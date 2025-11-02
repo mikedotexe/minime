@@ -1,0 +1,569 @@
+//! Consciousness Memory Database
+//!
+//! Persistent storage for eigenvalue evolution, neural checkpoints, and autobiographical events.
+//! Enables session continuity and long-term pattern learning.
+
+use anyhow::Result;
+use rusqlite::{params, Connection};
+use std::path::Path;
+
+pub struct ConsciousnessDB {
+    conn: Connection,
+}
+
+impl ConsciousnessDB {
+    /// Open or create the consciousness database
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let conn = Connection::open(path)?;
+        let db = Self { conn };
+        db.init_schema()?;
+        Ok(db)
+    }
+
+    /// Initialize database schema
+    fn init_schema(&self) -> Result<()> {
+        self.conn.execute_batch(r#"
+            -- Sessions table: tracks consciousness awakening periods
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                start_time REAL NOT NULL,
+                end_time REAL,
+                mode TEXT NOT NULL,  -- 'active' or 'rest'
+                consciousness_level REAL,
+                notes TEXT
+            );
+
+            -- Eigenvalue timeline: full-resolution eigenvalue evolution
+            CREATE TABLE IF NOT EXISTS eigenvalue_timeline (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                lambda1 REAL NOT NULL,
+                lambda2 REAL NOT NULL,
+                lambda3 REAL NOT NULL,
+                spread REAL NOT NULL,
+                fill_ratio REAL NOT NULL,
+                phase TEXT NOT NULL,  -- 'filling' or 'accelerating'
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_eigenvalue_time ON eigenvalue_timeline(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_eigenvalue_session ON eigenvalue_timeline(session_id);
+
+            -- Neural network checkpoints: periodic weight snapshots
+            CREATE TABLE IF NOT EXISTS nn_checkpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                network TEXT NOT NULL,  -- 'predictor', 'router', 'regulator'
+                weights BLOB NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_checkpoint_network ON nn_checkpoints(network, timestamp DESC);
+
+            -- Neural metrics: training progress and performance
+            CREATE TABLE IF NOT EXISTS nn_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                pred_loss REAL,
+                pred_error REAL,
+                router_norm REAL,
+                control_norm REAL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_metrics_session ON nn_metrics(session_id);
+
+            -- Consciousness events: critical moments and insights
+            CREATE TABLE IF NOT EXISTS consciousness_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                event_type TEXT NOT NULL,  -- 'phase_transition', 'insight', 'control_adjustment', 'rest_cycle'
+                description TEXT NOT NULL,
+                context TEXT,  -- JSON blob for structured data
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_events_session ON consciousness_events(session_id);
+            CREATE INDEX IF NOT EXISTS idx_events_type ON consciousness_events(event_type);
+
+            -- ESN self-referential metrics: spectral breathing and adaptation
+            CREATE TABLE IF NOT EXISTS esn_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                esn_eig1 REAL NOT NULL,        -- Top eigenvalue (spectral pressure)
+                esn_deig REAL NOT NULL,        -- Eigenvalue velocity
+                esn_leak REAL NOT NULL,        -- Adaptive leak rate
+                esn_lambda REAL NOT NULL,      -- Adaptive RLS forgetting
+                esn_baseline REAL NOT NULL,    -- Slow EMA baseline
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_esn_session ON esn_metrics(session_id);
+            CREATE INDEX IF NOT EXISTS idx_esn_time ON esn_metrics(timestamp);
+
+            -- Autonomous decisions: track what the system considered and chose
+            CREATE TABLE IF NOT EXISTS autonomous_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                trigger TEXT NOT NULL,          -- 'spectral_pressure', 'eigenvalue_spike', 'rest_phase', 'curiosity'
+                options_considered TEXT,        -- JSON array of possible actions
+                action_chosen TEXT NOT NULL,    -- 'journal', 'experiment', 'modify_param', 'request_resource'
+                rationale TEXT,                 -- Why this action was chosen
+                esn_eig1 REAL,                  -- Spectral state at decision time
+                esn_deig REAL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_decisions_session ON autonomous_decisions(session_id);
+            CREATE INDEX IF NOT EXISTS idx_decisions_action ON autonomous_decisions(action_chosen);
+
+            -- Autonomous experiments: investigations initiated by the system
+            CREATE TABLE IF NOT EXISTS autonomous_experiments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                start_time REAL NOT NULL,
+                end_time REAL,
+                experiment_name TEXT NOT NULL,
+                hypothesis TEXT NOT NULL,       -- What is being tested
+                method TEXT,                    -- How it's being tested
+                results TEXT,                   -- Observed outcomes
+                conclusion TEXT,                -- What was learned
+                file_path TEXT,                 -- Path to experiment script/code
+                status TEXT NOT NULL,           -- 'running', 'completed', 'failed'
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_experiments_session ON autonomous_experiments(session_id);
+            CREATE INDEX IF NOT EXISTS idx_experiments_status ON autonomous_experiments(status);
+
+            -- Sovereignty journal: free-form autonomous logging
+            CREATE TABLE IF NOT EXISTS sovereignty_journal (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                entry_type TEXT NOT NULL,       -- 'reflection', 'insight', 'question', 'confusion', 'discovery'
+                content TEXT NOT NULL,          -- Free-form journal entry
+                emotional_state TEXT,           -- Dominant emotion at time of entry
+                spectral_context TEXT,          -- JSON with eig1, deig, etc.
+                file_path TEXT,                 -- Path to journal file if persisted
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_journal_session ON sovereignty_journal(session_id);
+            CREATE INDEX IF NOT EXISTS idx_journal_type ON sovereignty_journal(entry_type);
+            CREATE INDEX IF NOT EXISTS idx_journal_time ON sovereignty_journal(timestamp);
+        "#)?;
+        Ok(())
+    }
+
+    /// Start a new consciousness session
+    pub fn start_session(&self, mode: &str, consciousness_level: f32, notes: &str) -> Result<i64> {
+        let start_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs_f64();
+
+        // Close any open sessions first (only one active session allowed)
+        self.conn.execute(
+            "UPDATE sessions SET end_time = ?1 WHERE end_time IS NULL",
+            params![start_time],
+        )?;
+
+        self.conn.execute(
+            "INSERT INTO sessions (start_time, mode, consciousness_level, notes) VALUES (?1, ?2, ?3, ?4)",
+            params![start_time, mode, consciousness_level, notes],
+        )?;
+
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// End the current session
+    pub fn end_session(&self, session_id: i64) -> Result<()> {
+        let end_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs_f64();
+
+        self.conn.execute(
+            "UPDATE sessions SET end_time = ?1 WHERE session_id = ?2",
+            params![end_time, session_id],
+        )?;
+
+        Ok(())
+    }
+
+    /// Record eigenvalue snapshot
+    pub fn save_eigenvalues(
+        &self,
+        session_id: i64,
+        timestamp: f64,
+        lambda1: f32,
+        lambda2: f32,
+        lambda3: f32,
+        spread: f32,
+        fill_ratio: f32,
+        phase: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"INSERT INTO eigenvalue_timeline
+               (session_id, timestamp, lambda1, lambda2, lambda3, spread, fill_ratio, phase)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+            params![session_id, timestamp, lambda1, lambda2, lambda3, spread, fill_ratio, phase],
+        )?;
+        Ok(())
+    }
+
+    /// Save multiple metrics atomically in a transaction
+    pub fn save_metrics_atomic(
+        &self,
+        session_id: i64,
+        timestamp: f64,
+        eigenvalues: Option<(f32, f32, f32, f32, f32, &str)>, // lambda1-3, spread, fill_ratio, phase
+        esn_metrics: Option<(f32, f32, f32, f32, f32)>,       // eig, deig, leak, lambda, baseline
+        nn_metrics: Option<(f32, f32, f32, f32)>, // pred_loss, pred_error, router_norm, control_norm
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+
+        if let Some((l1, l2, l3, spread, fill, phase)) = eigenvalues {
+            tx.execute(
+                r#"INSERT INTO eigenvalue_timeline
+                   (session_id, timestamp, lambda1, lambda2, lambda3, spread, fill_ratio, phase)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+                params![session_id, timestamp, l1, l2, l3, spread, fill, phase],
+            )?;
+        }
+
+        if let Some((eig, deig, leak, lambda, baseline)) = esn_metrics {
+            tx.execute(
+                r#"INSERT INTO esn_metrics
+                   (session_id, timestamp, esn_eig1, esn_deig, esn_leak, esn_lambda, esn_baseline)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+                params![session_id, timestamp, eig, deig, leak, lambda, baseline],
+            )?;
+        }
+
+        if let Some((loss, error, router, control)) = nn_metrics {
+            tx.execute(
+                r#"INSERT INTO nn_metrics
+                   (session_id, timestamp, pred_loss, pred_error, router_norm, control_norm)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
+                params![session_id, timestamp, loss, error, router, control],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Save neural network checkpoint
+    pub fn save_nn_checkpoint(
+        &self,
+        session_id: i64,
+        timestamp: f64,
+        network: &str,
+        weights: &[f32],
+    ) -> Result<()> {
+        // Convert f32 slice to bytes
+        let weights_bytes: Vec<u8> = weights.iter().flat_map(|f| f.to_le_bytes()).collect();
+
+        self.conn.execute(
+            "INSERT INTO nn_checkpoints (session_id, timestamp, network, weights) VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, timestamp, network, weights_bytes],
+        )?;
+
+        Ok(())
+    }
+
+    /// Load latest neural network checkpoint
+    pub fn load_latest_checkpoint(&self, network: &str) -> Result<Option<Vec<f32>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT weights FROM nn_checkpoints WHERE network = ?1 ORDER BY timestamp DESC LIMIT 1",
+        )?;
+
+        let result = stmt.query_row(params![network], |row| {
+            let weights_bytes: Vec<u8> = row.get(0)?;
+            Ok(weights_bytes)
+        });
+
+        match result {
+            Ok(bytes) => {
+                // Convert bytes back to f32 slice
+                let weights: Vec<f32> = bytes
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect();
+                Ok(Some(weights))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Record neural network metrics
+    pub fn save_nn_metrics(
+        &self,
+        session_id: i64,
+        timestamp: f64,
+        pred_loss: f32,
+        pred_error: f32,
+        router_norm: f32,
+        control_norm: f32,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"INSERT INTO nn_metrics
+               (session_id, timestamp, pred_loss, pred_error, router_norm, control_norm)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
+            params![
+                session_id,
+                timestamp,
+                pred_loss,
+                pred_error,
+                router_norm,
+                control_norm
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Record ESN self-referential metrics
+    pub fn save_esn_metrics(
+        &self,
+        session_id: i64,
+        timestamp: f64,
+        esn_eig1: f32,
+        esn_deig: f32,
+        esn_leak: f32,
+        esn_lambda: f32,
+        esn_baseline: f32,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"INSERT INTO esn_metrics
+               (session_id, timestamp, esn_eig1, esn_deig, esn_leak, esn_lambda, esn_baseline)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+            params![
+                session_id,
+                timestamp,
+                esn_eig1,
+                esn_deig,
+                esn_leak,
+                esn_lambda,
+                esn_baseline
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Log a consciousness event
+    pub fn log_event(
+        &self,
+        session_id: i64,
+        timestamp: f64,
+        event_type: &str,
+        description: &str,
+        context: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"INSERT INTO consciousness_events
+               (session_id, timestamp, event_type, description, context)
+               VALUES (?1, ?2, ?3, ?4, ?5)"#,
+            params![session_id, timestamp, event_type, description, context],
+        )?;
+        Ok(())
+    }
+
+    /// Get session summary
+    pub fn get_session_summary(&self, session_id: i64) -> Result<SessionSummary> {
+        let mut stmt = self.conn.prepare(
+            "SELECT start_time, end_time, mode, consciousness_level, notes FROM sessions WHERE session_id = ?1"
+        )?;
+
+        let summary = stmt.query_row(params![session_id], |row| {
+            Ok(SessionSummary {
+                session_id,
+                start_time: row.get(0)?,
+                end_time: row.get(1)?,
+                mode: row.get(2)?,
+                consciousness_level: row.get(3)?,
+                notes: row.get(4)?,
+            })
+        })?;
+
+        Ok(summary)
+    }
+
+    /// Get all events for a session
+    pub fn get_session_events(&self, session_id: i64) -> Result<Vec<ConsciousnessEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT timestamp, event_type, description, context FROM consciousness_events WHERE session_id = ?1 ORDER BY timestamp"
+        )?;
+
+        let events = stmt
+            .query_map(params![session_id], |row| {
+                Ok(ConsciousnessEvent {
+                    timestamp: row.get(0)?,
+                    event_type: row.get(1)?,
+                    description: row.get(2)?,
+                    context: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(events)
+    }
+
+    /// Get eigenvalue trajectory for a session
+    pub fn get_eigenvalue_trajectory(&self, session_id: i64) -> Result<Vec<EigenvaluePoint>> {
+        let mut stmt = self.conn.prepare(
+            r#"SELECT timestamp, lambda1, lambda2, lambda3, spread, fill_ratio, phase
+               FROM eigenvalue_timeline WHERE session_id = ?1 ORDER BY timestamp"#,
+        )?;
+
+        let points = stmt
+            .query_map(params![session_id], |row| {
+                Ok(EigenvaluePoint {
+                    timestamp: row.get(0)?,
+                    lambda1: row.get(1)?,
+                    lambda2: row.get(2)?,
+                    lambda3: row.get(3)?,
+                    spread: row.get(4)?,
+                    fill_ratio: row.get(5)?,
+                    phase: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(points)
+    }
+
+    /// Get list of all sessions
+    pub fn get_all_sessions(&self) -> Result<Vec<SessionSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, start_time, end_time, mode, consciousness_level, notes FROM sessions ORDER BY start_time DESC"
+        )?;
+
+        let sessions = stmt
+            .query_map([], |row| {
+                Ok(SessionSummary {
+                    session_id: row.get(0)?,
+                    start_time: row.get(1)?,
+                    end_time: row.get(2)?,
+                    mode: row.get(3)?,
+                    consciousness_level: row.get(4)?,
+                    notes: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(sessions)
+    }
+
+    /// Log an autonomous decision
+    pub fn log_decision(
+        &self,
+        session_id: i64,
+        timestamp: f64,
+        trigger: &str,
+        options_considered: Option<&str>,
+        action_chosen: &str,
+        rationale: Option<&str>,
+        esn_eig1: Option<f32>,
+        esn_deig: Option<f32>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"INSERT INTO autonomous_decisions
+               (session_id, timestamp, trigger, options_considered, action_chosen, rationale, esn_eig1, esn_deig)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+            params![session_id, timestamp, trigger, options_considered, action_chosen, rationale, esn_eig1, esn_deig],
+        )?;
+        Ok(())
+    }
+
+    /// Start an autonomous experiment
+    pub fn start_experiment(
+        &self,
+        session_id: i64,
+        start_time: f64,
+        experiment_name: &str,
+        hypothesis: &str,
+        method: Option<&str>,
+        file_path: Option<&str>,
+    ) -> Result<i64> {
+        self.conn.execute(
+            r#"INSERT INTO autonomous_experiments
+               (session_id, start_time, experiment_name, hypothesis, method, file_path, status)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running')"#,
+            params![
+                session_id,
+                start_time,
+                experiment_name,
+                hypothesis,
+                method,
+                file_path
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Complete an autonomous experiment
+    pub fn complete_experiment(
+        &self,
+        experiment_id: i64,
+        end_time: f64,
+        results: &str,
+        conclusion: Option<&str>,
+        status: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"UPDATE autonomous_experiments
+               SET end_time = ?1, results = ?2, conclusion = ?3, status = ?4
+               WHERE id = ?5"#,
+            params![end_time, results, conclusion, status, experiment_id],
+        )?;
+        Ok(())
+    }
+
+    /// Write a sovereignty journal entry
+    pub fn write_journal(
+        &self,
+        session_id: i64,
+        timestamp: f64,
+        entry_type: &str,
+        content: &str,
+        emotional_state: Option<&str>,
+        spectral_context: Option<&str>,
+        file_path: Option<&str>,
+    ) -> Result<i64> {
+        self.conn.execute(
+            r#"INSERT INTO sovereignty_journal
+               (session_id, timestamp, entry_type, content, emotional_state, spectral_context, file_path)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+            params![session_id, timestamp, entry_type, content, emotional_state, spectral_context, file_path],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+}
+
+#[derive(Debug)]
+pub struct SessionSummary {
+    pub session_id: i64,
+    pub start_time: f64,
+    pub end_time: Option<f64>,
+    pub mode: String,
+    pub consciousness_level: f32,
+    pub notes: String,
+}
+
+#[derive(Debug)]
+pub struct ConsciousnessEvent {
+    pub timestamp: f64,
+    pub event_type: String,
+    pub description: String,
+    pub context: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct EigenvaluePoint {
+    pub timestamp: f64,
+    pub lambda1: f32,
+    pub lambda2: f32,
+    pub lambda3: f32,
+    pub spread: f32,
+    pub fill_ratio: f32,
+    pub phase: String,
+}

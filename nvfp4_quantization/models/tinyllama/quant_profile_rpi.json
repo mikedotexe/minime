@@ -1,0 +1,21 @@
+{
+  "name": "tinyllama-rpi",
+  "description": "Ultra-compressed for Raspberry Pi 4/5",
+  "quantization": {
+    "type": "nvfp4",
+    "tile_size": 8,
+    "keep_fp16_layers": [
+      "model.embed_tokens",
+      "lm_head"
+    ],
+    "keep_fp16_percent": 0.05,
+    "aggressive_mode": true
+  },
+  "optimization": {
+    "use_neon": true,
+    "threads": 4,
+    "batch_size": 1,
+    "kv_cache_dtype": "int8",
+    "context_limit": 2048
+  }
+}

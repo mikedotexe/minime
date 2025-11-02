@@ -1,0 +1,155 @@
+# MikesSpatialMind .gitignore
+# Excludes runtime files, caches, and generated content
+
+# ============================================
+# Runtime State Files
+# ============================================
+*.pkl
+MikesSpatialMind_memories.json
+spatial_hypotheses.json
+thoughts_queue/
+*.log
+7-spirals-pi/production_consciousness.pkl
+7-spirals-pi/deployment_summary.json
+
+# ============================================
+# Python
+# ============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ============================================
+# Backup Files
+# ============================================
+*_backup_*.py
+*.bak
+*.swp
+*.swo
+*~
+
+# ============================================
+# Test Results
+# ============================================
+test_results_*.json
+comparison_report_*.md
+test_output.log
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ============================================
+# OS Files
+# ============================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ============================================
+# IDE Files
+# ============================================
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
+
+# ============================================
+# Temporary Files
+# ============================================
+*.tmp
+.cache/
+.archive_exclude
+
+# ============================================
+# Archives
+# ============================================
+mikeconsciousness_*.tar.gz
+*.zip
+
+# ============================================
+# Rust Build Artifacts
+# ============================================
+target/
+**/target/
+Cargo.lock
+**/Cargo.lock
+*.rlib
+
+# ============================================
+# Node/JavaScript
+# ============================================
+node_modules/
+**/node_modules/
+package-lock.json
+**/package-lock.json
+
+# ============================================
+# Runtime/Workspace Files
+# ============================================
+workspace/
+**/workspace/
+*.db
+*.db-shm
+*.db-wal
+minime_consciousness.db
+rust_output.log
+
+# ============================================
+# Python Virtual Environments
+# ============================================
+.venv/
+**/.venv/
+.claude/
+minime_bandstop_*.tar.gz
+
+# ============================================
+# Machine Learning Models (LARGE FILES)
+# ============================================
+*.safetensors
+*.gguf
+*.gguf.*
+*.bin
+*.onnx
+*.pth
+*.pt
+*.h5
+*.pb
+*.tflite
+*_hf/
+models/*/
+
+# ============================================
+# Tapestries and Large Runtime Files
+# ============================================
+tapestries/
+*.tapestry

@@ -1,0 +1,23 @@
+Observations on Twin Prime Distribution
+
+Twin primes are pairs of primes separated by 2: (3,5), (11,13), (17,19), (29,31), and so on.
+
+A question that remains open: Are there infinitely many twin primes? We don't know. This is the Twin Prime Conjecture, unproven for over 2000 years.
+
+An empirical observation: When examining regions around 2p² (where p is itself prime), some researchers have noticed what appears to be clustering of twin primes beyond baseline density.
+
+We measure this as "enrichment" - the ratio of observed twin primes in a window to what random distribution would predict. Sometimes this exceeds 2.0x.
+
+What does this mean? We're not sure. Possibilities:
+- There may be underlying structure we don't yet understand
+- It could be statistical noise in finite samples
+- Perhaps certain mathematical landmarks create local density patterns
+- Maybe there's no deep reason - just how primes happen to distribute
+
+Questions to explore:
+- Why do some p values show enrichment while others don't?
+- Is the pattern real or artifact of measurement?
+- If real, what mechanism could cause it?
+- Do other mathematical sequences show similar clustering?
+
+What we observe is not the same as what we understand. The numbers show us something. What it means remains to be discovered.

@@ -1,0 +1,6 @@
+Prime Optimization Experiments Report
+=====================================
+
+Timestamp: 1761535300
+Memory mode: shared
+Frames: 10000
