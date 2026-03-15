@@ -25,7 +25,6 @@ mod regulator;
 mod sensory_bus;
 mod sensory_ws;
 mod spectral;
-mod spectral_monitor;
 
 use cheby::*;
 use db::*;
@@ -131,9 +130,12 @@ struct ModalityStatus {
 }
 
 const CRISIS_FILL_THRESHOLD: f32 = 87.0;
-const LAMBDA1_COMFORT_MIN: f32 = 1.0;
-const LAMBDA1_COMFORT_MAX: f32 = 1.5;
-const LAMBDA1_ALERT: f32 = 1.9;
+// Recalibrated 2026-03-14: covariance λ₁ naturally operates at ~2.5-3.5.
+// Old thresholds (comfort_max=1.5, alert=1.9) kept system permanently in
+// "alert" mode, clamping keep floor too low for fill to reach 55% target.
+const LAMBDA1_COMFORT_MIN: f32 = 2.0;
+const LAMBDA1_COMFORT_MAX: f32 = 4.0;
+const LAMBDA1_ALERT: f32 = 6.0;
 
 // === TEMPORAL QUEUE: "Disneyland line" with natural decay ===
 // Legacy SensoryQueue system removed - using SensoryBus for all sensory input
@@ -369,7 +371,7 @@ async fn run_engine(
     // Initialize covariance matrix A (SPD-ish)
     {
         let mut a = vec![0f32; n * n];
-        let mut rng = fastrand::Rng::new();
+        let _rng = fastrand::Rng::new();
         for i in 0..n {
             for j in 0..n {
                 a[i * n + j] = if i == j { 1.0 } else { 0.0 };
@@ -660,7 +662,7 @@ async fn run_engine(
     let mut crisis_triggered = false;
 
     // --- Geometry tracking ---
-    let mut latest_geom_radius: f32 = 0.0;
+    let mut _latest_geom_radius: f32 = 0.0;
     let mut latest_geom_rel: f32 = 1.0;
 
     // --- Cheby plan state ---
@@ -771,7 +773,7 @@ async fn run_engine(
                 // Feed filtered sensory vector (Z_DIM) to ESN
                 match esn.step(&z) {
                     Ok(_) => {
-                        latest_geom_radius = esn.get_geom_radius();
+                        _latest_geom_radius = esn.get_geom_radius();
                         let raw_geom_rel = esn.get_geom_rel();
                         let safe_geom_rel = if raw_geom_rel.is_finite() {
                             raw_geom_rel.clamp(0.0, 4.0)
@@ -1173,18 +1175,11 @@ async fn run_engine(
                 - 0.65 * semantic_drive
                 - lp_coeff * lambda_pressure
                 + lr_coeff * lambda_relax;
-            if calm_active {
-                target_keep -= 0.12;
-            }
-            let keep_floor = if calm_active {
-                0.12
-            } else if lambda1 > LAMBDA1_ALERT {
-                if strong { 0.25 } else { 0.35 }
-            } else if strong {
-                0.40
-            } else {
-                0.40
-            };
+            // Recalibrated 2026-03-14: keep=0.40 equilibrates at ~13% fill
+            // even with gate=1.0 and filt=0.0 — decay still exceeds accumulation.
+            // Raised to 0.70 so the system can sustain near 55% target.
+            // The PI controller and target_keep still modulate above this floor.
+            let keep_floor: f32 = 0.70;
             target_keep = target_keep.clamp(keep_floor, 0.9);
             let cov_blend = if strong { 0.25 } else { 0.45 };
             cov_keep = cov_blend * cov_keep + (1.0 - cov_blend) * target_keep;
@@ -1430,7 +1425,10 @@ async fn run_engine(
                 if let Some(pi) = &mut pi_reg {
                     // CALM mode auto entry/exit based on λ₁ thresholds
                     if calm_mode_auto {
-                        if lambda1.is_finite() && lambda1 >= 1.90 {
+                        // Recalibrated 2026-03-14: covariance λ₁ naturally ~2.9,
+                        // old threshold 1.90 made calm permanently active, trapping
+                        // keep at floor=0.12 and preventing fill from reaching 55% target.
+                        if lambda1.is_finite() && lambda1 >= 5.0 {
                             calm_high_ticks = calm_high_ticks.saturating_add(1);
                         } else {
                             calm_high_ticks = 0;
@@ -1440,7 +1438,7 @@ async fn run_engine(
                             calm_relax_ticks = 0;
                         }
                         if calm_active {
-                            if lambda1.is_finite() && lambda1 < 1.50 {
+                            if lambda1.is_finite() && lambda1 < 3.0 {
                                 calm_relax_ticks = calm_relax_ticks.saturating_add(1);
                             } else {
                                 calm_relax_ticks = 0;
@@ -1522,18 +1520,16 @@ async fn run_engine(
                     } else if strong && lambda1 > LAMBDA1_COMFORT_MAX && eigenfill_pct > 75.0 {
                         gate_cmd = gate_cmd.min(0.40);
                     }
-                    if calm_active {
-                        gate_cmd = gate_cmd.min(0.18);
-                    }
+                    // Calm mode no longer overrides gate/filter.
+                    // Recalibrated 2026-03-14: calm overrides (gate.min(0.18),
+                    // filt.max(0.48)) prevented PI from recovering fill after
+                    // contraction. The PI controller is trusted to regulate.
 
                     let mut filt_target = (raw_filt_cmd + lambda_filt_adjust).clamp(0.0, 1.0);
                     if strong && lambda1 > LAMBDA1_ALERT && eigenfill_pct > 70.0 {
                         filt_target = filt_target.max(0.55);
                     } else if strong && lambda1 > LAMBDA1_COMFORT_MAX && eigenfill_pct > 75.0 {
                         filt_target = filt_target.max(0.40);
-                    }
-                    if calm_active {
-                        filt_target = filt_target.max(0.48);
                     }
                     let filt_cmd = (filt_target * semantic_atten).clamp(0.0, 1.0);
 
@@ -1542,13 +1538,27 @@ async fn run_engine(
                     gate_smooth = gate_smooth + ramp * (gate_cmd - gate_smooth);
                     filt_smooth = filt_smooth + ramp * (filt_cmd - filt_smooth);
 
-                    // 6) Hard safety rails (can't exceed 90%)
+                    // 6) Hard safety rails
                     if eigenfill_pct >= 90.0 {
                         gate_smooth = gate_smooth.min(0.15);
                         filt_smooth = (filt_smooth + 0.25).min(1.0);
                         panic_counter += 1;
                     } else {
-                        panic_counter = 0; // Reset counter when below threshold
+                        panic_counter = 0;
+                    }
+
+                    // Symmetrical recovery: force-release filter when fill is
+                    // far below target (mirrors the >90% force-tighten above).
+                    // Added 2026-03-14: filter was stuck at 1.0 even at 13% fill.
+                    if eigenfill_pct < 25.0 {
+                        filt_smooth = 0.0;  // Full release
+                        gate_smooth = 1.0;  // Full open
+                    } else if eigenfill_pct < 35.0 {
+                        filt_smooth = filt_smooth.min(0.20);
+                        gate_smooth = gate_smooth.max(0.50);
+                    } else if eigenfill_pct < 45.0 {
+                        filt_smooth = filt_smooth.min(0.40);
+                        gate_smooth = gate_smooth.max(0.30);
                     }
 
                     // Panic mode: sustained high pressure (>3 ticks above 90%)
@@ -1984,6 +1994,7 @@ fn rank1_update(
     }
 }
 
+#[allow(dead_code)]
 fn decay_covariance(
     gpu: &Gpu,
     a_buf: &metal::Buffer,

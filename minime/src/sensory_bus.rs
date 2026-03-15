@@ -1,4 +1,5 @@
 // src/sensory_bus.rs
+#![allow(dead_code)]
 use parking_lot::Mutex;
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::{

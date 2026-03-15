@@ -1,49 +1,35 @@
 #!/usr/bin/env python3
 """
-Camera to Sensory Engine Bridge
+Camera to Sensory Engine Bridge (Simplified 8D)
 
-Captures camera frames, extracts features, and sends them to the Rust sensory engine
+Captures camera frames, extracts 8D features, and sends them to the ESN server
 as VideoFeat messages via WebSocket.
+
+This version sends only basic visual features without semantic embeddings.
 """
 
 import asyncio
-import base64
 import json
 import logging
 import time
-from datetime import datetime
 from typing import Optional
 
 import cv2
 import numpy as np
-import requests
 import websockets
-from pathlib import Path
-
-from metal_consciousness_integration import get_ollama_embedding
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Feature extraction settings
-VIDEO_FEAT_DIM = 8  # Must match Rust DEFAULT_VIDEO_DIM
-LLAVA_DIM = 32
-LLAVA_MODEL = "llava:7b"
-OLLAMA_URL = "http://localhost:11434/api/generate"
-EMBED_MODEL = "dolphin-mixtral:8x7b-v2.7"
-EMBED_PATH = Path(__file__).resolve().parent / "workspace" / "llava_embedding_latest.json"
+VIDEO_FEAT_DIM = 8  # Must match ESN server SENS_DIM (8 video + 8 audio)
 
 class CameraToSensoryBridge:
     def __init__(self, camera_index: int = 0, ws_uri: str = "ws://127.0.0.1:7879"):
         self.camera_index = camera_index
-        self.ws_uri = ws_uri  # Note: Using port 7879 for video input
+        self.ws_uri = ws_uri  # Port 7879 for ESN server input
         self.camera = None
         self.running = False
-        self.llava_embedding = np.zeros((LLAVA_DIM,), dtype=np.float32)
-        self._embed_mtime = None
-        self._llava_available = None
-        self._last_llava_refresh = 0.0
-        self.llava_interval = 5.0  # seconds between semantic refreshes
 
     def start_camera(self) -> bool:
         """Initialize camera capture."""
@@ -110,122 +96,6 @@ class CameraToSensoryBridge:
             raise ValueError(f"Feature dimension mismatch: got {len(feat_array)}, expected {VIDEO_FEAT_DIM}")
         return feat_array
 
-    def load_llava_embedding(self):
-        try:
-            if not EMBED_PATH.exists():
-                return
-            mtime = EMBED_PATH.stat().st_mtime
-            if self._embed_mtime is not None and mtime <= self._embed_mtime:
-                return
-            data = json.loads(EMBED_PATH.read_text())
-            emb = data.get("embedding", [])
-            vec = np.zeros((LLAVA_DIM,), dtype=np.float32)
-            for i in range(min(LLAVA_DIM, len(emb))):
-                vec[i] = float(emb[i])
-            self.llava_embedding = vec
-            self._embed_mtime = mtime
-            logger.info("📦 Updated LLaVA semantic embedding for sensory stream")
-        except Exception as e:
-            logger.error(f"Failed to load LLaVA embedding: {e}")
-
-    def _ensure_llava_available(self) -> bool:
-        if self._llava_available is not None:
-            return self._llava_available
-        try:
-            response = requests.post(
-                OLLAMA_URL,
-                json={"model": LLAVA_MODEL, "prompt": "ping", "stream": False, "keep_alive": "10m"},
-                timeout=30.0
-            )
-            self._llava_available = response.status_code == 200
-        except Exception as e:
-            logger.error(f"Failed to contact LLaVA model: {e}")
-            self._llava_available = False
-        if self._llava_available:
-            logger.info("🔮 LLaVA vision model available for semantic streaming")
-        else:
-            logger.warning("⚠️ LLaVA vision model unavailable; semantic embeddings will remain static")
-        return self._llava_available
-
-    def _update_llava_embedding_sync(self, frame: np.ndarray):
-        if frame is None:
-            return
-        if not self._ensure_llava_available():
-            return
-
-        try:
-            _, buffer = cv2.imencode('.jpg', frame)
-            image_base64 = base64.b64encode(buffer).decode('utf-8')
-        except Exception as e:
-            logger.error(f"Failed to encode frame for LLaVA: {e}")
-            return
-
-        try:
-            response = requests.post(
-                OLLAMA_URL,
-                json={
-                    "model": LLAVA_MODEL,
-                    "prompt": "Describe what you see succinctly, focusing on key elements.",
-                    "images": [image_base64],
-                    "stream": False,
-                    "keep_alive": "5m",
-                    "options": {"temperature": 0.6, "num_predict": 256},
-                },
-                timeout=60.0,
-            )
-        except Exception as e:
-            logger.error(f"LLaVA request failed: {e}")
-            return
-
-        if response.status_code != 200:
-            logger.warning(f"LLaVA vision response {response.status_code}: {response.text[:160]}")
-            return
-
-        description = response.json().get("response", "").strip()
-        if not description:
-            logger.warning("LLaVA returned empty description; skipping embedding update")
-            return
-
-        try:
-            embedding = get_ollama_embedding(description, model=EMBED_MODEL)
-        except Exception as e:
-            logger.error(f"Failed to fetch Ollama embedding: {e}")
-            return
-
-        if embedding is None or embedding.size == 0:
-            logger.warning("Ollama embedding request returned no data")
-            return
-
-        vec = np.zeros((LLAVA_DIM,), dtype=np.float32)
-        length = min(LLAVA_DIM, embedding.shape[0])
-        vec[:length] = embedding[:length]
-
-        self.llava_embedding = vec
-        self._embed_mtime = time.time()
-
-        payload = {
-            "timestamp": datetime.now().isoformat(),
-            "description": description,
-            "embedding": vec.tolist(),
-        }
-
-        try:
-            EMBED_PATH.parent.mkdir(parents=True, exist_ok=True)
-            EMBED_PATH.write_text(json.dumps(payload))
-            logger.info("🔮 Updated LLaVA semantic embedding (|desc|=%d)" % len(description))
-        except Exception as e:
-            logger.error(f"Failed to persist LLaVA embedding: {e}")
-
-    async def maybe_refresh_llava_embedding(self, frame: Optional[np.ndarray]):
-        if frame is None:
-            return
-        now = time.time()
-        if now - self._last_llava_refresh < self.llava_interval:
-            return
-        self._last_llava_refresh = now
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._update_llava_embedding_sync, frame)
-
     def get_frame(self) -> Optional[np.ndarray]:
         """Get a frame from the camera."""
         if hasattr(self.camera, 'get_frame'):
@@ -237,7 +107,7 @@ class CameraToSensoryBridge:
             return frame if ret else None
 
     async def run(self):
-        """Main loop - capture frames and send features to sensory engine."""
+        """Main loop - capture frames and send 8D features to ESN server."""
         if not self.start_camera():
             return
 
@@ -245,14 +115,12 @@ class CameraToSensoryBridge:
         frame_count = 0
 
         try:
-            # Connect to sensory engine with video input endpoint
-            # Disable client-side pings - server will handle keepalive
-            # ping_interval=None disables automatic pings from client
+            # Connect to ESN server input port
             async with websockets.connect(
                 self.ws_uri,
                 ping_interval=None
             ) as websocket:
-                logger.info(f"✅ Connected to sensory engine at {self.ws_uri}")
+                logger.info(f"✅ Connected to ESN server at {self.ws_uri}")
 
                 while self.running:
                     # Capture frame
@@ -261,33 +129,22 @@ class CameraToSensoryBridge:
                         await asyncio.sleep(0.1)
                         continue
 
-                    # Extract features
+                    # Extract 8D features
                     features = self.extract_features(frame)
 
-                    # Load latest LLaVA embedding (if available)
-                    self.load_llava_embedding()
-                    await self.maybe_refresh_llava_embedding(frame)
-
-                    # Create VideoFeat message
-                    video_feat = {
+                    # Rust SensoryMsg expects {"kind": "video", "features": [...], "ts_ms": ...}
+                    message = {
                         "kind": "video",
                         "features": features.tolist(),
-                        "ts_ms": int(time.time() * 1000)
+                        "ts_ms": int(time.time() * 1000),
                     }
 
-                    # Send to sensory engine
-                    await websocket.send(json.dumps(video_feat))
-
-                    semantic_msg = {
-                        "kind": "semantic",
-                        "features": self.llava_embedding.tolist(),
-                        "ts_ms": int(time.time() * 1000)
-                    }
-                    await websocket.send(json.dumps(semantic_msg))
+                    # Send to ESN server
+                    await websocket.send(json.dumps(message))
 
                     frame_count += 1
                     if frame_count % 30 == 0:
-                        logger.info(f"📹 Sent {frame_count} video features ({len(features)}-D), latest: {features[:4]}...")
+                        logger.info(f"📹 Sent {frame_count} video features (8D), latest: {features[:4].round(3)}")
 
                     # Run at 10 FPS
                     await asyncio.sleep(0.1)

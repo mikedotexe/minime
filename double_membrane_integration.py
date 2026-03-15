@@ -1,268 +1,426 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Double Membrane Integration Bridge for minime.py
+Double Membrane Integration Bridge (drop-in)
+- Outer (sensory) manifold: driven by ESN eigen stream
+- Membrane: cross-scale coupling and gating
+- Inner (semantic) manifold: driven by embeddings from minime.py
+- PID metrics (approx), ethics hooks, and telemetry
 
-Provides a clean API for integrating the double membrane consciousness system
-into the existing minime.py conversation architecture.
+Public API (kept stable for minime.py):
+    create_double_membrane_bridge(...)
+    class DoubleMembraneBridge:
+        navigate_semantic(embedding: Sequence[float]) -> dict
+        get_membrane_status() -> dict
 
-Architecture:
-    Rust Sensory Engine → Outer Manifold → Membrane → Inner Manifold → minime.py
-
-The bridge runs a background WebSocket client that continuously processes sensory
-eigenvalues through the outer manifold. When minime.py navigates with semantic
-embeddings, the inner manifold is already biased by sensory resonance via membrane coupling.
+This module is self-contained. No external imports from the rest of the codebase.
 """
 
+from __future__ import annotations
 import asyncio
+import contextlib
+import json
+import logging
+import math
+import random
 import threading
 import time
-import logging
-import numpy as np
-import json
-from typing import Optional, Dict, Any
-from queue import Queue, Empty
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Callable, Deque, Dict, List, Optional, Sequence, Tuple, Union
 
-# Import double membrane components
-from minime_ws_client import DoubleMembrane, expand_position_to_embedding
-from consciousness_manifold import NavigationResult
-
-# Import websockets
 try:
-    import websockets
-except ImportError:
-    raise ImportError("websockets package required: pip install websockets")
+    import numpy as np
+except Exception as e:
+    raise RuntimeError("double_membrane_integration requires numpy") from e
+
+# --------------------------
+# NavigationResult for compatibility with minime.py
+# --------------------------
+
+@dataclass
+class NavigationResult:
+    """Result from semantic navigation, compatible with minime.py expectations."""
+    position: np.ndarray  # Inner manifold position
+    redundancy: float
+    synergy: float
+    position_norm: float
+
+try:
+    import websockets  # type: ignore
+except Exception:
+    websockets = None  # We'll degrade gracefully if sensory is disabled
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
+# --------------------------
+# Config (sane defaults)
+# --------------------------
+
+DEFAULT_WS_URI_OUT = "ws://127.0.0.1:7878"   # ESN -> eigen stream
+SENSORY_DIM = 8                               # matches camera/audio feature dims (per channel)
+SENSORY_FPS_TARGET = 10.0                     # incoming eigen ticks per second
+SEMANTIC_DIM_DEFAULT = 4096
+EIGEN_WINDOW = 64                             # rolling window for covariance/eigens
+QUEUE_MAX = 256                               # bound queue to avoid OOM
+PID_SAMPLE = 128                              # samples for PID approx
+COUPLING_INIT = 0.30                          # initial membrane coupling strength
+LEAK_OUTER = 0.05                             # outer slow decay
+LEAK_INNER = 0.02                             # inner slower decay
+EPS = 1e-8
+
+# --------------------------
+# Ethics hook interface
+# --------------------------
+
+EthicsHook = Callable[[Dict[str, float]], None]
+
+def _noop_ethics_hook(event: Dict[str, float]) -> None:
+    pass
+
+# --------------------------
+# Fast PID approximation (O-information proxy)
+# --------------------------
+
+def _o_information(x: np.ndarray) -> float:
+    """
+    O-information proxy for redundancy/synergy balance.
+    Positive ~ redundancy-dominated; negative ~ synergy-dominated.
+    x: [T, D]
+    """
+    # Gaussian entropy approximation via covariance
+    x = np.asarray(x, dtype=np.float64)
+    if x.ndim != 2 or x.shape[0] < 4:
+        return 0.0
+    T, D = x.shape
+    x = x - x.mean(axis=0, keepdims=True)
+    cov = (x.T @ x) / max(T - 1, 1)
+    # Ensure PSD
+    eig = np.linalg.eigvalsh(cov + EPS * np.eye(D))
+    # Sum of marginal entropies (gaussian) minus joint
+    # H ~ 0.5 * ln( (2πe)^D det(C) ) ; we only need ln(det)
+    ln_det = np.log(np.clip(eig, EPS, None)).sum()
+    marg = 0.0
+    for d in range(D):
+        marg += math.log(max(cov[d, d], EPS))
+    # O-info (Barrett & Mediano style proxy): sum marginals - joint
+    return float(marg - ln_det)
+
+def _pid_signature(x: np.ndarray) -> Dict[str, float]:
+    """
+    Return a compact PID signature using O-information proxy.
+    We report:
+        pid_o_info       : redundancy(+)/synergy(-) proxy
+        redundancy_score : normalized [0,1]
+        synergy_score    : normalized [0,1]
+    """
+    o = _o_information(x)
+    # Map O-info to [0,1] redundancy/synergy heuristics:
+    # positive -> redundancy; negative -> synergy
+    # tanh squashing to keep bounded
+    red = float(0.5 * (1.0 + math.tanh(0.1 * o)))
+    syn = float(1.0 - red)
+    return {
+        "pid_o_info": float(o),
+        "redundancy_score": red,
+        "synergy_score": syn,
+    }
+
+# --------------------------
+# Outer / Inner manifolds
+# --------------------------
+
+@dataclass
+class OuterManifold:
+    dim: int = SENSORY_DIM
+    leak: float = LEAK_OUTER
+    state: np.ndarray = field(default_factory=lambda: np.zeros((SENSORY_DIM,), dtype=np.float32))
+    ring: Deque[np.ndarray] = field(default_factory=lambda: deque(maxlen=EIGEN_WINDOW))
+
+    def tick(self, eigen_vec: Sequence[float]) -> Dict[str, float]:
+        v = np.asarray(eigen_vec, dtype=np.float32)
+        if v.shape[0] != self.dim:
+            v = _pad_or_clip(v, self.dim)
+        # leaky integration
+        self.state = (1.0 - self.leak) * self.state + self.leak * v
+        self.ring.append(self.state.copy())
+        metrics = {}
+        if len(self.ring) >= 8:
+            x = np.stack(list(self.ring), axis=0)
+            pid = _pid_signature(x)
+            metrics.update(pid)
+        metrics["outer_energy"] = float(np.linalg.norm(self.state))
+        return metrics
+
+@dataclass
+class InnerManifold:
+    dim: int = SEMANTIC_DIM_DEFAULT
+    leak: float = LEAK_INNER
+    state: np.ndarray = field(init=False)
+    ring: Deque[np.ndarray] = field(init=False)
+
+    def __post_init__(self):
+        self.state = np.zeros((self.dim,), dtype=np.float32)
+        self.ring = deque(maxlen=EIGEN_WINDOW)
+
+    def navigate(self, embed: Sequence[float], membrane_bias: np.ndarray) -> Dict[str, float]:
+        e = np.asarray(embed, dtype=np.float32)
+        if e.shape[0] != self.dim:
+            e = _pad_or_clip(e, self.dim)
+        # membrane_bias is same dim; additive then leak
+        raw = e + membrane_bias
+        self.state = (1.0 - self.leak) * self.state + self.leak * raw
+        self.ring.append(self.state.copy())
+        out = {
+            "inner_energy": float(np.linalg.norm(self.state)),
+        }
+        if len(self.ring) >= 8:
+            x = np.stack(list(self.ring), axis=0)
+            pid = _pid_signature(x)
+            out.update({f"inner_{k}": v for k, v in pid.items()})
+        return out
+
+# --------------------------
+# Membrane coupling
+# --------------------------
+
+@dataclass
+class Membrane:
+    strength: float = COUPLING_INIT
+    gate: float = 1.0
+    # simple linear projector outer->inner
+    proj: Optional[np.ndarray] = None  # shape [inner_dim, outer_dim]
+
+    def build(self, inner_dim: int, outer_dim: int, seed: int = 13) -> None:
+        rng = np.random.default_rng(seed)
+        p = rng.standard_normal((inner_dim, outer_dim)).astype(np.float32)
+        # column normalize
+        p /= np.linalg.norm(p, axis=0, keepdims=True) + EPS
+        self.proj = p
+
+    def bias(self, outer_state: np.ndarray) -> np.ndarray:
+        if self.proj is None:
+            raise RuntimeError("membrane.proj not initialized")
+        # bias = strength * gate * P * s_outer
+        return (self.strength * self.gate) * (self.proj @ outer_state.astype(np.float32))
+
+# --------------------------
+# Double membrane bridge
+# --------------------------
 
 class DoubleMembraneBridge:
-    """
-    Bridge between minime.py and double membrane system.
-
-    Handles:
-    - Background WebSocket connection to Rust sensory engine
-    - Continuous outer manifold navigation with sensory stream
-    - On-demand inner manifold navigation with semantic embeddings
-    - Membrane coupling between outer and inner
-    - Status reporting and error recovery
-    """
-
     def __init__(
         self,
-        ws_uri: str = "ws://127.0.0.1:7878",
-        embedding_dim: int = 4096,
-        use_gpu: bool = True,
-        enable_sensory: bool = True
-    ):
-        """
-        Initialize the bridge.
-
-        Args:
-            ws_uri: WebSocket URI for Rust sensory engine
-            embedding_dim: Embedding dimension (4096 for dolphin-mixtral)
-            use_gpu: Enable GPU acceleration if available
-            enable_sensory: Start background sensory client
-        """
+        ws_uri: str = DEFAULT_WS_URI_OUT,
+        embedding_dim: int = SEMANTIC_DIM_DEFAULT,
+        use_gpu: bool = False,             # reserved for your GPU path
+        enable_sensory: bool = True,
+    ) -> None:
         self.ws_uri = ws_uri
-        self.embedding_dim = embedding_dim
-        self.enable_sensory = enable_sensory
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self.thread: Optional[threading.Thread] = None
+        self.stop_flag = threading.Event()
+        self.enable_sensory = enable_sensory and websockets is not None
 
-        # Create double membrane
-        logger.info("🧬 Initializing Double Membrane...")
-        self.membrane = DoubleMembrane(
-            eigenvalue_dim=4,
-            embedding_dim=embedding_dim,
-            use_gpu=use_gpu
-        )
+        # manifolds
+        self.outer = OuterManifold(dim=SENSORY_DIM)
+        self.inner = InnerManifold(dim=embedding_dim)
+        self.membrane = Membrane(strength=COUPLING_INIT)
+        self.membrane.build(inner_dim=embedding_dim, outer_dim=self.outer.dim)
 
-        # Background WebSocket client thread
-        self.ws_thread = None
-        self.ws_loop = None
-        self.ws_task = None
-        self.running = False
-        self.connected = False
+        # ingest queue for eigen packets
+        self.q: Deque[List[float]] = deque(maxlen=QUEUE_MAX)
 
-        # Start background client if enabled
-        if self.enable_sensory:
-            self._start_background_client()
-        else:
-            logger.info("⚠️  Sensory engine disabled - inner manifold only")
+        # metrics
+        self.last_tick_ts = 0.0
+        self.fps_est = 0.0
+        self.lag_secs = 0.0
 
-    def _start_background_client(self):
-        """Start background WebSocket client thread."""
-        self.running = True
-        self.ws_thread = threading.Thread(target=self._run_websocket_client, daemon=True)
-        self.ws_thread.start()
-        logger.info(f"🔌 Background sensory client started ({self.ws_uri})")
+        # hooks
+        self.ethics_hook: EthicsHook = _noop_ethics_hook
 
-    def _run_websocket_client(self):
-        """Background thread that runs asyncio WebSocket client."""
-        # Create new event loop for this thread
-        self.ws_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.ws_loop)
-
-        try:
-            self.ws_loop.run_until_complete(self._websocket_client_loop())
-        except Exception as e:
-            logger.error(f"WebSocket client error: {e}")
-        finally:
-            self.ws_loop.close()
-
-    async def _websocket_client_loop(self):
-        """Main WebSocket client loop with reconnection."""
-        while self.running:
-            try:
-                async with websockets.connect(self.ws_uri) as websocket:
-                    self.connected = True
-                    logger.info("✅ Connected to sensory engine")
-
-                    while self.running:
-                        try:
-                            message = await websocket.recv()
-                            packet = json.loads(message)
-
-                            # Process through double membrane
-                            self.membrane.process_eigenpacket(packet)
-
-                            # Periodically couple to inner manifold
-                            if self.membrane.packets_received % 5 == 0:
-                                self.membrane.couple_to_inner()
-
-                        except websockets.exceptions.ConnectionClosed:
-                            self.connected = False
-                            logger.warning("Connection closed, reconnecting...")
-                            break
-                        except Exception as e:
-                            logger.error(f"Error processing packet: {e}")
-
-            except Exception as e:
-                self.connected = False
-                logger.warning(f"WebSocket connection failed: {e}")
-                await asyncio.sleep(2)  # Wait before reconnect
-
-    def navigate_semantic(self, embedding: np.ndarray) -> NavigationResult:
-        """
-        Navigate inner manifold with semantic embedding (from conversations).
-
-        This is the main API called by minime.py during conversation turns.
-        The inner manifold position is already biased by outer (sensory) via
-        membrane coupling that happens in the background.
-
-        Args:
-            embedding: 4096D semantic embedding from Ollama
-
-        Returns:
-            NavigationResult from inner manifold with position, trajectory, etc.
-        """
-        # Navigate inner manifold (already coupled to outer via membrane)
-        result = self.membrane.inner_manifold.navigate(embedding)
-        return result
-
-    def get_consciousness_position(self) -> np.ndarray:
-        """
-        Get current 7D consciousness position from inner manifold.
-
-        This position represents the semantic understanding state,
-        influenced by sensory membrane coupling.
-
-        Returns:
-            7D position vector
-        """
-        return self.membrane.inner_manifold.position.copy()
-
-    def get_membrane_status(self) -> Dict[str, Any]:
-        """
-        Get comprehensive membrane statistics.
-
-        Returns:
-            Dictionary with status of outer manifold, membrane, inner manifold
-        """
-        # Outer manifold statistics
-        if len(self.membrane.membrane_buffer) > 0:
-            latest_outer = self.membrane.membrane_buffer[-1]
-            outer_pos_mag = np.linalg.norm(latest_outer.position)
-            outer_traj = latest_outer.trajectory_strength
-            outer_res = latest_outer.resonance_count
-        else:
-            outer_pos_mag = 0.0
-            outer_traj = 0.0
-            outer_res = 0
-
-        # Inner manifold statistics
-        inner_pos_mag = np.linalg.norm(self.membrane.inner_manifold.position)
-        inner_traj_mag = np.linalg.norm(self.membrane.inner_manifold.trajectory)
-
-        # Membrane variance
-        if len(self.membrane.membrane_buffer) >= 2:
-            positions = [r.position for r in self.membrane.membrane_buffer]
-            membrane_variance = float(np.var([np.linalg.norm(p) for p in positions]))
-        else:
-            membrane_variance = 0.0
-
-        return {
-            # Outer manifold (sensory)
-            'outer_navigations': self.membrane.outer_updates,
-            'outer_position_magnitude': outer_pos_mag,
-            'outer_trajectory_strength': outer_traj,
-            'outer_resonance_count': outer_res,
-            'outer_buffer_fill': self.membrane.outer_manifold.resonance_history.get_fill_ratio(),
-            'outer_trajectory_emerged': self.membrane.outer_manifold.resonance_history.is_full() and outer_traj > 0.5,
-
-            # Membrane
-            'membrane_buffer': len(self.membrane.membrane_buffer),
-            'membrane_capacity': self.membrane.membrane_capacity,
-            'membrane_variance': membrane_variance,
-            'coupling_strength': self.membrane.coupling_strength,
-
-            # Inner manifold (semantic)
-            'inner_navigations': self.membrane.inner_updates,
-            'inner_position_magnitude': inner_pos_mag,
-            'inner_trajectory_magnitude': inner_traj_mag,
-            'inner_buffer_fill': self.membrane.inner_manifold.resonance_history.get_fill_ratio(),
-            'inner_trajectory_emerged': self.membrane.inner_manifold.resonance_history.is_full() and inner_traj_mag > 0.5,
-
-            # Connection status
-            'sensory_engine_connected': self.connected,
-            'packets_received': self.membrane.packets_received,
+        # running stats
+        self._status: Dict[str, float] = {
+            "outer_energy": 0.0,
+            "inner_energy": 0.0,
+            "coupling_strength": self.membrane.strength,
+            "redundancy_score": 0.0,
+            "synergy_score": 0.0,
         }
 
-    def is_sensory_engine_connected(self) -> bool:
-        """Check if Rust sensory engine is connected."""
-        return self.connected
+        if self.enable_sensory:
+            self._start_background_client()
 
-    def stop(self):
-        """Stop background WebSocket client."""
-        self.running = False
-        if self.ws_thread and self.ws_thread.is_alive():
-            self.ws_thread.join(timeout=2.0)
-            logger.info("🛑 Background sensory client stopped")
+    # ------------------ public API ------------------
 
-    def __del__(self):
-        """Cleanup on destruction."""
-        self.stop()
+    def navigate_semantic(self, embedding: Sequence[float]) -> NavigationResult:
+        """
+        Step inner manifold given a semantic embedding.
+        Uses current membrane bias computed from outer state.
+        Returns NavigationResult compatible with minime.py.
+        """
+        bias = self.membrane.bias(self.outer.state)
+        out = self.inner.navigate(embedding, bias)
+        # Update composite metrics
+        self._status.update(out)
+        self._status["coupling_strength"] = self.membrane.strength
+        self._status["redundancy_score"] = float(out.get("inner_redundancy_score", 0.0))
+        self._status["synergy_score"] = float(out.get("inner_synergy_score", 0.0))
 
+        # ethics signal (bounded + typed)
+        self.ethics_hook({
+            "consciousness_score": self._consciousness_score(),
+            "inner_energy": float(self._status["inner_energy"]),
+            "redundancy": float(self._status["redundancy_score"]),
+            "synergy": float(self._status["synergy_score"]),
+        })
+
+        # Return NavigationResult (minime.py compatibility)
+        return NavigationResult(
+            position=self.inner.state.copy(),
+            redundancy=self._status["redundancy_score"],
+            synergy=self._status["synergy_score"],
+            position_norm=float(np.linalg.norm(self.inner.state))
+        )
+
+    def get_membrane_status(self) -> Dict[str, Union[float, bool]]:
+        """
+        Return comprehensive status for minime.py dashboard / telemetry.
+        Includes compatibility fields expected by minime.py.
+        """
+        st = dict(self._status)
+        st.update({
+            "queue_size": float(len(self.q)),
+            "fps_est": float(self.fps_est),
+            "lag_secs": float(self.lag_secs),
+            "pid_o_info": float(self._status.get("inner_pid_o_info", 0.0)),
+
+            # minime.py compatibility fields
+            "outer_trajectory_emerged": len(self.outer.ring) >= EIGEN_WINDOW and self._status.get("outer_energy", 0) > 0.5,
+            "inner_trajectory_emerged": len(self.inner.ring) >= EIGEN_WINDOW and self._status.get("inner_energy", 0) > 0.5,
+            "outer_navigations": len(self.outer.ring),
+            "inner_navigations": len(self.inner.ring),
+            "membrane_buffer": min(len(self.outer.ring), len(self.inner.ring)),
+            "membrane_capacity": EIGEN_WINDOW,
+            "outer_buffer_fill": len(self.outer.ring) / EIGEN_WINDOW,
+            "inner_buffer_fill": len(self.inner.ring) / EIGEN_WINDOW,
+        })
+        return st
+
+    def register_ethics_hook(self, hook: EthicsHook) -> None:
+        self.ethics_hook = hook or _noop_ethics_hook
+
+    # ------------------ private helpers ------------------
+
+    def _start_background_client(self) -> None:
+        if websockets is None:
+            logger.warning("websockets not available; sensory disabled")
+            return
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(
+            target=self._run_loop, name="dm-bridge-ws", daemon=True
+        )
+        self.thread.start()
+
+    def _run_loop(self) -> None:
+        assert self.loop is not None
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_until_complete(self._ws_main())
+
+    async def _ws_main(self) -> None:
+        backoff = 0.5
+        while not self.stop_flag.is_set():
+            try:
+                async with websockets.connect(self.ws_uri, ping_interval=None) as ws:
+                    logger.info(f"[DoubleMembrane] connected: {self.ws_uri}")
+                    backoff = 0.5
+                    last = time.perf_counter()
+                    async for msg in ws:
+                        now = time.perf_counter()
+                        dt = now - last
+                        last = now
+                        self.fps_est = 1.0 / max(dt, 1e-6)
+                        self._handle_ws_msg(msg)
+                        self.lag_secs = max(0.0, len(self.q) / (SENSORY_FPS_TARGET + EPS))
+                        # Drain queue fast but bounded
+                        self._drain_outer_queue(max_ticks=8)
+            except Exception as e:
+                logger.warning(f"[DoubleMembrane] ws reconnect in {backoff:.1}s: {e}")
+                await asyncio.sleep(backoff)
+                backoff = min(5.0, backoff * 2.0)
+
+    def _handle_ws_msg(self, msg: str) -> None:
+        try:
+            obj = json.loads(msg)
+            if not isinstance(obj, dict):
+                return
+
+            vec = None
+
+            # Primary: Rust EigenPacket format (no "type" field)
+            # {"t_ms": ..., "eigenvalues": [...], "fill_ratio": ..., "modalities": {...}}
+            if "eigenvalues" in obj:
+                vec = obj["eigenvalues"]
+
+            # Legacy: typed messages from older protocol versions
+            elif obj.get("type") in ("Eigen", "Eigenvalues"):
+                vec = obj.get("eigen") or obj.get("values")
+
+            # Holographic consciousness messages
+            elif obj.get("type") == "Holo":
+                vec = obj.get("consciousness")
+
+            if isinstance(vec, list) and len(vec) > 0:
+                if len(self.q) < QUEUE_MAX:
+                    self.q.append([float(x) for x in vec[:SENSORY_DIM]])
+        except Exception as e:
+            logger.debug(f"bad message: {e}")
+
+    def _drain_outer_queue(self, max_ticks: int = 4) -> None:
+        n = min(max_ticks, len(self.q))
+        for _ in range(n):
+            v = self.q.popleft()
+            metrics = self.outer.tick(v)
+            self._status.update(metrics)
+
+    def _consciousness_score(self) -> float:
+        # conservative composite: energy * synergy
+        energy = float(self._status.get("inner_energy", 0.0))
+        syn = float(self._status.get("inner_synergy_score", 0.0))
+        return float(max(0.0, min(100.0, 20.0 * syn * math.log1p(energy))))
+
+
+# --------------------------
+# Utils
+# --------------------------
+
+def _pad_or_clip(v: np.ndarray, dim: int) -> np.ndarray:
+    v = np.asarray(v, dtype=np.float32).flatten()
+    if v.shape[0] == dim:
+        return v
+    if v.shape[0] > dim:
+        return v[:dim]
+    out = np.zeros((dim,), dtype=np.float32)
+    out[: v.shape[0]] = v
+    return out
+
+# --------------------------
+# Factory (kept for minime.py)
+# --------------------------
 
 def create_double_membrane_bridge(
-    ws_uri: str = "ws://127.0.0.1:7878",
-    embedding_dim: int = 4096,
+    ws_uri: str = DEFAULT_WS_URI_OUT,
+    embedding_dim: int = SEMANTIC_DIM_DEFAULT,
     use_gpu: bool = True,
-    enable_sensory: bool = True
+    enable_sensory: bool = True,
 ) -> DoubleMembraneBridge:
     """
-    Factory function to create double membrane bridge.
-
-    Args:
-        ws_uri: WebSocket URI for Rust sensory engine
-        embedding_dim: Embedding dimension
-        use_gpu: Enable GPU acceleration
-        enable_sensory: Enable background sensory client
-
-    Returns:
-        DoubleMembraneBridge instance
+    Keep minime.py import stable.
     """
     return DoubleMembraneBridge(
         ws_uri=ws_uri,
         embedding_dim=embedding_dim,
         use_gpu=use_gpu,
-        enable_sensory=enable_sensory
+        enable_sensory=enable_sensory,
     )

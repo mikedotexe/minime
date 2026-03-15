@@ -1,6 +1,7 @@
 // src/av_gpu.rs
 // GPU-first video features w/ unified memory + mem-mode switch.
 //
+#![allow(dead_code)]
 // Public API:
 //   let mut av = AvGpu::new("shaders/av_features.metal", MemMode::Shared)?;
 //   av.set_frame_size(128, 128)?;

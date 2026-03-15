@@ -8,11 +8,10 @@ pub mod cheby;
 pub mod db;
 pub mod esn;
 pub mod gpu;
-pub mod net;
+// pub mod net;  // no net.rs file
 pub mod nn;
 pub mod prime;
 pub mod regulator;
 pub mod sensory_bus;
 pub mod sensory_ws;
 pub mod spectral;
-pub mod spectral_monitor;

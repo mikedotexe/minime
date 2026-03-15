@@ -1,6 +1,7 @@
 //! Consciousness Memory Database
 //!
 //! Persistent storage for eigenvalue evolution, neural checkpoints, and autobiographical events.
+#![allow(dead_code)]
 //! Enables session continuity and long-term pattern learning.
 
 use anyhow::Result;

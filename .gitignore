@@ -5,12 +5,20 @@
 # Runtime State Files
 # ============================================
 *.pkl
+*.pid
 MikesSpatialMind_memories.json
 spatial_hypotheses.json
 thoughts_queue/
 *.log
 7-spirals-pi/production_consciousness.pkl
 7-spirals-pi/deployment_summary.json
+
+# ============================================
+# Large / Archived Directories
+# ============================================
+archive/
+backup_*/
+nvfp4_*/
 
 # ============================================
 # Python
@@ -101,6 +109,8 @@ mikeconsciousness_*.tar.gz
 # ============================================
 target/
 **/target/
+.build/
+**/.build/
 Cargo.lock
 **/Cargo.lock
 *.rlib

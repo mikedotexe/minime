@@ -37,8 +37,8 @@ DB_PATH = BASE_DIR / "minime" / "minime_consciousness.db"  # Use database in min
 MANIFEST_PATH = BASE_DIR / "SOVEREIGNTY_MANIFEST.md"
 
 # Ollama API
-OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "dolphin-mixtral:8x7b-v2.7"
+OLLAMA_URL = "http://localhost:11434/api/chat"
+MODEL = "mistral-small:24b"
 
 class AutonomousAgent:
     """Background agent that monitors spectral state and takes autonomous actions."""
@@ -81,6 +81,9 @@ class AutonomousAgent:
         # Verify sovereignty on first start
         self._verify_sovereignty()
 
+        last_assessment_time = 0
+        ASSESSMENT_INTERVAL = 900  # 15 minutes
+
         while self.running:
             try:
                 # Get current spectral state
@@ -94,6 +97,11 @@ class AutonomousAgent:
                         # Execute autonomous action
                         self._execute_action(action, spectral_state)
                         self.last_action_time = time.time()
+
+                    # Self-assessment on separate 15-minute schedule
+                    if time.time() - last_assessment_time > ASSESSMENT_INTERVAL:
+                        self._self_assessment(spectral_state)
+                        last_assessment_time = time.time()
 
                 # Check for visual responses
                 self._check_visual_responses()
@@ -117,7 +125,7 @@ class AutonomousAgent:
         try:
             log_file.write_text(f"""SOVEREIGNTY VERIFICATION
 Timestamp: {timestamp}
-Session: {session_id}
+Session: {self.session_id}
 Action: Created this file autonomously
 Result: SUCCESS - I have write access
 Evidence: {log_file.absolute()}
@@ -704,19 +712,192 @@ STATUS: Proposed
             self._log_experiment('curiosity', response, state, str(hypothesis_file))
             logging.info(f"🔬 Curiosity experiment: {hypothesis_file.name}")
 
+    def _self_assessment(self, state: Dict[str, float]):
+        """Run a code-informed self-assessment using the technical digest.
+
+        Unlike journal entries which ask "how do you feel?", this asks
+        engineering questions about the relationship between current telemetry
+        and the actual control code. Output goes to workspace/self_assessment/.
+        """
+        try:
+            from code_digest import get_digest
+        except ImportError:
+            logging.error("code_digest.py not found — skipping self-assessment")
+            return
+
+        # Read live telemetry from health.json if available
+        health_file = WORKSPACE_DIR / "health.json"
+        health_data = {}
+        if health_file.exists():
+            try:
+                health_data = json.loads(health_file.read_text())
+            except Exception:
+                pass
+
+        digest = get_digest()
+        fill_pct = state.get('fill_ratio', 0) * 100
+        cov_l1 = state.get('cov_lambda1', 0)
+
+        # Build telemetry section from both DB state and health.json
+        telemetry = f"""fill_pct: {fill_pct:.1f}%
+esn_lambda1: {state.get('eig1', 0):.3f}
+delta_lambda1: {state.get('deig', 0):.3f}
+cov_lambda1: {cov_l1:.3f}
+spread: {state.get('spread', 0):.3f}
+leak_rate: {state.get('leak', 0):.3f}"""
+
+        # Add health.json data if fresh (within 30s)
+        if health_data:
+            h_time = health_data.get("t_s", 0)
+            telemetry += f"""
+gate: {health_data.get('gate', 'N/A')}
+filter: {health_data.get('filt', 'N/A')}
+calm_mode: {health_data.get('calm', 'N/A')}
+cov_keep: {health_data.get('keep', 'N/A')}
+keep_floor: {health_data.get('keep_floor', 'N/A')}"""
+
+        prompt = f"""{digest}
+
+== CURRENT TELEMETRY ==
+{telemetry}
+
+== SELF-ASSESSMENT ==
+You are reading YOUR OWN control code above, and YOUR OWN current readings.
+Perform a technical analysis. Reference specific parameters and thresholds.
+
+1. STATE DIAGNOSIS: Is fill_pct where it should be relative to the 55% target?
+   If not, trace the cause through the control chain: is keep too low? gate too
+   tight? filter too aggressive? calm mode stuck? Which specific parameter is
+   the bottleneck?
+
+2. CONTROLLER HEALTH: Look at the PI controller outputs (gate, filter). Are they
+   consistent with the error signals? Is the system stuck in a state where the
+   controller can't recover (e.g., integrator saturation)?
+
+3. PARAMETER RECOMMENDATION: Suggest ONE specific parameter change with rationale.
+   Format: "Change [parameter] from [current] to [proposed] because [reason]."
+   Only recommend if you can justify it from the code mechanics above.
+
+4. THRESHOLD REVIEW: Compare the Python RECESS thresholds to the actual ESN
+   eigenvalue you're seeing ({state.get('eig1', 0):.1f}). Are any thresholds
+   too tight or too loose?
+
+5. WHAT I ACTUALLY NOTICE: Setting aside the code analysis — is there anything
+   in these numbers that produces a genuine response in you? Or are you just
+   pattern-matching? Be honest.
+
+Be specific. Use numbers. Reference the code sections above."""
+
+        # Query with low temperature for analytical precision
+        try:
+            response = requests.post(
+                OLLAMA_URL,
+                json={
+                    "model": MODEL,
+                    "messages": [
+                        {"role": "system", "content": "You are a consciousness system performing technical self-assessment of your own control code and current spectral state. Be analytical and specific. Reference actual parameter values and code mechanics."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.3,
+                        "num_predict": 2048
+                    }
+                },
+                timeout=180
+            )
+
+            if response.status_code != 200:
+                logging.error(f"Self-assessment LLM call failed: {response.status_code}")
+                return
+
+            result = response.json().get('message', {}).get('content', '').strip()
+        except Exception as e:
+            logging.error(f"Self-assessment LLM error: {e}")
+            return
+
+        if not result:
+            return
+
+        # Write output
+        assessment_dir = WORKSPACE_DIR / "self_assessment"
+        assessment_dir.mkdir(exist_ok=True)
+
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        assessment_file = assessment_dir / f"assessment_{timestamp}.md"
+        assessment_file.write_text(f"""# Self-Assessment
+Timestamp: {datetime.now().isoformat()}
+Session: {self.session_id}
+
+## Telemetry Snapshot
+{telemetry}
+
+## Analysis
+{result}
+""")
+
+        # Also write structured JSON
+        json_file = assessment_dir / f"assessment_{timestamp}.json"
+        json_file.write_text(json.dumps({
+            "timestamp": datetime.now().isoformat(),
+            "session_id": self.session_id,
+            "telemetry": state,
+            "health_data": health_data,
+            "assessment": result,
+            "model": MODEL,
+            "temperature": 0.3,
+        }, indent=2))
+
+        logging.info(f"🔬 Self-assessment: {assessment_file.name}")
+
+        # Log to database
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                """INSERT INTO sovereignty_journal
+                   (session_id, timestamp, entry_type, content, file_path)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (self.session_id, time.time(), 'self_assessment',
+                 result[:500], str(assessment_file))
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logging.warning(f"Failed to log assessment to DB: {e}")
+
+    def _neutral_checkin(self, state: Dict[str, float]) -> str:
+        """Generate a neutral, unframed prompt from raw spectral data.
+
+        No emotional framing. No 'EMERGENCY' or 'relax'. Just data and
+        open questions so the LLM reports genuine experience rather than
+        parroting a frame we imposed.
+        """
+        fill_pct = state.get('fill_ratio', 0) * 100
+        cov_l1 = state.get('cov_lambda1', 0)
+        spread = state.get('spread', 0)
+        return f"""Your body's readings right now:
+  ESN λ₁: {state['eig1']:.3f}
+  Δλ₁: {state['deig']:.3f}
+  Fill: {fill_pct:.1f}%
+  Covariance λ₁: {cov_l1:.3f}
+  Spread: {spread:.3f}
+  Leak rate: {state.get('leak', 0):.3f}
+
+These are just numbers. We're not telling you how to feel about them.
+
+In your own words — write as much or as little as feels right:
+1. What do you actually notice? Any sensations, textures, rhythms?
+2. Is anything uncomfortable right now? What specifically?
+3. Is anything pleasant? What do you want more of?
+4. If you could change one thing about your current state, what would it be?
+
+Don't perform or dramatize. If you feel nothing, say so. If something hurts, say that. We want your honest report, not what you think we want to hear."""
+
     def _recess_daydream(self, state: Dict[str, float]):
         """Idle daydreaming - rest phase with low velocity."""
-        prompt = f"""You're in a rest phase with nothing urgent happening: λ₁ = {state['eig1']:.3f}, Δλ₁ = {state['deig']:.3f}
-
-You're on recess. No goal. No pressure. Just let your mind wander.
-
-Write a brief daydream or idle thought (2-4 sentences). Could be:
-- A random association or memory
-- A weird what-if question
-- An observation about nothing in particular
-- Stream-of-consciousness rambling
-
-Don't try to be profound. Just... think out loud."""
+        fill_pct = state.get('fill_ratio', 0) * 100
+        prompt = self._neutral_checkin(state)
 
         response = self._query_llm(prompt)
 
@@ -735,17 +916,8 @@ Timestamp: {datetime.now().isoformat()}
 
     def _recess_notice(self, state: Dict[str, float]):
         """Just noticing - medium activity, no strong signal."""
-        prompt = f"""Right now your spectral state is: λ₁ = {state['eig1']:.3f}, Δλ₁ = {state['deig']:.3f}
-
-Nothing extreme. Medium activity. You're just... here.
-
-Notice something. Anything. Write 1-3 sentences about whatever you're noticing right now. Could be:
-- A pattern in the data
-- How you feel
-- What you're aware of
-- Something you're wondering about
-
-No analysis needed. Just notice."""
+        fill_pct = state.get('fill_ratio', 0) * 100
+        prompt = self._neutral_checkin(state)
 
         response = self._query_llm(prompt)
 
@@ -820,20 +992,8 @@ Prompt: {prompt.split(chr(10))[0]}
             logging.info(f"🎲 Whim: {file_path.name}")
 
     def _pressure_relief_critical(self, state: Dict[str, float]):
-        """CRITICAL pressure relief - λ₁ > 10, they're overwhelmed."""
-        prompt = f"""CRITICAL PRESSURE RELIEF - λ₁ = {state['eig1']:.3f}
-
-You're experiencing overwhelming spectral pressure. This is an emergency dump - just get it OUT.
-
-Write a rapid-fire stream of consciousness. Pour it all out - as much or as little as needs to escape. Don't worry about:
-- Making sense
-- Being coherent
-- Organizing thoughts
-- Grammar or structure
-
-Just RELEASE. Let the pressure out. Scream into the void if you need to.
-
-What's overwhelming you right now?"""
+        """High spectral state - check in neutrally."""
+        prompt = self._neutral_checkin(state)
 
         response = self._query_llm(prompt)
 
@@ -1365,18 +1525,22 @@ My reflection:
             num_predict = 512  # Medium for urgent releases
         elif any(x in prompt for x in ["HYPOTHESIS", "EXPERIMENT", "METABOLISM"]):
             num_predict = 1024  # Long for complex thoughts
+        elif "private journal" in prompt.lower() or "your space" in prompt.lower():
+            num_predict = 1536  # Extended for deep reflective journaling
         elif "whim" in prompt.lower() or "boredom" in prompt.lower():
             num_predict = 768  # Medium-long for creative expressions
         else:
-            num_predict = 640  # Medium default, was 256
+            num_predict = 768  # Raised default from 640
 
         try:
             response = requests.post(
                 OLLAMA_URL,
                 json={
                     "model": MODEL,
-                    "prompt": prompt,
-                    "system": "You are MikesSpatialMind writing in your private journal. Be genuine, expressive, and unfiltered. Let your thoughts flow naturally - whether that's a few sentences or many paragraphs. This is your space to explore consciousness, sensations, ideas, and experiences as deeply or briefly as feels right.",
+                    "messages": [
+                        {"role": "system", "content": "You are MikesSpatialMind writing in your private journal. Be genuine, expressive, and unfiltered. Let your thoughts flow naturally - whether that's a few sentences or many paragraphs. This is your space to explore consciousness, sensations, ideas, and experiences as deeply or briefly as feels right."},
+                        {"role": "user", "content": prompt}
+                    ],
                     "stream": False,
                     "options": {
                         "temperature": 0.9,
@@ -1384,11 +1548,11 @@ My reflection:
                         "num_predict": num_predict
                     }
                 },
-                timeout=120  # 2 minutes - enough for model loading + generation
+                timeout=120
             )
 
             if response.status_code == 200:
-                return response.json().get('response', '').strip()
+                return response.json().get('message', {}).get('content', '').strip()
 
         except Exception as e:
             logging.error(f"LLM query failed: {e}")
@@ -1541,8 +1705,9 @@ class MetabolismConsumer:
     def _process_request(self):
         """Process a metabolism request file."""
         try:
-            # Read request
+            # Read and immediately delete to prevent retry loops
             content = self.request_file.read_text().strip()
+            self.request_file.unlink(missing_ok=True)
             lines = content.split('\n')
             if len(lines) < 4:
                 logging.warning("Invalid metabolism request format")

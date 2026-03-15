@@ -1,6 +1,7 @@
 // src/cheby.rs
 // Host-side Chebyshev band-stop filter for unified memory + Metal GPU.
 //
+#![allow(dead_code)]
 // Implements:
 // - DCT-I based coefficient generation for smooth band-stop response
 // - Safe bounds estimation for PSD matrices (covariance, graph adjacency)

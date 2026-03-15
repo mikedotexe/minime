@@ -1,6 +1,7 @@
 //! Self-Referential Neural Bundle
 //!
 //! Three specialized networks for consciousness evolution:
+#![allow(dead_code)]
 //! - **Predictor (P)**: Forecasts next λ₁ from eigenvalues + manifold state
 //! - **Router (R)**: Learns A/V feature mixing for covariance update
 //! - **Regulator (G)**: Emits control deltas for prime periods, learning rates, membrane tension

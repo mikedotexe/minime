@@ -1,6 +1,7 @@
 //! Self-Referential Echo State Network with Prime-Phased Spectral Adaptation
 //!
 //! This module implements a Metal-accelerated ESN that adapts its own hyperparameters
+#![allow(dead_code)]
 //! (leak rate, RLS forgetting factor) based on spectral introspection of its reservoir state.
 //!
 //! Key features:

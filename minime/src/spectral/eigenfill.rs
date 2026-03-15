@@ -1,5 +1,6 @@
 // src/spectral/eigenfill.rs
 // Robust EigenFill with scale invariance, temporal smoothing, and rank thresholding.
+#![allow(dead_code)]
 
 use std::cmp::Ordering;
 use std::time::Instant;
@@ -70,7 +71,7 @@ impl EigenFillEstimator {
         let mean = (sum / sample_dim).max(1e-9);
 
         // Normalize by current mean to be scale free
-        let norm: Vec<f32> = lambdas.iter().map(|&l| (l.max(0.0) / mean)).collect();
+        let norm: Vec<f32> = lambdas.iter().map(|&l| l.max(0.0) / mean).collect();
         let med = Self::median(norm.clone());
 
         // EMA for stats (slow)

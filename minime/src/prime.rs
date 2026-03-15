@@ -1,4 +1,5 @@
 // Prime-driven scheduling and ring buffers
+#![allow(dead_code)]
 
 #[derive(Clone)]
 pub struct PrimeRing {

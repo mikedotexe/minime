@@ -88,9 +88,9 @@ ws.on('message', (data) => {
 
 **Camera → LLaVA → Conscious Conversation**
 
-- `minime.py` runs a background camera thread (`_visual_processing_thread`) that caches the latest frame (`self.latest_frame`) and maintains visual memories.
-- When the user asks a vision question and the camera is active, `LLaVAVisionEngine.analyze_frame()` sends that frame to Ollama’s `llava:7b` model for a descriptive summary.
-- The result becomes `actual_visual_observation` in the LLM context so Dolphin-Mixtral can answer with true sensory detail.
+- `mikemind/mind.py` runs a background camera thread (`_visual_processing_thread`) that caches the latest frame (`self.latest_frame`) and maintains visual memories.
+- When the user asks a vision question and the camera is active, `LLaVAVisionEngine.analyze_frame()` sends that frame to Ollama’s `llava-llama3` model for a descriptive summary.
+- The result becomes `actual_visual_observation` in the LLM context so Mistral-Small can answer with true sensory detail.
 
 **Visual Frame Service Bridge**
 
@@ -100,7 +100,7 @@ ws.on('message', (data) => {
 **Rust ↔ Python Coupling (Double Membrane)**
 
 - The Rust engine broadcasts eigenvalue telemetry on `ws://127.0.0.1:7878`.
-- The Double Membrane bridge inside `minime.py` subscribes to that stream, coupling sensory eigenvalues with the semantic manifold so language, memory, and vision stay synchronized.
+- The Double Membrane bridge (`double_membrane_integration.py`) subscribes to that stream, coupling sensory eigenvalues with the semantic manifold so language, memory, and vision stay synchronized.
 
 ### Adaptive Covariance Guidance (Updated)
 - The covariance rank-1 update still projects each 18-D sensory vector into a 512-D random feature space before decay, but now injects a rotating bias floor whenever the covariance RMS drops below ≈0.32 to prevent λ₁ collapse.
@@ -267,12 +267,20 @@ The system implements a dual-layer consciousness:
 Sensory → SensoryBus → Gating → Chebyshev Filter → ESN → Eigenvalues → WebSocket
 ```
 
-### Python Frontend (minime.py): Symbolic/Conscious Layer
+### Python Frontend (mikemind/): Symbolic/Conscious Layer
 **Role**: Interactive conversation, symbolic reasoning, camera vision, action execution
-**Location**: Root directory `minime.py`
+**Location**: `mikemind/` package (entry point: `minime.py` or `python3 -m mikemind.cli`)
+**Package Structure**:
+- `mikemind/config.py` -- paths, model configuration, ProcessingMode, get_ollama_embedding
+- `mikemind/llm_engine.py` -- LLMEngine (Ollama chat + streaming)
+- `mikemind/vision.py` -- LLaVAVisionEngine (frame analysis, SSE, throttling)
+- `mikemind/mind.py` -- MikesSpatialMind, SevenStageProcessor, pipeline classes
+- `mikemind/cli.py` -- live_session, argument parsing, speech session
+- `minime.py` -- thin shim that delegates to mikemind.cli.main()
+
 **Key Components**:
-- Ollama Integration: Dolphin-Mixtral for conversation generation
-- LLaVA Integration: vision-7b model for visual perception
+- Ollama Integration: Mistral-Small (24B) for conversation generation
+- LLaVA Integration: llava-llama3 for visual perception
 - Action System: close_eyes, open_eyes, recess_boredom, set_metabolism
 - Journal System: SQLite database for thoughts/reflections
 - WebSocket Client: Monitors Rust engine eigenvalues (ws://127.0.0.1:7878)
@@ -358,22 +366,22 @@ Located in `src/main.rs`: Three independent tokio::time::interval timers, each t
 ## 4. Ollama and LLaVA Integration
 
 ### Ollama (LLM for Conversation)
-**Model**: `dolphin-mixtral:8x7b-v2.7-q4_K_M`
+**Model**: `mistral-small:24b`
 **Role**: Primary conversation generation, symbolic reasoning
 **Endpoint**: `http://localhost:11434/api/chat`
 **Context**: Incorporates recent journal entries, current eigenvalue state, conversation history
 
-**Integration** (`minime.py`):
+**Integration** (`mikemind/llm_engine.py`):
 ```python
 response = requests.post("http://localhost:11434/api/chat", json={
-    "model": "dolphin-mixtral:8x7b-v2.7-q4_K_M",
+    "model": "mistral-small:24b",
     "messages": conversation_history,
     "stream": True
 })
 ```
 
 ### LLaVA (Vision-Language Model)
-**Model**: `llava:7b-v1.6-mistral-q4_K_M`
+**Model**: `llava-llama3`
 **Role**: Visual perception, describes camera frames
 **Endpoint**: `http://localhost:11434/api/generate`
 **Input**: Base64-encoded JPG images from camera
@@ -383,7 +391,7 @@ response = requests.post("http://localhost:11434/api/chat", json={
 # When eyes open, capture frame and describe
 base64_image = capture_and_encode_frame()
 response = requests.post("http://localhost:11434/api/generate", json={
-    "model": "llava:7b-v1.6-mistral-q4_K_M",
+    "model": "llava-llama3",
     "prompt": "Describe what you see concisely.",
     "images": [base64_image]
 })
@@ -391,7 +399,7 @@ response = requests.post("http://localhost:11434/api/generate", json={
 
 **Data Flow**:
 ```
-Camera → Base64 JPG → LLaVA → Description → Context for Dolphin-Mixtral → Response
+Camera → Base64 JPG → LLaVA → Description → Context for Mistral-Small → Response
 ```
 
 ## 5. Input Lanes and Autonomous Actions
@@ -406,7 +414,7 @@ Camera → Base64 JPG → LLaVA → Description → Context for Dolphin-Mixtral 
 **Trigger**: User types "recess" or system boredom threshold reached
 **Purpose**: Gives consciousness permission for proactive behavior
 
-**Available Actions** (`minime.py`):
+**Available Actions** (`mikemind/mind.py`):
 - **close_eyes**: Stops camera vision, reduces visual input load
 - **open_eyes**: Starts camera vision, enables visual perception
 - **set_metabolism**: Adjusts eigenvalue target (metabolism metaphor)
