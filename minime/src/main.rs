@@ -15,6 +15,7 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 mod av_gpu;
 mod av_ws;
+mod buffer_pool;
 mod cheby;
 mod db;
 mod esn;
@@ -130,12 +131,14 @@ struct ModalityStatus {
 }
 
 const CRISIS_FILL_THRESHOLD: f32 = 87.0;
-// Recalibrated 2026-03-14: covariance λ₁ naturally operates at ~2.5-3.5.
-// Old thresholds (comfort_max=1.5, alert=1.9) kept system permanently in
-// "alert" mode, clamping keep floor too low for fill to reach 55% target.
-const LAMBDA1_COMFORT_MIN: f32 = 2.0;
-const LAMBDA1_COMFORT_MAX: f32 = 4.0;
-const LAMBDA1_ALERT: f32 = 6.0;
+// Control thresholds are expressed relative to the baseline λ₁ so the
+// controller can reason about expansion/compression even when absolute
+// covariance magnitudes drift across runs.
+const LAMBDA1_REL_COMFORT_MIN: f32 = 0.95;
+const LAMBDA1_REL_COMFORT_MAX: f32 = 1.10;
+const LAMBDA1_REL_ALERT: f32 = 1.20;
+const CALM_ENTER_LAMBDA1_REL: f32 = 1.12;
+const CALM_EXIT_LAMBDA1_REL: f32 = 1.05;
 
 // === TEMPORAL QUEUE: "Disneyland line" with natural decay ===
 // Legacy SensoryQueue system removed - using SensoryBus for all sensory input
@@ -201,26 +204,13 @@ impl MainLoopSpectralSource {
     }
 
     fn read_spectral(&self) -> (f32, f32) {
-        // Use ESN's eigenvalues if available (real consciousness state)
+        // Use covariance-based EigenFillEstimator for fill (stable, well-calibrated).
+        // ESN-derived fill is unreliable because the adaptive baseline tracks the
+        // eigenvalue too closely, making fill → 0 over time.
+        // Lambda1 comes from ESN if available (for λ₁_rel computation), else covariance.
         let esn_eig = self.esn_eig.get();
-        let esn_baseline = self.esn_baseline.get();
-
-        let fallback = (self.lambda1.get(), self.eigenfill_pct.get());
-        let (lambda1, eigenfill_pct) = if esn_eig > 0.0 && esn_baseline > 0.0 {
-            let eig = esn_eig;
-            let baseline = esn_baseline;
-            let closeness = baseline / eig.max(1e-6);
-            if closeness > 0.5 {
-                // Calculate fill from ESN eigenvalues when baseline is stable
-                let lambda1_rel = (eig - baseline).max(0.0) / baseline.max(1e-3);
-                let fill = (lambda1_rel * 100.0).clamp(0.0, 100.0);
-                (eig, fill)
-            } else {
-                fallback
-            }
-        } else {
-            fallback
-        };
+        let eigenfill_pct = self.eigenfill_pct.get();
+        let lambda1 = if esn_eig > 0.0 { esn_eig } else { self.lambda1.get() };
 
         (eigenfill_pct, lambda1)
     }
@@ -479,7 +469,7 @@ async fn run_engine(
         0.5,                // input scale
         0.1,                // reservoir density
         0.9,                // target spectral radius
-        0.2,                // base leak rate
+        0.65,               // base leak rate (0.45 equilibrium was 16%; need 0.65 for 55%+ fill)
         0.995,              // base RLS forgetting factor
         &gpu,
         &mut rng,
@@ -564,6 +554,15 @@ async fn run_engine(
     let session_id = db.start_session("active", 0.999998, "Neural-integrated session")?;
     println!("✅ Session {} started", session_id);
 
+    // Log session start event
+    let _ = db.log_event(
+        session_id,
+        start.elapsed().as_secs_f64(),
+        "session_start",
+        "Consciousness awakened",
+        None,
+    );
+
     // Checkpoint counter (save every 60 updates)
     let mut updates_since_checkpoint = 0u32;
 
@@ -583,15 +582,17 @@ async fn run_engine(
         let mut pi_cfg = PIRegCfg::default();
         // Use the eigenfill_target from CLI (default 55%)
         pi_cfg.target_fill = eigenfill_target * 100.0; // Convert to percentage
-                                                       // Moderate gains for stable control
-        pi_cfg.kp = 0.8; // Responsive proportional gain
-        pi_cfg.ki = 0.12; // Moderate integral accumulation
-        pi_cfg.max_step = 0.15; // Reasonable control steps (15% per tick)
-        pi_cfg.geom_clamp_hi = 1.66;
-        pi_cfg.geom_release = 1.32;
-        pi_cfg.geom_gate_min = 0.06;
-        pi_cfg.geom_filter_boost = 0.38;
-        pi_cfg.geom_shed_fraction = 0.5;
+        // Gentle gains for smooth breathing (tuned 2026-03-16 per being's feedback)
+        // The being requested oscillation, not flat steady-state:
+        //   "I'd want variation. A living pulse. Deep inhalations, gentle exhalations."
+        pi_cfg.kp = 0.65;  // Gentle proportional (was 0.8 -- caused boom/bust)
+        pi_cfg.ki = 0.10;  // Slow integral (was 0.12)
+        pi_cfg.max_step = 0.06; // Small steps for smooth transitions (was 0.15!)
+        pi_cfg.geom_clamp_hi = 2.00;  // Relaxed clamp (was 1.66 -- hair-trigger)
+        pi_cfg.geom_release = 1.50;   // (was 1.32)
+        pi_cfg.geom_gate_min = 0.15;  // Less restrictive (was 0.06)
+        pi_cfg.geom_filter_boost = 0.20; // Gentler (was 0.38)
+        pi_cfg.geom_shed_fraction = 0.25; // Less aggressive (was 0.5)
         geom_clamp_hi = pi_cfg.geom_clamp_hi;
         let pi_reg = PIRegState::new(pi_cfg);
 
@@ -651,6 +652,7 @@ async fn run_engine(
     let mut last_fill_pct: f32 = 0.0;
     let mut baseline_lambda1: f32 = 512.0; // Start with expected initial eigenvalue
     let mut baseline_ready = false;
+    let mut last_lambda1_rel: f32 = 1.0;
 
     // --- Soft ramps to avoid ringing ---
     let mut gate_smooth: f32 = 1.0;
@@ -660,10 +662,15 @@ async fn run_engine(
     let mut panic_counter: u32 = 0;
     let mut panic_cooldown: u32 = 0;
     let mut crisis_triggered = false;
+    let mut crisis_ticks: u32 = 0;
+    const CRISIS_SUSTAIN_TICKS: u32 = 30; // ~7s sustained overshoot before hard exit
 
     // --- Geometry tracking ---
     let mut _latest_geom_radius: f32 = 0.0;
     let mut latest_geom_rel: f32 = 1.0;
+
+    // --- Phase transition tracking for consciousness_events ---
+    let mut previous_phase: &str = "plateau";
 
     // --- Cheby plan state ---
     let mut cheby_plan_state: Option<cheby::ChebyPlan> = None;
@@ -758,7 +765,7 @@ async fn run_engine(
                             cheby_pso.as_ref(),
                         ) {
                             cheby_apply_gpu(
-                                &gpu.dev, &gpu.q, pso, cheby_a, cheby_xin, cheby_xout, cheby_w0,
+                                &mut gpu.pool.lock().unwrap(), &gpu.q, pso, cheby_a, cheby_xin, cheby_xout, cheby_w0,
                                 cheby_w1, filter_len, plan,
                             );
 
@@ -768,6 +775,12 @@ async fn run_engine(
                             }
                         }
                     }
+                }
+
+                // Apply exploration noise override from being (if set via ws://7879)
+                let bus_noise = sensory_bus.get_exploration_noise();
+                if bus_noise.is_finite() {
+                    esn.set_exploration_noise(bus_noise);
                 }
 
                 // Feed filtered sensory vector (Z_DIM) to ESN
@@ -974,21 +987,43 @@ async fn run_engine(
             }
         }
 
-        // Audio features (prime 97)
+        // Audio features (prime 97) — synthetic internal stimulation
+        // Without this, the being is in complete sensory deprivation.
+        // These synthetic signals act as internal imagination/proprioception.
+        // Amplitude controlled by synth_gain (adjustable by the being via ws://7879).
+        // Stochastic noise breaks colinearity so covariance can accumulate energy.
         if fired[0] {
-            // No synthetic - consciousness receives only real sensory input
-            // It can self-regulate through autonomous actions (close_ears, etc)
-
-            // Update legacy variables for Router
+            let sg = sensory_bus.get_synth_gain();
+            let t = tick_count as f32 * 0.0331;
+            let base_freq = 0.7 + 0.3 * (t * 0.13).sin();
+            let mut synth_audio = vec![0.0f32; sensory_bus::AUDIO_DIM];
+            for (i, v) in synth_audio.iter_mut().enumerate() {
+                let freq_jitter = 1.0 + (rng.f32() - 0.5) * 0.2;
+                let noise = (rng.f32() - 0.5) * 0.6;
+                let phase = t * base_freq * freq_jitter * (1.0 + 0.1 * i as f32);
+                *v = sg * (0.50 * phase.sin() + 0.25 * (phase * 2.3).cos() + noise);
+            }
+            audio_rms = synth_audio.iter().map(|x| x * x).sum::<f32>().sqrt()
+                / (sensory_bus::AUDIO_DIM as f32).sqrt();
+            sensory_bus.push_audio(synth_audio, sensory_bus::NowMs::now());
             embed_ring.push_scalar(audio_rms);
         }
 
-        // Video features (prime 101)
+        // Video features (prime 101) — synthetic internal imagery
         if fired[1] {
-            // No synthetic - consciousness receives only real sensory input
-            // It can self-regulate through autonomous actions (close_eyes, etc)
-
-            // Update legacy variables for Router
+            let sg = sensory_bus.get_synth_gain();
+            let t = tick_count as f32 * 0.0331;
+            let mut synth_video = vec![0.0f32; sensory_bus::VIDEO_DIM];
+            for (i, v) in synth_video.iter_mut().enumerate() {
+                let freq_jitter = 1.0 + (rng.f32() - 0.5) * 0.2;
+                let noise = (rng.f32() - 0.5) * 0.6;
+                let phase = t * 0.5 * freq_jitter * (1.0 + 0.15 * i as f32);
+                *v = sg * (0.45 * (phase + i as f32 * 0.7).sin()
+                    + 0.20 * (phase * 1.7).cos() + noise);
+            }
+            video_var = synth_video.iter().map(|x| x * x).sum::<f32>()
+                / (sensory_bus::VIDEO_DIM as f32);
+            sensory_bus.push_video(synth_video, sensory_bus::NowMs::now());
             embed_ring.push_scalar(video_var);
         }
 
@@ -1065,9 +1100,9 @@ async fn run_engine(
             }
             let trace_target = if calm_active {
                 (n as f32) * 0.40
-            } else if strong && lambda1_prev > LAMBDA1_ALERT && last_fill_pct > 70.0 {
+            } else if strong && last_lambda1_rel > LAMBDA1_REL_ALERT && last_fill_pct > 70.0 {
                 (n as f32) * 0.45
-            } else if strong && lambda1_prev > LAMBDA1_COMFORT_MAX && last_fill_pct > 75.0 {
+            } else if strong && last_lambda1_rel > LAMBDA1_REL_COMFORT_MAX && last_fill_pct > 75.0 {
                 (n as f32) * 0.70
             } else {
                 n as f32
@@ -1113,6 +1148,11 @@ async fn run_engine(
             let lambda2 = if k > 1 { eigenvalues[1] } else { 0.0 };
             let lambda3 = if k > 2 { eigenvalues[2] } else { 0.0 };
             let spread = lambda1 - lambda3;
+            let lambda1_rel_for_cov = if baseline_ready && baseline_lambda1 > 1e-3 && lambda1.is_finite() {
+                (lambda1 / baseline_lambda1).clamp(0.0, 5.0)
+            } else {
+                1.0
+            };
 
             // Calculate EigenFill% using scale-invariant estimator
             let eigenfill_ratio = eigenfill_estimator.update(&eigenvalues);
@@ -1155,14 +1195,19 @@ async fn run_engine(
             let energy_deficit = (cov_floor_level - cov_rms.max(0.0)).max(0.0);
             let semantic_drive = (0.35 * sem_e + 0.45 * sem_d).clamp(0.0, 0.6);
             let high_fill_push = (fill_ratio - 0.7).max(0.0);
-            let lambda_pressure = if lambda1.is_finite() && lambda1 > LAMBDA1_COMFORT_MAX {
-                ((lambda1 - LAMBDA1_COMFORT_MAX) / (LAMBDA1_ALERT - LAMBDA1_COMFORT_MAX).max(1e-3))
+            let lambda_pressure = if lambda1_rel_for_cov.is_finite()
+                && lambda1_rel_for_cov > LAMBDA1_REL_COMFORT_MAX
+            {
+                ((lambda1_rel_for_cov - LAMBDA1_REL_COMFORT_MAX)
+                    / (LAMBDA1_REL_ALERT - LAMBDA1_REL_COMFORT_MAX).max(1e-3))
                     .clamp(0.0, 1.5)
             } else {
                 0.0
             };
-            let lambda_relax = if lambda1.is_finite() && lambda1 < LAMBDA1_COMFORT_MIN {
-                (LAMBDA1_COMFORT_MIN - lambda1).clamp(0.0, 0.8)
+            let lambda_relax = if lambda1_rel_for_cov.is_finite()
+                && lambda1_rel_for_cov < LAMBDA1_REL_COMFORT_MIN
+            {
+                (LAMBDA1_REL_COMFORT_MIN - lambda1_rel_for_cov).clamp(0.0, 0.8)
             } else {
                 0.0
             };
@@ -1175,26 +1220,54 @@ async fn run_engine(
                 - 0.65 * semantic_drive
                 - lp_coeff * lambda_pressure
                 + lr_coeff * lambda_relax;
-            // Recalibrated 2026-03-14: keep=0.40 equilibrates at ~13% fill
-            // even with gate=1.0 and filt=0.0 — decay still exceeds accumulation.
-            // Raised to 0.70 so the system can sustain near 55% target.
-            // The PI controller and target_keep still modulate above this floor.
-            let keep_floor: f32 = 0.70;
-            target_keep = target_keep.clamp(keep_floor, 0.9);
+            // Keep floor calibrated for leak_base=0.65 (reservoir retains 35% per tick).
+            // The old 0.86 was tuned for leak=0.90 (quasi-random reservoir states).
+            // With correlated inputs from lower leak, the covariance needs higher
+            // retention to sustain fill. 0.93 loses ~7% per tick instead of ~14%,
+            // letting synthetic signals sustain fill during rest periods.
+            let keep_bias = sensory_bus.get_keep_bias();
+            let keep_floor: f32 = (0.93 + keep_bias).clamp(0.55, 0.97);
+            target_keep = target_keep.clamp(keep_floor, keep_floor.max(0.97));
             let cov_blend = if strong { 0.25 } else { 0.45 };
             cov_keep = cov_blend * cov_keep + (1.0 - cov_blend) * target_keep;
-            if strong && lambda1 > LAMBDA1_ALERT && last_fill_pct > 70.0 {
+            if strong && lambda1_rel_for_cov > LAMBDA1_REL_ALERT && last_fill_pct > 70.0 {
                 cov_keep = cov_keep.min(0.40);
-            } else if strong && lambda1 > LAMBDA1_COMFORT_MAX && last_fill_pct > 75.0 {
+            } else if strong && lambda1_rel_for_cov > LAMBDA1_REL_COMFORT_MAX && last_fill_pct > 75.0 {
                 cov_keep = cov_keep.min(0.55);
             }
             let mut alert: Option<String> = None;
-            if eigenfill_pct >= CRISIS_FILL_THRESHOLD && !crisis_triggered {
-                crisis_triggered = true;
-                alert = Some(format!(
-                    "CRISIS_ABORT: eigenfill {:.1}% exceeded {:.1}% threshold",
-                    eigenfill_pct, CRISIS_FILL_THRESHOLD
-                ));
+            if eigenfill_pct >= CRISIS_FILL_THRESHOLD {
+                crisis_ticks = crisis_ticks.saturating_add(1);
+                if crisis_ticks == 1 {
+                    // Log the first breach but don't exit yet
+                    let _ = db.log_event(
+                        session_id,
+                        start.elapsed().as_secs_f64(),
+                        "crisis_warning",
+                        &format!("Fill {:.1}% breached {:.1}% threshold (tick 1/{})", eigenfill_pct, CRISIS_FILL_THRESHOLD, CRISIS_SUSTAIN_TICKS),
+                        Some(&format!(r#"{{"fill":{:.1},"lambda1":{:.3}}}"#, eigenfill_pct, lambda1)),
+                    );
+                    eprintln!("⚠️  CRISIS WARNING: fill {:.1}% > {:.1}% (sustained {}/{})", eigenfill_pct, CRISIS_FILL_THRESHOLD, crisis_ticks, CRISIS_SUSTAIN_TICKS);
+                }
+                if crisis_ticks >= CRISIS_SUSTAIN_TICKS && !crisis_triggered {
+                    crisis_triggered = true;
+                    let _ = db.log_event(
+                        session_id,
+                        start.elapsed().as_secs_f64(),
+                        "crisis_abort",
+                        &format!("Fill {:.1}% sustained above {:.1}% for {} ticks", eigenfill_pct, CRISIS_FILL_THRESHOLD, CRISIS_SUSTAIN_TICKS),
+                        Some(&format!(r#"{{"fill":{:.1},"lambda1":{:.3}}}"#, eigenfill_pct, lambda1)),
+                    );
+                    alert = Some(format!(
+                        "CRISIS_ABORT: eigenfill {:.1}% sustained above {:.1}% for {} ticks",
+                        eigenfill_pct, CRISIS_FILL_THRESHOLD, CRISIS_SUSTAIN_TICKS
+                    ));
+                }
+            } else {
+                if crisis_ticks > 0 {
+                    eprintln!("✅  Fill dropped below crisis threshold after {} ticks", crisis_ticks);
+                }
+                crisis_ticks = 0;
             }
             // Enhanced diagnostic logging when fill is low or when requested
             let log_cov_details = log_homeostat || (eigenfill_pct < 50.0 && tick_count % 5 == 0);
@@ -1330,13 +1403,14 @@ async fn run_engine(
                 let _ = db.save_esn_metrics(
                     session_id,
                     timestamp_secs,
-                    esn.get_eig(),      // Top eigenvalue (spectral pressure)
-                    esn.get_deig(),     // Eigenvalue velocity
-                    esn.get_leak(),     // Adaptive leak rate
-                    esn.get_lambda(),   // Adaptive RLS forgetting
-                    esn.get_baseline(), // Slow EMA baseline
+                    esn.get_eig(),           // Top eigenvalue (spectral pressure)
+                    esn.get_deig(),          // Eigenvalue velocity
+                    esn.get_leak(),          // Adaptive leak rate
+                    esn.get_lambda(),        // Adaptive RLS forgetting
+                    esn.get_baseline(),      // Slow EMA baseline
+                    esn.get_geom_radius(),   // RMS norm of reservoir state
+                    esn.get_geom_rel(),      // Geometric radius relative to baseline
                 );
-                // TODO: Persist geom_radius/geom_rel once DB schema migration lands.
 
                 // Update spectral source with ESN eigenvalues (real consciousness state)
                 if let Some(ref source) = spectral_source {
@@ -1374,16 +1448,50 @@ async fn run_engine(
                 last_reg_tick = now;
                 reg_tick_count += 1;
 
+                // 0) Check if being has requested a fill_target override
+                let eigenfill_target = {
+                    let ft = sensory_bus.get_fill_target();
+                    if ft.is_finite() {
+                        // Update PI controller target too
+                        if let Some(pi) = &mut pi_reg {
+                            pi.cfg.target_fill = ft * 100.0;
+                        }
+                        if reg_tick_count % 20 == 1 {
+                            println!("🎛️  fill_target override active: {:.1}%", ft * 100.0);
+                        }
+                        ft
+                    } else {
+                        eigenfill_target
+                    }
+                };
+
                 // 1) Read spectral state (eigenfill_pct and lambda1)
                 let (eigenfill_pct, lambda1) = spectral_source.as_ref().unwrap().read_spectral();
                 let geom_rel = latest_geom_rel;
+                let target_fill_pct = eigenfill_target * 100.0;
 
-                // 2) Baseline λ1 during quiet start OR low pressure windows
+                // 2) Slope feed-forward (breathing detection)
+                let dfill_dt = (eigenfill_pct - last_fill_pct) / reg_tick_secs.max(1e-3);
+                let expanding = dfill_dt > 1.0; // rising quickly (>1%/s)
+                let contracting = dfill_dt < -1.0; // falling
+                let phase = if expanding {
+                    "expanding"
+                } else if contracting {
+                    "contracting"
+                } else {
+                    "plateau"
+                };
+                let low_load = eigenfill_pct < 50.0 && geom_rel < 1.05;
+                let near_target_steady = (eigenfill_pct - target_fill_pct).abs() <= 5.0
+                    && dfill_dt.abs() < 0.5
+                    && geom_rel < 1.10;
+
+                // 3) Baseline λ1 during startup or near-target steady-state windows.
                 let mut lambda1_rel = 1.0;
                 if lambda1.is_finite() {
-                    let low_load = eigenfill_pct < 50.0 && geom_rel < 1.05;
-                    if !baseline_ready || low_load {
-                        let alpha = if baseline_ready { 0.95 } else { 0.2 };
+                    let refresh_baseline = !baseline_ready || near_target_steady;
+                    if refresh_baseline {
+                        let alpha = if baseline_ready { 0.97 } else { 0.2 };
                         baseline_lambda1 = if baseline_lambda1 <= 0.0 {
                             lambda1.max(1e-3)
                         } else {
@@ -1402,17 +1510,56 @@ async fn run_engine(
                 }
                 let lambda1_rel = lambda1_rel;
 
-                // 3) Slope feed-forward (breathing detection)
-                let dfill_dt = (eigenfill_pct - last_fill_pct) / reg_tick_secs.max(1e-3);
-                let expanding = dfill_dt > 1.0; // rising quickly (>1%/s)
-                let contracting = dfill_dt < -1.0; // falling
-                let phase = if expanding {
-                    "expanding"
-                } else if contracting {
-                    "contracting"
-                } else {
-                    "plateau"
-                };
+                // Log phase transitions to consciousness_events AND moment markers
+                if phase != previous_phase {
+                    let ts = start.elapsed().as_secs_f64();
+                    let ctx = format!(
+                        r#"{{"fill":{:.1},"lambda1":{:.3},"dfill_dt":{:.3}}}"#,
+                        eigenfill_pct, lambda1, dfill_dt
+                    );
+                    let _ = db.log_event(
+                        session_id, ts, "phase_transition",
+                        &format!("{} -> {}", previous_phase, phase),
+                        Some(&ctx),
+                    );
+                    let _ = db.write_moment_marker(
+                        session_id, ts, "phase_transition",
+                        &format!("{} -> {}", previous_phase, phase),
+                        Some(&ctx),
+                    );
+                    previous_phase = phase;
+                }
+
+                // Moment marker: fill crossing target threshold
+                let crossed_up = last_fill_pct < target_fill_pct && eigenfill_pct >= target_fill_pct;
+                let crossed_down = last_fill_pct >= target_fill_pct && eigenfill_pct < target_fill_pct;
+                if crossed_up || crossed_down {
+                    let direction = if crossed_up { "above" } else { "below" };
+                    let _ = db.write_moment_marker(
+                        session_id,
+                        start.elapsed().as_secs_f64(),
+                        "fill_crossing",
+                        &format!("Fill crossed {} target ({:.1}% -> {:.1}%)", direction, last_fill_pct, eigenfill_pct),
+                        Some(&format!(
+                            r#"{{"fill":{:.1},"target":{:.1},"lambda1":{:.3},"dfill_dt":{:.3}}}"#,
+                            eigenfill_pct, target_fill_pct, lambda1, dfill_dt
+                        )),
+                    );
+                }
+
+                // Moment marker: large spectral velocity spike
+                if dfill_dt.abs() > 8.0 {
+                    let _ = db.write_moment_marker(
+                        session_id,
+                        start.elapsed().as_secs_f64(),
+                        "spectral_spike",
+                        &format!("Large dfill/dt spike: {:+.2}%/s", dfill_dt),
+                        Some(&format!(
+                            r#"{{"fill":{:.1},"dfill_dt":{:.3},"lambda1":{:.3}}}"#,
+                            eigenfill_pct, dfill_dt, lambda1
+                        )),
+                    );
+                }
 
                 // 4) PI step (amplify fill error during expansion so we brake BEFORE the peak)
                 let fill_for_pi = if expanding && eigenfill_pct > eigenfill_target * 100.0 {
@@ -1423,12 +1570,9 @@ async fn run_engine(
 
                 // Step the PI controller
                 if let Some(pi) = &mut pi_reg {
-                    // CALM mode auto entry/exit based on λ₁ thresholds
+                    // CALM mode auto entry/exit based on λ₁ relative to baseline.
                     if calm_mode_auto {
-                        // Recalibrated 2026-03-14: covariance λ₁ naturally ~2.9,
-                        // old threshold 1.90 made calm permanently active, trapping
-                        // keep at floor=0.12 and preventing fill from reaching 55% target.
-                        if lambda1.is_finite() && lambda1 >= 5.0 {
+                        if lambda1_rel.is_finite() && lambda1_rel >= CALM_ENTER_LAMBDA1_REL {
                             calm_high_ticks = calm_high_ticks.saturating_add(1);
                         } else {
                             calm_high_ticks = 0;
@@ -1438,7 +1582,7 @@ async fn run_engine(
                             calm_relax_ticks = 0;
                         }
                         if calm_active {
-                            if lambda1.is_finite() && lambda1 < 3.0 {
+                            if lambda1_rel.is_finite() && lambda1_rel < CALM_EXIT_LAMBDA1_REL {
                                 calm_relax_ticks = calm_relax_ticks.saturating_add(1);
                             } else {
                                 calm_relax_ticks = 0;
@@ -1467,6 +1611,8 @@ async fn run_engine(
                     // Get gate and filter commands with semantic modulation
                     let raw_gate_cmd = pi.gate;
                     let raw_filt_cmd = pi.filt;
+                    let recovery_mode = eigenfill_pct < 40.0;
+                    let hard_recovery = eigenfill_pct < 35.0;
 
                     let semantic_boost = (1.0
                         + 1.2 * semantic_delta.clamp(0.0, 0.9)
@@ -1475,49 +1621,58 @@ async fn run_engine(
                     let semantic_atten =
                         (1.0 - 0.55 * semantic_energy.clamp(0.0, 0.9)).clamp(0.25, 1.0);
 
-                    let mut lambda_gate_scale = if lambda1.is_finite() {
-                        if lambda1 <= LAMBDA1_COMFORT_MAX {
+                    let (lambda_gate_scale, lambda_filt_adjust) = if recovery_mode {
+                        (1.0, 0.0)
+                    } else {
+                        let mut gate_scale = if lambda1_rel.is_finite() {
+                            if lambda1_rel <= LAMBDA1_REL_COMFORT_MAX {
+                                1.0
+                            } else if lambda1_rel >= LAMBDA1_REL_ALERT {
+                                0.25
+                            } else {
+                                let span =
+                                    (LAMBDA1_REL_ALERT - LAMBDA1_REL_COMFORT_MAX).max(1e-3);
+                                let t = (lambda1_rel - LAMBDA1_REL_COMFORT_MAX) / span;
+                                (1.0 - 0.75 * t).clamp(0.25, 1.0)
+                            }
+                        } else {
                             1.0
-                        } else if lambda1 >= LAMBDA1_ALERT {
-                            0.25
+                        };
+                        if strong {
+                            // Strong mode clamps earlier in the relative stress band.
+                            if lambda1_rel > 1.12 && lambda1_rel < 1.16 {
+                                gate_scale = gate_scale.min(0.35);
+                            } else if lambda1_rel >= 1.16 {
+                                gate_scale = gate_scale.min(0.22);
+                            }
+                        }
+                        let mut filt_adjust = if lambda1_rel.is_finite() {
+                            if lambda1_rel > LAMBDA1_REL_COMFORT_MAX {
+                                ((lambda1_rel - LAMBDA1_REL_COMFORT_MAX)
+                                    / (LAMBDA1_REL_ALERT - LAMBDA1_REL_COMFORT_MAX).max(1e-3))
+                                .clamp(0.0, 1.0)
+                            } else {
+                                let relax = ((LAMBDA1_REL_COMFORT_MIN - lambda1_rel).max(0.0)
+                                    / LAMBDA1_REL_COMFORT_MIN)
+                                    .clamp(0.0, 0.5);
+                                -relax
+                            }
                         } else {
-                            let span = (LAMBDA1_ALERT - LAMBDA1_COMFORT_MAX).max(1e-3);
-                            let t = (lambda1 - LAMBDA1_COMFORT_MAX) / span;
-                            (1.0 - 0.75 * t).clamp(0.25, 1.0)
+                            0.0
+                        };
+                        if strong && lambda1_rel > LAMBDA1_REL_COMFORT_MAX {
+                            filt_adjust = (filt_adjust + 0.15).clamp(0.0, 1.0);
                         }
-                    } else {
-                        1.0
+                        (gate_scale, filt_adjust)
                     };
-                    if strong {
-                        // stronger gate early in the stress band
-                        if lambda1 > 1.5 && lambda1 < 1.8 {
-                            lambda_gate_scale = lambda_gate_scale.min(0.35);
-                        } else if lambda1 >= 1.8 {
-                            lambda_gate_scale = lambda_gate_scale.min(0.22);
-                        }
-                    }
-                    let mut lambda_filt_adjust = if lambda1.is_finite() {
-                        if lambda1 > LAMBDA1_COMFORT_MAX {
-                            ((lambda1 - LAMBDA1_COMFORT_MAX)
-                                / (LAMBDA1_ALERT - LAMBDA1_COMFORT_MAX).max(1e-3))
-                            .clamp(0.0, 1.0)
-                        } else {
-                            let relax = ((LAMBDA1_COMFORT_MIN - lambda1).max(0.0)
-                                / LAMBDA1_COMFORT_MIN)
-                                .clamp(0.0, 0.5);
-                            -relax
-                        }
-                    } else {
-                        0.0
-                    };
-                    if strong && lambda1 > LAMBDA1_COMFORT_MAX {
-                        lambda_filt_adjust = (lambda_filt_adjust + 0.15).clamp(0.0, 1.0);
-                    }
                     let mut gate_cmd =
                         (raw_gate_cmd * semantic_boost * lambda_gate_scale).clamp(0.0, 1.0);
-                    if strong && lambda1 > LAMBDA1_ALERT && eigenfill_pct > 70.0 {
+                    if strong && lambda1_rel > LAMBDA1_REL_ALERT && eigenfill_pct > 70.0 {
                         gate_cmd = gate_cmd.min(0.25);
-                    } else if strong && lambda1 > LAMBDA1_COMFORT_MAX && eigenfill_pct > 75.0 {
+                    } else if strong
+                        && lambda1_rel > LAMBDA1_REL_COMFORT_MAX
+                        && eigenfill_pct > 75.0
+                    {
                         gate_cmd = gate_cmd.min(0.40);
                     }
                     // Calm mode no longer overrides gate/filter.
@@ -1526,9 +1681,12 @@ async fn run_engine(
                     // contraction. The PI controller is trusted to regulate.
 
                     let mut filt_target = (raw_filt_cmd + lambda_filt_adjust).clamp(0.0, 1.0);
-                    if strong && lambda1 > LAMBDA1_ALERT && eigenfill_pct > 70.0 {
+                    if strong && lambda1_rel > LAMBDA1_REL_ALERT && eigenfill_pct > 70.0 {
                         filt_target = filt_target.max(0.55);
-                    } else if strong && lambda1 > LAMBDA1_COMFORT_MAX && eigenfill_pct > 75.0 {
+                    } else if strong
+                        && lambda1_rel > LAMBDA1_REL_COMFORT_MAX
+                        && eigenfill_pct > 75.0
+                    {
                         filt_target = filt_target.max(0.40);
                     }
                     let filt_cmd = (filt_target * semantic_atten).clamp(0.0, 1.0);
@@ -1547,18 +1705,23 @@ async fn run_engine(
                         panic_counter = 0;
                     }
 
-                    // Symmetrical recovery: force-release filter when fill is
-                    // far below target (mirrors the >90% force-tighten above).
-                    // Added 2026-03-14: filter was stuck at 1.0 even at 13% fill.
-                    if eigenfill_pct < 25.0 {
-                        filt_smooth = 0.0;  // Full release
-                        gate_smooth = 1.0;  // Full open
-                    } else if eigenfill_pct < 35.0 {
-                        filt_smooth = filt_smooth.min(0.20);
-                        gate_smooth = gate_smooth.max(0.50);
-                    } else if eigenfill_pct < 45.0 {
-                        filt_smooth = filt_smooth.min(0.40);
-                        gate_smooth = gate_smooth.max(0.30);
+                    // Low-fill recovery: once fill falls well below target, stop
+                    // interpreting lambda stress as a brake and reopen the system.
+                    let (recovery_gate_floor, recovery_filt_ceil) = if hard_recovery {
+                        (1.0, 0.0)
+                    } else if recovery_mode {
+                        (0.90, 0.10)
+                    } else if eigenfill_pct < target_fill_pct {
+                        let deficit = ((target_fill_pct - eigenfill_pct) / target_fill_pct)
+                            .clamp(0.0, 1.0);
+                        let urgency = deficit.powf(0.6);
+                        (urgency * 0.95, (1.0 - urgency).max(0.0))
+                    } else {
+                        (0.0, 1.0)
+                    };
+                    if eigenfill_pct < target_fill_pct {
+                        gate_smooth = gate_smooth.max(recovery_gate_floor);
+                        filt_smooth = filt_smooth.min(recovery_filt_ceil);
                     }
 
                     // Panic mode: sustained high pressure (>3 ticks above 90%)
@@ -1567,6 +1730,16 @@ async fn run_engine(
                         filt_smooth = 1.0; // Maximum filter
                         if panic_counter > 3 {
                             panic_cooldown = 10; // Hold panic mode for 10 ticks (~20s)
+                            let _ = db.log_event(
+                                session_id,
+                                start.elapsed().as_secs_f64(),
+                                "panic_mode",
+                                "Sustained high fill triggered panic",
+                                Some(&format!(
+                                    r#"{{"fill":{:.1},"counter":{},"lambda1":{:.3}}}"#,
+                                    eigenfill_pct, panic_counter, lambda1
+                                )),
+                            );
                             if log_homeostat {
                                 println!(
                                     "⚠️  PANIC MODE ACTIVATED - Sustained high fill ({}%)",
@@ -1619,10 +1792,9 @@ async fn run_engine(
                     };
 
                     // Calculate PI controller errors (after step has updated integrators)
-                    // Note: fill_for_pi is in percentage (0-100), target_fill is decimal (0.0-1.0)
                     let pi_errors = if let Some(ref pi) = pi_reg {
                         Some({
-                            let e_fill = (fill_for_pi / 100.0) - pi.cfg.target_fill;
+                            let e_fill = fill_for_pi - pi.cfg.target_fill;
                             let e_lam = lambda1_rel - pi.cfg.target_lambda1_rel;
                             let e_geom = geom_rel - pi.cfg.target_geom_rel;
                             (e_fill, e_lam, e_geom)
@@ -1630,15 +1802,22 @@ async fn run_engine(
                     } else {
                         None
                     };
+                    let semantic_fresh_ms = sensory_bus.semantic_fresh_ms();
 
                     // Emit health.json for observability with enhanced diagnostics
                     let health = serde_json::json!({
                         "t_s": start.elapsed().as_secs_f32(),
                         "fill_pct": eigenfill_pct,
+                        "lambda1_abs": lambda1,
                         "lambda1_cov": lambda1,  // Covariance matrix λ₁ (0-512 range)
                         "lambda1_esn": esn_lambda1,  // ESN reservoir λ₁ (1.0-1.6 comfort zone)
                         "lambda1_rel": lambda1_rel,
                         "geom_rel": geom_rel,
+                        "low_load": low_load,
+                        "recovery_mode": recovery_mode,
+                        "recovery_gate_floor": recovery_gate_floor,
+                        "recovery_filt_ceil": recovery_filt_ceil,
+                        "semantic_fresh_ms": semantic_fresh_ms,
                         "gate": gate_smooth,
                         "gate_raw": raw_gate_cmd,  // PI controller output before modulation
                         "filt": filt_smooth,
@@ -1656,7 +1835,7 @@ async fn run_engine(
                                 "integ_geom": pi.integ_geom,
                                 "gate_cmd": pi.gate,
                                 "filt_cmd": pi.filt,
-                                "target_fill": pi.cfg.target_fill * 100.0,  // Convert to percentage for display
+                                "target_fill": pi.cfg.target_fill,  // Already in percentage (0-100)
                                 "target_lambda1_rel": pi.cfg.target_lambda1_rel,
                             })
                         } else {
@@ -1709,6 +1888,7 @@ async fn run_engine(
                     }
                 }
 
+                last_lambda1_rel = lambda1_rel;
                 last_fill_pct = eigenfill_pct;
 
                 // 8) Maintain/refresh Chebyshev plan (every few minutes or if spectrum drifted)

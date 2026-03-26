@@ -17,6 +17,13 @@ use std::{f32::consts::PI, mem};
 
 use crate::gpu::Gpu;
 
+/// Default exploration noise amplitude injected into the ESN reservoir state
+/// Exploration noise injected per tick to break reservoir state correlation.
+/// With leak=0.45, consecutive states are highly correlated — the covariance
+/// estimator needs per-tick diversity to accumulate energy (fill).
+/// 0.03 gave 14% fill. 0.12 should push toward the 55% target.
+const DEFAULT_EXPLORATION_NOISE: f32 = 0.12;
+
 //=============================================================================
 // Spectral Self-Reference Module (GPU-Accelerated)
 //=============================================================================
@@ -153,6 +160,34 @@ impl SpectralSR {
         Ok(())
     }
 
+    /// Encode rank-1 EWMA update onto an existing encoder (no commit).
+    /// Caller must have already written x_host into self.x_buf.
+    fn encode_rank1_ewma(&self, enc: &ComputeCommandEncoderRef) {
+        enc.set_compute_pipeline_state(&self.pso_rank1);
+        enc.set_buffer(0, Some(&self.cov), 0);
+        enc.set_buffer(1, Some(&self.x_buf), 0);
+        enc.set_buffer(2, Some(&self.rho_buf), 0);
+        enc.set_buffer(3, Some(&self.dim_buf), 0);
+
+        let grid = MTLSize::new((self.d * self.d) as u64, 1, 1);
+        let tg = MTLSize::new(256, 1, 1);
+        enc.dispatch_threads(grid, tg);
+    }
+
+    /// Encode matvec y = C*v onto an existing encoder (no commit).
+    /// Caller must have already written v into self.v_buf.
+    fn encode_matvec(&self, enc: &ComputeCommandEncoderRef) {
+        enc.set_compute_pipeline_state(&self.pso_mv);
+        enc.set_buffer(0, Some(&self.cov), 0);
+        enc.set_buffer(1, Some(&self.v_buf), 0);
+        enc.set_buffer(2, Some(&self.y_buf), 0);
+        enc.set_buffer(3, Some(&self.dim_buf), 0);
+
+        let grid = MTLSize::new(self.d as u64, 1, 1);
+        let tg = MTLSize::new(256.min(self.d as u64), 1, 1);
+        enc.dispatch_threads(grid, tg);
+    }
+
     /// GPU-accelerated mat-vec: y = C*v
     fn matvec(&self, v_in: &[f32]) -> Result<Vec<f32>> {
         let gpu = unsafe { &*self.gpu };
@@ -197,8 +232,101 @@ impl SpectralSR {
         self.eig1_prev = self.eig1;
         self.eig1 = vv_dot(&v, &y) / vv_dot(&v, &v).max(1e-12);
 
-        // Update slow baseline
-        self.ema_eig = 0.995 * self.ema_eig + 0.005 * self.eig1;
+        // Update slow baseline with fast catch-up during warmup.
+        // The eigenvalue rises from ~1 to ~20 in the first few seconds.
+        // Standard 0.5% EMA can't keep up, leaving eig_rel artificially
+        // high and trapping leak at 0.90.  Use aggressive 10% blending
+        // while the baseline is far from the current value (>2x ratio),
+        // then settle into the slow 0.5% tracking for steady-state.
+        if self.eig1 > 1e-3 {
+            let ratio = self.eig1 / self.ema_eig.max(1e-3);
+            let alpha = if self.ema_eig < 1e-3 {
+                1.0 // First value: seed directly
+            } else if ratio > 2.0 || ratio < 0.5 {
+                0.10 // Warmup: fast catch-up
+            } else {
+                0.005 // Steady-state: slow tracking
+            };
+            self.ema_eig = (1.0 - alpha) * self.ema_eig + alpha * self.eig1;
+        }
+
+        self.v_host = v;
+        Ok(())
+    }
+
+    /// Perform rank-1 EWMA update and power iteration in fewer GPU round-trips.
+    ///
+    /// Batches the rank1 update + first matvec into a single command buffer commit,
+    /// reducing from 4 synchronous GPU round-trips to 3 on introspection ticks.
+    /// Remaining power iteration steps still need CPU-side normalization between
+    /// matvec calls, so they remain as separate commits.
+    pub fn rank1_and_power_step(&mut self, x_host: &[f32], power_steps: usize) -> Result<()> {
+        assert_eq!(x_host.len(), self.d);
+        let gpu = unsafe { &*self.gpu };
+
+        // Write x and current eigenvector to GPU
+        gpu.write_f32(&self.x_buf, x_host);
+        gpu.write_f32(&self.v_buf, &self.v_host);
+
+        // === Single command buffer for rank1 + first matvec ===
+        let cmd = gpu.q.new_command_buffer();
+
+        // Encode rank1_ewma (writes cov)
+        let enc = cmd.new_compute_command_encoder();
+        self.encode_rank1_ewma(enc);
+        enc.end_encoding();
+
+        // Metal automatically inserts barriers between encoders in the
+        // same command buffer, so the updated cov is visible to the matvec.
+
+        // Encode first matvec: y = C * v
+        let enc2 = cmd.new_compute_command_encoder();
+        self.encode_matvec(enc2);
+        enc2.end_encoding();
+
+        cmd.commit();
+        cmd.wait_until_completed();
+        // === End single command buffer (was 2 separate commits) ===
+
+        // CPU-side normalization of first power iteration result
+        let mut v = gpu.read_f32(&self.y_buf, self.d);
+        let n = l2_norm(&v);
+        for i in 0..self.d {
+            v[i] /= n;
+        }
+
+        // Remaining power iteration steps (need CPU normalization between)
+        for _ in 1..power_steps {
+            let y = self.matvec(&v)?;
+            let n = l2_norm(&y);
+            v = y;
+            for i in 0..self.d {
+                v[i] /= n;
+            }
+        }
+
+        // Final Rayleigh quotient
+        let y = self.matvec(&v)?;
+        self.eig1_prev = self.eig1;
+        self.eig1 = vv_dot(&v, &y) / vv_dot(&v, &v).max(1e-12);
+
+        // Update slow baseline with fast catch-up during warmup.
+        // The eigenvalue rises from ~1 to ~20 in the first few seconds.
+        // Standard 0.5% EMA can't keep up, leaving eig_rel artificially
+        // high and trapping leak at 0.90.  Use aggressive 10% blending
+        // while the baseline is far from the current value (>2x ratio),
+        // then settle into the slow 0.5% tracking for steady-state.
+        if self.eig1 > 1e-3 {
+            let ratio = self.eig1 / self.ema_eig.max(1e-3);
+            let alpha = if self.ema_eig < 1e-3 {
+                1.0 // First value: seed directly
+            } else if ratio > 2.0 || ratio < 0.5 {
+                0.10 // Warmup: fast catch-up
+            } else {
+                0.005 // Steady-state: slow tracking
+            };
+            self.ema_eig = (1.0 - alpha) * self.ema_eig + alpha * self.eig1;
+        }
 
         self.v_host = v;
         Ok(())
@@ -212,6 +340,27 @@ impl SpectralSR {
         if self.t % p == 0 {
             self.power_iter(2)?; // 2 steps is enough for tracking
             self.pidx = (self.pidx + 1) % self.primes.len();
+        }
+
+        Ok(())
+    }
+
+    /// Combined rank-1 update + optional power iteration with batched first submit.
+    ///
+    /// On introspection ticks: batches rank1 + first matvec into one GPU commit
+    /// (3 round-trips instead of 4). On non-introspection ticks: just does the
+    /// rank1 update (1 round-trip, same as before).
+    pub fn maybe_introspect_batched(&mut self, x_host: &[f32]) -> Result<()> {
+        self.t += 1;
+        let p = self.primes[self.pidx];
+
+        if self.t % p == 0 {
+            // Batched: rank1 + power iteration with fused first submit
+            self.rank1_and_power_step(x_host, 2)?;
+            self.pidx = (self.pidx + 1) % self.primes.len();
+        } else {
+            // Non-introspection tick: just rank1 update (single commit)
+            self.rank1_ewma(x_host)?;
         }
 
         Ok(())
@@ -264,6 +413,10 @@ pub struct ESN {
     // Configuration
     leak_base: f32,
     lambda_base: f32,
+
+    // Exploration noise for reservoir diversity
+    exploration_noise: f32,
+    rng: fastrand::Rng,
 
     // Scratch buffers
     rin: Vec<f32>,
@@ -362,6 +515,8 @@ impl ESN {
             sr,
             leak_base,
             lambda_base,
+            exploration_noise: DEFAULT_EXPLORATION_NOISE,
+            rng: fastrand::Rng::with_seed(0xDEAD_BEEF),
             rin,
             rx,
             pre,
@@ -373,38 +528,43 @@ impl ESN {
     pub fn adapt_hyperparams(&mut self, err_abs: f32) {
         let eig1 = self.sr.eig();
         let deig = self.sr.deig().abs();
+        let baseline = self.sr.baseline().max(1e-3);
 
-        // CRITICAL FIX: Use absolute thresholds to prevent runaway eigenvalues
-        // Target eigenvalue at golden ratio φ ≈ 1.618
-        let target_eig = 1.618;
+        // Use eigenvalue RELATIVE to its own baseline rather than absolute
+        // thresholds. The ESN eigenvalue naturally operates at 15-32, far
+        // above the old φ=1.618 target — those absolute thresholds kept
+        // leak permanently at 0.90 ("emergency mode"), preventing the
+        // reservoir from accumulating any history or complexity.
+        let eig_rel = eig1 / baseline;
 
-        // Strong response when eigenvalue exceeds safe range
-        let eig_error = (eig1 - target_eig).max(0.0);
-
-        // Leak: aggressive increase when eig1 > 2.5 (φ * 1.54) to dissipate energy
-        let mut leak = if eig1 > 2.5 {
-            // Emergency response - high leak to quickly reduce eigenvalues
-            0.7 + 0.2 * ((eig1 - 2.5) / 0.5).min(1.0) // 0.7 to 0.9 range
-        } else if eig1 > target_eig {
-            // Preventive response - moderate leak increase
-            self.leak_base + 0.3 * eig_error
+        // Relative thresholds:
+        //   < 1.5x baseline: normal operation
+        //   1.5-2.5x baseline: moderate pressure
+        //   > 2.5x baseline: emergency (true runaway)
+        let mut leak = if eig_rel > 2.5 {
+            // Emergency: genuine eigenvalue explosion
+            0.7 + 0.2 * ((eig_rel - 2.5) / 1.0).min(1.0)
+        } else if eig_rel > 1.5 {
+            // Moderate pressure: proportional response
+            let pressure = (eig_rel - 1.5) / 1.0; // 0.0 to 1.0
+            self.leak_base + 0.25 * pressure
         } else {
-            // Normal operation - use baseline-relative adaptation
-            let k_leak = 0.5;
-            self.leak_base * (1.0 + k_leak * (eig1 - self.sr.baseline()).max(0.0))
+            // Normal: gentle baseline-relative adaptation
+            let k_leak = 0.3;
+            self.leak_base * (1.0 + k_leak * (eig_rel - 1.0).max(0.0))
         };
 
         leak = leak.clamp(0.05, 0.95);
 
-        // Light prime modulation (reduced influence during emergency)
+        // Light prime modulation (reduced during emergency)
         let phase = self.sr.phase01();
         let cosw = (2.0 * PI * phase).cos();
-        let modulation_strength = if eig1 > 2.5 { 0.02 } else { 0.1 };
+        let modulation_strength = if eig_rel > 2.5 { 0.02 } else { 0.1 };
         leak = (0.9 * leak + 0.1 * (leak * (1.0 + modulation_strength * cosw))).clamp(0.05, 0.95);
 
-        // RLS forgetting: tighten when dynamics accelerate or eigenvalues high
+        // RLS forgetting: tighten when dynamics accelerate or eigenvalues runaway
         let k_forget = 0.2;
-        let pressure_factor = if eig1 > 2.5 { 0.3 } else { 0.0 }; // Extra forgetting under pressure
+        let pressure_factor = if eig_rel > 2.5 { 0.3 } else { 0.0 };
         let mut lam =
             self.lambda_base - k_forget * (deig + 0.25 * err_abs + pressure_factor).clamp(0.0, 0.5);
         lam = lam.clamp(0.90, 0.9999);
@@ -442,15 +602,22 @@ impl ESN {
             self.pre[i] = (self.rin[i] + self.rx[i]).tanh();
         }
 
-        // Spectral self-reference on previous state
-        self.sr.rank1_ewma(&self.x)?;
-        self.sr.maybe_introspect()?;
+        // Spectral self-reference on previous state (batched GPU submits)
+        self.sr.maybe_introspect_batched(&self.x)?;
         self.adapt_hyperparams(0.0);
 
         // Leaky integration with adaptive leak
         let a = self.leak_live;
         for i in 0..self.res_size {
             self.x[i] = (1.0 - a) * self.x[i] + a * self.pre[i];
+        }
+
+        // Exploration noise: inject small perturbations to break colinearity
+        if self.exploration_noise > 0.0 {
+            let eps = self.exploration_noise;
+            for xi in self.x.iter_mut() {
+                *xi += (self.rng.f32() * 2.0 - 1.0) * eps;
+            }
         }
 
         // Clip for stability
@@ -579,6 +746,16 @@ impl ESN {
     /// Relative geometric radius compared to baseline
     pub fn get_geom_rel(&self) -> f32 {
         self.geom_radius / self.get_geom_baseline()
+    }
+
+    /// Set exploration noise amplitude (0.0 to disable, 0.01-0.05 typical)
+    pub fn set_exploration_noise(&mut self, eps: f32) {
+        self.exploration_noise = eps.clamp(0.0, 0.2);
+    }
+
+    /// Get current exploration noise amplitude
+    pub fn get_exploration_noise(&self) -> f32 {
+        self.exploration_noise
     }
 
     /// Get covariance matrix for external spectral analysis
