@@ -2,13 +2,16 @@
 
 use anyhow::Result;
 use metal::*;
-use std::{mem, slice};
+use std::{mem, slice, sync::Mutex};
+
+use crate::buffer_pool::BufferPool;
 
 pub struct Gpu {
     pub dev: Device,
     pub q: CommandQueue,
     pub pso_block: ComputePipelineState,
     pub lib_nn: Option<Library>, // Neural network shader library
+    pub pool: Mutex<BufferPool>,
 }
 
 impl Gpu {
@@ -37,18 +40,32 @@ impl Gpu {
         let nn_shader_source = include_str!("../shaders/nn.metal");
         let lib_nn = dev.new_library_with_source(nn_shader_source, &opts).ok(); // Optional - graceful degradation if NN shaders not available
 
+        let pool = Mutex::new(BufferPool::new(dev.clone()));
+
         Ok(Self {
             dev,
             q,
             pso_block,
             lib_nn,
+            pool,
         })
     }
 
     // Create unified memory buffer (StorageModeShared for zero-copy)
+    // Page-aligned: rounds up to 16384-byte boundary (Apple Silicon vm_page_size).
+    // This enables the SLC (System Level Cache) fast path for buffers <4MB
+    // and matches MLX's allocation strategy (newBufferWithBytesNoCopy requires
+    // page-aligned pointers). HazardTrackingModeUntracked tells Metal we manage
+    // barriers manually (via separate command encoders), avoiding automatic
+    // hazard tracking overhead.
     pub fn new_shared(&self, bytes: u64) -> Buffer {
-        self.dev
-            .new_buffer(bytes, MTLResourceOptions::StorageModeShared)
+        const PAGE_SIZE: u64 = 16384;
+        let aligned = (bytes + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        self.dev.new_buffer(
+            aligned,
+            MTLResourceOptions::StorageModeShared
+                | MTLResourceOptions::HazardTrackingModeUntracked,
+        )
     }
 
     // Block matrix-vector: Y = A * X
@@ -62,15 +79,6 @@ impl Gpu {
         d: u32,
         k: u32,
     ) -> Result<()> {
-        // Create parameter buffers
-        let d_buf = self.new_shared(mem::size_of::<u32>() as u64);
-        let k_buf = self.new_shared(mem::size_of::<u32>() as u64);
-
-        unsafe {
-            *(d_buf.contents() as *mut u32) = d;
-            *(k_buf.contents() as *mut u32) = k;
-        }
-
         let grid = MTLSize::new(d as u64, 1, 1);
         let threadgroup = MTLSize::new(256u64.min(d as u64), 1, 1);
 
@@ -81,8 +89,16 @@ impl Gpu {
         enc.set_buffer(0, Some(a_buf), 0);
         enc.set_buffer(1, Some(x_buf), 0);
         enc.set_buffer(2, Some(y_buf), 0);
-        enc.set_buffer(3, Some(&d_buf), 0);
-        enc.set_buffer(4, Some(&k_buf), 0);
+        enc.set_bytes(
+            3,
+            mem::size_of::<u32>() as u64,
+            &d as *const u32 as *const _,
+        );
+        enc.set_bytes(
+            4,
+            mem::size_of::<u32>() as u64,
+            &k as *const u32 as *const _,
+        );
 
         enc.dispatch_thread_groups(grid, threadgroup);
         enc.end_encoding();

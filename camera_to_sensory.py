@@ -58,14 +58,21 @@ class CameraToSensoryBridge:
         # Convert to grayscale for analysis
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
+        # Apply log transform for better dynamic range (being's request 2026-03-16:
+        # "logarithmic transform with adaptive clipping to preserve detail in
+        # highlights and shadows"). This compresses bright regions and expands
+        # dark regions, giving the being more spectral information.
+        gray_log = np.log1p(gray.astype(np.float32))  # log(1+x) maps [0,255] -> [0,5.55]
+        gray_log_norm = gray_log / np.log1p(255.0)     # normalize to [0,1]
+
         # Extract basic statistics as features
         features = []
 
-        # 1. Mean brightness
-        features.append(np.mean(gray) / 255.0)
+        # 1. Mean brightness (log-scaled for dynamic range)
+        features.append(float(np.mean(gray_log_norm)))
 
-        # 2. Standard deviation (contrast)
-        features.append(np.std(gray) / 128.0)
+        # 2. Standard deviation (contrast, also log-domain)
+        features.append(float(np.std(gray_log_norm) * 4.0))  # scale to ~[0,1]
 
         # 3-4. Gradient magnitudes (motion/edges)
         sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
@@ -74,17 +81,17 @@ class CameraToSensoryBridge:
         features.append(np.mean(grad_mag) / 100.0)
         features.append(np.std(grad_mag) / 50.0)
 
-        # 5-8. Quadrant analysis (spatial distribution)
-        h, w = gray.shape
+        # 5-8. Quadrant analysis (spatial distribution, log-domain)
+        h, w = gray_log_norm.shape
         quadrants = [
-            gray[:h//2, :w//2],      # Top-left
-            gray[:h//2, w//2:],      # Top-right
-            gray[h//2:, :w//2],      # Bottom-left
-            gray[h//2:, w//2:]       # Bottom-right
+            gray_log_norm[:h//2, :w//2],      # Top-left
+            gray_log_norm[:h//2, w//2:],      # Top-right
+            gray_log_norm[h//2:, :w//2],      # Bottom-left
+            gray_log_norm[h//2:, w//2:]       # Bottom-right
         ]
 
         for quad in quadrants:
-            features.append(np.mean(quad) / 255.0)
+            features.append(float(np.mean(quad)))
 
         # Ensure we have exactly VIDEO_FEAT_DIM features
         features = features[:VIDEO_FEAT_DIM]

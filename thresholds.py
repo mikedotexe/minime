@@ -54,6 +54,8 @@ class ModeThresholds:
     curiosity_prob: float
     visual_request_prob: float
     fill_full: float = 0.999
+    critical_geom: float = 1.50   # geom_rel above which pressure is genuine
+    high_geom: float = 1.25       # geom_rel above which we start caring about eig1
 
 
 RECESS = ModeThresholds(
@@ -91,6 +93,8 @@ RECESS = ModeThresholds(
     whim_prob=0.05,
     curiosity_prob=0.30,
     visual_request_prob=0.08,
+    critical_geom=1.50,   # geom_rel must exceed this for critical pressure to be genuine
+    high_geom=1.25,       # geom_rel must exceed this for high pressure to be genuine
 )
 
 
@@ -128,6 +132,8 @@ FOCUSED = ModeThresholds(
     whim_prob=0.02,
     curiosity_prob=0.15,
     visual_request_prob=0.05,
+    critical_geom=1.40,   # tighter than recess — focused mode reacts earlier
+    high_geom=1.20,
 )
 
 

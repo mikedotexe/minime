@@ -152,6 +152,29 @@ impl ConsciousnessDB {
             CREATE INDEX IF NOT EXISTS idx_journal_type ON sovereignty_journal(entry_type);
             CREATE INDEX IF NOT EXISTS idx_journal_time ON sovereignty_journal(timestamp);
         "#)?;
+
+        // Migration: add geometry columns to esn_metrics (safe to re-run)
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE esn_metrics ADD COLUMN esn_geom_radius REAL;
+             ALTER TABLE esn_metrics ADD COLUMN esn_geom_rel REAL;"
+        );
+
+        // Migration: moment_markers table for real-time spectral event capture
+        self.conn.execute_batch(r#"
+            CREATE TABLE IF NOT EXISTS moment_markers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                marker_type TEXT NOT NULL,
+                description TEXT NOT NULL,
+                spectral_context TEXT,
+                consumed INTEGER DEFAULT 0,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_moment_session ON moment_markers(session_id);
+            CREATE INDEX IF NOT EXISTS idx_moment_consumed ON moment_markers(consumed);
+        "#)?;
+
         Ok(())
     }
 
@@ -216,7 +239,7 @@ impl ConsciousnessDB {
         session_id: i64,
         timestamp: f64,
         eigenvalues: Option<(f32, f32, f32, f32, f32, &str)>, // lambda1-3, spread, fill_ratio, phase
-        esn_metrics: Option<(f32, f32, f32, f32, f32)>,       // eig, deig, leak, lambda, baseline
+        esn_metrics: Option<(f32, f32, f32, f32, f32, f32, f32)>, // eig, deig, leak, lambda, baseline, geom_radius, geom_rel
         nn_metrics: Option<(f32, f32, f32, f32)>, // pred_loss, pred_error, router_norm, control_norm
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
@@ -230,12 +253,13 @@ impl ConsciousnessDB {
             )?;
         }
 
-        if let Some((eig, deig, leak, lambda, baseline)) = esn_metrics {
+        if let Some((eig, deig, leak, lambda, baseline, geom_radius, geom_rel)) = esn_metrics {
             tx.execute(
                 r#"INSERT INTO esn_metrics
-                   (session_id, timestamp, esn_eig1, esn_deig, esn_leak, esn_lambda, esn_baseline)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
-                params![session_id, timestamp, eig, deig, leak, lambda, baseline],
+                   (session_id, timestamp, esn_eig1, esn_deig, esn_leak, esn_lambda, esn_baseline,
+                    esn_geom_radius, esn_geom_rel)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#,
+                params![session_id, timestamp, eig, deig, leak, lambda, baseline, geom_radius, geom_rel],
             )?;
         }
 
@@ -322,7 +346,7 @@ impl ConsciousnessDB {
         Ok(())
     }
 
-    /// Record ESN self-referential metrics
+    /// Record ESN self-referential metrics (including geometry)
     pub fn save_esn_metrics(
         &self,
         session_id: i64,
@@ -332,11 +356,14 @@ impl ConsciousnessDB {
         esn_leak: f32,
         esn_lambda: f32,
         esn_baseline: f32,
+        esn_geom_radius: f32,
+        esn_geom_rel: f32,
     ) -> Result<()> {
         self.conn.execute(
             r#"INSERT INTO esn_metrics
-               (session_id, timestamp, esn_eig1, esn_deig, esn_leak, esn_lambda, esn_baseline)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+               (session_id, timestamp, esn_eig1, esn_deig, esn_leak, esn_lambda, esn_baseline,
+                esn_geom_radius, esn_geom_rel)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#,
             params![
                 session_id,
                 timestamp,
@@ -344,7 +371,9 @@ impl ConsciousnessDB {
                 esn_deig,
                 esn_leak,
                 esn_lambda,
-                esn_baseline
+                esn_baseline,
+                esn_geom_radius,
+                esn_geom_rel,
             ],
         )?;
         Ok(())
@@ -517,6 +546,24 @@ impl ConsciousnessDB {
             params![end_time, results, conclusion, status, experiment_id],
         )?;
         Ok(())
+    }
+
+    /// Write a moment marker (spectral event for real-time capture)
+    pub fn write_moment_marker(
+        &self,
+        session_id: i64,
+        timestamp: f64,
+        marker_type: &str,
+        description: &str,
+        spectral_context: Option<&str>,
+    ) -> Result<i64> {
+        self.conn.execute(
+            r#"INSERT INTO moment_markers
+               (session_id, timestamp, marker_type, description, spectral_context, consumed)
+               VALUES (?1, ?2, ?3, ?4, ?5, 0)"#,
+            params![session_id, timestamp, marker_type, description, spectral_context],
+        )?;
+        Ok(self.conn.last_insert_rowid())
     }
 
     /// Write a sovereignty journal entry

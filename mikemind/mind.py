@@ -38,6 +38,7 @@ from mikemind.config import (
     OLLAMA_MODEL,
     ProcessingMode,
     THOUGHTS_QUEUE_DIR,
+    get_embedding,
     get_ollama_embedding,
 )
 
@@ -1608,7 +1609,9 @@ class MikesSpatialMind:
                     use_gpu=True,
                     enable_sensory=True  # Start background sensory client
                 )
-                # get_ollama_embedding is now a module-level function (no import needed)
+                # get_embedding tries MLX first, falls back to Ollama
+                self.get_embedding = get_embedding
+                # Keep legacy alias for backward compatibility
                 self.get_ollama_embedding = get_ollama_embedding
 
                 logging.info("Double Membrane initialized (sensory <-> semantic)")
@@ -2281,8 +2284,8 @@ Just the thought, nothing else:"""
         if self.enable_double_membrane and self.membrane_bridge and user_input:
             try:
                 # Get embeddings for user input and assistant response
-                user_embedding = self.get_ollama_embedding(user_input, model=ModelConfig.CONVERSATION)
-                assistant_embedding = self.get_ollama_embedding(audited_response, model=ModelConfig.CONVERSATION)
+                user_embedding = self.get_embedding(user_input)
+                assistant_embedding = self.get_embedding(audited_response)
 
                 if user_embedding is not None and assistant_embedding is not None:
                     # Send assistant embedding to Rust for semantic eigenvalue tracking (semE/semΔ)
@@ -2393,11 +2396,11 @@ Just the thought, nothing else:"""
     def _store_llava_embedding(self, description: str):
         if not description:
             return
-        if not hasattr(self, "get_ollama_embedding"):
+        if not hasattr(self, "get_embedding"):
             return
 
         try:
-            embedding = self.get_ollama_embedding(description, model=ModelConfig.DOLPHIN_MIXTRAL)
+            embedding = self.get_embedding(description)
         except Exception as e:
             logging.error(f"Failed to fetch LLaVA embedding: {e}")
             return

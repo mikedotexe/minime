@@ -35,9 +35,9 @@ impl EigenFillEstimator {
             ema_fill: 0.0,
             alpha_stats: 0.1,
             alpha_fill: 0.25,
-            rel_thresh: 0.12, // treat λ > 0.12×mean as "active"
-            min_fill: 0.04,
-            leak_rate: 0.012,
+            rel_thresh: 0.06, // treat λ > 0.06×mean as "active" (lowered to count more eigenvalues)
+            min_fill: 0.10,  // never report below 10% when any mode is active
+            leak_rate: 0.005, // slower temporal decay so fill doesn't drain between measurements
             last_update: Instant::now(),
         }
     }

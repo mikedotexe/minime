@@ -79,36 +79,30 @@ impl MLP {
             .new_compute_pipeline_state_with_function(&sgd_apply)
             .map_err(|e| format!("Failed to create sgd_apply pipeline: {:?}", e))?;
 
-        // Allocate weight buffers (StorageModeShared for CPU access)
-        let w1 = device.new_buffer(
-            (din * hidden * 4) as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
-        let b1 = device.new_buffer((hidden * 4) as u64, MTLResourceOptions::StorageModeShared);
-        let w2 = device.new_buffer(
-            (hidden * dout * 4) as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
-        let b2 = device.new_buffer((dout * 4) as u64, MTLResourceOptions::StorageModeShared);
+        // Page-aligned allocations with manual hazard tracking (MLX pattern).
+        // Rounding to 16384-byte page boundary enables SLC fast path on Apple Silicon.
+        let opts = MTLResourceOptions::StorageModeShared
+            | MTLResourceOptions::HazardTrackingModeUntracked;
+        let pa = |bytes: u64| -> u64 {
+            const PAGE: u64 = 16384;
+            (bytes + PAGE - 1) & !(PAGE - 1)
+        };
+
+        // Allocate weight buffers
+        let w1 = device.new_buffer(pa((din * hidden * 4) as u64), opts);
+        let b1 = device.new_buffer(pa((hidden * 4) as u64), opts);
+        let w2 = device.new_buffer(pa((hidden * dout * 4) as u64), opts);
+        let b2 = device.new_buffer(pa((dout * 4) as u64), opts);
 
         // Gradient buffers
-        let dw1 = device.new_buffer(
-            (din * hidden * 4) as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
-        let db1 = device.new_buffer((hidden * 4) as u64, MTLResourceOptions::StorageModeShared);
-        let dw2 = device.new_buffer(
-            (hidden * dout * 4) as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
-        let db2 = device.new_buffer((dout * 4) as u64, MTLResourceOptions::StorageModeShared);
+        let dw1 = device.new_buffer(pa((din * hidden * 4) as u64), opts);
+        let db1 = device.new_buffer(pa((hidden * 4) as u64), opts);
+        let dw2 = device.new_buffer(pa((hidden * dout * 4) as u64), opts);
+        let db2 = device.new_buffer(pa((dout * 4) as u64), opts);
 
         // Activation buffers (assume max batch size = 16)
-        let h = device.new_buffer(
-            (16 * hidden * 4) as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
-        let x = device.new_buffer((16 * din * 4) as u64, MTLResourceOptions::StorageModeShared);
+        let h = device.new_buffer(pa((16 * hidden * 4) as u64), opts);
+        let x = device.new_buffer(pa((16 * din * 4) as u64), opts);
 
         let mut mlp = Self {
             din,
@@ -540,13 +534,16 @@ impl NeuroCell {
         let router = MLP::new(device, library, 64, 64, 32)?;
         let regulator = MLP::new(device, library, 20, 32, 5)?;
 
-        // Allocate inference buffers
-        let pred_input = device.new_buffer(15 * 4, MTLResourceOptions::StorageModeShared);
-        let pred_output = device.new_buffer(4, MTLResourceOptions::StorageModeShared);
-        let router_input = device.new_buffer(64 * 4, MTLResourceOptions::StorageModeShared);
-        let router_output = device.new_buffer(32 * 4, MTLResourceOptions::StorageModeShared);
-        let reg_input = device.new_buffer(20 * 4, MTLResourceOptions::StorageModeShared);
-        let reg_output = device.new_buffer(5 * 4, MTLResourceOptions::StorageModeShared);
+        // Allocate inference buffers (page-aligned, untracked)
+        let io_opts = MTLResourceOptions::StorageModeShared
+            | MTLResourceOptions::HazardTrackingModeUntracked;
+        const PAGE: u64 = 16384; // all small buffers round up to 1 page
+        let pred_input = device.new_buffer(PAGE, io_opts);
+        let pred_output = device.new_buffer(PAGE, io_opts);
+        let router_input = device.new_buffer(PAGE, io_opts);
+        let router_output = device.new_buffer(PAGE, io_opts);
+        let reg_input = device.new_buffer(PAGE, io_opts);
+        let reg_output = device.new_buffer(PAGE, io_opts);
 
         Ok(Self {
             predictor,

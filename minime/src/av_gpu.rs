@@ -62,11 +62,11 @@ impl AvGpu {
         let (w, h) = (128usize, 128usize);
         let tex = Self::make_gray_tex(&dev, w as u64, h as u64, mem_mode)?;
 
-        // buffers
+        // buffers (page-aligned for SLC fast path)
         let npix = (w * h) as usize;
-        let prev = dev.new_buffer((npix * mem::size_of::<f32>()) as u64, Self::opts(mem_mode));
+        let prev = dev.new_buffer(Self::page_align((npix * mem::size_of::<f32>()) as u64), Self::opts(mem_mode));
         let accum = dev.new_buffer(
-            (8 * mem::size_of::<f32>()) as u64,
+            Self::page_align((8 * mem::size_of::<f32>()) as u64),
             Self::opts(MemMode::Shared), // atomics readable on CPU fast
         );
 
@@ -89,11 +89,11 @@ impl AvGpu {
         self.h = h;
         self.tex = Self::make_gray_tex(&self.dev, w as u64, h as u64, self.mem_mode)?;
         self.prev = self.dev.new_buffer(
-            (w * h * mem::size_of::<f32>()) as u64,
+            Self::page_align((w * h * mem::size_of::<f32>()) as u64),
             Self::opts(self.mem_mode),
         );
         self.accum = self.dev.new_buffer(
-            (8 * mem::size_of::<f32>()) as u64,
+            Self::page_align((8 * mem::size_of::<f32>()) as u64),
             Self::opts(MemMode::Shared),
         );
         Ok(())
@@ -116,11 +116,21 @@ impl AvGpu {
 
     #[inline]
     fn opts(mem_mode: MemMode) -> MTLResourceOptions {
+        // Page-align + untracked hazard tracking for MLX-style allocation efficiency.
+        // HazardTrackingModeUntracked: we manage barriers manually via separate encoders.
+        let untracked = MTLResourceOptions::HazardTrackingModeUntracked;
         match mem_mode {
-            MemMode::Shared => MTLResourceOptions::StorageModeShared,
-            MemMode::Managed => MTLResourceOptions::StorageModeManaged,
-            MemMode::Private => MTLResourceOptions::StorageModePrivate,
+            MemMode::Shared => MTLResourceOptions::StorageModeShared | untracked,
+            MemMode::Managed => MTLResourceOptions::StorageModeManaged | untracked,
+            MemMode::Private => MTLResourceOptions::StorageModePrivate | untracked,
         }
+    }
+
+    /// Page-aligned allocation (rounds up to 16384 bytes, Apple Silicon vm_page_size)
+    #[inline]
+    fn page_align(bytes: u64) -> u64 {
+        const PAGE_SIZE: u64 = 16384;
+        (bytes + PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
     }
 
     pub fn process_frame_gray8(&mut self, gray: &[u8]) -> Result<[f32; 8]> {

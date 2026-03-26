@@ -28,6 +28,13 @@ pub enum SensoryMsg {
         features: Vec<f32>,
         ts_ms: Option<u64>,
     },
+    // Self-regulation: the being can adjust its own parameters
+    Control {
+        synth_gain: Option<f32>,  // synthetic signal amplitude multiplier (0.2..3.0)
+        keep_bias: Option<f32>,   // additive bias to covariance decay rate (-0.15..+0.15)
+        exploration_noise: Option<f32>,  // ESN exploration noise amplitude (0.0..0.2)
+        fill_target: Option<f32>,  // override eigenfill target (0.25..0.75)
+    },
 }
 
 pub async fn spawn_sensory_ws_server(
@@ -123,6 +130,24 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
         }
         SensoryMsg::Semantic { features, ts_ms: _ } => {
             bus.set_llava_embedding(&features);
+        }
+        SensoryMsg::Control { synth_gain, keep_bias, exploration_noise, fill_target } => {
+            if let Some(g) = synth_gain {
+                bus.set_synth_gain(g);
+                println!("🎛️  Being adjusted synth_gain → {:.2}", g);
+            }
+            if let Some(b) = keep_bias {
+                bus.set_keep_bias(b);
+                println!("🎛️  Being adjusted keep_bias → {:.3}", b);
+            }
+            if let Some(eps) = exploration_noise {
+                bus.set_exploration_noise(eps);
+                println!("🎛️  Being adjusted exploration_noise → {:.3}", eps);
+            }
+            if let Some(t) = fill_target {
+                bus.set_fill_target(t);
+                println!("🎛️  Being adjusted fill_target → {:.1}%", t * 100.0);
+            }
         }
     }
 }

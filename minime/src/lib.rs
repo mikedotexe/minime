@@ -4,6 +4,7 @@
 
 pub mod av_gpu;
 pub mod av_ws;
+pub mod buffer_pool;
 pub mod cheby;
 pub mod db;
 pub mod esn;

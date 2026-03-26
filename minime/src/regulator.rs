@@ -243,18 +243,18 @@ impl Default for PIRegCfg {
             .unwrap_or(false);
 
         let mut cfg = Self {
-            target_fill: 0.60,        // 60% EigenFill target (healthy operating range)
+            target_fill: 0.55,        // 55% EigenFill target (matches CLI default)
             target_lambda1_rel: 1.05, // Keep λ₁ close to baseline (1.0-1.6 comfort zone)
             target_geom_rel: 1.00,    // Stay near geometric baseline
-            geom_weight: 1.80,        // Prioritize λ₁ control over fill
-            geom_clamp_hi: 1.66,      // ≈ +66% expansion triggers hard clamp
-            geom_release: 1.32,       // Release clamp once relaxed below this
-            geom_gate_min: 0.06,      // Hard gate limit during clamp
-            geom_filter_boost: 0.35,  // Extra filter push when clamped
-            geom_shed_fraction: 0.45, // Shed ~45% of backlog when clamped
-            kp: 1.10,                 // Strong proportional response to λ₁ excess
-            ki: 0.18,                 // Faster integral correction
-            max_step: 0.12,           // Allow larger steps to catch runaway λ₁
+            geom_weight: 1.20,        // Moderate geometric influence (was 1.80 - too aggressive)
+            geom_clamp_hi: 2.00,      // ≈ +100% expansion triggers hard clamp (was 1.66 - too hair-trigger)
+            geom_release: 1.50,       // Release clamp once relaxed below this (was 1.32)
+            geom_gate_min: 0.12,      // Hard gate limit during clamp (was 0.06 - too restrictive)
+            geom_filter_boost: 0.25,  // Extra filter push when clamped (was 0.35)
+            geom_shed_fraction: 0.30, // Shed ~30% of backlog when clamped (was 0.45)
+            kp: 0.85,                 // Gentler proportional response (was 1.10 - caused boom/bust)
+            ki: 0.14,                 // Slower integral correction (was 0.18)
+            max_step: 0.08,           // Smaller steps for smoother transitions (was 0.12)
         };
 
         if strong {

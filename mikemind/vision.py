@@ -24,8 +24,20 @@ class LLaVAVisionEngine:
     def __init__(self, model: str = None):
         self.model = model or ModelConfig.LLAVA_VISION
         self.api_url = ModelConfig.OLLAMA_API_GENERATE
-        self.available = self._check_availability()
         self.sse_url = self._normalize_sse_url(os.getenv("LLAVA_SSE_URL"))
+
+        # MLX VLM -- try this first before falling back to Ollama
+        self.mlx_vision_url = os.getenv(
+            "MLX_VISION_URL",
+            f"http://localhost:{int(os.getenv('MLX_VISION_PORT', '8091'))}/v1/chat/completions",
+        )
+        self.mlx_vision_available = self._check_mlx_vision()
+
+        # Ollama availability (skip the slow probe when MLX is already live)
+        if self.mlx_vision_available:
+            self.available = True
+        else:
+            self.available = self._check_availability()
 
         self._last_frame_hash = None
         self._last_frame_b64 = None
@@ -39,10 +51,12 @@ class LLaVAVisionEngine:
         self._tb_tokens = float(self._tb_burst)
         self._tb_last = time.monotonic()
 
-        if self.available:
-            logging.info(f"LLaVA Vision Engine initialized with {self.model}")
+        if self.mlx_vision_available:
+            logging.info(f"Vision Engine initialized with MLX VLM at {self.mlx_vision_url}")
+        elif self.available:
+            logging.info(f"Vision Engine initialized with Ollama LLaVA ({self.model})")
         else:
-            logging.warning(f"LLaVA Vision Engine unavailable (model: {self.model})")
+            logging.warning(f"Vision Engine unavailable (no MLX VLM or Ollama LLaVA)")
 
         if self.sse_url:
             logging.info(f"LLaVA SSE worker detected at {self.sse_url}/describe")
@@ -58,6 +72,55 @@ class LLaVAVisionEngine:
         except Exception as e:
             logging.error(f"LLaVA availability check failed: {e}")
             return False
+
+    def _check_mlx_vision(self) -> bool:
+        """Check if MLX VLM server is running."""
+        try:
+            port = int(os.getenv("MLX_VISION_PORT", "8091"))
+            response = requests.get(f"http://localhost:{port}/v1/models", timeout=5)
+            return response.status_code == 200
+        except Exception:
+            return False
+
+    def _analyze_frame_mlx(self, image_base64: str, prompt: str) -> Optional[str]:
+        """Analyze frame using MLX VLM server (OpenAI-compatible API)."""
+        try:
+            response = requests.post(
+                self.mlx_vision_url,
+                json={
+                    "model": "default",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{image_base64}"
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                    "max_tokens": 512,
+                    "temperature": 0.7,
+                },
+                timeout=20,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                return (
+                    data.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                    .strip()
+                    or None
+                )
+            return None
+        except Exception as e:
+            logging.error(f"MLX VLM request failed: {e}")
+            return None
 
     def analyze_frame(
         self, frame, prompt: str = "Describe what you see in this image in detail."
@@ -83,6 +146,13 @@ class LLaVAVisionEngine:
                 image_base64 = base64.b64encode(buffer).decode("utf-8")
                 self._last_frame_hash = frame_hash
                 self._last_frame_b64 = image_base64
+
+            # Try MLX VLM first (Metal-accelerated, lowest latency)
+            if self.mlx_vision_available:
+                result = self._analyze_frame_mlx(image_base64, prompt)
+                if result:
+                    return result
+                logging.warning("MLX VLM failed, falling back to Ollama")
 
             if self.sse_url:
                 streamed = self._analyze_frame_via_sse(image_base64, prompt)
