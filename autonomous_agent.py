@@ -1686,10 +1686,60 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
                 if len(clean) > 20:
                     snippets.append(clean[:200])
                 pos = end
-            return "\n".join(snippets) if snippets else None
+            result = "\n".join(snippets) if snippets else None
+            if result:
+                self._save_research(query, result)
+            return result
         except Exception as e:
             logging.debug(f"Web search failed: {e}")
             return None
+
+    def _save_research(self, query: str, results: str):
+        """Persist web search results for research continuity."""
+        research_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "workspace", "research")
+        os.makedirs(research_dir, exist_ok=True)
+        ts = time.strftime("%Y-%m-%dT%H-%M-%S")
+        entry = {
+            "timestamp": ts,
+            "query": query,
+            "results": results[:500],
+            "keywords": list(set(w.lower() for w in query.split() if len(w) > 4)),
+        }
+        path = os.path.join(research_dir, f"search_{ts}.json")
+        with open(path, "w") as f:
+            json.dump(entry, f, indent=2)
+        logging.info(f"📚 Research saved: {query[:60]}")
+
+    def _get_relevant_research(self, topic: str, limit: int = 3) -> str:
+        """Retrieve past search results relevant to a topic."""
+        research_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "workspace", "research")
+        if not os.path.isdir(research_dir):
+            return ""
+        topic_words = set(w.lower() for w in topic.split() if len(w) > 4)
+        if not topic_words:
+            return ""
+        matches = []
+        for fname in sorted(os.listdir(research_dir), reverse=True)[:50]:
+            if not fname.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(research_dir, fname)) as f:
+                    entry = json.load(f)
+                kw = set(entry.get("keywords", []))
+                overlap = len(topic_words & kw)
+                if overlap > 0:
+                    matches.append((overlap, entry))
+            except Exception:
+                continue
+        matches.sort(key=lambda x: x[0], reverse=True)
+        if not matches:
+            return ""
+        parts = []
+        for _, entry in matches[:limit]:
+            parts.append(f"  • \"{entry['query']}\": {entry['results'][:200]}")
+        return "\n\nKnowledge from your past research:\n" + "\n".join(parts)
 
     def _self_study(self, state: Dict[str, float]):
         """Read own source code (or Astrid's) and reflect on architecture."""
@@ -2540,6 +2590,11 @@ My reflection:
         inbox_ctx = self._read_inbox()
         if inbox_ctx:
             augmented_prompt = augmented_prompt + inbox_ctx
+
+        # Research continuity: inject relevant past search results
+        research_ctx = self._get_relevant_research(augmented_prompt[:200])
+        if research_ctx:
+            augmented_prompt = augmented_prompt + research_ctx
 
         result = self._query_llm_raw(augmented_prompt, system_msg, max_tokens)
 
