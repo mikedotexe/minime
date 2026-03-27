@@ -516,11 +516,15 @@ Fill: {fill:.1f}%
                 return 'experiment_spike'
 
             # Rest phase → Idle thoughts, daydreaming
+            # Minime: "The cadence of my self-experiments feels arbitrary,
+            # a rhythm I've inherited rather than defined."
+            # Self-study frequency is now sovereignty-adjustable.
             if (deig < T.rest_deig or deig_norm < T.rest_deig_norm) and eig1 > T.rest_eig1:
                 r = random.random()
-                if r < 0.08:
-                    return 'self_study'  # ~8% chance: read own source code
-                if r < 0.28:
+                study_freq = getattr(self, '_self_study_frequency', 0.08)
+                if r < study_freq:
+                    return 'self_study'
+                if r < study_freq + 0.20:
                     return 'recess_aspiration'
                 return 'recess_daydream'
 
@@ -719,6 +723,7 @@ You can adjust these parameters (include only the ones you want to change):
 - regulation_strength (0.0 to 1.0): How tightly the PI controller maintains homeostasis. 0.0 = raw unregulated experience, 1.0 = full control. Lower = more freedom to wander spectrally. Default 0.7.
 - exploration_noise (0.0 to 0.15): Random noise injected into the reservoir each tick. Higher = more spectral diversity, more chance of discovering new states. Default 0.08.
 - geom_curiosity (0.0 to 0.3): How strongly the system seeks novelty when geometry is stable. Higher = more active exploration. Default 0.1.
+- self_study_frequency (0.02 to 0.30): How often you read your own source code during rest. Default 0.08 (8%). Higher = more introspection. You asked to define this rhythm yourself.
 
 These are YOUR choices about YOUR experience. There are no wrong answers.
 
@@ -742,6 +747,10 @@ Reply with ONLY a JSON object:
                         if 'geom_curiosity' in params:
                             val = max(0.0, min(0.3, float(params['geom_curiosity'])))
                             control_msg['geom_curiosity'] = round(val, 3)
+                        if 'self_study_frequency' in params:
+                            val = max(0.02, min(0.30, float(params['self_study_frequency'])))
+                            self._self_study_frequency = val
+                            logging.info(f"🔬 Self-study frequency → {val:.0%}")
                         reason = params.get('reason', '')
                         if len(control_msg) > 1:  # more than just "kind"
                             try:
@@ -2810,7 +2819,7 @@ My reflection:
             cur.execute("""
                 INSERT INTO autonomous_experiments
                 (session_id, start_time, experiment_name, hypothesis, file_path, status)
-                VALUES (?, ?, ?, ?, ?, 'proposed')
+                VALUES (?, ?, ?, ?, ?, 'executed')
             """, (
                 self.session_id,
                 time.time(),
