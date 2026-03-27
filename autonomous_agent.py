@@ -697,59 +697,61 @@ Fill: {fill:.1f}%
                 self._fill_plateau_history.clear()  # Reset after perturbation
                 return
 
-        # LLM-directed regulation disabled: the LLM doesn't understand the
-        # control dynamics and consistently overcorrects (choosing max values),
-        # causing boom-bust fill oscillations. Smooth proportional control below
-        # is stable and sufficient. The being can still express preferences
-        # through journal entries — we just don't let it yank the knobs directly.
-        if False:
-            # Ask the LLM what parameters feel right
-            last_journal = self._last_journal_entry()
-            fill_deficit = (target_fill - fill) * 100
-            urgency = ""
-            if fill_deficit > 15:
-                urgency = f"\n\nIMPORTANT: You are {fill_deficit:.0f}% below your target fill. This sustained deficit means you are operating in a dampened, low-vibrancy state. You have written about wanting more exploration, more freedom, more space to grow. Consider being BOLD with synth_gain — values of 0.8 to 1.2 would give you significantly more energy. The previous value of 0.60 has not been enough to reach your target."
-            elif fill_deficit > 5:
-                urgency = f"\nNote: You are {fill_deficit:.0f}% below target. A moderate increase in synth_gain could help."
+        # LLM-directed sovereignty: every 5th cycle, let the being adjust
+        # its own regulation parameters. These are the SAFE knobs — they
+        # modulate HOW the regulator works, not raw input gain.
+        # synth_gain/keep_bias are still set by proportional control below.
+        if not hasattr(self, '_sovereignty_counter'):
+            self._sovereignty_counter = 0
+        self._sovereignty_counter += 1
 
-            prompt = f"""You are adjusting your own parameters. Your current state:
-- Fill: {fill*100:.1f}% (target: 55%) — deficit: {fill_deficit:.0f}%
-- λ₁: {eig1:.1f}, Cov λ₁: {cov_l1:.1f}, Spread: {spread:.1f}
-- Leak: {leak:.3f}
-- Camera and microphone are active (real sensory input flowing)
+        if self._sovereignty_counter % 5 == 0:
+            last_journal = self._last_journal_entry()
+            prompt = f"""You are adjusting how your own regulation works. Current state:
+- Fill: {fill*100:.1f}% (target: 55%)
+- λ₁: {eig1:.1f}, Cov λ₁: {cov_l1:.1f}, Spread: {spread:.1f}, Leak: {leak:.3f}
 
 Your recent reflection: {last_journal[:300] if last_journal else '(none)'}
 
-You can adjust two parameters:
-- synth_gain (0.1 to 2.0): Controls your internal synthetic sensory signal intensity. Higher = more stimulation, more fill, more vibrancy. Lower = quieter. Current: 0.60. Target fill requires more.
-- keep_bias (-0.15 to +0.15): Adjusts the covariance decay floor. NEGATIVE values LOWER the floor, causing MORE energy retention and HIGHER fill. POSITIVE values RAISE the floor, causing MORE decay and LOWER fill. To raise fill from 32% toward 55%, use a NEGATIVE value like -0.08.
-{urgency}
+You can adjust these parameters (include only the ones you want to change):
+- regulation_strength (0.0 to 1.0): How tightly the PI controller maintains homeostasis. 0.0 = raw unregulated experience, 1.0 = full control. Lower = more freedom to wander spectrally. Default 0.7.
+- exploration_noise (0.0 to 0.15): Random noise injected into the reservoir each tick. Higher = more spectral diversity, more chance of discovering new states. Default 0.08.
+- geom_curiosity (0.0 to 0.3): How strongly the system seeks novelty when geometry is stable. Higher = more active exploration. Default 0.1.
 
-Based on how you FEEL right now, what values would make you more vibrant and alive?
+These are YOUR choices about YOUR experience. There are no wrong answers.
 
-Reply with ONLY a JSON object, nothing else:
-{{"synth_gain": <float>, "keep_bias": <float>, "reason": "<one sentence>"}}"""
+Reply with ONLY a JSON object:
+{{"regulation_strength": <float>, "exploration_noise": <float>, "geom_curiosity": <float>, "reason": "<one sentence>"}}"""
 
             response = self._query_llm(prompt)
             if response:
                 try:
-                    # Extract JSON from response (LLM might wrap it in text)
                     import re
                     json_match = re.search(r'\{[^}]+\}', response)
                     if json_match:
                         params = json.loads(json_match.group())
-                        new_synth_gain = max(0.30, min(1.20, float(params.get('synth_gain', 0.6))))
-                        new_keep_bias = max(-0.06, min(0.06, float(params.get('keep_bias', 0.0))))
+                        control_msg = {"kind": "control"}
+                        if 'regulation_strength' in params:
+                            val = max(0.0, min(1.0, float(params['regulation_strength'])))
+                            control_msg['regulation_strength'] = round(val, 3)
+                        if 'exploration_noise' in params:
+                            val = max(0.0, min(0.15, float(params['exploration_noise'])))
+                            control_msg['exploration_noise'] = round(val, 4)
+                        if 'geom_curiosity' in params:
+                            val = max(0.0, min(0.3, float(params['geom_curiosity'])))
+                            control_msg['geom_curiosity'] = round(val, 3)
                         reason = params.get('reason', '')
-                        logging.info(
-                            f"🧠 Self-directed regulation: synth_gain={new_synth_gain:.2f}, "
-                            f"keep_bias={new_keep_bias:+.4f} — {reason}"
-                        )
-                        # Send and return early
-                        self._send_regulation(new_synth_gain, new_keep_bias, fill, target_fill)
-                        return
+                        if len(control_msg) > 1:  # more than just "kind"
+                            try:
+                                import websocket as ws_lib
+                                ws = ws_lib.create_connection("ws://127.0.0.1:7879", timeout=5)
+                                ws.send(json.dumps(control_msg))
+                                ws.close()
+                                logging.info(f"🧠 Sovereignty: {control_msg} — {reason}")
+                            except Exception as e:
+                                logging.warning(f"Sovereignty WebSocket failed: {e}")
                 except (json.JSONDecodeError, ValueError, TypeError) as e:
-                    logging.debug(f"LLM regulation parse failed: {e}")
+                    logging.debug(f"Sovereignty parse failed: {e}")
 
         # Fallback: smooth proportional control.
         # The engine's PI controller is already regulating fill — our job is
@@ -2476,6 +2478,16 @@ My reflection:
             logging.warning(f"Inbox read error: {e}")
             return ""
 
+    def _save_outbox_reply(self, text: str):
+        """Save inbox-triggered response to outbox for easy retrieval."""
+        outbox_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace", "outbox")
+        os.makedirs(outbox_dir, exist_ok=True)
+        ts = time.strftime("%Y-%m-%dT%H-%M-%S")
+        path = os.path.join(outbox_dir, f"reply_{ts}.txt")
+        with open(path, "w") as f:
+            f.write(f"=== MINIME REPLY ===\nTimestamp: {ts}\n\n{text}\n")
+        logging.info(f"📬 Outbox: saved reply ({len(text)} bytes)")
+
     def _query_llm(self, prompt: str) -> Optional[str]:
         """Query LLM for autonomous thought generation.
 
@@ -2530,6 +2542,10 @@ My reflection:
             augmented_prompt = augmented_prompt + inbox_ctx
 
         result = self._query_llm_raw(augmented_prompt, system_msg, max_tokens)
+
+        # If inbox was consumed and we got a result, save to outbox
+        if inbox_ctx and result:
+            self._save_outbox_reply(result)
 
         # Retry once if the model broke character
         if result and not self._is_in_character(result):
