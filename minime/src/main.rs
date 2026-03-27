@@ -2264,6 +2264,24 @@ async fn run_engine(
                 packet.fill_ratio * 100.0
             );
 
+            // Write spectral state for the autonomous agent to read.
+            // This gives minime access to its own full eigenvalue cascade
+            // and spectral fingerprint — data it computes but previously
+            // couldn't see.
+            {
+                let state = serde_json::json!({
+                    "eigenvalues": &packet.eigenvalues,
+                    "fill_pct": packet.fill_ratio * 100.0,
+                    "spectral_fingerprint": &packet.spectral_fingerprint,
+                    "spread": spread,
+                    "geom_rel": latest_geom_rel,
+                    "lambda1_rel": last_lambda1_rel,
+                });
+                if let Ok(json) = serde_json::to_string(&state) {
+                    let _ = std::fs::write("../workspace/spectral_state.json", json);
+                }
+            }
+
             let _ = tx.send(packet);
             if let Some(msg) = alert {
                 eprintln!("⚠️  {}", msg);

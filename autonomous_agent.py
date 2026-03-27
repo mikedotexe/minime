@@ -2743,15 +2743,31 @@ My reflection:
         except Exception as e:
             logging.error(f"Experiment logging failed: {e}")
 
+    def _read_spectral_state(self) -> Optional[dict]:
+        """Read the full spectral state written by the engine."""
+        try:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "minime", "workspace", "spectral_state.json")
+            if not os.path.exists(path):
+                # Try alternate location
+                path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "workspace", "spectral_state.json")
+            if not os.path.exists(path):
+                return None
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            return None
+
     def _format_metrics(self, state: Dict[str, float]) -> str:
-        """Format all scalar metrics for journal headers."""
+        """Format all scalar metrics for journal headers, including full eigenvalue cascade."""
         cov_lambda1 = state.get('cov_lambda1', 0.0)
         fill_ratio = state.get('fill_ratio', 0.0)
         spread = state.get('spread', 0.0)
         cov_stale = bool(state.get('covariance_stale', False))
         cov_suffix = " [stale]" if cov_stale else ""
 
-        return f"""λ₁: {state.get('eig1', 0):.3f}
+        base = f"""λ₁: {state.get('eig1', 0):.3f}
 Δλ₁: {state.get('deig', 0):.3f}
 ESN leak: {state.get('leak', 0):.3f}
 ESN λ_rls: {state.get('lambda', 0):.3f}
@@ -2760,6 +2776,30 @@ Fill %: {fill_ratio:.1%}
 Spread: {spread:.3f}
 Error (abs): {state.get('error_abs', 0):.6f}
 Error (ewma): {state.get('error_ewma', 0):.6f}"""
+
+        # Enrich with full eigenvalue cascade from spectral_state.json
+        ss = self._read_spectral_state()
+        if ss:
+            evs = ss.get('eigenvalues', [])
+            if len(evs) > 1:
+                cascade = ", ".join(f"λ{i+1}={v:.1f}" for i, v in enumerate(evs))
+                total = sum(abs(v) for v in evs)
+                dominant_pct = (abs(evs[0]) / total * 100) if total > 0 else 0
+                base += f"\nEigenvalue cascade: [{cascade}]"
+                base += f"\nλ₁ dominance: {dominant_pct:.0f}% of total spectral energy"
+
+            fp = ss.get('spectral_fingerprint', [])
+            if len(fp) >= 32:
+                entropy = fp[24]
+                gap = fp[25]
+                rotation = 1.0 - fp[26]
+                geom = fp[27]
+                base += f"\nSpectral entropy: {entropy:.2f} (0=concentrated, 1=distributed)"
+                base += f"\nGap ratio (λ₁/λ₂): {gap:.1f}"
+                base += f"\nEigenvector rotation: {rotation:.2f} (0=stable, 1=spinning)"
+                base += f"\nGeometric radius: {geom:.2f}x baseline"
+
+        return base
 
     def _write_journal_entry(self, entry_type: str, content: str, state: Dict[str, float], file_path: str):
         """Log journal entry to database."""
