@@ -210,7 +210,7 @@ pub struct SensoryBus {
 
     // Self-regulation controls (set by being via WebSocket)
     synth_gain: Mutex<f32>,     // multiplier for synthetic signal amplitude (default 1.0)
-    keep_bias: Mutex<f32>,      // additive bias to keep_floor (default 0.0, range -0.15..+0.15)
+    keep_bias: Mutex<f32>,      // additive bias to keep_floor (default 0.0, range -0.06..+0.06)
     exploration_noise: Mutex<f32>, // ESN exploration noise amplitude (default from ESN, range 0.0..0.2)
     fill_target: Mutex<f32>,       // Override eigenfill target (NAN = use CLI default, range 0.25..0.75)
 
@@ -226,7 +226,7 @@ pub struct SensoryBus {
     pending_annotation: Mutex<Option<String>>, // Starred moment annotation for next checkpoint
     deep_breathing: Mutex<bool>,  // Slow frequency mode
     pure_tone: Mutex<bool>,       // Simplest mode: one sine wave, zero noise, total calm
-    synth_noise_level: Mutex<f32>, // Stochastic noise in synthetic signals (0.0-1.0, default 0.4)
+    synth_noise_level: Mutex<f32>, // Stochastic noise in synthetic signals (0.0-1.0, default 0.1)
     penalty_sensitivity: Mutex<f32>,  // Scales projection penalty (0.0=no penalty, 2.0=double, default 1.0)
     breathing_rate_scale: Mutex<f32>, // Scale min_rate/max_rate (0.5-2.0, default 1.0)
     mem_mode_preference: Mutex<u8>,   // 0=Shared, 1=Managed, 2=Private (default 1)

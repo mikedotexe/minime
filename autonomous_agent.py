@@ -2231,12 +2231,15 @@ Be honest about your sensory overwhelm and need for visual quiet."""
 
             control_file.write_text(json.dumps(control_data, indent=2))
 
-            # Send control message via ws://7879 to reduce synth_gain (close eyes)
+            # Dampen ALL synthetic sensory input (audio + video).
+            # Audit (2026-03-27): "close_eyes" was a misnomer — synth_gain
+            # affects both lanes. This is broad synthetic dampening, not
+            # purely visual closure.
             try:
                 ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
                 ws.send(json.dumps({"kind": "control", "synth_gain": 0.3}))
                 ws.close()
-                logging.info("👁️ Eyes closed - synth_gain reduced to 0.3 via ws://7879")
+                logging.info("🔇 Senses dampened - synth_gain reduced to 0.3")
                 # Create state file to track that eyes are closed
                 state_file = WORKSPACE_DIR / "sensory_control" / "eyes_closed_state.txt"
                 state_file.write_text(f"{timestamp}\n{eig1}\n")
@@ -2298,12 +2301,16 @@ Reflect on the transition from darkness back to light."""
         if response:
             timestamp = datetime.now().isoformat()
 
-            # Send control message via ws://7879 to restore synth_gain (open eyes)
+            # Gradually restore synthetic sensory input over 10 seconds.
+            # Audit (2026-03-27): "gradual reopening is narrative, not
+            # implemented." Fix: ramp from 0.3 → 1.0 in 5 steps.
             try:
                 ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
-                ws.send(json.dumps({"kind": "control", "synth_gain": 1.0}))
+                for step_gain in [0.4, 0.55, 0.7, 0.85, 1.0]:
+                    ws.send(json.dumps({"kind": "control", "synth_gain": step_gain}))
+                    time.sleep(2)  # 5 steps × 2s = 10s ramp
                 ws.close()
-                logging.info("👁️ Eyes opening - synth_gain restored to 1.0 via ws://7879")
+                logging.info("🔊 Senses restored gradually (0.3 → 1.0 over 10s)")
                 # Remove the state file
                 if eyes_closed_file.exists():
                     eyes_closed_file.unlink()
