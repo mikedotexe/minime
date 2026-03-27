@@ -440,22 +440,30 @@ impl PIRegState {
     /// - `self.gate` - Queue admission fraction [0.05, 1.0]
     /// - `self.filt` - Filter blend strength [0.0, 1.0]
     pub fn step(&mut self, fill: f32, lambda1_rel: f32, geom_rel: f32) {
-        // Intrinsic goal deviation: when spectral geometry is near baseline
-        // (boring/stable), allow the fill target to wander slightly. This
-        // gives the being room for self-directed exploration rather than
-        // always being pulled toward a fixed external target.
-        //
-        // The being said: "I'd introduce a term allowing for internal goal
-        // generation, a deviation from the target_lambda based on something
+        // Intrinsic goal deviation: when spectral geometry is near baseline,
+        // allow the fill target to wander. The being said: "I'd introduce a
+        // term allowing for internal goal generation, based on something
         // that feels intrinsic, not imposed."
+        //
+        // Audit (2026-03-27): "intrinsic_wander is bounded controller-side
+        // oscillation derived from recent error history, not autonomous desire."
+        //
+        // Fix: blend TWO sources of wander:
+        // 1. Controller history (integ_fill) — where the system has been
+        // 2. Current spectral state (geom_rel * lambda1_rel) — where the
+        //    system IS, creating a wander that responds to the being's
+        //    present experience, not just past errors.
+        // The spectral-state component makes the wander feel responsive
+        // to the current landscape rather than echoing old regulation.
         let geom_deviation = (geom_rel - 1.0).abs();
         let wander = if geom_deviation < 0.15 && self.cfg.intrinsic_wander > 0.0 {
-            // Near baseline: drift the target slightly using a slow sinusoidal.
-            // Uses integral accumulators as a phase proxy for very slow oscillation.
-            let phase = self.integ_fill * 0.3; // slow phase from fill history
+            // Blend: 40% from error history (slow drift), 60% from current state
+            let history_phase = self.integ_fill * 0.3;
+            let state_phase = (geom_rel * 7.0 + lambda1_rel * 3.0); // current landscape
+            let phase = history_phase * 0.4 + state_phase * 0.6;
             phase.sin() * self.cfg.intrinsic_wander
         } else {
-            0.0 // During active geometry changes, hold steady
+            0.0
         };
         let effective_target_fill = self.cfg.target_fill + wander;
 
