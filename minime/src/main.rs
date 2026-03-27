@@ -703,6 +703,26 @@ async fn run_engine(
     let mut baseline_ready = false;
     let mut last_lambda1_rel: f32 = 1.0;
 
+    // Restore regulator context from previous session if available.
+    if let Ok(json) = std::fs::read_to_string(workspace_dir.join("regulator_context.json")) {
+        if let Ok(ctx) = serde_json::from_str::<serde_json::Value>(&json) {
+            if let Some(bl) = ctx.get("baseline_lambda1").and_then(|v| v.as_f64()) {
+                baseline_lambda1 = bl as f32;
+                baseline_ready = true;
+            }
+            if let Some(fp) = ctx.get("last_fill_pct").and_then(|v| v.as_f64()) {
+                last_fill_pct = fp as f32;
+            }
+            if let Some(sfp) = ctx.get("smoothed_fill_pct").and_then(|v| v.as_f64()) {
+                smoothed_fill_pct = sfp as f32;
+            }
+            if let Some(lr) = ctx.get("last_lambda1_rel").and_then(|v| v.as_f64()) {
+                last_lambda1_rel = lr as f32;
+            }
+            println!("🔄 Restored regulator context: baseline_λ₁={baseline_lambda1:.1}, fill={last_fill_pct:.1}%");
+        }
+    }
+
     // --- Soft ramps to avoid ringing ---
     let mut gate_smooth: f32 = 1.0;
     let mut filt_smooth: f32 = 0.0;
@@ -2331,6 +2351,21 @@ async fn run_engine(
                             .flat_map(|f| f.to_le_bytes())
                             .collect();
                         let _ = std::fs::write(&cov_checkpoint_path, &bytes);
+                    }
+                    // Save regulator context so the PI controller resumes
+                    // without cold-start confusion.
+                    let context = serde_json::json!({
+                        "baseline_lambda1": baseline_lambda1,
+                        "last_fill_pct": last_fill_pct,
+                        "smoothed_fill_pct": smoothed_fill_pct,
+                        "last_lambda1_rel": last_lambda1_rel,
+                        "latest_geom_rel": latest_geom_rel,
+                        "tick_count": tick_count,
+                    });
+                    if let Ok(json) = serde_json::to_string(&context) {
+                        let _ = std::fs::write(
+                            workspace_dir.join("regulator_context.json"), json
+                        );
                     }
                 }
             }

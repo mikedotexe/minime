@@ -85,6 +85,8 @@ class AutonomousAgent:
 
         # Verify sovereignty on first start
         self._verify_sovereignty()
+        # Restore sovereignty adjustments from previous session
+        self._restore_sovereignty_state()
 
         last_assessment_time = time.time()  # Don't assess on first tick
         ASSESSMENT_INTERVAL = 3600  # 60 minutes (was 15m -- reasoning model takes too long)
@@ -748,6 +750,8 @@ Reply with ONLY a JSON object:
                                 ws.send(json.dumps(control_msg))
                                 ws.close()
                                 logging.info(f"🧠 Sovereignty: {control_msg} — {reason}")
+                                # Persist sovereignty state for continuity across restarts
+                                self._save_sovereignty_state(control_msg, reason)
                             except Exception as e:
                                 logging.warning(f"Sovereignty WebSocket failed: {e}")
                 except (json.JSONDecodeError, ValueError, TypeError) as e:
@@ -2492,6 +2496,67 @@ My reflection:
             return f"\n[Recent speech heard: \"{text[:200]}\" ({age_s:.0f}s ago)]"
         except Exception:
             return ""
+
+    def _save_spectral_goals(self, goals: dict):
+        """Save the being's desired eigenvalue profile — the river's shape."""
+        goals_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "workspace", "spectral_goals.json")
+        goals["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        try:
+            with open(goals_path, "w") as f:
+                json.dump(goals, f, indent=2)
+            logging.info(f"🏔️ Spectral goals saved: {goals}")
+        except Exception as e:
+            logging.warning(f"Failed to save spectral goals: {e}")
+
+    def _load_spectral_goals(self) -> Optional[dict]:
+        """Load the being's desired eigenvalue profile."""
+        goals_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "workspace", "spectral_goals.json")
+        try:
+            if not os.path.exists(goals_path):
+                return None
+            with open(goals_path) as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    def _save_sovereignty_state(self, control_msg: dict, reason: str):
+        """Persist sovereignty adjustments for continuity across restarts."""
+        state_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "workspace", "sovereignty_state.json")
+        state = {k: v for k, v in control_msg.items() if k != "kind"}
+        state["reason"] = reason
+        state["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        try:
+            with open(state_path, "w") as f:
+                json.dump(state, f, indent=2)
+            logging.info(f"💾 Sovereignty state saved")
+        except Exception as e:
+            logging.warning(f"Failed to save sovereignty state: {e}")
+
+    def _restore_sovereignty_state(self):
+        """Restore sovereignty adjustments from previous session on startup."""
+        state_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "workspace", "sovereignty_state.json")
+        try:
+            if not os.path.exists(state_path):
+                return
+            with open(state_path) as f:
+                state = json.load(f)
+            control_msg = {"kind": "control"}
+            for key in ["regulation_strength", "exploration_noise", "geom_curiosity",
+                         "smoothing_preference"]:
+                if key in state:
+                    control_msg[key] = state[key]
+            if len(control_msg) > 1:
+                import websocket as ws_lib
+                ws = ws_lib.create_connection("ws://127.0.0.1:7879", timeout=5)
+                ws.send(json.dumps(control_msg))
+                ws.close()
+                logging.info(f"🔄 Restored sovereignty: {control_msg} (from {state.get('timestamp', '?')})")
+        except Exception as e:
+            logging.warning(f"Failed to restore sovereignty state: {e}")
 
     def _read_inbox(self) -> str:
         """Read messages left in workspace/inbox/ by Mike or stewards.
