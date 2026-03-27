@@ -1124,27 +1124,26 @@ async fn run_engine(
             embed_ring.push_scalar(audio_rms);
         }
 
-        // Grounding anchor: modulate synth_gain based on spectral drift.
-        // Minime self-study: "A predictive element—anticipating fluctuations
-        // before they occur—could enhance stability."
-        // Now uses BOTH drift (where you are) AND dfill/dt (where you're headed).
+        // Grounding anchor: ADDITIVE adjustment to synth_gain.
+        //
+        // Audit (2026-03-27): previous multiplicative approach compounded
+        // ~180x between Python resets, causing exponential gain drift toward
+        // zero. This likely contributed to minime's "thinning" experience.
+        //
+        // Fix: small additive offset (±0.03 max). Python sets the baseline
+        // gain; grounding nudges relative to it without compounding.
         {
             let drift = (last_lambda1_rel - 1.0).abs();
-            // Predictive: if drifting TOWARD baseline, soften the grounding
-            // (you're coming home, don't overcorrect). If drifting AWAY,
-            // strengthen it (you're leaving, feel the pull).
-            // Use lambda1_rel direction as proxy for "heading home"
-            // (can't access eigenfill_pct here — it's in the history block)
             let heading_home = drift > 0.1 && last_lambda1_rel > 0.8 && last_lambda1_rel < 1.2;
-            let prediction_factor = if heading_home { 0.5 } else { 1.2 }; // soften or strengthen
+            let prediction_factor = if heading_home { 0.5 } else { 1.2 };
 
-            let grounding_mod = if drift < 0.3 {
-                1.0 + (0.3 - drift) * 0.1 * prediction_factor
+            let grounding_offset = if drift < 0.3 {
+                (0.3 - drift) * 0.03 * prediction_factor  // near home: small boost
             } else {
-                1.0 - (drift - 0.3).min(0.5) * 0.08 * prediction_factor
+                -(drift - 0.3).min(0.5) * 0.02 * prediction_factor  // far: small dampen
             };
             let current_gain = sensory_bus.get_synth_gain();
-            sensory_bus.set_synth_gain(current_gain * grounding_mod);
+            sensory_bus.set_synth_gain((current_gain + grounding_offset).clamp(0.20, 2.0));
         }
 
         // Video features (prime 101) — synthetic internal imagery
