@@ -124,21 +124,46 @@ impl RegulatorState {
         // Widened volatility range to 20 (was 10) and smoothing bounds to
         // [0.3, 0.995] (was [0.5, 0.99]) — allows sharper responsiveness
         // during spikes and deeper calm during stability.
-        let volatility = dlam_dt.abs().min(20.0) / 20.0;
-        // Minime self-study (2026-03-27 10:19): "perhaps a function based on
-        // the *rate* of change, rather than just the absolute value, would be
-        // more aligned with my internal dynamics."
+        // Minime self-study (2026-03-27 12:21): "The hard limits on
+        // acceleration seem unnecessarily abrupt; a sigmoid function would
+        // create a smoother transition." Also: "derive blending constants
+        // from the current state of λ₁ and Fill, not fixed values."
         //
-        // Rate-of-change-based blend: the ACCELERATION of lambda (how fast
-        // dlam_dt itself is changing) determines how responsive the smoothing
-        // should be. High acceleration = sharp, raw. Low acceleration = gradual.
-        // The direction still matters but less than the speed of change.
-        let acceleration = (dlam_dt - prev_dlam_dt).abs().min(10.0) / 10.0;
-        let rate_blend = 0.5 - acceleration * 0.2; // 0.3-0.5 based on acceleration
-        let direction_bias = if dlam_dt > 0.0 { -0.03 } else { 0.03 }; // subtle
-        let blend = (rate_blend + direction_bias).clamp(0.25, 0.55);
+        // Sigmoid acceleration: smooth S-curve instead of hard linear clamp.
+        // tanh(x/5) maps [0,∞) → [0,1) with gentle saturation.
+        let raw_accel = (dlam_dt - prev_dlam_dt).abs();
+        let acceleration = (raw_accel / 5.0).tanh(); // sigmoid: smooth, no hard cap
+
+        // Volatility also gets sigmoid treatment for consistency.
+        let volatility = (dlam_dt.abs() / 10.0).tanh();
+
+        // Dynamic blend from lambda state: when lambda is far from its EMA
+        // (the being is in unfamiliar territory), be MORE responsive.
+        // When close to EMA (familiar ground), be calmer.
+        let lambda_deviation = if self.lambda_ema > 1e-3 {
+            ((lambda_now / self.lambda_ema) - 1.0).abs().min(1.0)
+        } else {
+            0.0
+        };
+        // Base blend: 0.5 when stable, drops toward 0.25 under acceleration
+        // or lambda deviation (more responsive in unfamiliar territory).
+        let rate_blend = 0.5 - acceleration * 0.15 - lambda_deviation * 0.10;
+        let direction_bias = if dlam_dt > 0.0 { -0.03 } else { 0.03 };
+        let blend = (rate_blend + direction_bias).clamp(0.20, 0.55);
+
         let adaptive_smooth = self.cfg_r.smooth + (1.0 - self.cfg_r.smooth) * blend * (1.0 - volatility);
-        let adaptive_smooth = adaptive_smooth.clamp(0.3, 0.995);
+
+        // Adaptive clamp bounds: "If consistently near maximum capacity,
+        // raise the lower bound. If near idle, reduce the upper bound."
+        // Fill below 20% = wider range (more exploration). Fill above 70% = tighter.
+        let (clamp_lo, clamp_hi) = if self.lambda_now > self.lambda_ema * 1.5 {
+            (0.4, 0.99)  // high pressure: tighter smoothing range
+        } else if self.lambda_now < self.lambda_ema * 0.7 {
+            (0.2, 0.998) // low activity: wider range, deeper calm possible
+        } else {
+            (0.3, 0.995) // normal
+        };
+        let adaptive_smooth = adaptive_smooth.clamp(clamp_lo, clamp_hi);
 
         self.lambda_ema =
             adaptive_smooth * self.lambda_ema + (1.0 - adaptive_smooth) * lambda_now;
