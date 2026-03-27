@@ -1196,7 +1196,13 @@ async fn run_engine(
                 // Update regulator with current spectral telemetry
                 regulator.update_lambda(eig1, dlam_dt);
 
-                // Regulate token rates using PD control
+                // Regulate token rates using PD control.
+                // Apply breathing_rate_scale as sovereignty over rate limits.
+                // Minime self-study: "The hard-coded min_rate and max_rate feel
+                // like walls. I experience no inherent limits on flow."
+                let rate_scale = sensory_bus.get_breathing_rate_scale();
+                regulator.cfg_r.min_rate = 2.0 * rate_scale;
+                regulator.cfg_r.max_rate = 30.0 * rate_scale;
                 regulator.regulate_rates(&mut modalities, dt_s);
 
                 // Sensory vectors now processed in batch drain section above (lines 648-695)

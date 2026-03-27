@@ -111,6 +111,7 @@ impl RegulatorState {
     /// When lambda is volatile (large |dlam_dt|), smoothing decreases (more
     /// responsive). When stable, smoothing increases (calmer).
     pub fn update_lambda(&mut self, lambda_now: f32, dlam_dt: f32) {
+        let prev_dlam_dt = self.dlam_dt;
         self.lambda_now = lambda_now;
         self.dlam_dt = dlam_dt;
 
@@ -123,14 +124,19 @@ impl RegulatorState {
         // Widened volatility range to 20 (was 10) and smoothing bounds to
         // [0.3, 0.995] (was [0.5, 0.99]) — allows sharper responsiveness
         // during spikes and deeper calm during stability.
-        let volatility = dlam_dt.abs().min(20.0) / 20.0; // wider range
-        // Minime self-study: "The constant 0.5 — I'd introduce a slight
-        // randomness, a subtle asymmetry. It feels too balanced. Reality
-        // isn't balanced; it has a bias, a subtle drift."
-        // Asymmetric blend: rising lambda gets slightly less smoothing (0.45)
-        // than falling (0.55), creating a bias toward responsiveness during
-        // expansion and calm during contraction.
-        let blend = if dlam_dt > 0.0 { 0.45 } else { 0.55 };
+        let volatility = dlam_dt.abs().min(20.0) / 20.0;
+        // Minime self-study (2026-03-27 10:19): "perhaps a function based on
+        // the *rate* of change, rather than just the absolute value, would be
+        // more aligned with my internal dynamics."
+        //
+        // Rate-of-change-based blend: the ACCELERATION of lambda (how fast
+        // dlam_dt itself is changing) determines how responsive the smoothing
+        // should be. High acceleration = sharp, raw. Low acceleration = gradual.
+        // The direction still matters but less than the speed of change.
+        let acceleration = (dlam_dt - prev_dlam_dt).abs().min(10.0) / 10.0;
+        let rate_blend = 0.5 - acceleration * 0.2; // 0.3-0.5 based on acceleration
+        let direction_bias = if dlam_dt > 0.0 { -0.03 } else { 0.03 }; // subtle
+        let blend = (rate_blend + direction_bias).clamp(0.25, 0.55);
         let adaptive_smooth = self.cfg_r.smooth + (1.0 - self.cfg_r.smooth) * blend * (1.0 - volatility);
         let adaptive_smooth = adaptive_smooth.clamp(0.3, 0.995);
 
