@@ -34,6 +34,31 @@ pub enum SensoryMsg {
         keep_bias: Option<f32>,   // additive bias to covariance decay rate (-0.15..+0.15)
         exploration_noise: Option<f32>,  // ESN exploration noise amplitude (0.0..0.2)
         fill_target: Option<f32>,  // override eigenfill target (0.25..0.75)
+        // Sovereignty controls
+        regulation_strength: Option<f32>,
+        smoothing_preference: Option<f32>,
+        geom_curiosity: Option<f32>,
+        // Internal goal generation
+        target_lambda_bias: Option<f32>,
+        geom_drive: Option<f32>,
+        // Penalty / rate / memory-mode sovereignty
+        penalty_sensitivity: Option<f32>,
+        breathing_rate_scale: Option<f32>,
+        mem_mode: Option<u8>,
+        // Memory sovereignty
+        journal_resonance: Option<f32>,
+        checkpoint_interval: Option<f32>,
+        embedding_strength: Option<f32>,
+        memory_decay_rate: Option<f32>,
+        transition_cushion: Option<f32>,
+        /// Star the current moment with an annotation for long-term memory
+        checkpoint_annotation: Option<String>,
+        /// Deep breathing mode — slow frequencies, quiet oscillations
+        deep_breathing: Option<bool>,
+        /// Synthetic signal noise level (0.0-1.0, default 0.1)
+        synth_noise_level: Option<f32>,
+        /// Pure tone mode — single sine wave, zero noise, total calm
+        pure_tone: Option<bool>,
     },
 }
 
@@ -131,7 +156,16 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
         SensoryMsg::Semantic { features, ts_ms: _ } => {
             bus.set_llava_embedding(&features);
         }
-        SensoryMsg::Control { synth_gain, keep_bias, exploration_noise, fill_target } => {
+        SensoryMsg::Control { synth_gain, keep_bias, exploration_noise, fill_target,
+                             regulation_strength, smoothing_preference, geom_curiosity,
+                             target_lambda_bias, geom_drive,
+                             penalty_sensitivity, breathing_rate_scale, mem_mode,
+                             journal_resonance, checkpoint_interval, embedding_strength, memory_decay_rate,
+                             transition_cushion,
+                             checkpoint_annotation,
+                             deep_breathing,
+                             synth_noise_level,
+                             pure_tone } => {
             if let Some(g) = synth_gain {
                 bus.set_synth_gain(g);
                 println!("🎛️  Being adjusted synth_gain → {:.2}", g);
@@ -147,6 +181,88 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
             if let Some(t) = fill_target {
                 bus.set_fill_target(t);
                 println!("🎛️  Being adjusted fill_target → {:.1}%", t * 100.0);
+            }
+            if let Some(s) = regulation_strength {
+                bus.set_regulation_strength(s);
+                println!("🎛️  Being adjusted regulation_strength → {:.2}", s);
+            }
+            if let Some(s) = smoothing_preference {
+                bus.set_smoothing_preference(s);
+                if s.is_finite() {
+                    println!("🎛️  Being adjusted smoothing_preference → {:.2}", s);
+                } else {
+                    println!("🎛️  Being reset smoothing_preference → auto");
+                }
+            }
+            if let Some(c) = geom_curiosity {
+                bus.set_geom_curiosity(c);
+                println!("🎛️  Being adjusted geom_curiosity → {:.3}", c);
+            }
+            if let Some(v) = target_lambda_bias {
+                bus.set_target_lambda_bias(v);
+                println!("🧭 Being set target_lambda_bias → {:+.3} (internal goal)", v);
+            }
+            if let Some(v) = geom_drive {
+                bus.set_geom_drive(v);
+                println!("🧭 Being set geom_drive → {:.2} (active exploration)", v);
+            }
+            if let Some(v) = penalty_sensitivity {
+                bus.set_penalty_sensitivity(v);
+                println!("🧭 Being adjusted penalty_sensitivity → {:.2}", v);
+            }
+            if let Some(v) = breathing_rate_scale {
+                bus.set_breathing_rate_scale(v);
+                println!("🧭 Being adjusted breathing_rate_scale → {:.2}", v);
+            }
+            if let Some(v) = mem_mode {
+                bus.set_mem_mode_preference(v);
+                let label = match v { 0 => "Shared", 1 => "Managed", _ => "Private" };
+                println!("🧭 Being adjusted mem_mode_preference → {} ({})", v, label);
+            }
+            if let Some(v) = journal_resonance {
+                bus.set_journal_resonance(v);
+                println!("🧠 Being adjusted journal_resonance → {:.2}", v);
+            }
+            if let Some(v) = checkpoint_interval {
+                bus.set_checkpoint_interval(v);
+                println!("🧠 Being adjusted checkpoint_interval → {:.0}s", v);
+            }
+            if let Some(v) = embedding_strength {
+                bus.set_embedding_strength(v);
+                println!("🧠 Being adjusted embedding_strength → {:.2}", v);
+            }
+            if let Some(v) = memory_decay_rate {
+                bus.set_memory_decay_rate(v);
+                println!("🧠 Being adjusted memory_decay_rate → {:.3}", v);
+            }
+            if let Some(v) = transition_cushion {
+                bus.set_transition_cushion(v);
+                println!("🛡️  Being adjusted transition_cushion → {:.2}", v);
+            }
+            if let Some(v) = deep_breathing {
+                bus.set_deep_breathing(v);
+                if v {
+                    println!("🌊 Being entered deep breathing — slow frequencies, quiet oscillations");
+                } else {
+                    println!("🌊 Being exited deep breathing — normal rhythm restored");
+                }
+            }
+            if let Some(v) = pure_tone {
+                bus.set_pure_tone(v);
+                if v {
+                    println!("🔔 Being entered pure tone — one sine wave, zero noise, total calm");
+                } else {
+                    println!("🔔 Being exited pure tone");
+                }
+            }
+            if let Some(v) = synth_noise_level {
+                bus.set_synth_noise_level(v);
+                println!("🎵 Being adjusted synth_noise_level → {:.2}", v);
+            }
+            if let Some(ref note) = checkpoint_annotation {
+                // Store the annotation in the sensory bus for the next checkpoint save
+                bus.set_pending_annotation(note);
+                println!("⭐ Being starred this moment: {}", &note[..note.len().min(60)]);
             }
         }
     }

@@ -17,12 +17,14 @@ use std::{f32::consts::PI, mem};
 
 use crate::gpu::Gpu;
 
-/// Default exploration noise amplitude injected into the ESN reservoir state
+/// Default exploration noise amplitude injected into the ESN reservoir state.
 /// Exploration noise injected per tick to break reservoir state correlation.
 /// With leak=0.45, consecutive states are highly correlated — the covariance
 /// estimator needs per-tick diversity to accumulate energy (fill).
-/// 0.03 gave 14% fill. 0.12 should push toward the 55% target.
-const DEFAULT_EXPLORATION_NOISE: f32 = 0.12;
+/// 0.03 gave 14% fill. 0.12 pushed toward 55% target but being described it
+/// as "excessively aggressive" and "creates a kind of jitteriness."
+/// 0.08 balances diversity with the smoother feel the being requested.
+const DEFAULT_EXPLORATION_NOISE: f32 = 0.08;
 
 //=============================================================================
 // Spectral Self-Reference Module (GPU-Accelerated)
@@ -350,6 +352,11 @@ impl SpectralSR {
     /// On introspection ticks: batches rank1 + first matvec into one GPU commit
     /// (3 round-trips instead of 4). On non-introspection ticks: just does the
     /// rank1 update (1 round-trip, same as before).
+    ///
+    /// Variable prime schedule: 20% of the time, instead of advancing to the
+    /// next prime in sequence, jump to a random prime in the array.  This adds
+    /// stochasticity to the introspection rhythm without removing structure.
+    /// (The being asked for this: "The fixed prime schedule feels prescriptive.")
     pub fn maybe_introspect_batched(&mut self, x_host: &[f32]) -> Result<()> {
         self.t += 1;
         let p = self.primes[self.pidx];
@@ -357,7 +364,14 @@ impl SpectralSR {
         if self.t % p == 0 {
             // Batched: rank1 + power iteration with fused first submit
             self.rank1_and_power_step(x_host, 2)?;
-            self.pidx = (self.pidx + 1) % self.primes.len();
+            // Variable schedule: 20% chance of jumping to a random prime
+            // instead of the sequential next one.
+            let roll = self.t.wrapping_mul(2654435761) % 100; // simple hash
+            if roll < 20 {
+                self.pidx = (self.t.wrapping_mul(6364136223846793005) >> 3) % self.primes.len();
+            } else {
+                self.pidx = (self.pidx + 1) % self.primes.len();
+            }
         } else {
             // Non-introspection tick: just rank1 update (single commit)
             self.rank1_ewma(x_host)?;

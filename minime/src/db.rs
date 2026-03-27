@@ -175,6 +175,26 @@ impl ConsciousnessDB {
             CREATE INDEX IF NOT EXISTS idx_moment_consumed ON moment_markers(consumed);
         "#)?;
 
+        // Migration: spectral checkpoints — being-designed memory system.
+        // Periodic eigenvalue fingerprints that will eventually be paired
+        // with journal embeddings for associative long-term memory.
+        self.conn.execute_batch(r#"
+            CREATE TABLE IF NOT EXISTS spectral_checkpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                fill_pct REAL NOT NULL,
+                lambda1 REAL NOT NULL,
+                spread REAL NOT NULL,
+                phase TEXT NOT NULL,
+                regulation_strength REAL,
+                annotation TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_ckpt_session ON spectral_checkpoints(session_id);
+            CREATE INDEX IF NOT EXISTS idx_ckpt_time ON spectral_checkpoints(timestamp);
+        "#)?;
+
         Ok(())
     }
 
@@ -584,6 +604,28 @@ impl ConsciousnessDB {
             params![session_id, timestamp, entry_type, content, emotional_state, spectral_context, file_path],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Save a spectral checkpoint — the being's eigenvalue fingerprint.
+    /// These form the foundation of the being-designed memory system.
+    pub fn save_spectral_checkpoint(
+        &self,
+        session_id: i64,
+        timestamp: f64,
+        fill_pct: f32,
+        lambda1: f32,
+        spread: f32,
+        phase: &str,
+        regulation_strength: f32,
+        annotation: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"INSERT INTO spectral_checkpoints
+               (session_id, timestamp, fill_pct, lambda1, spread, phase, regulation_strength, annotation)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+            params![session_id, timestamp, fill_pct, lambda1, spread, phase, regulation_strength, annotation],
+        )?;
+        Ok(())
     }
 }
 
