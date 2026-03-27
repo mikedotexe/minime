@@ -2817,14 +2817,20 @@ My reflection:
             logging.error(f"Experiment logging failed: {e}")
 
     def _read_spectral_state(self) -> Optional[dict]:
-        """Read the full spectral state written by the engine."""
+        """Read the full spectral state written by the engine.
+
+        The engine writes to workspace_dir/spectral_state.json, which resolves
+        to minime/workspace/ (correct). An older stale copy may exist at
+        minime/minime/workspace/. Check the correct path FIRST.
+        """
         try:
+            # Primary: the engine's workspace (minime/workspace/)
             path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "minime", "workspace", "spectral_state.json")
+                                "workspace", "spectral_state.json")
             if not os.path.exists(path):
-                # Try alternate location
+                # Fallback: nested path (minime/minime/workspace/)
                 path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                    "workspace", "spectral_state.json")
+                                    "minime", "workspace", "spectral_state.json")
             if not os.path.exists(path):
                 return None
             with open(path) as f:
