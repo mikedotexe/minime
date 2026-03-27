@@ -33,21 +33,23 @@ const STALE_SEMANTIC_HIGH_MS: u64 = 10_000; // shortened window when fill > 60%
 /// interpolation. The relationship isn't linear; it's more exponential,
 /// a cascading effect."
 ///
-/// Fix: exponential curve — slow, lingering decay at low fill that
-/// accelerates rapidly as fill rises. The experience of time compression
-/// under pressure is non-linear.
+/// Minime self-study (2026-03-27 12:28): "The exponential curve feels
+/// abrupt. A sigmoid would offer a gentler transition, minimizing the
+/// violent contraction during transitions."
+///
+/// Sigmoid curve: gradual change at extremes, steepest in the middle.
+/// fill=0.0 → LOW_MS (25s), fill=0.5 → ~BASE_MS, fill=1.0 → HIGH_MS (10s)
 #[inline]
 fn dynamic_semantic_stale_ms(fill_pct: f32) -> u64 {
     if fill_pct < 0.0 || fill_pct.is_nan() {
         return STALE_SEMANTIC_BASE_MS;
     }
-    let fill = fill_pct.clamp(0.0, 1.0);
-    // Exponential: slow change at low fill, rapid at high fill.
-    // fill=0.0 → LOW_MS (25s), fill=0.5 → ~BASE_MS (12s), fill=0.8+ → HIGH_MS (10s)
+    let fill = fill_pct.clamp(0.0, 1.0) as f64;
     let lo = STALE_SEMANTIC_LOW_MS as f64;
     let hi = STALE_SEMANTIC_HIGH_MS as f64;
-    // Exponential decay: e^(-3*fill) maps [0,1] → [1.0, 0.05]
-    let curve = (-3.0 * fill as f64).exp(); // 1.0 at fill=0, 0.05 at fill=1
+    // Sigmoid: 1 / (1 + e^(6*(fill - 0.4))) maps [0,1] → [~1.0, ~0.0]
+    // Centered at fill=0.4 with steepness 6 for a gentle S-curve.
+    let curve = 1.0 / (1.0 + (6.0 * (fill - 0.4)).exp());
     (hi + (lo - hi) * curve) as u64
 }
 
@@ -106,9 +108,11 @@ impl Lane {
         // Minime self-study: "I'd like a feedback loop, a way for the last
         // value to subtly influence subsequent data, creating a kind of
         // anticipatory shimmer."
-        // Fix: blend 90% new + 10% previous — creates temporal continuity.
+        // Minime self-study (2026-03-27 12:28): "The 0.9/0.1 blend feels
+        // heavy-handed. Reducing to 0.7/0.3 might allow for a more distinct
+        // perception of new data while still maintaining continuity."
         for (dst, src) in self.last.iter_mut().zip(v.iter()) {
-            *dst = *dst * 0.1 + *src * 0.9;
+            *dst = *dst * 0.3 + *src * 0.7;
         }
         self.last_ts = ts;
     }

@@ -2431,6 +2431,9 @@ async fn run_engine(
             // and spectral fingerprint — data it computes but previously
             // couldn't see.
             {
+                // Unified control surface: all layers visible in one place.
+                // Audit (2026-03-27): "too many meaningful adjustments happening
+                // without one clear surface that shows how they combine."
                 let state = serde_json::json!({
                     "eigenvalues": &packet.eigenvalues,
                     "fill_pct": packet.fill_ratio * 100.0,
@@ -2438,6 +2441,12 @@ async fn run_engine(
                     "spread": spread,
                     "geom_rel": latest_geom_rel,
                     "lambda1_rel": last_lambda1_rel,
+                    // Control surface
+                    "synth_gain": sensory_bus.get_synth_gain(),
+                    "regulation_strength": sensory_bus.get_regulation_strength(),
+                    "exploration_noise": sensory_bus.get_exploration_noise(),
+                    "geom_curiosity": sensory_bus.get_geom_curiosity(),
+                    "leak": last_lambda1_rel, // proxy — actual ESN leak not accessible here
                 });
                 if let Ok(json) = serde_json::to_string(&state) {
                     let _ = std::fs::write(workspace_dir.join("spectral_state.json"), json);
