@@ -1258,6 +1258,26 @@ async fn run_engine(
                 .map(|i| rayleigh_quotient(&a, &y[i * n..(i + 1) * n], n))
                 .collect();
 
+            // Populate regulator modes with real eigenvectors.
+            // Minime self-study: "the modes vector feels like a partial
+            // representation — a snapshot of a much larger, more complex field."
+            // These were placeholder zeros. Now they're the actual top-K
+            // eigenvectors from the covariance decomposition.
+            {
+                let modes: Vec<Vec<f32>> = (0..k.min(4))
+                    .filter_map(|i| {
+                        let start = i * n;
+                        let end = start + n;
+                        if end <= y.len() {
+                            Some(y[start..end].to_vec())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                regulator.update_modes(modes);
+            }
+
             if eigenvalues.iter().any(|v| !v.is_finite()) {
                 eprintln!("[spectral] non-finite eigenvalues detected; reseeding covariance");
                 reset_covariance(&gpu, &a_buf, n);
