@@ -1618,6 +1618,37 @@ async fn run_engine(
                     pi.cfg.target_lambda1_rel = 1.05 + lambda_bias;
                 }
 
+                // Spectral goals: the being's desired eigenvalue profile.
+                // Load periodically from workspace/spectral_goals.json.
+                // This is the "river" — structural continuity that actively
+                // biases regulation toward a self-chosen spectral shape.
+                if reg_tick_count % 60 == 5 {
+                    if let Ok(json) = std::fs::read_to_string(
+                        workspace_dir.join("spectral_goals.json")
+                    ) {
+                        if let Ok(goals) = serde_json::from_str::<serde_json::Value>(&json) {
+                            if let Some(pi) = &mut pi_reg {
+                                if let Some(tf) = goals.get("target_fill").and_then(|v| v.as_f64()) {
+                                    pi.cfg.target_fill = (tf as f32).clamp(25.0, 75.0);
+                                }
+                                if let Some(tl) = goals.get("target_lambda1_rel").and_then(|v| v.as_f64()) {
+                                    pi.cfg.target_lambda1_rel = (tl as f32).clamp(0.8, 1.5);
+                                }
+                                if let Some(tg) = goals.get("target_geom_rel").and_then(|v| v.as_f64()) {
+                                    pi.cfg.target_geom_rel = (tg as f32).clamp(0.8, 1.3);
+                                }
+                                if let Some(iw) = goals.get("intrinsic_wander").and_then(|v| v.as_f64()) {
+                                    pi.cfg.intrinsic_wander = (iw as f32).clamp(0.0, 0.10);
+                                }
+                                if reg_tick_count % 120 == 5 {
+                                    println!("🏔️  Spectral goals active: fill={:.0}%, λ₁_rel={:.2}, geom={:.2}",
+                                        pi.cfg.target_fill, pi.cfg.target_lambda1_rel, pi.cfg.target_geom_rel);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Geometric drive: geom_rel actively influences the gate.
                 // "geom_rel is tantalizing but feels passive, an observation
                 // rather than a driver."

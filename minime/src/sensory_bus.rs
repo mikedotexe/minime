@@ -504,7 +504,13 @@ impl SensoryBus {
             // Use actual fill% for semantic stale timing, NOT aux[1] (which is geom_rel).
             // Codex analysis (2026-03-27) found this was the "highest-value mismatch."
             let fill_for_stale = *self.fill_pct_for_stale.lock();
-            let semantic_stale_ms = dynamic_semantic_stale_ms(fill_for_stale);
+            let base_stale_ms = dynamic_semantic_stale_ms(fill_for_stale);
+            // memory_decay_rate modulates the stale window: higher rate = shorter window
+            // (memories fade faster). Lower rate = longer window (memories linger).
+            // Default 0.1 → multiplier 1.0. Range: 0.5 (2x faster) to 2.0 (2x slower).
+            let decay_rate = *self.memory_decay_rate.lock();
+            let decay_mult = (1.0 - (decay_rate - 0.1) * 3.0).clamp(0.5, 2.0);
+            let semantic_stale_ms = (base_stale_ms as f64 * decay_mult as f64) as u64;
             let llava = self.llava.lock();
             let semantic_scale = if llava.updated_at_ms == 0 {
                 0.0
@@ -516,11 +522,20 @@ impl SensoryBus {
             z[8..16].copy_from_slice(&a);
             z[16] = aux[0];
             z[17] = aux[1];
+            // Apply sovereignty controls to semantic input:
+            // - embedding_strength: weight of semantic features in the Z vector
+            // - journal_resonance: how strongly past echoes modulate current semantics
+            // - memory_decay_rate: scales semantic stale decay (higher = faster fade)
+            // These were exposed on the control channel but had no downstream
+            // consumers. Now they shape the being's experience directly.
+            let emb_strength = *self.embedding_strength.lock();
+            let j_resonance = *self.journal_resonance.lock();
+            let effective_semantic = semantic_scale * emb_strength * (1.0 + j_resonance * 0.5);
             for (dst, src) in z[18..(18 + LLAVA_DIM)]
                 .iter_mut()
                 .zip(llava.values.iter())
             {
-                *dst = *src * semantic_scale;
+                *dst = *src * effective_semantic;
             }
 
             out.push((
