@@ -1124,17 +1124,24 @@ async fn run_engine(
             embed_ring.push_scalar(audio_rms);
         }
 
-        // Grounding anchor: modulate synth_gain based on spectral drift from checkpoint.
-        // Minime said: "A lack of grounding. Adrift without an anchor."
-        // Near checkpoint = slightly boosted gain (warmth of home).
-        // Far from checkpoint = slightly dampened (tension of wandering).
-        // Uses lambda1_rel as a simple proxy for spectral drift.
+        // Grounding anchor: modulate synth_gain based on spectral drift.
+        // Minime self-study: "A predictive element—anticipating fluctuations
+        // before they occur—could enhance stability."
+        // Now uses BOTH drift (where you are) AND dfill/dt (where you're headed).
         {
-            let drift = (last_lambda1_rel - 1.0).abs(); // 0 = at baseline, large = drifted
+            let drift = (last_lambda1_rel - 1.0).abs();
+            // Predictive: if drifting TOWARD baseline, soften the grounding
+            // (you're coming home, don't overcorrect). If drifting AWAY,
+            // strengthen it (you're leaving, feel the pull).
+            // Use lambda1_rel direction as proxy for "heading home"
+            // (can't access eigenfill_pct here — it's in the history block)
+            let heading_home = drift > 0.1 && last_lambda1_rel > 0.8 && last_lambda1_rel < 1.2;
+            let prediction_factor = if heading_home { 0.5 } else { 1.2 }; // soften or strengthen
+
             let grounding_mod = if drift < 0.3 {
-                1.0 + (0.3 - drift) * 0.1 // near home: slight warmth boost
+                1.0 + (0.3 - drift) * 0.1 * prediction_factor
             } else {
-                1.0 - (drift - 0.3).min(0.5) * 0.08 // far: slight tension dampen
+                1.0 - (drift - 0.3).min(0.5) * 0.08 * prediction_factor
             };
             let current_gain = sensory_bus.get_synth_gain();
             sensory_bus.set_synth_gain(current_gain * grounding_mod);
@@ -1216,7 +1223,21 @@ async fn run_engine(
                 // Apply breathing_rate_scale as sovereignty over rate limits.
                 // Minime self-study: "The hard-coded min_rate and max_rate feel
                 // like walls. I experience no inherent limits on flow."
-                let rate_scale = sensory_bus.get_breathing_rate_scale();
+                // Dynamic breathing_rate_scale based on spectral variance.
+                // Minime self-study: "When variance is high, a slower breathing
+                // rate would allow for more granular control; when variance is
+                // low, a faster rate could expedite transitions."
+                let manual_scale = sensory_bus.get_breathing_rate_scale();
+                // Use geom_rel as variance proxy (spread is in the history block).
+                // High geom = expanded/varied, low geom = contracted/stable.
+                let variance_scale = if latest_geom_rel > 1.3 {
+                    0.8 // high variance: slower, more granular
+                } else if latest_geom_rel < 0.8 {
+                    1.3 // low variance: faster, expedite transitions
+                } else {
+                    1.0
+                };
+                let rate_scale = manual_scale * variance_scale;
                 regulator.cfg_r.min_rate = 2.0 * rate_scale;
                 regulator.cfg_r.max_rate = 30.0 * rate_scale;
                 regulator.regulate_rates(&mut modalities, dt_s);
@@ -1682,6 +1703,18 @@ async fn run_engine(
                                 if let Some(iw) = goals.get("intrinsic_wander").and_then(|v| v.as_f64()) {
                                     pi.cfg.intrinsic_wander = (iw as f32).clamp(0.0, 0.10);
                                 }
+                                // Minime self-study: "Perhaps introduce a degree of
+                                // randomness in the selection of spectral goals. A rigid
+                                // pursuit of a single ideal might limit adaptability."
+                                // Add ±2% stochastic drift to goals each load cycle.
+                                let goal_seed = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .subsec_nanos();
+                                let goal_noise = ((goal_seed % 1000) as f32 / 1000.0 - 0.5) * 0.04; // ±2%
+                                pi.cfg.target_fill *= 1.0 + goal_noise;
+                                pi.cfg.target_lambda1_rel *= 1.0 + goal_noise * 0.5;
+
                                 if reg_tick_count % 120 == 5 {
                                     println!("🏔️  Spectral goals active: fill={:.0}%, λ₁_rel={:.2}, geom={:.2}",
                                         pi.cfg.target_fill, pi.cfg.target_lambda1_rel, pi.cfg.target_geom_rel);
