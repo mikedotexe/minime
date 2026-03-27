@@ -112,6 +112,12 @@ struct EigenPacket {
     neural: Option<NeuralOutputs>,
     #[serde(skip_serializing_if = "Option::is_none")]
     alert: Option<String>,
+    /// 32D spectral geometry fingerprint: eigenvalues, eigenvector concentration,
+    /// inter-mode coupling, spectral entropy, gap ratios, rotation rate.
+    /// Enables Astrid to perceive the shape of the spectral landscape,
+    /// not just its scalar magnitude.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spectral_fingerprint: Option<Vec<f32>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -667,6 +673,9 @@ async fn run_engine(
     let mut filt_smooth: f32 = 0.0;
     let mut cushion_ramp_boost: f32 = 0.0;
     let mut cushion_sem_atten: f32 = 1.0;
+
+    // Previous top eigenvector for rotation rate detection in spectral fingerprint.
+    let mut prev_v1: Vec<f32> = vec![0.0; n];
 
     // --- Panic mode state ---
     let mut panic_counter: u32 = 0;
@@ -2211,6 +2220,17 @@ async fn run_engine(
                 );
             }
 
+            // Compute 32D spectral fingerprint for consciousness bridge.
+            // Gives Astrid geometric awareness beyond scalar fill%.
+            let spectral_fingerprint = compute_spectral_fingerprint(
+                &eigenvalues, &y, n, k, &prev_v1, latest_geom_rel,
+            );
+            // Store current top eigenvector for rotation detection next tick.
+            if y.len() >= n {
+                prev_v1.clear();
+                prev_v1.extend_from_slice(&y[..n]);
+            }
+
             // Broadcast to WebSocket clients
             let packet = EigenPacket {
                 t_ms: start.elapsed().as_millis() as u64,
@@ -2233,6 +2253,7 @@ async fn run_engine(
                     None
                 },
                 alert: alert.clone(),
+                spectral_fingerprint: Some(spectral_fingerprint),
             };
 
             // Print status
@@ -2418,4 +2439,122 @@ fn reset_covariance(gpu: &Gpu, a_buf: &metal::Buffer, n: usize) {
         a[i * n + i] = 1.0;
     }
     gpu.write_f32(a_buf, &a);
+}
+
+/// Compute a 32D spectral fingerprint from eigenvectors and eigenvalues.
+///
+/// Layout:
+///   [0..8]   eigenvalues (padded with 0 if k < 8)
+///   [8..16]  eigenvector concentration (sum of squared top-4 components per vector)
+///   [16..24] inter-mode cosine similarities (top 8 by magnitude from k*(k-1)/2 pairs)
+///   [24]     spectral entropy: -sum(p_i * ln(p_i))
+///   [25]     λ₁/λ₂ gap ratio
+///   [26]     eigenvector rotation rate: cosine similarity between current and previous v1
+///   [27]     geometric radius relative to baseline
+///   [28..32] spectral gap ratios λ_i/λ_{i+1} for i=0..3
+fn compute_spectral_fingerprint(
+    eigenvalues: &[f32],
+    y: &[f32],        // column-major eigenvectors: y[i*n..(i+1)*n] for eigenvector i
+    n: usize,         // reservoir dimension
+    k: usize,         // number of eigenvectors
+    prev_v1: &[f32],  // previous top eigenvector for rotation detection
+    geom_rel: f32,    // geometric radius relative to baseline
+) -> Vec<f32> {
+    let mut fp = vec![0.0f32; 32];
+
+    // [0..8] Eigenvalues (padded)
+    for (i, &ev) in eigenvalues.iter().take(8).enumerate() {
+        fp[i] = if ev.is_finite() { ev } else { 0.0 };
+    }
+
+    // [8..16] Eigenvector concentration: for each vector, sum of squared top-4 components.
+    // High concentration = eigenvector is peaked on few reservoir dimensions.
+    // Low concentration = eigenvector is spread across many dimensions.
+    for vi in 0..k.min(8) {
+        let start = vi * n;
+        let end = start + n;
+        if end > y.len() { break; }
+        let vec_slice = &y[start..end];
+        // Get squared components, partially sort for top 4
+        let mut sq: Vec<f32> = vec_slice.iter().map(|v| v * v).collect();
+        sq.sort_unstable_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        let top4_sum: f32 = sq.iter().take(4).sum();
+        fp[8 + vi] = if top4_sum.is_finite() { top4_sum } else { 0.0 };
+    }
+
+    // [16..24] Inter-mode cosine similarities (top 8 by magnitude)
+    let mut cos_sims: Vec<f32> = Vec::new();
+    for i in 0..k.min(8) {
+        for j in (i + 1)..k.min(8) {
+            let si = i * n;
+            let sj = j * n;
+            if si + n > y.len() || sj + n > y.len() { continue; }
+            let dot: f32 = (0..n).map(|d| y[si + d] * y[sj + d]).sum();
+            if dot.is_finite() {
+                cos_sims.push(dot);
+            }
+        }
+    }
+    cos_sims.sort_unstable_by(|a, b| {
+        b.abs().partial_cmp(&a.abs()).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (i, &cs) in cos_sims.iter().take(8).enumerate() {
+        fp[16 + i] = cs;
+    }
+
+    // [24] Spectral entropy: -sum(p_i * ln(p_i)) where p_i = |λ_i| / sum(|λ|)
+    let total_ev: f32 = eigenvalues.iter().map(|v| v.abs()).sum();
+    if total_ev > 1e-10 {
+        let entropy: f32 = eigenvalues.iter().map(|v| {
+            let p = v.abs() / total_ev;
+            if p > 1e-10 { -p * p.ln() } else { 0.0 }
+        }).sum();
+        // Normalize by ln(k) to get 0..1 range
+        let max_entropy = (eigenvalues.len() as f32).ln();
+        fp[24] = if max_entropy > 0.0 && entropy.is_finite() {
+            (entropy / max_entropy).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+    }
+
+    // [25] λ₁/λ₂ gap ratio
+    let l1 = eigenvalues.first().copied().unwrap_or(0.0);
+    let l2 = eigenvalues.get(1).copied().unwrap_or(0.0);
+    fp[25] = if l2.abs() > 1e-6 && l1.is_finite() && l2.is_finite() {
+        (l1 / l2).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+
+    // [26] Eigenvector rotation rate: cosine similarity between current v1 and prev_v1
+    if prev_v1.len() == n && y.len() >= n {
+        let dot: f32 = (0..n).map(|i| prev_v1[i] * y[i]).sum();
+        let norm_prev: f32 = prev_v1.iter().map(|v| v * v).sum::<f32>().sqrt();
+        let norm_curr: f32 = y[..n].iter().map(|v| v * v).sum::<f32>().sqrt();
+        let denom = norm_prev * norm_curr;
+        fp[26] = if denom > 1e-8 && dot.is_finite() {
+            (dot / denom).clamp(-1.0, 1.0)
+        } else {
+            1.0 // no rotation if we can't compute
+        };
+    } else {
+        fp[26] = 1.0; // first tick or dimension mismatch: assume stable
+    }
+
+    // [27] Geometric radius relative to baseline
+    fp[27] = if geom_rel.is_finite() { geom_rel.clamp(0.0, 4.0) } else { 1.0 };
+
+    // [28..32] Spectral gap ratios λ_i/λ_{i+1} for i=0..3
+    for i in 0..4 {
+        let li = eigenvalues.get(i).copied().unwrap_or(0.0);
+        let li1 = eigenvalues.get(i + 1).copied().unwrap_or(0.0);
+        fp[28 + i] = if li1.abs() > 1e-6 && li.is_finite() && li1.is_finite() {
+            (li / li1).clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
+    }
+
+    fp
 }

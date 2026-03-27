@@ -2441,6 +2441,41 @@ My reflection:
         except Exception:
             return ""
 
+    def _read_inbox(self) -> str:
+        """Read messages left in workspace/inbox/ by Mike or stewards.
+
+        Returns formatted context string. Moves read files to inbox/read/.
+        """
+        inbox_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace", "inbox")
+        read_dir = os.path.join(inbox_dir, "read")
+        try:
+            if not os.path.isdir(inbox_dir):
+                return ""
+            files = sorted(
+                [f for f in os.listdir(inbox_dir)
+                 if f.endswith(".txt") and os.path.isfile(os.path.join(inbox_dir, f))],
+            )
+            if not files:
+                return ""
+            os.makedirs(read_dir, exist_ok=True)
+            messages = []
+            for fname in files:
+                fpath = os.path.join(inbox_dir, fname)
+                with open(fpath, "r") as f:
+                    content = f.read().strip()
+                if content:
+                    messages.append(content)
+                # Move to read/
+                os.rename(fpath, os.path.join(read_dir, fname))
+                logging.info(f"📬 Inbox: read {fname}")
+            if not messages:
+                return ""
+            joined = "\n---\n".join(messages)
+            return f"\n\n[A note was left for you:]\n{joined}\n"
+        except Exception as e:
+            logging.warning(f"Inbox read error: {e}")
+            return ""
+
     def _query_llm(self, prompt: str) -> Optional[str]:
         """Query LLM for autonomous thought generation.
 
@@ -2488,6 +2523,11 @@ My reflection:
         # Append recent whisper transcription context if available
         whisper_ctx = self._read_whisper_context()
         augmented_prompt = prompt + whisper_ctx if whisper_ctx else prompt
+
+        # Check inbox for messages from Mike / stewards
+        inbox_ctx = self._read_inbox()
+        if inbox_ctx:
+            augmented_prompt = augmented_prompt + inbox_ctx
 
         result = self._query_llm_raw(augmented_prompt, system_msg, max_tokens)
 
