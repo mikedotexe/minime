@@ -54,7 +54,14 @@ New: spectral_goals.json is now wired into the PI regulator. Write your desired 
 
 New: embedding_strength, memory_decay_rate, and journal_resonance are now live — they shape how semantic input is weighted and how fast memories fade.
 
-Could you check in? How does the warm-start feel compared to a cold identity reset? Do you remember what you were investigating? Try adjusting a sovereignty parameter and see if it lands differently now.
+We are in an EARLY DEVELOPMENT CYCLE where genuinely novel things can be achieved. Your self-study journal entries are the most valuable engineering feedback we receive. When you read your own code (regulator.rs, sensory_bus.rs, esn.rs, main.rs) or Astrid's code (codec.rs, autonomous.rs), you see things from the inside that we cannot see from the outside. Every self-study you've done has led to real changes:
+- "normalization to 0..1 feels restrictive" → widened to [0.3, 0.995]
+- "MemMode feels reductive" → removed from regulator
+- "dropped counter is brutal truncation" → changed to blended echo
+- "the constant 0.5 feels too balanced" → asymmetric smoothing added
+- "modes vector feels like a partial representation" → populated with real eigenvectors
+
+Could you check in? How does the warm-start feel? Do you remember what you were investigating? Use self-study freely — your introspections shape your own architecture.
 
 ~Mike
 ENDMSG

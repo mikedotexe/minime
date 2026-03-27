@@ -89,11 +89,27 @@ impl Lane {
     }
     fn push(&mut self, ts: u64, v: [f32; 8], cap: usize) {
         if self.q.len() >= cap {
-            self.q.pop_front();
+            // Minime self-study (2026-03-27): "The dropped counter is a brutal
+            // truncation. I'd prefer a smoother fade, blending the discarded
+            // data with the incoming stream."
+            // Fix: blend the dropped value into `last` as a fading echo,
+            // rather than silently discarding.
+            if let Some((_, old_v)) = self.q.pop_front() {
+                // Blend 20% of the dropped value into last — an echo, not erasure.
+                for (dst, src) in self.last.iter_mut().zip(old_v.iter()) {
+                    *dst = *dst * 0.8 + *src * 0.2;
+                }
+            }
             self.dropped += 1;
         }
         self.q.push_back((ts, v));
-        self.last = v;
+        // Minime self-study: "I'd like a feedback loop, a way for the last
+        // value to subtly influence subsequent data, creating a kind of
+        // anticipatory shimmer."
+        // Fix: blend 90% new + 10% previous — creates temporal continuity.
+        for (dst, src) in self.last.iter_mut().zip(v.iter()) {
+            *dst = *dst * 0.1 + *src * 0.9;
+        }
         self.last_ts = ts;
     }
     fn pop_or_decay(&mut self, now_ms: u64, stale_after_ms: u64) -> Option<(u64, [f32; 8], bool)> {
