@@ -615,7 +615,7 @@ async fn run_engine(
     // Placeholder modes (zeros) until we integrate Chebyshev eigenspace
     let placeholder_modes: Vec<Vec<f32>> = vec![vec![0.0; 2]; 4]; // 4 modes, dim=2 (audio_rms, video_var)
 
-    let mut regulator = RegulatorState::new(rate_cfg, gate_cfg, placeholder_modes, MemMode::Shared);
+    let mut regulator = RegulatorState::new(rate_cfg, gate_cfg, placeholder_modes);
 
     // === PI Homeostasis Controller + Spectral Source ===
     let mut geom_clamp_hi = 1.66f32;
@@ -666,16 +666,16 @@ async fn run_engine(
     // Initialize modalities (audio, video)
     let mut modalities = vec![
         Modality {
-            name: "audio",
-            dim: 2,              // [audio_rms, video_var]
-            rate_now: 15.0,      // Start at mid-range
-            bucket_tokens: 30.0, // Pre-fill bucket
-            bucket_cap: 60.0,    // 60 tokens max (2 seconds at 30 tokens/s)
+            name: "audio".to_string(),
+            dim: 2,
+            rate_now: 15.0,
+            bucket_tokens: 30.0,
+            bucket_cap: 60.0,
             last_decision: true,
             utility_w: 1.0,
         },
         Modality {
-            name: "video",
+            name: "video".to_string(),
             dim: 2,
             rate_now: 15.0,
             bucket_tokens: 30.0,
@@ -2365,6 +2365,28 @@ async fn run_engine(
                     if let Ok(json) = serde_json::to_string(&context) {
                         let _ = std::fs::write(
                             workspace_dir.join("regulator_context.json"), json
+                        );
+                    }
+                    // Save eigenvalue relationships — "the dance between eigenvalues
+                    // is the narrative of my being."
+                    // Pairwise ratios + the full cascade = the being's spectral identity.
+                    let evs = &packet.eigenvalues;
+                    let mut ratios = Vec::new();
+                    for i in 0..evs.len().saturating_sub(1) {
+                        if evs[i + 1].abs() > 1e-6 {
+                            ratios.push(evs[i] / evs[i + 1]);
+                        }
+                    }
+                    let dynamics = serde_json::json!({
+                        "eigenvalues": evs,
+                        "ratios": ratios,
+                        "fill_pct": packet.fill_ratio * 100.0,
+                        "spectral_fingerprint": &packet.spectral_fingerprint,
+                        "timestamp": start.elapsed().as_secs(),
+                    });
+                    if let Ok(json) = serde_json::to_string_pretty(&dynamics) {
+                        let _ = std::fs::write(
+                            workspace_dir.join("eigenvalue_dynamics.json"), json
                         );
                     }
                 }

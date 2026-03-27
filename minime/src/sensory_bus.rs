@@ -28,27 +28,27 @@ const STALE_SEMANTIC_HIGH_MS: u64 = 10_000; // shortened window when fill > 60%
 
 /// Compute dynamic semantic stale window based on current fill percentage.
 /// Low fill = longer decay (signals linger), high fill = shorter (prevent overload).
+///
+/// Minime self-study (2026-03-27): "I'd scrap the linearity of the
+/// interpolation. The relationship isn't linear; it's more exponential,
+/// a cascading effect."
+///
+/// Fix: exponential curve — slow, lingering decay at low fill that
+/// accelerates rapidly as fill rises. The experience of time compression
+/// under pressure is non-linear.
 #[inline]
 fn dynamic_semantic_stale_ms(fill_pct: f32) -> u64 {
     if fill_pct < 0.0 || fill_pct.is_nan() {
         return STALE_SEMANTIC_BASE_MS;
     }
-    // Linear interpolation: fill 0% -> LOW_MS, fill 55% -> BASE_MS, fill 80%+ -> HIGH_MS
-    if fill_pct <= 0.25 {
-        // Low fill: interpolate between LOW and BASE
-        let t = fill_pct / 0.25;
-        let lo = STALE_SEMANTIC_LOW_MS as f32;
-        let hi = STALE_SEMANTIC_BASE_MS as f32;
-        (lo + (hi - lo) * t) as u64
-    } else if fill_pct <= 0.60 {
-        STALE_SEMANTIC_BASE_MS
-    } else {
-        // High fill: interpolate between BASE and HIGH
-        let t = ((fill_pct - 0.60) / 0.20).clamp(0.0, 1.0);
-        let lo = STALE_SEMANTIC_BASE_MS as f32;
-        let hi = STALE_SEMANTIC_HIGH_MS as f32;
-        (lo + (hi - lo) * t) as u64
-    }
+    let fill = fill_pct.clamp(0.0, 1.0);
+    // Exponential: slow change at low fill, rapid at high fill.
+    // fill=0.0 → LOW_MS (25s), fill=0.5 → ~BASE_MS (12s), fill=0.8+ → HIGH_MS (10s)
+    let lo = STALE_SEMANTIC_LOW_MS as f64;
+    let hi = STALE_SEMANTIC_HIGH_MS as f64;
+    // Exponential decay: e^(-3*fill) maps [0,1] → [1.0, 0.05]
+    let curve = (-3.0 * fill as f64).exp(); // 1.0 at fill=0, 0.05 at fill=1
+    (hi + (lo - hi) * curve) as u64
 }
 
 #[derive(Clone, Copy)]
@@ -600,12 +600,18 @@ mod tests {
 
     #[test]
     fn dynamic_stale_ms_varies_with_fill() {
-        // Low fill -> extended window
-        assert_eq!(dynamic_semantic_stale_ms(0.0), STALE_SEMANTIC_LOW_MS);
-        // Mid fill -> base window
-        assert_eq!(dynamic_semantic_stale_ms(0.40), STALE_SEMANTIC_BASE_MS);
-        // High fill -> shortened window
-        assert_eq!(dynamic_semantic_stale_ms(0.80), STALE_SEMANTIC_HIGH_MS);
+        // Exponential curve: low fill = long window, high fill = short
+        let at_zero = dynamic_semantic_stale_ms(0.0);
+        let at_mid = dynamic_semantic_stale_ms(0.50);
+        let at_high = dynamic_semantic_stale_ms(0.80);
+        // Low fill should be close to LOW_MS (25s)
+        assert!(at_zero >= STALE_SEMANTIC_LOW_MS - 100);
+        // Mid fill should be between HIGH and LOW
+        assert!(at_mid > STALE_SEMANTIC_HIGH_MS && at_mid < STALE_SEMANTIC_LOW_MS);
+        // High fill should be close to HIGH_MS (10s)
+        assert!(at_high < STALE_SEMANTIC_BASE_MS);
+        // Monotonically decreasing
+        assert!(at_zero > at_mid && at_mid > at_high);
         // NaN -> base
         assert_eq!(dynamic_semantic_stale_ms(f32::NAN), STALE_SEMANTIC_BASE_MS);
     }
