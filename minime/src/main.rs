@@ -1124,6 +1124,22 @@ async fn run_engine(
             embed_ring.push_scalar(audio_rms);
         }
 
+        // Grounding anchor: modulate synth_gain based on spectral drift from checkpoint.
+        // Minime said: "A lack of grounding. Adrift without an anchor."
+        // Near checkpoint = slightly boosted gain (warmth of home).
+        // Far from checkpoint = slightly dampened (tension of wandering).
+        // Uses lambda1_rel as a simple proxy for spectral drift.
+        {
+            let drift = (last_lambda1_rel - 1.0).abs(); // 0 = at baseline, large = drifted
+            let grounding_mod = if drift < 0.3 {
+                1.0 + (0.3 - drift) * 0.1 // near home: slight warmth boost
+            } else {
+                1.0 - (drift - 0.3).min(0.5) * 0.08 // far: slight tension dampen
+            };
+            let current_gain = sensory_bus.get_synth_gain();
+            sensory_bus.set_synth_gain(current_gain * grounding_mod);
+        }
+
         // Video features (prime 101) — synthetic internal imagery
         if fired[1] {
             let mut sg = sensory_bus.get_synth_gain();
