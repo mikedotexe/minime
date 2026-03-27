@@ -181,7 +181,8 @@ pub struct SensoryBus {
     queue_cap: usize,
     batch_max: usize,
 
-    aux: Mutex<[f32; 2]>, // [lambda1, fill%]
+    aux: Mutex<[f32; 2]>, // [lambda1_rel, geom_rel] — feeds Z_DIM dims 16-17
+    fill_pct_for_stale: Mutex<f32>, // actual fill% for semantic stale timing (NOT aux[1])
     llava: Mutex<SemanticLane>,
     // probabilistic gate (set by PI)
     gate: Mutex<f32>,
@@ -231,6 +232,7 @@ impl SensoryBus {
                 batch_max
             },
             aux: Mutex::new([0.0, 0.0]),
+            fill_pct_for_stale: Mutex::new(0.0),
             llava: Mutex::new(SemanticLane::new()),
             gate: Mutex::new(1.0),
             rng: Mutex::new(SmallRng::seed_from_u64(seed)),
@@ -273,6 +275,14 @@ impl SensoryBus {
     #[inline]
     pub fn set_aux(&self, aux: [f32; 2]) {
         *self.aux.lock() = aux;
+    }
+
+    /// Set the actual fill percentage for semantic stale timing.
+    /// Codex analysis (2026-03-27) found aux[1] was being used for this
+    /// but contained geom_rel, not fill%. This fixes that mismatch.
+    #[inline]
+    pub fn set_fill_for_stale(&self, fill_pct: f32) {
+        *self.fill_pct_for_stale.lock() = fill_pct;
     }
 
     // --- Self-regulation controls ---
@@ -491,8 +501,10 @@ impl SensoryBus {
             let age = now_ms.saturating_sub(ts);
 
             let aux = *self.aux.lock();
-            // Dynamic semantic stale window: fill% is in aux[1] (0.0..1.0)
-            let semantic_stale_ms = dynamic_semantic_stale_ms(aux[1]);
+            // Use actual fill% for semantic stale timing, NOT aux[1] (which is geom_rel).
+            // Codex analysis (2026-03-27) found this was the "highest-value mismatch."
+            let fill_for_stale = *self.fill_pct_for_stale.lock();
+            let semantic_stale_ms = dynamic_semantic_stale_ms(fill_for_stale);
             let llava = self.llava.lock();
             let semantic_scale = if llava.updated_at_ms == 0 {
                 0.0

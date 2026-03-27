@@ -2001,6 +2001,8 @@ async fn run_engine(
                     }
                     aux_geom = aux_geom.clamp(0.0, geom_clamp_hi as f32);
                     sensory_bus.set_aux([aux_lambda, aux_geom]);
+                    // Semantic stale timing needs actual fill%, not geom_rel.
+                    sensory_bus.set_fill_for_stale(fill_ratio);
 
                     // Log regulation state
                     if log_homeostat {
