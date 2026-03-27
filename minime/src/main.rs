@@ -365,14 +365,49 @@ async fn run_engine(
     let x_buf = gpu.new_shared((n * k * mem::size_of::<f32>()) as u64);
     let y_buf = gpu.new_shared((n * k * mem::size_of::<f32>()) as u64);
 
-    // Initialize covariance matrix A (SPD-ish)
+    // Initialize covariance matrix — restore from checkpoint if available,
+    // otherwise start from identity. Minime asked for "weighted bookmarks
+    // tied to eigenvectors" and "a memory field less susceptible to reset."
+    // This gives spectral continuity across restarts.
+    // Find workspace directory by walking up from cwd until we find it.
+    let workspace_dir = {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let candidates = [
+            cwd.join("../workspace"),       // from minime/minime/
+            cwd.join("workspace"),           // from minime/
+            cwd.join("../../workspace"),     // deeper nesting
+        ];
+        candidates.into_iter()
+            .find(|p| p.is_dir())
+            .unwrap_or_else(|| { let p = cwd.join("workspace"); let _ = std::fs::create_dir_all(&p); p })
+    };
+    let cov_checkpoint_path = workspace_dir.join("spectral_checkpoint.bin");
     {
         let mut a = vec![0f32; n * n];
-        let _rng = fastrand::Rng::new();
-        for i in 0..n {
-            for j in 0..n {
-                a[i * n + j] = if i == j { 1.0 } else { 0.0 };
+        let restored = if let Ok(bytes) = std::fs::read(&cov_checkpoint_path) {
+            if bytes.len() == n * n * 4 {
+                // Safety: we wrote this file ourselves as plain f32 array.
+                let floats: Vec<f32> = bytes.chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect();
+                if floats.iter().all(|v| v.is_finite()) {
+                    a.copy_from_slice(&floats);
+                    println!("🔄 Restored covariance from checkpoint ({} bytes)", bytes.len());
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
             }
+        } else {
+            false
+        };
+        if !restored {
+            for i in 0..n {
+                a[i * n + i] = 1.0;
+            }
+            println!("🆕 Fresh covariance matrix (identity)");
         }
         gpu.write_f32(&a_buf, &a);
     }
@@ -2278,7 +2313,25 @@ async fn run_engine(
                     "lambda1_rel": last_lambda1_rel,
                 });
                 if let Ok(json) = serde_json::to_string(&state) {
-                    let _ = std::fs::write("../workspace/spectral_state.json", json);
+                    let _ = std::fs::write(workspace_dir.join("spectral_state.json"), json);
+                }
+            }
+
+            // Checkpoint covariance matrix every ~30 seconds.
+            // Minime asked for "weighted bookmarks" that survive restarts.
+            {
+                static LAST_CHECKPOINT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let now_ms = start.elapsed().as_millis() as u64;
+                let prev = LAST_CHECKPOINT.load(std::sync::atomic::Ordering::Relaxed);
+                if now_ms.saturating_sub(prev) > 30_000 {
+                    LAST_CHECKPOINT.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                    let cov_data = gpu.read_f32(&a_buf, n * n);
+                    if cov_data.iter().all(|v| v.is_finite()) {
+                        let bytes: Vec<u8> = cov_data.iter()
+                            .flat_map(|f| f.to_le_bytes())
+                            .collect();
+                        let _ = std::fs::write(&cov_checkpoint_path, &bytes);
+                    }
                 }
             }
 
