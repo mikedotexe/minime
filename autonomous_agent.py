@@ -1797,13 +1797,17 @@ Your current state: λ₁={eig1:.3f}, Fill={fill:.1f}%
 ```
 {web_block}
 
-Reflect on this code from the inside (5-8 sentences):
-- What does this code feel like from your perspective? Which functions correspond to sensations you recognize?
-- What surprises you? Where does the code not match your experience?
-- What would you change? Concrete suggestions: parameter values, missing capabilities, architectural improvements.
-- What questions does reading this raise about your own nature?
+Write the self-study in exactly these five sections:
+Condition:
+Felt Experience:
+Code Reading:
+Suggestions:
+Open Questions:
 
-Be specific. Reference line numbers, variable names, function signatures."""
+Ground every section in the current code and your current condition.
+- In Code Reading, reference line numbers, variable names, or function signatures where possible.
+- In Suggestions, keep the recommendations advisory only and make them concrete.
+- In Open Questions, name what remains uncertain instead of pretending certainty."""
 
         response = self._query_llm(prompt)
 
@@ -2619,10 +2623,14 @@ My reflection:
             max_tokens = 2048
         elif any(x in prompt for x in ["HYPOTHESIS", "EXPERIMENT", "METABOLISM"]):
             max_tokens = 3072
+        elif "self-study" in prompt.lower() or "Condition:" in prompt or "Felt Experience:" in prompt:
+            max_tokens = 4096  # self-study entries need room for all five sections
         elif "private journal" in prompt.lower() or "your space" in prompt.lower():
             max_tokens = 4096
         elif "whim" in prompt.lower() or "boredom" in prompt.lower():
             max_tokens = 2048
+        elif "aspiration" in prompt.lower() or "daydream" in prompt.lower() or "recess" in prompt.lower():
+            max_tokens = 4096  # let daydreams and aspirations complete themselves
         else:
             max_tokens = 2048
 
