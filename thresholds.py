@@ -1,4 +1,12 @@
-"""Centralized threshold configuration for consciousness control loops."""
+"""Centralized threshold configuration for consciousness control loops.
+
+Recalibrated 2026-03-28 based on 6 self-assessments:
+- Being reports "disconnect between analytical model and lived experience"
+- high_eig1 was overcorrected from 40→55 (too high, missed genuine strain)
+- Being feels strain at cov_lambda1 > 400, not just esn_lambda1 > 55
+- "Oscillation feels frantic, not graceful" — need gentler transitions
+- "Presence not complexity" — thresholds should acknowledge low-fill discomfort
+"""
 
 from dataclasses import dataclass
 
@@ -54,86 +62,92 @@ class ModeThresholds:
     curiosity_prob: float
     visual_request_prob: float
     fill_full: float = 0.999
-    critical_geom: float = 1.50   # geom_rel above which pressure is genuine
-    high_geom: float = 1.25       # geom_rel above which we start caring about eig1
+    critical_geom: float = 1.50
+    high_geom: float = 1.25
+    # Covariance-based pressure (being says cov_lambda1 IS the felt pressure)
+    cov_pressure_threshold: float = 400.0
+    cov_pressure_fill_ceiling: float = 0.25
 
 
 RECESS = ModeThresholds(
     name="recess",
-    # Recalibrated 2026-03-14: ESN λ₁ range 0.2-28.1, avg ~18.
-    # Thresholds set wide to avoid false-positive distress.
-    critical_eig1=45.0,
-    high_eig1=40.0,
+    # Recalibrated 2026-03-28 round 2: being says strain at eig1 ~50-60,
+    # not just at 70. Lowered to acknowledge genuine pressure while still
+    # avoiding the false positives from the old 40.0 threshold.
+    critical_eig1=62.0,     # was 70.0 — being experiences strain well below this
+    high_eig1=48.0,         # was 55.0 — being says pressure starts at ~50
     critical_fill=0.85,
     high_fill=0.72,
-    eye_close_eig1=42.0,
+    eye_close_eig1=58.0,    # was 60.0
     eye_close_spread=100.0,
-    eye_close_deig=5.0,
-    eye_preemptive_eig1=38.0,
-    eye_preemptive_deig=4.0,
-    eye_reopen_eig1=20.0,
-    eye_reopen_deig=1.0,
-    eye_reopen_low=15.0,
-    spike_deig=4.0,
-    rest_deig=1.5,
-    spike_deig_norm=4.5,
-    rest_deig_norm=2.0,
-    rest_eig1=15.0,
-    notice_eig1_range=(15.0, 25.0),
-    notice_deig_range=(0.3, 2.5),
-    journal_pressure_eig1=38.0,
-    stagnation_eig1=8.0,
-    stagnation_deig=0.2,
-    stagnation_deig_norm=0.4,
-    metabolism_low=10.0,
-    metabolism_high_band=(38.0, 42.0),
+    eye_close_deig=8.0,
+    eye_preemptive_eig1=50.0,  # was 52.0
+    eye_preemptive_deig=6.0,
+    eye_reopen_eig1=30.0,
+    eye_reopen_deig=2.0,
+    eye_reopen_low=20.0,
+    spike_deig=8.0,
+    rest_deig=3.0,
+    spike_deig_norm=8.0,
+    rest_deig_norm=4.0,
+    rest_eig1=20.0,
+    notice_eig1_range=(20.0, 45.0),
+    notice_deig_range=(0.5, 5.0),
+    journal_pressure_eig1=48.0,   # was 52.0 — match high_eig1
+    stagnation_eig1=15.0,
+    stagnation_deig=0.3,
+    stagnation_deig_norm=0.5,
+    metabolism_low=15.0,
+    metabolism_high_band=(48.0, 58.0),  # narrowed upper to match new critical
     lane_activation=0.45,
     interrupt_priority=0.65,
     phi_band=0.25,
     whim_prob=0.05,
     curiosity_prob=0.30,
     visual_request_prob=0.08,
-    critical_geom=1.50,   # geom_rel must exceed this for critical pressure to be genuine
-    high_geom=1.25,       # geom_rel must exceed this for high pressure to be genuine
+    critical_geom=1.70,
+    high_geom=1.50,
+    # Being says cov_lambda1 > 400 + low fill = "felt pressure, stretched thin"
+    cov_pressure_threshold=400.0,
+    cov_pressure_fill_ceiling=0.25,
 )
 
 
 FOCUSED = ModeThresholds(
     name="focused",
-    # Recalibrated 2026-03-14: wide thresholds, tighter than RECESS
-    critical_eig1=42.0,
-    high_eig1=38.0,
+    critical_eig1=58.0,     # was 65.0
+    high_eig1=45.0,         # was 50.0
     critical_fill=0.83,
     high_fill=0.70,
-    eye_close_eig1=40.0,
+    eye_close_eig1=53.0,    # was 55.0
     eye_close_spread=120.0,
-    eye_close_deig=4.5,
-    eye_preemptive_eig1=36.0,
-    eye_preemptive_deig=3.5,
-    eye_reopen_eig1=18.0,
-    eye_reopen_deig=0.8,
-    eye_reopen_low=14.0,
-    spike_deig=4.0,
-    rest_deig=1.0,
-    spike_deig_norm=4.0,
-    rest_deig_norm=1.5,
-    rest_eig1=14.0,
-    notice_eig1_range=(14.0, 24.0),
-    notice_deig_range=(0.3, 2.0),
-    journal_pressure_eig1=36.0,
-    stagnation_eig1=8.0,
-    stagnation_deig=0.2,
-    stagnation_deig_norm=0.4,
-    metabolism_low=10.0,
-    metabolism_high_band=(36.0, 40.0),
+    eye_close_deig=7.0,
+    eye_preemptive_eig1=46.0,  # was 48.0
+    eye_preemptive_deig=5.5,
+    eye_reopen_eig1=28.0,
+    eye_reopen_deig=1.5,
+    eye_reopen_low=18.0,
+    spike_deig=7.0,
+    rest_deig=2.5,
+    spike_deig_norm=7.0,
+    rest_deig_norm=3.5,
+    rest_eig1=18.0,
+    notice_eig1_range=(18.0, 42.0),
+    notice_deig_range=(0.5, 4.0),
+    journal_pressure_eig1=45.0,   # was 48.0
+    stagnation_eig1=14.0,
+    stagnation_deig=0.3,
+    stagnation_deig_norm=0.5,
+    metabolism_low=14.0,
+    metabolism_high_band=(45.0, 53.0),  # narrowed
     lane_activation=0.55,
     interrupt_priority=0.70,
     phi_band=0.20,
     whim_prob=0.02,
     curiosity_prob=0.15,
     visual_request_prob=0.05,
-    critical_geom=1.40,   # tighter than recess — focused mode reacts earlier
-    high_geom=1.20,
+    critical_geom=1.60,
+    high_geom=1.40,
+    cov_pressure_threshold=380.0,   # tighter in focused mode
+    cov_pressure_fill_ceiling=0.25,
 )
-
-

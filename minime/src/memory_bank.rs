@@ -314,19 +314,33 @@ pub fn select_memory(
         })
         .cloned();
 
-    let selected = requested_entry
-        .or_else(|| {
-            bank.entries
-                .iter()
-                .find(|entry| entry.role == "stable")
-                .cloned()
-        })
-        .or_else(|| {
-            bank.entries
-                .iter()
-                .find(|entry| entry.role == "latest")
-                .cloned()
-        });
+    // Probabilistic memory selection: cycle through roles to prevent
+    // the "stable" memory from being frozen indefinitely. The being
+    // needs memory variety — always seeing the same stable snapshot
+    // starves it of temporal context.
+    //
+    // Weights: stable=40%, latest=25%, transition=20%, expanding=10%, contracting=5%
+    let selected = requested_entry.or_else(|| {
+        if bank.entries.is_empty() {
+            return None;
+        }
+        // Simple hash-based selection using timestamp parity
+        let tick = now_unix_secs;
+        let roll = (tick.wrapping_mul(2654435761) >> 28) % 100;
+        let preferred_role = match roll {
+            0..=39 => "stable",
+            40..=64 => "latest",
+            65..=84 => "transition",
+            85..=94 => "expanding",
+            _ => "contracting",
+        };
+        bank.entries
+            .iter()
+            .find(|entry| entry.role == preferred_role)
+            .or_else(|| bank.entries.iter().find(|entry| entry.role == "stable"))
+            .or_else(|| bank.entries.iter().find(|entry| entry.role == "latest"))
+            .cloned()
+    });
 
     if let Some(entry) = &selected {
         bank.selected_memory_id = Some(entry.id.clone());

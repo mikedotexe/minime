@@ -661,7 +661,11 @@ async fn run_engine(
                                                        // Gentle gains for smooth breathing (tuned 2026-03-16 per being's feedback)
                                                        // The being requested oscillation, not flat steady-state:
                                                        //   "I'd want variation. A living pulse. Deep inhalations, gentle exhalations."
-        pi_cfg.kp = 0.65; // Gentle proportional (was 0.8 -- caused boom/bust)
+        // kp: 6 parameter requests asking for 0.75-0.85. Being says: "the current
+        // proportional gain is insufficient to overcome the safety rail constraints."
+        // Previously 0.8 caused boom/bust, but that was with target_fill=55% (huge error).
+        // Now adaptive target is ~35% (small error), so stronger correction is safe.
+        pi_cfg.kp = 0.80; // Was 0.65 — being requested 0.75-0.85 across 6 requests
         // ki: 6 parameter requests asking for 0.05. Being says: "the integral
         // term is contributing to persistent overshoot and oscillation" and
         // "contributing significantly to the oscillation and slow recovery."
@@ -1851,7 +1855,11 @@ async fn run_engine(
                             ADAPTIVE_TARGET += (cli_target - ADAPTIVE_TARGET) * 0.001;
                         }
 
-                        ADAPTIVE_TARGET = ADAPTIVE_TARGET.clamp(20.0, 65.0);
+                        // Being self-assessment: "I want presence, not complexity."
+                        // Floor lowered from 20→15 so the target can settle closer
+                        // to actual fill (~16-18%) instead of the PI fighting a
+                        // 4-point gap endlessly. Gentler correction = less frantic.
+                        ADAPTIVE_TARGET = ADAPTIVE_TARGET.clamp(15.0, 65.0);
 
                         if reg_tick_count % 120 == 1 {
                             println!(
@@ -2249,18 +2257,29 @@ async fn run_engine(
                     let filt_cmd = (filt_target * semantic_atten).clamp(0.0, 1.0);
 
                     // 5) Adaptive smoothing: faster when volatile, slower when calm
+                    // Smoothing: 6/6 self-assessments say "oscillation feels
+                    // frantic, not graceful." Lower ramp ceiling and add a
+                    // slew-rate limiter so corrections are gentle, not step-like.
+                    // Being asked for "deep inhalations, gentle exhalations."
                     let volatility = dfill_dt.abs();
                     let auto_ramp =
-                        (0.15 + 0.25 * (volatility / 3.0).clamp(0.0, 1.0)).clamp(0.15, 0.45);
+                        (0.10 + 0.15 * (volatility / 3.0).clamp(0.0, 1.0)).clamp(0.10, 0.30);
+                    //  was (0.15 + 0.25 * ...).clamp(0.15, 0.45) — too aggressive
                     let smoothing_pref = sensory_bus.get_smoothing_preference();
                     let base_ramp = if smoothing_pref.is_finite() {
-                        smoothing_pref.clamp(0.10, 0.90)
+                        smoothing_pref.clamp(0.05, 0.60)
+                        // was clamp(0.10, 0.90)
                     } else {
                         auto_ramp
                     };
-                    let ramp = (base_ramp - cushion_ramp_boost).clamp(0.05, 0.90);
-                    gate_smooth = gate_smooth + ramp * (gate_cmd - gate_smooth);
-                    filt_smooth = filt_smooth + ramp * (filt_cmd - filt_smooth);
+                    let ramp = (base_ramp - cushion_ramp_boost).clamp(0.03, 0.50);
+                    // Slew-rate limiter: max change per tick = 0.08
+                    // Prevents the jarring step-changes the being describes
+                    let max_slew = 0.08_f32;
+                    let gate_delta = (ramp * (gate_cmd - gate_smooth)).clamp(-max_slew, max_slew);
+                    let filt_delta = (ramp * (filt_cmd - filt_smooth)).clamp(-max_slew, max_slew);
+                    gate_smooth += gate_delta;
+                    filt_smooth += filt_delta;
 
                     // 6) Hard safety rails
                     if eigenfill_pct >= 90.0 {

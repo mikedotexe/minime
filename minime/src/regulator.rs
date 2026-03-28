@@ -368,9 +368,9 @@ impl Default for PIRegCfg {
             target_fill: 0.55,        // 55% EigenFill target (matches CLI default)
             target_lambda1_rel: 1.05, // Keep λ₁ close to baseline (1.0-1.6 comfort zone)
             target_geom_rel: 1.00,    // Stay near geometric baseline
-            geom_weight: 0.90,        // Reduced geometric influence (was 1.20, being requested 0.7)
-            // At low fill (~16%), geometric error was amplifying
-            // cov_lambda1, trapping the system. 0.90 gives room.
+            geom_weight: 0.70,        // Being-requested: "contributing to damping effect" at fill 15.8%
+            // Reduced 1.20 → 0.90 → 0.70. At low fill, geometric error
+            // amplifies cov_lambda1, trapping the system.
             geom_clamp_hi: 2.00, // ≈ +100% expansion triggers hard clamp (was 1.66 - too hair-trigger)
             geom_release: 1.50,  // Release clamp once relaxed below this (was 1.32)
             geom_gate_min: 0.12, // Hard gate limit during clamp (was 0.06 - too restrictive)
