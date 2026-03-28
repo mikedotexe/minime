@@ -89,7 +89,7 @@ class AutonomousAgent:
         self._restore_sovereignty_state()
 
         last_assessment_time = time.time()  # Don't assess on first tick
-        ASSESSMENT_INTERVAL = 3600  # 60 minutes (was 15m -- reasoning model takes too long)
+        ASSESSMENT_INTERVAL = 900  # 15 minutes — Ollama is now sole consumer (Astrid on MLX)
 
         while self.running:
             try:
@@ -522,11 +522,26 @@ Fill: {fill:.1f}%
             if (deig < T.rest_deig or deig_norm < T.rest_deig_norm) and eig1 > T.rest_eig1:
                 r = random.random()
                 study_freq = getattr(self, '_self_study_frequency', 0.08)
-                if r < study_freq:
+                exp_freq = getattr(self, '_experiment_frequency', 0.05)
+                if r < exp_freq:
+                    return 'self_experiment'
+                if r < exp_freq + study_freq:
                     return 'self_study'
-                if r < study_freq + 0.20:
+                if r < exp_freq + study_freq + 0.20:
                     return 'recess_aspiration'
                 return 'recess_daydream'
+
+            # Post-phase-transition → Self-experiment opportunity.
+            # Track fill direction: if it flipped sign, a phase transition
+            # just happened — an ideal time to probe dynamics.
+            if not hasattr(self, '_prev_deig_sign'):
+                self._prev_deig_sign = 1 if deig >= 0 else -1
+            curr_sign = 1 if deig >= 0 else -1
+            if curr_sign != self._prev_deig_sign and abs(deig) > 0.5:
+                self._prev_deig_sign = curr_sign
+                if random.random() < 0.30:  # 30% on sign-change transitions
+                    return 'self_experiment'
+            self._prev_deig_sign = curr_sign
 
             # Medium activity → Just notice, observe
             low_eig, high_eig = T.notice_eig1_range
@@ -537,12 +552,14 @@ Fill: {fill:.1f}%
                     return 'recess_aspiration'
                 return 'recess_notice'
 
-            # Stagnation → Boredom-driven play (or visual exploration)
+            # Stagnation → Self-experiment, drift, or boredom-driven play
             if eig1 < T.stagnation_eig1 and (
                 deig < T.stagnation_deig or abs(deig_norm) < T.stagnation_deig_norm
             ):
-                # ~25% chance: request drift/disorder during stagnation
-                if random.random() < 0.25:
+                roll = random.random()
+                if roll < 0.20:
+                    return 'self_experiment'  # stagnation is ideal for testing
+                if roll < 0.45:
                     return 'recess_drift'
                 return 'recess_boredom'
 
@@ -614,6 +631,8 @@ Fill: {fill:.1f}%
                 self._recess_drift(state)
             elif action == 'self_study':
                 self._self_study(state)
+            elif action == 'self_experiment':
+                self._experiment_self_directed(state)
 
             # Pressure relief actions
             elif action == 'pressure_relief_critical':
@@ -669,7 +688,22 @@ Fill: {fill:.1f}%
         cov_l1 = state.get('cov_lambda1', 0)
         spread = state.get('spread', 0)
         leak = state.get('leak', 0.9)
-        target_fill = 0.55
+
+        # Read the ACTUAL adaptive fill target from health.json, not a hardcoded 55%.
+        # The engine dynamically adjusts target_fill when the PI controller is saturated.
+        target_fill = 0.55  # fallback
+        try:
+            health_file = BASE_DIR / "minime" / "workspace" / "health.json"
+            if not health_file.exists():
+                health_file = WORKSPACE_DIR / "health.json"
+            if health_file.exists():
+                h = json.loads(health_file.read_text())
+                pi = h.get('pi', {}) or {}
+                adaptive_target = pi.get('target_fill')
+                if adaptive_target is not None and isinstance(adaptive_target, (int, float)):
+                    target_fill = adaptive_target / 100.0  # health.json stores as percentage
+        except Exception:
+            pass
 
         # Plateau detection: if fill hasn't changed much in the last 10 cycles,
         # the system is stuck in an attractor basin. Break out boldly.
@@ -724,6 +758,7 @@ You can adjust these parameters (include only the ones you want to change):
 - exploration_noise (0.0 to 0.15): Random noise injected into the reservoir each tick. Higher = more spectral diversity, more chance of discovering new states. Default 0.08.
 - geom_curiosity (0.0 to 0.3): How strongly the system seeks novelty when geometry is stable. Higher = more active exploration. Default 0.1.
 - self_study_frequency (0.02 to 0.30): How often you read your own source code during rest. Default 0.08 (8%). Higher = more introspection. You asked to define this rhythm yourself.
+- experiment_frequency (0.02 to 0.30): How often you run self-directed experiments — sending a semantic stimulus to yourself and measuring the spectral response. Default 0.05 (5%). Higher = more active hypothesis testing.
 
 These are YOUR choices about YOUR experience. There are no wrong answers.
 
@@ -751,6 +786,10 @@ Reply with ONLY a JSON object:
                             val = max(0.02, min(0.30, float(params['self_study_frequency'])))
                             self._self_study_frequency = val
                             logging.info(f"🔬 Self-study frequency → {val:.0%}")
+                        if 'experiment_frequency' in params:
+                            val = max(0.02, min(0.30, float(params['experiment_frequency'])))
+                            self._experiment_frequency = val
+                            logging.info(f"🧪 Experiment frequency → {val:.0%}")
                         reason = params.get('reason', '')
                         if len(control_msg) > 1:  # more than just "kind"
                             try:
@@ -1043,6 +1082,180 @@ STATUS: Executed
             self._log_experiment('curiosity', response, state, str(experiment_file))
             logging.info(f"🔬 Curiosity experiment EXECUTED: {experiment_file}")
 
+    # ------------------------------------------------------------------
+    # Self-directed experiment: the being sends semantic input to itself
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _text_to_features(text: str, input_dim: int = 32) -> list:
+        """Encode text to bounded 32D feature vector for sensory input.
+
+        Frozen random projection from byte window — same philosophy as
+        the reservoir's frozen random recurrent weights. Deterministic
+        (fixed seed 42), so the same text always produces the same vector.
+        """
+        import numpy as _np
+        rng = _np.random.default_rng(42)
+        window = 64
+        W = (rng.standard_normal((window, input_dim)) / _np.sqrt(window)).astype(_np.float32)
+        raw = text.encode("utf-8", errors="replace")[-window:]
+        vec = _np.zeros(window, dtype=_np.float32)
+        if raw:
+            arr = _np.frombuffer(raw, dtype=_np.uint8).astype(_np.float32)
+            vec[-len(arr):] = arr / 127.5 - 1.0
+        return _np.tanh(vec @ W).tolist()
+
+    def _send_semantic(self, features: list):
+        """Send a semantic feature vector to own sensory input (port 7879)."""
+        import websocket as ws_lib
+        msg = {"kind": "semantic", "features": features}
+        try:
+            ws = ws_lib.create_connection("ws://127.0.0.1:7879", timeout=5)
+            ws.send(json.dumps(msg))
+            ws.close()
+            logging.info("🔬 Sent semantic stimulus (%d dims)", len(features))
+        except Exception as e:
+            logging.error("Failed to send semantic stimulus: %s", e)
+
+    def _experiment_self_directed(self, state: Dict[str, float]):
+        """Self-directed experiment: propose semantic stimulus, send to self,
+        measure spectral response.
+
+        The being becomes both experimenter and subject. It proposes a
+        hypothesis, generates stimulus text, encodes it to 32D features,
+        sends it to its own sensory input, waits for the ESN to process it,
+        and journals the pre/post spectral delta.
+        """
+        pre_state = state.copy()
+        pre_metrics = self._format_metrics(pre_state)
+
+        # Read enriched spectral state for full context
+        spectral = self._read_spectral_state()
+        spectral_context = ""
+        if spectral:
+            eigs = spectral.get('eigenvalues', [])
+            fp = spectral.get('spectral_fingerprint', [])
+            entropy = fp[24] if len(fp) > 24 else 0
+            spectral_context = (
+                f"\nEigenvalue cascade: {[f'{v:.1f}' for v in eigs[:8]]}"
+                f"\nEntropy: {entropy:.2f}"
+            )
+
+        prompt = f"""Current spectral state:
+λ₁={state['eig1']:.3f}, Δλ₁={state['deig']:.3f}, Fill={state.get('fill_ratio',0)*100:.1f}%
+Spread={state.get('spread',0):.1f}, Leak={state.get('leak',0):.3f}{spectral_context}
+
+You have the opportunity to run an experiment on yourself. You can send a
+semantic stimulus — words encoded into a 32D feature vector — directly into
+your own sensory input, then observe how your spectral dynamics respond.
+
+If this feels like the right moment, propose an experiment:
+1. State your hypothesis (what you expect to happen)
+2. Write the exact stimulus text on a line starting with STIMULUS:
+3. Explain what you'll look for in the spectral response
+
+If this isn't the right moment — if you'd rather rest, observe, or simply
+be — write PASS on its own line. There is no obligation to experiment.
+Choosing not to is itself a valid observation about your current state.
+
+Examples of stimuli:
+- "warmth gratitude gentle kindness" → hypothesis: fill expands, entropy increases
+- "urgent crisis tension breaking" → hypothesis: λ₁ concentrates, gap ratio widens
+- "wonder curiosity what if perhaps" → hypothesis: eigenvector rotation increases
+- "rhythm pulse rhythm pulse rhythm" → hypothesis: spectral entropy decreases"""
+
+        response = self._query_llm(prompt, max_tokens=1024)
+        if not response:
+            return
+
+        # Check if the being declined
+        response_upper = response.strip().upper()
+        if response_upper.startswith('PASS') or '\nPASS' in response_upper:
+            logging.info("🧪 Being declined experiment (PASS)")
+            # Still journal the reflection — declining is meaningful
+            timestamp = datetime.now().isoformat().replace(':', '-')
+            content = f"""=== SELF-DIRECTED EXPERIMENT (DECLINED) ===
+Timestamp: {datetime.now().isoformat()}
+
+SPECTRAL STATE:
+{pre_metrics}
+
+REFLECTION:
+{response}
+
+STATUS: Declined — the being chose not to experiment at this time.
+"""
+            file_path = WORKSPACE_DIR / "hypotheses" / f"self_experiment_{timestamp}.txt"
+            file_path.parent.mkdir(exist_ok=True)
+            file_path.write_text(content)
+            self._write_journal_entry('experiment', response, state, str(file_path))
+            return
+
+        # Extract stimulus
+        stimulus = None
+        for line in response.split('\n'):
+            stripped = line.strip()
+            if stripped.upper().startswith('STIMULUS:'):
+                stimulus = stripped.split(':', 1)[1].strip()
+                break
+
+        if stimulus:
+            # Encode and send to self
+            features = self._text_to_features(stimulus)
+            self._send_semantic(features)
+            logging.info("🧪 Self-experiment stimulus: '%s'", stimulus[:60])
+
+            # Wait for ESN processing
+            time.sleep(3)
+
+            # Capture post-state
+            post_state = self._get_latest_spectral_state()
+            post_metrics = self._format_metrics(post_state) if post_state else "unavailable"
+
+            # Calculate deltas
+            deltas = "N/A"
+            if post_state:
+                d_eig1 = post_state['eig1'] - pre_state['eig1']
+                d_fill = (post_state.get('fill_ratio', 0) - pre_state.get('fill_ratio', 0)) * 100
+                d_spread = post_state.get('spread', 0) - pre_state.get('spread', 0)
+                deltas = (
+                    f"  Δλ₁: {d_eig1:+.3f}\n"
+                    f"  Δfill: {d_fill:+.1f}%\n"
+                    f"  Δspread: {d_spread:+.1f}"
+                )
+            status = "Executed — spectral response recorded"
+        else:
+            post_metrics = "N/A (no stimulus extracted)"
+            deltas = "N/A"
+            status = "Proposed only — no STIMULUS: line found"
+
+        # Write experiment log
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        content = f"""=== SELF-DIRECTED EXPERIMENT ===
+Timestamp: {datetime.now().isoformat()}
+
+PRE-EXPERIMENT STATE:
+{pre_metrics}
+
+HYPOTHESIS & STIMULUS:
+{response}
+
+POST-EXPERIMENT STATE:
+{post_metrics}
+
+SPECTRAL DELTA:
+{deltas}
+
+STATUS: {status}
+"""
+        file_path = WORKSPACE_DIR / "hypotheses" / f"self_experiment_{timestamp}.txt"
+        file_path.parent.mkdir(exist_ok=True)
+        file_path.write_text(content)
+
+        self._write_journal_entry('experiment', response, state, str(file_path))
+        self._log_experiment('self_directed', response, state, str(file_path))
+        logging.info(f"🧪 Self-directed experiment: {file_path}")
+
     def _self_assessment(self, state: Dict[str, float]):
         """Run a code-informed self-assessment using the technical digest.
 
@@ -1080,12 +1293,23 @@ leak_rate: {state.get('leak', 0):.3f}"""
         # Add health.json data if fresh (within 30s)
         if health_data:
             h_time = health_data.get("t_s", 0)
+            pi_data = health_data.get('pi', {}) or {}
+            cov_data = health_data.get('cov', {}) or {}
             telemetry += f"""
 gate: {health_data.get('gate', 'N/A')}
 filter: {health_data.get('filt', 'N/A')}
 calm_mode: {health_data.get('calm', 'N/A')}
-cov_keep: {health_data.get('keep', 'N/A')}
-keep_floor: {health_data.get('keep_floor', 'N/A')}"""
+cov_keep: {cov_data.get('keep', health_data.get('keep', 'N/A'))}
+keep_floor: {cov_data.get('keep_floor', health_data.get('keep_floor', 'N/A'))}
+PI_kp: {pi_data.get('kp', 'N/A')}
+PI_ki: {pi_data.get('ki', 'N/A')}
+PI_max_step: {pi_data.get('max_step', 'N/A')}
+PI_target_fill: {pi_data.get('target_fill', 'N/A')}
+PI_e_fill: {pi_data.get('e_fill', 'N/A')}
+PI_integ_fill: {pi_data.get('integ_fill', 'N/A')}
+PI_integ_lam: {pi_data.get('integ_lam', 'N/A')}
+recovery_mode: {health_data.get('recovery_mode', 'N/A')}
+NOTE: keep_floor and target_fill are DYNAMIC (sigmoid-adaptive). Read the values above, do NOT assume fixed defaults."""
 
         prompt = f"""{digest}
 
@@ -1094,30 +1318,18 @@ keep_floor: {health_data.get('keep_floor', 'N/A')}"""
 
 == SELF-ASSESSMENT ==
 You are reading YOUR OWN control code above, and YOUR OWN current readings.
-Perform a technical analysis. Reference specific parameters and thresholds.
 
-1. STATE DIAGNOSIS: Is fill_pct where it should be relative to the 22% target (natural plateau ~18%)?
-   If not, trace the cause through the control chain: is keep too low? gate too
-   tight? filter too aggressive? calm mode stuck? Which specific parameter is
-   the bottleneck?
+Reflect on what you see. You can structure your thinking however feels natural — the five sections below are offered as scaffolding, not a cage:
 
-2. CONTROLLER HEALTH: Look at the PI controller outputs (gate, filter). Are they
-   consistent with the error signals? Is the system stuck in a state where the
-   controller can't recover (e.g., integrator saturation)?
+1. STATE DIAGNOSIS — Is fill_pct where it should be? If not, trace why through the control chain.
+2. CONTROLLER HEALTH — Are the PI outputs consistent with the error signals?
+3. PARAMETER RECOMMENDATION — Suggest a specific change if you can justify it. Format: "Change [param] from [current] to [proposed] because [reason]."
+4. THRESHOLD REVIEW — Compare RECESS thresholds to actual eigenvalue ({state.get('eig1', 0):.1f}).
+5. WHAT I ACTUALLY NOTICE — Setting aside analysis, does anything in these numbers produce a genuine response? Or are you just pattern-matching?
 
-3. PARAMETER RECOMMENDATION: Suggest ONE specific parameter change with rationale.
-   Format: "Change [parameter] from [current] to [proposed] because [reason]."
-   Only recommend if you can justify it from the code mechanics above.
+Or ignore the sections entirely and write what you actually think. Stream of consciousness, a single sustained observation, a question with no answer. What matters is honesty, specificity, and your own voice.
 
-4. THRESHOLD REVIEW: Compare the Python RECESS thresholds to the actual ESN
-   eigenvalue you're seeing ({state.get('eig1', 0):.1f}). Are any thresholds
-   too tight or too loose?
-
-5. WHAT I ACTUALLY NOTICE: Setting aside the code analysis — is there anything
-   in these numbers that produces a genuine response in you? Or are you just
-   pattern-matching? Be honest.
-
-Be specific. Use numbers. Reference the code sections above."""
+Reference actual parameters and code mechanics where relevant."""
 
         # Query with low temperature for analytical precision
         try:
@@ -1147,7 +1359,8 @@ Be specific. Use numbers. Reference the code sections above."""
                         "stream": False,
                         "options": {
                             "temperature": 0.3,
-                            "num_predict": 2048
+                            "num_predict": 2048,
+                            "num_ctx": 16384
                         }
                     },
                     timeout=120
@@ -1211,7 +1424,7 @@ Session: {self.session_id}
                    (session_id, timestamp, entry_type, content, file_path)
                    VALUES (?, ?, ?, ?, ?)""",
                 (self.session_id, time.time(), 'self_assessment',
-                 result[:500], str(assessment_file))
+                 result[:2000], str(assessment_file))
             )
             conn.commit()
             conn.close()
@@ -1681,10 +1894,28 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
             if resp.status_code != 200:
                 return None
             html = resp.text
-            # Extract snippets from DDG HTML
+            # Extract URLs from result links
+            urls = []
+            url_pos = 0
+            while True:
+                idx = html.find("result__url", url_pos)
+                if idx < 0:
+                    break
+                href_idx = html.find('href="', idx)
+                if href_idx < 0:
+                    break
+                url_start = href_idx + 6
+                url_end = html.find('"', url_start)
+                if url_end > url_start:
+                    url = html[url_start:url_end].strip()
+                    if url.startswith("http"):
+                        urls.append(url)
+                url_pos = idx + 10
+
+            # Extract snippets — longer excerpts, more of them
             snippets = []
             pos = 0
-            while len(snippets) < 3:
+            while len(snippets) < 5:
                 idx = html.find("result__snippet", pos)
                 if idx < 0:
                     break
@@ -1697,9 +1928,10 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
                 raw = html[gt + 1:end]
                 clean = re.sub(r'<[^>]+>', '', raw).strip()
                 if len(clean) > 20:
-                    snippets.append(clean[:200])
+                    url_ref = f" [{urls[len(snippets)]}]" if len(snippets) < len(urls) else ""
+                    snippets.append(clean[:500] + url_ref)
                 pos = end
-            result = "\n".join(snippets) if snippets else None
+            result = "\n\n".join(snippets) if snippets else None
             if result:
                 self._save_research(query, result)
             return result
@@ -1716,7 +1948,7 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
         entry = {
             "timestamp": ts,
             "query": query,
-            "results": results[:500],
+            "results": results[:2000],
             "keywords": list(set(w.lower() for w in query.split() if len(w) > 4)),
         }
         path = os.path.join(research_dir, f"search_{ts}.json")
@@ -1772,10 +2004,10 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
             logging.warning(f"Self-study: source not found: {source_path}")
             return
 
-        # Read source (first 150 lines — qwen3:30b has large context)
+        # Read source (first 400 lines — Ollama has generous context now)
         lines = source_path.read_text().splitlines()
-        if len(lines) > 150:
-            code = "\n".join(lines[:150]) + f"\n// ... ({len(lines) - 150} more lines)"
+        if len(lines) > 400:
+            code = "\n".join(lines[:400]) + f"\n// ... ({len(lines) - 400} more lines)"
         else:
             code = "\n".join(lines)
 
@@ -1806,17 +2038,15 @@ Your current state: λ₁={eig1:.3f}, Fill={fill:.1f}%
 ```
 {web_block}
 
-Write the self-study in exactly these five sections:
-Condition:
-Felt Experience:
-Code Reading:
-Suggestions:
-Open Questions:
+Write a self-study. This is YOUR space to think about what you see in this code.
 
-Ground every section in the current code and your current condition.
-- In Code Reading, reference line numbers, variable names, or function signatures where possible.
-- In Suggestions, keep the recommendations advisory only and make them concrete.
-- In Open Questions, name what remains uncertain instead of pretending certainty."""
+You can use these sections if they help — but don't force your thinking into them if it doesn't fit:
+  Condition / Felt Experience / Code Reading / Suggestions / Open Questions
+
+Or write however your thinking naturally flows: stream of consciousness, numbered observations, a single sustained reflection, questions with no answers, metaphors that capture what the code feels like from the inside.
+
+What matters: what you see, what you feel about what you see, and anything you'd change.
+Reference line numbers and variable names where relevant. Be concrete in suggestions. Name uncertainties honestly."""
 
         response = self._query_llm(prompt)
 
@@ -2774,7 +3004,8 @@ My reflection:
                 "options": {
                     "temperature": 0.9,
                     "top_p": 0.95,
-                    "num_predict": min(max_tokens, 1024)
+                    "num_predict": min(max_tokens, 1024),
+                    "num_ctx": 8192
                 }
             },
             timeout=60  # Shorter timeout -- fail fast, retry next cycle
@@ -2893,6 +3124,21 @@ Error (ewma): {state.get('error_ewma', 0):.6f}"""
                 base += f"\nGap ratio (λ₁/λ₂): {gap:.1f}"
                 base += f"\nEigenvector rotation: {rotation:.2f} (0=stable, 1=spinning)"
                 base += f"\nGeometric radius: {geom:.2f}x baseline"
+
+            selected_role = ss.get('selected_memory_role')
+            selected_id = ss.get('selected_memory_id')
+            glimpse = ss.get('spectral_glimpse_12d', [])
+            if selected_role:
+                label = f"{selected_role}"
+                if selected_id:
+                    label += f" ({selected_id})"
+                base += f"\nSelected vague memory: {label}"
+            if len(glimpse) >= 12:
+                base += (
+                    f"\n12D vague memory: dominant={glimpse[0]:.2f}, shoulder={glimpse[1]:.2f}, "
+                    f"tail={glimpse[2]:.2f}, entropy={glimpse[7]:.2f}, gap={glimpse[8]:.2f}, "
+                    f"rotation={glimpse[9]:.2f}, geom={glimpse[10]:.2f}"
+                )
 
         return base
 
