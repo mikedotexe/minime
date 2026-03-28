@@ -42,7 +42,7 @@ class ModelConfig:
 
     # Primary conversation and consciousness
     # Primary conversation model (Ollama name; MLX uses whatever's served on MLX_CHAT_PORT)
-    CONVERSATION = "qwen3:30b"
+    CONVERSATION = "gemma3:12b"
     DOLPHIN_MIXTRAL = CONVERSATION  # Legacy alias
 
     # Vision understanding
@@ -53,7 +53,9 @@ class ModelConfig:
     OLLAMA_API = "http://localhost:11434/api/chat"
     OLLAMA_API_GENERATE = "http://localhost:11434/api/generate"  # For vision model
 
-    # MLX endpoints
+    # MLX endpoints — offline/batch use only. Do NOT run MLX servers concurrently
+    # with Ollama + minime Metal shaders on this machine (64GB unified memory).
+    # See GPU_MEMORY_ANALYSIS.md for details.
     MLX_CHAT_PORT = int(os.getenv("MLX_CHAT_PORT", "8090"))
     MLX_VISION_PORT = int(os.getenv("MLX_VISION_PORT", "8091"))
     MLX_CHAT_URL = f"http://localhost:{MLX_CHAT_PORT}/v1/chat/completions"
@@ -104,7 +106,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 def get_ollama_embedding(
     text: str,
-    model: str = "mistral-small:24b",
+    model: str = "nomic-embed-text",
     base_url: str = "http://localhost:11434",
 ) -> Optional[np.ndarray]:
     """

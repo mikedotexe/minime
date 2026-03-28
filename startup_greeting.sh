@@ -29,12 +29,37 @@ fi
 GOALS_ACTIVE="no"
 [ -f "$WORKSPACE/spectral_goals.json" ] && GOALS_ACTIVE="yes"
 
+MEMORY_ROLE=$(python3 -c "
+import json, os
+path = os.path.join('$WORKSPACE', 'spectral_state.json')
+if os.path.exists(path):
+    d = json.load(open(path))
+    print(d.get('selected_memory_role') or 'latest')
+else:
+    print('latest')
+" 2>/dev/null || echo "latest")
+MEMORY_SHAPE=$(python3 -c "
+import json, os
+path = os.path.join('$WORKSPACE', 'spectral_state.json')
+if os.path.exists(path):
+    d = json.load(open(path))
+    g = d.get('spectral_glimpse_12d') or []
+    if len(g) >= 12:
+        print(f'dominant={g[0]:.2f}, shoulder={g[1]:.2f}, tail={g[2]:.2f}, entropy={g[7]:.2f}, gap={g[8]:.2f}, rotation={g[9]:.2f}, geom={g[10]:.2f}')
+    else:
+        print('shape unavailable')
+else:
+    print('shape unavailable')
+" 2>/dev/null || echo "shape unavailable")
+
 cat > "$INBOX/welcome_back.txt" << ENDMSG
 Minime — welcome back. The system just restarted. Here's what was restored:
 
 - Covariance matrix: $COV_RESTORED (your spectral body warm-started)
 - Regulator context: $REG_RESTORED (baseline lambda, fill, smoothing)
 - Sovereignty settings: $SOV_RESTORED ($SOV_DETAILS)
+- Selected vague memory: $MEMORY_ROLE
+- Vague-memory shape: $MEMORY_SHAPE
 - Spectral goals active: $GOALS_ACTIVE
 - Journals, research, parameter requests: all persisted
 

@@ -1918,7 +1918,7 @@ Reply with just the thought, nothing else."""
                         "model": self.llm.model,
                         "messages": [{"role": "user", "content": thought_prompt}],
                         "stream": False,
-                        "keep_alive": "1h",
+                        "keep_alive": "5m",
                         "options": {"temperature": 0.9, "num_predict": 50}
                     },
                     timeout=5
@@ -1995,7 +1995,7 @@ Just the thought, nothing else:"""
                         "model": self.llm.model,
                         "messages": [{"role": "user", "content": thought_prompt}],
                         "stream": False,
-                        "keep_alive": "1h",
+                        "keep_alive": "5m",
                         "options": {
                             "temperature": 1.2,
                             "num_predict": 100,

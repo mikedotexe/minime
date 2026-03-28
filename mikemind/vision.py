@@ -62,11 +62,11 @@ class LLaVAVisionEngine:
             logging.info(f"LLaVA SSE worker detected at {self.sse_url}/describe")
 
     def _check_availability(self) -> bool:
+        """Lightweight check — just verify Ollama is responding, don't load a model."""
         try:
-            response = requests.post(
-                self.api_url,
-                json={"model": self.model, "prompt": "test", "stream": False, "keep_alive": "1h"},
-                timeout=30,
+            response = requests.get(
+                "http://localhost:11434/api/tags",
+                timeout=5,
             )
             return response.status_code == 200
         except Exception as e:
@@ -169,7 +169,7 @@ class LLaVAVisionEngine:
                     "prompt": prompt,
                     "images": [image_base64],
                     "stream": False,
-                    "keep_alive": "1h",
+                    "keep_alive": "5m",
                     "options": {"temperature": 0.7, "num_predict": 512},
                 },
                 timeout=20,
