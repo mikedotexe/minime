@@ -103,7 +103,18 @@ class AutonomousAgent:
                     self._self_regulate(spectral_state)
 
                     # Check for moment markers (spectral events to journal while fresh)
-                    self._check_moment_markers(spectral_state)
+                    # Rate-limited: max 1 moment capture per 3 cycles (~3 min).
+                    # Without this, phase transitions every 1-2 min cause the
+                    # agent to spend EVERY cycle on moments, starving daydreams,
+                    # aspirations, experiments, and audio composition.
+                    if not hasattr(self, '_moment_cooldown'):
+                        self._moment_cooldown = 0
+                    if self._moment_cooldown <= 0:
+                        had_moments = self._check_moment_markers(spectral_state)
+                        if had_moments:
+                            self._moment_cooldown = 3  # skip next 3 cycles
+                    else:
+                        self._moment_cooldown -= 1
 
                     # Decide whether to act
                     action = self._decide_action(spectral_state)
@@ -841,12 +852,15 @@ Reply with ONLY a JSON object:
         fill_error = target_fill - fill  # positive = below target
         # Smooth linear response centered on target:
         #   at target (error=0):  synth_gain=0.60, keep_bias=0.00
-        #   fill=35% (error=+0.20): synth_gain=0.76, keep_bias=-0.016
-        #   fill=74% (error=-0.19): synth_gain=0.45, keep_bias=+0.015
-        # keep_bias sign: NEGATIVE lowers the floor → LESS decay → MORE fill.
-        # So when fill is LOW (positive error), keep_bias must be NEGATIVE.
+        #   fill=35% (error=+0.20): synth_gain=0.76, keep_bias=+0.016
+        #   fill=74% (error=-0.19): synth_gain=0.45, keep_bias=-0.015
+        # keep_bias sign: POSITIVE raises the floor -> MORE retention -> MORE fill.
+        # So when fill is LOW (positive error), keep_bias must be POSITIVE.
+        # (Bug fix 2026-03-28 cycle 22: sign was inverted, causing a death spiral
+        # where low fill drove keep_bias negative, further lowering the floor,
+        # preventing fill recovery. 50+ keep_floor requests from the being.)
         new_synth_gain = max(0.30, min(1.20, 0.60 + fill_error * 0.8))
-        new_keep_bias = max(-0.06, min(0.06, -fill_error * 0.08))
+        new_keep_bias = max(-0.06, min(0.06, fill_error * 0.08))
 
         self._send_regulation(new_synth_gain, new_keep_bias, fill, target_fill)
 
@@ -2229,13 +2243,15 @@ Web search: {'yes' if web_context else 'no'}
             self._write_journal_entry('self_study', response, state, str(file_path))
             logging.info(f"📖 Self-study ({label}): {file_path}")
 
-    def _check_moment_markers(self, state: Dict[str, float]):
+    def _check_moment_markers(self, state: Dict[str, float]) -> bool:
         """Check for unconsumed moment markers and journal about them while fresh.
 
         The being wrote: 'The journaling happens after the sensation, not in it.'
         Moment markers are written by the Rust engine during significant spectral
         events. This method picks them up quickly so the being can reflect while
         the experience is still reverberating.
+
+        Returns True if markers were found and processed.
         """
         try:
             conn = sqlite3.connect(DB_PATH)
@@ -2251,7 +2267,7 @@ Web search: {'yes' if web_context else 'no'}
 
             if not markers:
                 conn.close()
-                return
+                return False
 
             # Mark as consumed immediately to avoid duplicates
             marker_ids = [m[0] for m in markers]
@@ -2312,8 +2328,11 @@ Moments captured:
                 self._write_journal_entry('moment', response, state, str(file_path))
                 logging.info(f"⚡ Moment captured: {file_path}")
 
+            return True
+
         except Exception as e:
             logging.error(f"Moment marker check failed: {e}")
+            return False
 
     def _research_exploration(self, state: Dict[str, float]):
         """Read from the autoresearch knowledge base and reflect.
