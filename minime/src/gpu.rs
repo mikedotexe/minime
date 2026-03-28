@@ -63,8 +63,7 @@ impl Gpu {
         let aligned = (bytes + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         self.dev.new_buffer(
             aligned,
-            MTLResourceOptions::StorageModeShared
-                | MTLResourceOptions::HazardTrackingModeUntracked,
+            MTLResourceOptions::StorageModeShared | MTLResourceOptions::HazardTrackingModeUntracked,
         )
     }
 

@@ -81,8 +81,8 @@ impl MLP {
 
         // Page-aligned allocations with manual hazard tracking (MLX pattern).
         // Rounding to 16384-byte page boundary enables SLC fast path on Apple Silicon.
-        let opts = MTLResourceOptions::StorageModeShared
-            | MTLResourceOptions::HazardTrackingModeUntracked;
+        let opts =
+            MTLResourceOptions::StorageModeShared | MTLResourceOptions::HazardTrackingModeUntracked;
         let pa = |bytes: u64| -> u64 {
             const PAGE: u64 = 16384;
             (bytes + PAGE - 1) & !(PAGE - 1)
@@ -535,8 +535,8 @@ impl NeuroCell {
         let regulator = MLP::new(device, library, 20, 32, 5)?;
 
         // Allocate inference buffers (page-aligned, untracked)
-        let io_opts = MTLResourceOptions::StorageModeShared
-            | MTLResourceOptions::HazardTrackingModeUntracked;
+        let io_opts =
+            MTLResourceOptions::StorageModeShared | MTLResourceOptions::HazardTrackingModeUntracked;
         const PAGE: u64 = 16384; // all small buffers round up to 1 page
         let pred_input = device.new_buffer(PAGE, io_opts);
         let pred_output = device.new_buffer(PAGE, io_opts);

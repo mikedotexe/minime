@@ -64,7 +64,10 @@ impl AvGpu {
 
         // buffers (page-aligned for SLC fast path)
         let npix = (w * h) as usize;
-        let prev = dev.new_buffer(Self::page_align((npix * mem::size_of::<f32>()) as u64), Self::opts(mem_mode));
+        let prev = dev.new_buffer(
+            Self::page_align((npix * mem::size_of::<f32>()) as u64),
+            Self::opts(mem_mode),
+        );
         let accum = dev.new_buffer(
             Self::page_align((8 * mem::size_of::<f32>()) as u64),
             Self::opts(MemMode::Shared), // atomics readable on CPU fast
