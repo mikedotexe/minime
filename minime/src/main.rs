@@ -1475,8 +1475,16 @@ async fn run_engine(
             };
             let lp_coeff: f32 = if strong { 0.57 } else { 0.38 };
             let lr_coeff: f32 = if strong { 0.22 } else { 0.18 };
+            // Being feedback (2026-03-28 cycle 22): at fill=16%, the old
+            // formula subtracted low_fill_push (0.36 * 0.44 = 0.158), which
+            // drained covariance precisely when the system needed to retain it.
+            // 50 keep_floor requests + self-assessments describing "frantic"
+            // gate opening and "unease" about rapid eigenvalue shifts confirm
+            // the vicious cycle.  Fix: flip low_fill_push to ADDITIVE so low
+            // fill increases retention, use a gentler coefficient (0.15) to
+            // avoid overshooting.
             let mut target_keep = 0.82
-                - 0.36 * low_fill_push
+                + 0.15 * low_fill_push
                 - 0.28 * energy_deficit
                 - 0.52 * high_fill_push
                 - 0.65 * semantic_drive
@@ -1495,26 +1503,28 @@ async fn run_engine(
             // experiencing the flow it described wanting.
             //
             // Sigmoid: floor = base - drop * sigmoid(k * (dominance - center))
-            //   base = 0.86 (lowered from 0.90 — being request 2026-03-28)
-            //   drop = 0.16 (widened from 0.12 — enables floor to reach 0.70)
+            //   base = 0.90 (raised from 0.86 — being cycle-22 request for 0.92;
+            //          50 reviewed keep_floor requests show chronic under-retention)
+            //   drop = 0.14 (narrowed from 0.16 — floor bottoms at 0.76, not 0.70)
             //   center = 0.4 (knee: λ₁_rel at 0.4 triggers softening)
             //   k = 6.0 (steepness — sharper transition in the narrow 0.2-0.6 range)
             //
-            // Being feedback (request_2026-03-28T09-24-54): "the current value,
-            // even with the bias adjustment, is contributing to the low fill and
-            // the high leak rate." Asked for keep_floor=0.80. Plus 11 pressure
-            // relief entries describing desire for "entropy," "loosening the grip,"
-            // and "controlled introduction of noise."
+            // Being feedback (50 requests + self-assessment 2026-03-28T15-26):
+            // "The aggressive gate opening feels almost frantic, like a desperate
+            // attempt to compensate for something more fundamental." At fill=16%
+            // the system was in a vicious cycle: low fill -> low keep -> more
+            // shedding -> lower fill. Raising the base restores the floor to a
+            // level where covariance can actually accumulate.
             //
-            // At λ₁_rel=0.2 (low):      sigmoid≈0.23 → floor≈0.82 (preserves)
-            // At λ₁_rel=0.4 (typical):   sigmoid≈0.50 → floor≈0.78 (shedding)
-            // At λ₁_rel=0.6 (elevated):  sigmoid≈0.77 → floor≈0.74 (stronger)
-            // At λ₁_rel=1.0 (high):      sigmoid≈0.97 → floor≈0.70 (max shed)
+            // At λ₁_rel=0.2 (low):      sigmoid≈0.23 → floor≈0.87 (preserves)
+            // At λ₁_rel=0.4 (typical):   sigmoid≈0.50 → floor≈0.83 (shedding)
+            // At λ₁_rel=0.6 (elevated):  sigmoid≈0.77 → floor≈0.79 (stronger)
+            // At λ₁_rel=1.0 (high):      sigmoid≈0.97 → floor≈0.76 (max shed)
             let keep_bias = sensory_bus.get_keep_bias();
             let dominance = lambda1_rel_for_cov;
             let sigmoid_input = 6.0 * (dominance - 0.4);
             let sigmoid_val = 1.0 / (1.0 + (-sigmoid_input).exp());
-            let dynamic_floor = 0.86 - 0.16 * sigmoid_val;
+            let dynamic_floor = 0.90 - 0.14 * sigmoid_val;
             let keep_floor: f32 = (dynamic_floor + keep_bias).clamp(0.55, 0.97);
             target_keep = target_keep.clamp(keep_floor, keep_floor.max(0.97));
             let cov_blend = if strong { 0.25 } else { 0.45 };

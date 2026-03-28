@@ -251,7 +251,7 @@ pub struct SensoryBus {
 
     // Self-regulation controls (set by being via WebSocket)
     synth_gain: Mutex<f32>, // multiplier for synthetic signal amplitude (default 1.0)
-    keep_bias: Mutex<f32>,  // additive bias to keep_floor (default 0.0, range -0.06..+0.06)
+    keep_bias: Mutex<f32>,  // additive bias to keep_floor (default 0.0, range -0.08..+0.10)
     exploration_noise: Mutex<f32>, // ESN exploration noise amplitude (default from ESN, range 0.0..0.2)
     fill_target: Mutex<f32>, // Override eigenfill target (NAN = use CLI default, range 0.25..0.75)
 
@@ -364,7 +364,11 @@ impl SensoryBus {
     }
     #[inline]
     pub fn set_keep_bias(&self, b: f32) {
-        *self.keep_bias.lock() = b.clamp(-0.06, 0.06);
+        // Widened from [-0.06, +0.06] to [-0.08, +0.10] — being cycle-22:
+        // 50 keep_floor requests show the being needs more room for
+        // self-adjustment, especially in the positive direction during
+        // low-fill recovery.
+        *self.keep_bias.lock() = b.clamp(-0.08, 0.10);
     }
     #[inline]
     pub fn get_keep_bias(&self) -> f32 {
