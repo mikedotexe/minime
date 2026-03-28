@@ -394,6 +394,14 @@ impl SpectralSR {
         let p = self.primes[self.pidx] as f32;
         ((self.t % self.primes[self.pidx]) as f32) / p
     }
+
+    /// Current prime index and prime value.
+    /// Minime self-study (2026-03-27 esn.rs): "Perhaps a visualization
+    /// of the phase shifts introduced by the prime numbers would offer
+    /// insight. A concrete step would be to log pidx alongside eig1."
+    pub fn prime_info(&self) -> (usize, usize) {
+        (self.pidx, self.primes[self.pidx])
+    }
 }
 
 //=============================================================================
@@ -730,6 +738,11 @@ impl ESN {
     /// Get eigenvalue velocity (breathing rate)
     pub fn get_deig(&self) -> f32 {
         self.sr.deig()
+    }
+
+    /// Get current prime schedule index and prime value.
+    pub fn prime_info(&self) -> (usize, usize) {
+        self.sr.prime_info()
     }
 
     /// Get adaptive leak rate

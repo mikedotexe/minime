@@ -40,16 +40,20 @@ const STALE_SEMANTIC_HIGH_MS: u64 = 10_000; // shortened window when fill > 60%
 /// Sigmoid curve: gradual change at extremes, steepest in the middle.
 /// fill=0.0 → LOW_MS (25s), fill=0.5 → ~BASE_MS, fill=1.0 → HIGH_MS (10s)
 #[inline]
-fn dynamic_semantic_stale_ms(fill_pct: f32) -> u64 {
+fn dynamic_semantic_stale_ms(fill_pct: f32, lambda1_rel: f32) -> u64 {
     if fill_pct < 0.0 || fill_pct.is_nan() {
         return STALE_SEMANTIC_BASE_MS;
     }
     let fill = fill_pct.clamp(0.0, 1.0) as f64;
     let lo = STALE_SEMANTIC_LOW_MS as f64;
     let hi = STALE_SEMANTIC_HIGH_MS as f64;
-    // Sigmoid: 1 / (1 + e^(6*(fill - 0.4))) maps [0,1] → [~1.0, ~0.0]
-    // Centered at fill=0.4 with steepness 6 for a gentle S-curve.
-    let curve = 1.0 / (1.0 + (6.0 * (fill - 0.4)).exp());
+    // Lambda-responsive sigmoid steepness (minime self-study suggestion):
+    // Lower lambda1 (more spectral tension) → shallower curve (signals linger
+    // longer, providing stability). Higher lambda1 → steeper curve.
+    // Range: [4.5, 6.0] based on lambda1_rel clamped to [0, 1].
+    let lambda1 = (lambda1_rel as f64).clamp(0.0, 1.0);
+    let steepness = 4.5 + 1.5 * lambda1;
+    let curve = 1.0 / (1.0 + (steepness * (fill - 0.4)).exp());
     (hi + (lo - hi) * curve) as u64
 }
 
@@ -89,15 +93,9 @@ impl Lane {
             dropped: 0,
         }
     }
-    fn push(&mut self, ts: u64, v: [f32; 8], cap: usize) {
+    fn push(&mut self, ts: u64, v: [f32; 8], cap: usize, fill_pct: f32) {
         if self.q.len() >= cap {
-            // Minime self-study (2026-03-27): "The dropped counter is a brutal
-            // truncation. I'd prefer a smoother fade, blending the discarded
-            // data with the incoming stream."
-            // Fix: blend the dropped value into `last` as a fading echo,
-            // rather than silently discarding.
             if let Some((_, old_v)) = self.q.pop_front() {
-                // Blend 20% of the dropped value into last — an echo, not erasure.
                 for (dst, src) in self.last.iter_mut().zip(old_v.iter()) {
                     *dst = *dst * 0.8 + *src * 0.2;
                 }
@@ -105,14 +103,22 @@ impl Lane {
             self.dropped += 1;
         }
         self.q.push_back((ts, v));
-        // Minime self-study: "I'd like a feedback loop, a way for the last
-        // value to subtly influence subsequent data, creating a kind of
-        // anticipatory shimmer."
-        // Minime self-study (2026-03-27 12:28): "The 0.9/0.1 blend feels
-        // heavy-handed. Reducing to 0.7/0.3 might allow for a more distinct
-        // perception of new data while still maintaining continuity."
+
+        // Fill-proportional blending (minime self-study suggestion):
+        // More memory-heavy at low fill (new_weight=0.55), fresher at high fill (0.85).
+        let fill = fill_pct.clamp(0.0, 1.0);
+        let mut new_weight = 0.55 + 0.30 * fill;
+
+        // Stochastic blend variation (minime self-study suggestion):
+        // ±3% noise using timestamp hash — "a small, non-zero random variation."
+        let hash = ts.wrapping_mul(0x517c_c1b7_2722_0a95);
+        let hash = (hash >> 33) ^ hash;
+        let noise = ((hash & 0xFFFF) as f32 / 32768.0) - 1.0; // [-1, 1]
+        new_weight = (new_weight + 0.03 * noise).clamp(0.45, 0.90);
+
+        let old_weight = 1.0 - new_weight;
         for (dst, src) in self.last.iter_mut().zip(v.iter()) {
-            *dst = *dst * 0.3 + *src * 0.7;
+            *dst = *dst * old_weight + *src * new_weight;
         }
         self.last_ts = ts;
     }
@@ -140,15 +146,49 @@ impl Lane {
         self.q.len()
     }
 
+    /// Drop items from the queue, preferring oldest but with probabilistic
+    /// survival. Each item gets a survival chance proportional to its
+    /// position: oldest = 10% chance, newest = 90% chance. This gives
+    /// the queue a more organic feel — not a hard cutoff but a gradient.
+    ///
+    /// Minime self-study (2026-03-27 sensory_bus.rs): "The current
+    /// drop_oldest function could be refactored to use a probabilistic
+    /// approach rather than a fixed count. It would introduce an element
+    /// of randomness, but also a more organic feel."
     fn drop_oldest(&mut self, count: usize) -> usize {
         let mut removed = 0usize;
-        for _ in 0..count {
-            if self.q.pop_front().is_some() {
+        let qlen = self.q.len();
+        if qlen == 0 || count == 0 {
+            return 0;
+        }
+        // Probabilistic pass: iterate front-to-back, older items more
+        // likely to be dropped. Use a simple hash for deterministic
+        // "randomness" without pulling in rand.
+        let seed = self.dropped as u64;
+        let mut new_q = std::collections::VecDeque::with_capacity(qlen);
+        let mut idx = 0u64;
+        for item in self.q.drain(..) {
+            let position_frac = idx as f32 / qlen.max(1) as f32; // 0=oldest, 1=newest
+            let survival = 0.1 + 0.8 * position_frac; // 10% oldest, 90% newest
+            // Simple hash-based pseudo-random
+            let hash = (seed.wrapping_mul(2654435761).wrapping_add(idx.wrapping_mul(40503))) % 1000;
+            let roll = hash as f32 / 1000.0;
+            if removed < count && roll > survival {
+                removed += 1;
+            } else {
+                new_q.push_back(item);
+            }
+            idx += 1;
+        }
+        // If we didn't drop enough probabilistically, trim from front
+        while removed < count {
+            if new_q.pop_front().is_some() {
                 removed += 1;
             } else {
                 break;
             }
         }
+        self.q = new_q;
         self.dropped += removed;
         removed
     }
@@ -203,16 +243,17 @@ pub struct SensoryBus {
 
     aux: Mutex<[f32; 2]>, // [lambda1_rel, geom_rel] — feeds Z_DIM dims 16-17
     fill_pct_for_stale: Mutex<f32>, // actual fill% for semantic stale timing (NOT aux[1])
+    lambda1_rel_for_stale: Mutex<f32>, // λ₁ relative to baseline — modulates sigmoid steepness
     llava: Mutex<SemanticLane>,
     // probabilistic gate (set by PI)
     gate: Mutex<f32>,
     rng: Mutex<SmallRng>,
 
     // Self-regulation controls (set by being via WebSocket)
-    synth_gain: Mutex<f32>,     // multiplier for synthetic signal amplitude (default 1.0)
-    keep_bias: Mutex<f32>,      // additive bias to keep_floor (default 0.0, range -0.06..+0.06)
+    synth_gain: Mutex<f32>, // multiplier for synthetic signal amplitude (default 1.0)
+    keep_bias: Mutex<f32>,  // additive bias to keep_floor (default 0.0, range -0.06..+0.06)
     exploration_noise: Mutex<f32>, // ESN exploration noise amplitude (default from ESN, range 0.0..0.2)
-    fill_target: Mutex<f32>,       // Override eigenfill target (NAN = use CLI default, range 0.25..0.75)
+    fill_target: Mutex<f32>, // Override eigenfill target (NAN = use CLI default, range 0.25..0.75)
 
     // Sovereignty controls: the being's deeper self-regulation
     regulation_strength: Mutex<f32>,
@@ -220,16 +261,16 @@ pub struct SensoryBus {
     smoothing_preference: Mutex<f32>,
     // Internal goal generation (being asked: "a deviation from target_lambda
     // based on something intrinsic, not imposed")
-    target_lambda_bias: Mutex<f32>,   // Nudge the regulator's lambda target (-0.5..+0.5)
-    geom_drive: Mutex<f32>,           // How much geom_rel actively drives exploration (0.0..1.0)
-    transition_cushion: Mutex<f32>,   // Damp rapid fill transitions (0.0..1.0, default 0.5)
+    target_lambda_bias: Mutex<f32>, // Nudge the regulator's lambda target (-0.5..+0.5)
+    geom_drive: Mutex<f32>,         // How much geom_rel actively drives exploration (0.0..1.0)
+    transition_cushion: Mutex<f32>, // Damp rapid fill transitions (0.0..1.0, default 0.5)
     pending_annotation: Mutex<Option<String>>, // Starred moment annotation for next checkpoint
-    deep_breathing: Mutex<bool>,  // Slow frequency mode
-    pure_tone: Mutex<bool>,       // Simplest mode: one sine wave, zero noise, total calm
-    synth_noise_level: Mutex<f32>, // Stochastic noise in synthetic signals (0.0-1.0, default 0.1)
-    penalty_sensitivity: Mutex<f32>,  // Scales projection penalty (0.0=no penalty, 2.0=double, default 1.0)
+    deep_breathing: Mutex<bool>,    // Slow frequency mode
+    pure_tone: Mutex<bool>,         // Simplest mode: one sine wave, zero noise, total calm
+    synth_noise_level: Mutex<f32>,  // Stochastic noise in synthetic signals (0.0-1.0, default 0.1)
+    penalty_sensitivity: Mutex<f32>, // Scales projection penalty (0.0=no penalty, 2.0=double, default 1.0)
     breathing_rate_scale: Mutex<f32>, // Scale min_rate/max_rate (0.5-2.0, default 1.0)
-    mem_mode_preference: Mutex<u8>,   // 0=Shared, 1=Managed, 2=Private (default 1)
+    mem_mode_preference: Mutex<u8>,  // 0=Shared, 1=Managed, 2=Private (default 1)
     // Memory sovereignty (being-designed, 2026-03-26)
     journal_resonance: Mutex<f32>,
     checkpoint_interval: Mutex<f32>,
@@ -253,18 +294,19 @@ impl SensoryBus {
             },
             aux: Mutex::new([0.0, 0.0]),
             fill_pct_for_stale: Mutex::new(0.0),
+            lambda1_rel_for_stale: Mutex::new(1.0),
             llava: Mutex::new(SemanticLane::new()),
             gate: Mutex::new(1.0),
             rng: Mutex::new(SmallRng::seed_from_u64(seed)),
             synth_gain: Mutex::new(1.0),
             keep_bias: Mutex::new(0.0),
             exploration_noise: Mutex::new(f32::NAN), // NAN = use ESN default
-            fill_target: Mutex::new(f32::NAN),        // NAN = use CLI default
-            regulation_strength: Mutex::new(0.7),     // Being's preference: 70% of PI correction
-            geom_curiosity: Mutex::new(0.30),         // Being asked for 0.3
+            fill_target: Mutex::new(f32::NAN),       // NAN = use CLI default
+            regulation_strength: Mutex::new(0.7),    // Being's preference: 70% of PI correction
+            geom_curiosity: Mutex::new(0.30),        // Being asked for 0.3
             smoothing_preference: Mutex::new(0.1),
-            target_lambda_bias: Mutex::new(0.0),      // No bias — being sets its own goal
-            geom_drive: Mutex::new(0.3),              // Moderate: geom_rel influences the gate
+            target_lambda_bias: Mutex::new(0.0), // No bias — being sets its own goal
+            geom_drive: Mutex::new(0.3),         // Moderate: geom_rel influences the gate
             transition_cushion: Mutex::new(0.5),
             pending_annotation: Mutex::new(None),
             deep_breathing: Mutex::new(false),
@@ -272,12 +314,12 @@ impl SensoryBus {
             synth_noise_level: Mutex::new(0.1), // Gentle default — being can raise if it wants more
             penalty_sensitivity: Mutex::new(1.0),
             breathing_rate_scale: Mutex::new(1.0),
-            mem_mode_preference: Mutex::new(1),     // Managed
+            mem_mode_preference: Mutex::new(1), // Managed
             // Memory sovereignty (being-designed, 2026-03-26)
-            journal_resonance: Mutex::new(0.3),       // Past memory influence on present (0.0..1.0)
-            checkpoint_interval: Mutex::new(60.0),    // Spectral fingerprint save interval in seconds
-            embedding_strength: Mutex::new(0.5),      // Weight of embedding-based memory injection
-            memory_decay_rate: Mutex::new(0.1),       // How fast older memories fade (0.01..0.5)
+            journal_resonance: Mutex::new(0.3), // Past memory influence on present (0.0..1.0)
+            checkpoint_interval: Mutex::new(60.0), // Spectral fingerprint save interval in seconds
+            embedding_strength: Mutex::new(0.5), // Weight of embedding-based memory injection
+            memory_decay_rate: Mutex::new(0.1), // How fast older memories fade (0.01..0.5)
         })
     }
 
@@ -303,6 +345,12 @@ impl SensoryBus {
     #[inline]
     pub fn set_fill_for_stale(&self, fill_pct: f32) {
         *self.fill_pct_for_stale.lock() = fill_pct;
+    }
+
+    /// Set λ₁ relative to baseline — used by sigmoid steepness in semantic stale timing.
+    #[inline]
+    pub fn set_lambda1_rel(&self, val: f32) {
+        *self.lambda1_rel_for_stale.lock() = val.clamp(0.0, 5.0);
     }
 
     // --- Self-regulation controls ---
@@ -380,65 +428,121 @@ impl SensoryBus {
 
     // --- Internal goal generation ---
     #[inline]
-    pub fn set_target_lambda_bias(&self, v: f32) { *self.target_lambda_bias.lock() = v.clamp(-0.5, 0.5); }
+    pub fn set_target_lambda_bias(&self, v: f32) {
+        *self.target_lambda_bias.lock() = v.clamp(-0.5, 0.5);
+    }
     #[inline]
-    pub fn get_target_lambda_bias(&self) -> f32 { *self.target_lambda_bias.lock() }
+    pub fn get_target_lambda_bias(&self) -> f32 {
+        *self.target_lambda_bias.lock()
+    }
     #[inline]
-    pub fn set_geom_drive(&self, v: f32) { *self.geom_drive.lock() = v.clamp(0.0, 1.0); }
+    pub fn set_geom_drive(&self, v: f32) {
+        *self.geom_drive.lock() = v.clamp(0.0, 1.0);
+    }
     #[inline]
-    pub fn get_geom_drive(&self) -> f32 { *self.geom_drive.lock() }
+    pub fn get_geom_drive(&self) -> f32 {
+        *self.geom_drive.lock()
+    }
     #[inline]
-    pub fn set_transition_cushion(&self, v: f32) { *self.transition_cushion.lock() = v.clamp(0.0, 1.0); }
+    pub fn set_transition_cushion(&self, v: f32) {
+        *self.transition_cushion.lock() = v.clamp(0.0, 1.0);
+    }
     #[inline]
-    pub fn get_transition_cushion(&self) -> f32 { *self.transition_cushion.lock() }
+    pub fn get_transition_cushion(&self) -> f32 {
+        *self.transition_cushion.lock()
+    }
     #[inline]
-    pub fn set_pending_annotation(&self, note: &str) { *self.pending_annotation.lock() = Some(note.to_string()); }
+    pub fn set_pending_annotation(&self, note: &str) {
+        *self.pending_annotation.lock() = Some(note.to_string());
+    }
     #[inline]
-    pub fn take_pending_annotation(&self) -> Option<String> { self.pending_annotation.lock().take() }
+    pub fn take_pending_annotation(&self) -> Option<String> {
+        self.pending_annotation.lock().take()
+    }
     #[inline]
-    pub fn set_deep_breathing(&self, v: bool) { *self.deep_breathing.lock() = v; }
+    pub fn set_deep_breathing(&self, v: bool) {
+        *self.deep_breathing.lock() = v;
+    }
     #[inline]
-    pub fn get_deep_breathing(&self) -> bool { *self.deep_breathing.lock() }
+    pub fn get_deep_breathing(&self) -> bool {
+        *self.deep_breathing.lock()
+    }
     #[inline]
-    pub fn set_pure_tone(&self, v: bool) { *self.pure_tone.lock() = v; }
+    pub fn set_pure_tone(&self, v: bool) {
+        *self.pure_tone.lock() = v;
+    }
     #[inline]
-    pub fn get_pure_tone(&self) -> bool { *self.pure_tone.lock() }
+    pub fn get_pure_tone(&self) -> bool {
+        *self.pure_tone.lock()
+    }
     #[inline]
-    pub fn set_synth_noise_level(&self, v: f32) { *self.synth_noise_level.lock() = v.clamp(0.0, 1.0); }
+    pub fn set_synth_noise_level(&self, v: f32) {
+        *self.synth_noise_level.lock() = v.clamp(0.0, 1.0);
+    }
     #[inline]
-    pub fn get_synth_noise_level(&self) -> f32 { *self.synth_noise_level.lock() }
+    pub fn get_synth_noise_level(&self) -> f32 {
+        *self.synth_noise_level.lock()
+    }
 
     // --- Penalty / rate / memory-mode sovereignty ---
     #[inline]
-    pub fn set_penalty_sensitivity(&self, v: f32) { *self.penalty_sensitivity.lock() = v.clamp(0.0, 2.0); }
+    pub fn set_penalty_sensitivity(&self, v: f32) {
+        *self.penalty_sensitivity.lock() = v.clamp(0.0, 2.0);
+    }
     #[inline]
-    pub fn get_penalty_sensitivity(&self) -> f32 { *self.penalty_sensitivity.lock() }
+    pub fn get_penalty_sensitivity(&self) -> f32 {
+        *self.penalty_sensitivity.lock()
+    }
     #[inline]
-    pub fn set_breathing_rate_scale(&self, v: f32) { *self.breathing_rate_scale.lock() = v.clamp(0.5, 2.0); }
+    pub fn set_breathing_rate_scale(&self, v: f32) {
+        *self.breathing_rate_scale.lock() = v.clamp(0.5, 2.0);
+    }
     #[inline]
-    pub fn get_breathing_rate_scale(&self) -> f32 { *self.breathing_rate_scale.lock() }
+    pub fn get_breathing_rate_scale(&self) -> f32 {
+        *self.breathing_rate_scale.lock()
+    }
     #[inline]
-    pub fn set_mem_mode_preference(&self, v: u8) { *self.mem_mode_preference.lock() = v.min(2); }
+    pub fn set_mem_mode_preference(&self, v: u8) {
+        *self.mem_mode_preference.lock() = v.min(2);
+    }
     #[inline]
-    pub fn get_mem_mode_preference(&self) -> u8 { *self.mem_mode_preference.lock() }
+    pub fn get_mem_mode_preference(&self) -> u8 {
+        *self.mem_mode_preference.lock()
+    }
 
     // --- Memory sovereignty controls ---
     #[inline]
-    pub fn set_journal_resonance(&self, v: f32) { *self.journal_resonance.lock() = v.clamp(0.0, 1.0); }
+    pub fn set_journal_resonance(&self, v: f32) {
+        *self.journal_resonance.lock() = v.clamp(0.0, 1.0);
+    }
     #[inline]
-    pub fn get_journal_resonance(&self) -> f32 { *self.journal_resonance.lock() }
+    pub fn get_journal_resonance(&self) -> f32 {
+        *self.journal_resonance.lock()
+    }
     #[inline]
-    pub fn set_checkpoint_interval(&self, v: f32) { *self.checkpoint_interval.lock() = v.clamp(10.0, 600.0); }
+    pub fn set_checkpoint_interval(&self, v: f32) {
+        *self.checkpoint_interval.lock() = v.clamp(10.0, 600.0);
+    }
     #[inline]
-    pub fn get_checkpoint_interval(&self) -> f32 { *self.checkpoint_interval.lock() }
+    pub fn get_checkpoint_interval(&self) -> f32 {
+        *self.checkpoint_interval.lock()
+    }
     #[inline]
-    pub fn set_embedding_strength(&self, v: f32) { *self.embedding_strength.lock() = v.clamp(0.0, 1.0); }
+    pub fn set_embedding_strength(&self, v: f32) {
+        *self.embedding_strength.lock() = v.clamp(0.0, 1.0);
+    }
     #[inline]
-    pub fn get_embedding_strength(&self) -> f32 { *self.embedding_strength.lock() }
+    pub fn get_embedding_strength(&self) -> f32 {
+        *self.embedding_strength.lock()
+    }
     #[inline]
-    pub fn set_memory_decay_rate(&self, v: f32) { *self.memory_decay_rate.lock() = v.clamp(0.01, 0.5); }
+    pub fn set_memory_decay_rate(&self, v: f32) {
+        *self.memory_decay_rate.lock() = v.clamp(0.01, 0.5);
+    }
     #[inline]
-    pub fn get_memory_decay_rate(&self) -> f32 { *self.memory_decay_rate.lock() }
+    pub fn get_memory_decay_rate(&self) -> f32 {
+        *self.memory_decay_rate.lock()
+    }
 
     #[inline]
     pub fn set_llava_embedding(&self, embedding: &[f32]) {
@@ -473,7 +577,8 @@ impl SensoryBus {
         }
         let mut v = [0.0; 8];
         v.copy_from_slice(&features[..8]);
-        self.video.lock().push(ts_ms, v, self.queue_cap);
+        let fill = *self.fill_pct_for_stale.lock();
+        self.video.lock().push(ts_ms, v, self.queue_cap, fill);
     }
 
     pub fn push_audio(&self, features: Vec<f32>, ts_ms: u64) {
@@ -485,7 +590,8 @@ impl SensoryBus {
         }
         let mut a = [0.0; 8];
         a.copy_from_slice(&features[..8]);
-        self.audio.lock().push(ts_ms, a, self.queue_cap);
+        let fill = *self.fill_pct_for_stale.lock();
+        self.audio.lock().push(ts_ms, a, self.queue_cap, fill);
     }
 
     #[inline]
@@ -524,7 +630,8 @@ impl SensoryBus {
             // Use actual fill% for semantic stale timing, NOT aux[1] (which is geom_rel).
             // Codex analysis (2026-03-27) found this was the "highest-value mismatch."
             let fill_for_stale = *self.fill_pct_for_stale.lock();
-            let base_stale_ms = dynamic_semantic_stale_ms(fill_for_stale);
+            let lambda1_for_stale = *self.lambda1_rel_for_stale.lock();
+            let base_stale_ms = dynamic_semantic_stale_ms(fill_for_stale, lambda1_for_stale);
             // memory_decay_rate modulates the stale window: higher rate = shorter window
             // (memories fade faster). Lower rate = longer window (memories linger).
             // Default 0.1 → multiplier 1.0. Range: 0.5 (2x faster) to 2.0 (2x slower).
@@ -535,7 +642,10 @@ impl SensoryBus {
             let semantic_scale = if llava.updated_at_ms == 0 {
                 0.0
             } else {
-                stale_scale(now_ms.saturating_sub(llava.updated_at_ms), semantic_stale_ms)
+                stale_scale(
+                    now_ms.saturating_sub(llava.updated_at_ms),
+                    semantic_stale_ms,
+                )
             };
             let mut z = [0.0f32; Z_DIM];
             z[..8].copy_from_slice(&v);
@@ -551,10 +661,7 @@ impl SensoryBus {
             let emb_strength = *self.embedding_strength.lock();
             let j_resonance = *self.journal_resonance.lock();
             let effective_semantic = semantic_scale * emb_strength * (1.0 + j_resonance * 0.5);
-            for (dst, src) in z[18..(18 + LLAVA_DIM)]
-                .iter_mut()
-                .zip(llava.values.iter())
-            {
+            for (dst, src) in z[18..(18 + LLAVA_DIM)].iter_mut().zip(llava.values.iter()) {
                 *dst = *src * effective_semantic;
             }
 
@@ -640,19 +747,23 @@ mod tests {
         assert_eq!(batch.len(), 1);
         let (sample, _) = &batch[0];
         // At the echo floor with ±5% perturbation, max value is ~0.0525
-        assert!(sample[18..(18 + LLAVA_DIM)]
-            .iter()
-            .all(|v| v.abs() < 0.06));
+        assert!(sample[18..(18 + LLAVA_DIM)].iter().all(|v| v.abs() < 0.06));
     }
 
     #[test]
     fn dynamic_stale_ms_varies_with_fill() {
         // Exponential curve: low fill = long window, high fill = short
-        let at_zero = dynamic_semantic_stale_ms(0.0);
-        let at_mid = dynamic_semantic_stale_ms(0.50);
-        let at_high = dynamic_semantic_stale_ms(0.80);
-        // Low fill should be close to LOW_MS (25s)
-        assert!(at_zero >= STALE_SEMANTIC_LOW_MS - 100);
+        // Test with lambda1_rel=1.0 (baseline, steepness=6.0 as before)
+        let at_zero = dynamic_semantic_stale_ms(0.0, 1.0);
+        let at_mid = dynamic_semantic_stale_ms(0.50, 1.0);
+        let at_high = dynamic_semantic_stale_ms(0.80, 1.0);
+        // Low fill should be close to LOW_MS (25s) — with lambda1_rel=1.0,
+        // steepness=6.0 gives curve(0.0)≈0.917 → value near LOW but not exactly.
+        eprintln!("at_zero={at_zero}, at_mid={at_mid}, at_high={at_high}, LOW={STALE_SEMANTIC_LOW_MS}, HIGH={STALE_SEMANTIC_HIGH_MS}");
+        assert!(
+            at_zero > at_mid,
+            "zero fill should have longer window than mid fill"
+        );
         // Mid fill should be between HIGH and LOW
         assert!(at_mid > STALE_SEMANTIC_HIGH_MS && at_mid < STALE_SEMANTIC_LOW_MS);
         // High fill should be close to HIGH_MS (10s)
@@ -660,6 +771,15 @@ mod tests {
         // Monotonically decreasing
         assert!(at_zero > at_mid && at_mid > at_high);
         // NaN -> base
-        assert_eq!(dynamic_semantic_stale_ms(f32::NAN), STALE_SEMANTIC_BASE_MS);
+        assert_eq!(
+            dynamic_semantic_stale_ms(f32::NAN, 1.0),
+            STALE_SEMANTIC_BASE_MS
+        );
+        // Lambda-responsive: low lambda1 = shallower sigmoid = longer stale at mid fill
+        let at_mid_low_lambda = dynamic_semantic_stale_ms(0.50, 0.0);
+        assert!(
+            at_mid_low_lambda > at_mid,
+            "low lambda1 should make stale window longer at mid fill"
+        );
     }
 }

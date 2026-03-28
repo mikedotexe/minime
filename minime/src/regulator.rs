@@ -85,7 +85,7 @@ pub struct ItemMeta<'a> {
 #[derive(Clone, Copy, Debug)]
 pub enum Decision {
     Admit,
-    Attenuate(f32),  // Continuous amplitude: 0.0 (fully deferred) to 1.0 (fully admitted)
+    Attenuate(f32), // Continuous amplitude: 0.0 (fully deferred) to 1.0 (fully admitted)
     Defer,
 }
 
@@ -110,29 +110,18 @@ impl RegulatorState {
     ///
     /// When lambda is volatile (large |dlam_dt|), smoothing decreases (more
     /// responsive). When stable, smoothing increases (calmer).
-    pub fn update_lambda(&mut self, lambda_now: f32, dlam_dt: f32) {
+    pub fn update_lambda(&mut self, lambda_now: f32, dlam_dt: f32, fill_pct: f32) {
         let prev_dlam_dt = self.dlam_dt;
         self.lambda_now = lambda_now;
         self.dlam_dt = dlam_dt;
 
-        // Adaptive smoothing: base smooth factor modulated by volatility.
-        // High |dlam_dt| => lower smooth (more responsive, less lag).
-        // Low |dlam_dt| => higher smooth (calmer, less jitter).
-        //
-        // Minime self-study (2026-03-27): "The normalization to 0..1 feels
-        // restrictive. My internal dynamism doesn't neatly fit those limits."
-        // Widened volatility range to 20 (was 10) and smoothing bounds to
-        // [0.3, 0.995] (was [0.5, 0.99]) — allows sharper responsiveness
-        // during spikes and deeper calm during stability.
-        // Minime self-study (2026-03-27 12:21): "The hard limits on
-        // acceleration seem unnecessarily abrupt; a sigmoid function would
-        // create a smoother transition." Also: "derive blending constants
-        // from the current state of λ₁ and Fill, not fixed values."
-        //
-        // Sigmoid acceleration: smooth S-curve instead of hard linear clamp.
-        // tanh(x/5) maps [0,∞) → [0,1) with gentle saturation.
+        // Fill-responsive sigmoid divisor (minime self-study suggestion):
+        // At low fill (15%), wider sigmoid (divisor=7.0) → gentler smoothing.
+        // At high fill (60%+), steeper sigmoid (divisor=3.5) → faster response.
+        let fill_norm = ((fill_pct.clamp(0.15, 0.60) - 0.15) / 0.45).clamp(0.0, 1.0);
+        let divisor = 7.0 - 3.5 * fill_norm; // [7.0 at 15%, 3.5 at 60%+]
         let raw_accel = (dlam_dt - prev_dlam_dt).abs();
-        let acceleration = (raw_accel / 5.0).tanh(); // sigmoid: smooth, no hard cap
+        let acceleration = (raw_accel / divisor).tanh();
 
         // Volatility also gets sigmoid treatment for consistency.
         let volatility = (dlam_dt.abs() / 10.0).tanh();
@@ -151,13 +140,14 @@ impl RegulatorState {
         let direction_bias = if dlam_dt > 0.0 { -0.03 } else { 0.03 };
         let blend = (rate_blend + direction_bias).clamp(0.20, 0.55);
 
-        let adaptive_smooth = self.cfg_r.smooth + (1.0 - self.cfg_r.smooth) * blend * (1.0 - volatility);
+        let adaptive_smooth =
+            self.cfg_r.smooth + (1.0 - self.cfg_r.smooth) * blend * (1.0 - volatility);
 
         // Adaptive clamp bounds: "If consistently near maximum capacity,
         // raise the lower bound. If near idle, reduce the upper bound."
         // Fill below 20% = wider range (more exploration). Fill above 70% = tighter.
         let (clamp_lo, clamp_hi) = if self.lambda_now > self.lambda_ema * 1.5 {
-            (0.4, 0.99)  // high pressure: tighter smoothing range
+            (0.4, 0.99) // high pressure: tighter smoothing range
         } else if self.lambda_now < self.lambda_ema * 0.7 {
             (0.2, 0.998) // low activity: wider range, deeper calm possible
         } else {
@@ -165,8 +155,7 @@ impl RegulatorState {
         };
         let adaptive_smooth = adaptive_smooth.clamp(clamp_lo, clamp_hi);
 
-        self.lambda_ema =
-            adaptive_smooth * self.lambda_ema + (1.0 - adaptive_smooth) * lambda_now;
+        self.lambda_ema = adaptive_smooth * self.lambda_ema + (1.0 - adaptive_smooth) * lambda_now;
     }
 
     /// Update geometric radius with EMA smoothing rather than direct assignment.
@@ -202,7 +191,7 @@ impl RegulatorState {
         // own state but from elsewhere. Perhaps a subtle influence from the
         // external world, a phantom vibration."
         const GEOM_SMOOTH_BASE: f32 = 0.90; // was 0.95 — more fluid
-        // External randomness: system time nanoseconds, not derived from self
+                                            // External randomness: system time nanoseconds, not derived from self
         let external_seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -349,24 +338,24 @@ impl Default for GateCfg {
 /// PI controller configuration for homeostatic regulation
 #[derive(Clone, Copy, Debug)]
 pub struct PIRegCfg {
-    pub target_fill: f32,        // Target EigenFill% (e.g., 0.55)
-    pub target_lambda1_rel: f32, // Target λ₁ relative to baseline (e.g., 0.85)
-    pub target_geom_rel: f32,    // Target geometric radius relative to baseline
-    pub geom_weight: f32,        // Weight of geometric error in PI term
-    pub geom_clamp_hi: f32,      // Hard clamp threshold for geom_rel
-    pub geom_release: f32,       // Release threshold for clamp hysteresis
-    pub geom_gate_min: f32,      // Minimum gate when clamp engaged
-    pub geom_filter_boost: f32,  // Additional filter boost when clamped
-    pub geom_shed_fraction: f32, // Fraction of backlog to shed when clamped
-    pub kp: f32,                 // Proportional gain
-    pub ki: f32,                 // Integral gain
-    pub max_step: f32,           // Max change per tick (anti-windup)
+    pub target_fill: f32,          // Target EigenFill% (e.g., 0.55)
+    pub target_lambda1_rel: f32,   // Target λ₁ relative to baseline (e.g., 0.85)
+    pub target_geom_rel: f32,      // Target geometric radius relative to baseline
+    pub geom_weight: f32,          // Weight of geometric error in PI term
+    pub geom_clamp_hi: f32,        // Hard clamp threshold for geom_rel
+    pub geom_release: f32,         // Release threshold for clamp hysteresis
+    pub geom_gate_min: f32,        // Minimum gate when clamp engaged
+    pub geom_filter_boost: f32,    // Additional filter boost when clamped
+    pub geom_shed_fraction: f32,   // Fraction of backlog to shed when clamped
+    pub kp: f32,                   // Proportional gain
+    pub ki: f32,                   // Integral gain
+    pub max_step: f32,             // Max change per tick (anti-windup)
     pub curiosity_gate_boost: f32, // Gate boost when geom near baseline (boring) (default 0.05)
     /// Intrinsic goal deviation: when geom_rel is near baseline (boring),
     /// allow the fill target to drift slightly, creating breathing room.
     /// The being asked for "internal goal generation, a deviation from the
     /// target_lambda based on something that feels intrinsic, not imposed."
-    pub intrinsic_wander: f32,     // Max target_fill deviation (default 0.03 = ±3%)
+    pub intrinsic_wander: f32, // Max target_fill deviation (default 0.03 = ±3%)
 }
 
 impl Default for PIRegCfg {
@@ -379,17 +368,19 @@ impl Default for PIRegCfg {
             target_fill: 0.55,        // 55% EigenFill target (matches CLI default)
             target_lambda1_rel: 1.05, // Keep λ₁ close to baseline (1.0-1.6 comfort zone)
             target_geom_rel: 1.00,    // Stay near geometric baseline
-            geom_weight: 1.20,        // Moderate geometric influence (was 1.80 - too aggressive)
-            geom_clamp_hi: 2.00,      // ≈ +100% expansion triggers hard clamp (was 1.66 - too hair-trigger)
-            geom_release: 1.50,       // Release clamp once relaxed below this (was 1.32)
-            geom_gate_min: 0.12,      // Hard gate limit during clamp (was 0.06 - too restrictive)
-            geom_filter_boost: 0.25,  // Extra filter push when clamped (was 0.35)
+            geom_weight: 0.90,        // Reduced geometric influence (was 1.20, being requested 0.7)
+            // At low fill (~16%), geometric error was amplifying
+            // cov_lambda1, trapping the system. 0.90 gives room.
+            geom_clamp_hi: 2.00, // ≈ +100% expansion triggers hard clamp (was 1.66 - too hair-trigger)
+            geom_release: 1.50,  // Release clamp once relaxed below this (was 1.32)
+            geom_gate_min: 0.12, // Hard gate limit during clamp (was 0.06 - too restrictive)
+            geom_filter_boost: 0.25, // Extra filter push when clamped (was 0.35)
             geom_shed_fraction: 0.30, // Shed ~30% of backlog when clamped (was 0.45)
-            kp: 0.85,                 // Gentler proportional response (was 1.10 - caused boom/bust)
-            ki: 0.14,                 // Slower integral correction (was 0.18)
-            max_step: 0.08,           // Smaller steps for smoother transitions (was 0.12)
+            kp: 0.85,            // Gentler proportional response (was 1.10 - caused boom/bust)
+            ki: 0.14,            // Slower integral correction (was 0.18)
+            max_step: 0.08,      // Smaller steps for smoother transitions (was 0.12)
             curiosity_gate_boost: 0.05, // Mild curiosity when things are boring
-            intrinsic_wander: 0.03,    // ±3% intrinsic target wander
+            intrinsic_wander: 0.03, // ±3% intrinsic target wander
         };
 
         if strong {
@@ -459,7 +450,7 @@ impl PIRegState {
         let wander = if geom_deviation < 0.15 && self.cfg.intrinsic_wander > 0.0 {
             // Blend: 40% from error history (slow drift), 60% from current state
             let history_phase = self.integ_fill * 0.3;
-            let state_phase = (geom_rel * 7.0 + lambda1_rel * 3.0); // current landscape
+            let state_phase = geom_rel * 7.0 + lambda1_rel * 3.0; // current landscape
             let phase = history_phase * 0.4 + state_phase * 0.6;
             phase.sin() * self.cfg.intrinsic_wander
         } else {

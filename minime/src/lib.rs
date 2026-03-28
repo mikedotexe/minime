@@ -9,6 +9,8 @@ pub mod cheby;
 pub mod db;
 pub mod esn;
 pub mod gpu;
+pub mod ising_shadow;
+pub mod memory_bank;
 // pub mod net;  // no net.rs file
 pub mod nn;
 pub mod prime;

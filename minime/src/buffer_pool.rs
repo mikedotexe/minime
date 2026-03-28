@@ -29,8 +29,7 @@ impl BufferPool {
         }
         self.dev.new_buffer(
             aligned,
-            MTLResourceOptions::StorageModeShared
-                | MTLResourceOptions::HazardTrackingModeUntracked,
+            MTLResourceOptions::StorageModeShared | MTLResourceOptions::HazardTrackingModeUntracked,
         )
     }
 
@@ -45,10 +44,5 @@ impl BufferPool {
     pub fn release(&mut self, buf: Buffer) {
         let size = buf.length();
         self.free.entry(size).or_default().push(buf);
-    }
-
-    /// Number of cached buffers (for diagnostics).
-    pub fn cached_count(&self) -> usize {
-        self.free.values().map(|v| v.len()).sum()
     }
 }

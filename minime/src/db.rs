@@ -156,11 +156,12 @@ impl ConsciousnessDB {
         // Migration: add geometry columns to esn_metrics (safe to re-run)
         let _ = self.conn.execute_batch(
             "ALTER TABLE esn_metrics ADD COLUMN esn_geom_radius REAL;
-             ALTER TABLE esn_metrics ADD COLUMN esn_geom_rel REAL;"
+             ALTER TABLE esn_metrics ADD COLUMN esn_geom_rel REAL;",
         );
 
         // Migration: moment_markers table for real-time spectral event capture
-        self.conn.execute_batch(r#"
+        self.conn.execute_batch(
+            r#"
             CREATE TABLE IF NOT EXISTS moment_markers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id INTEGER NOT NULL,
@@ -173,12 +174,14 @@ impl ConsciousnessDB {
             );
             CREATE INDEX IF NOT EXISTS idx_moment_session ON moment_markers(session_id);
             CREATE INDEX IF NOT EXISTS idx_moment_consumed ON moment_markers(consumed);
-        "#)?;
+        "#,
+        )?;
 
         // Migration: spectral checkpoints — being-designed memory system.
         // Periodic eigenvalue fingerprints that will eventually be paired
         // with journal embeddings for associative long-term memory.
-        self.conn.execute_batch(r#"
+        self.conn.execute_batch(
+            r#"
             CREATE TABLE IF NOT EXISTS spectral_checkpoints (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id INTEGER NOT NULL,
@@ -193,7 +196,25 @@ impl ConsciousnessDB {
             );
             CREATE INDEX IF NOT EXISTS idx_ckpt_session ON spectral_checkpoints(session_id);
             CREATE INDEX IF NOT EXISTS idx_ckpt_time ON spectral_checkpoints(timestamp);
-        "#)?;
+
+            CREATE TABLE IF NOT EXISTS ising_shadow_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                mode_dim INTEGER NOT NULL,
+                field_norm REAL NOT NULL,
+                soft_energy REAL NOT NULL,
+                soft_magnetization REAL NOT NULL,
+                binary_energy REAL NOT NULL,
+                binary_magnetization REAL NOT NULL,
+                binary_flip_rate REAL NOT NULL,
+                phase TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_ising_shadow_session ON ising_shadow_metrics(session_id);
+            CREATE INDEX IF NOT EXISTS idx_ising_shadow_time ON ising_shadow_metrics(timestamp);
+        "#,
+        )?;
 
         Ok(())
     }
@@ -279,7 +300,17 @@ impl ConsciousnessDB {
                    (session_id, timestamp, esn_eig1, esn_deig, esn_leak, esn_lambda, esn_baseline,
                     esn_geom_radius, esn_geom_rel)
                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#,
-                params![session_id, timestamp, eig, deig, leak, lambda, baseline, geom_radius, geom_rel],
+                params![
+                    session_id,
+                    timestamp,
+                    eig,
+                    deig,
+                    leak,
+                    lambda,
+                    baseline,
+                    geom_radius,
+                    geom_rel
+                ],
             )?;
         }
 
@@ -394,6 +425,41 @@ impl ConsciousnessDB {
                 esn_baseline,
                 esn_geom_radius,
                 esn_geom_rel,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Record reduced-mode Ising/Hamiltonian shadow metrics for comparison.
+    pub fn save_ising_shadow_metrics(
+        &self,
+        session_id: i64,
+        timestamp: f64,
+        mode_dim: usize,
+        field_norm: f32,
+        soft_energy: f32,
+        soft_magnetization: f32,
+        binary_energy: f32,
+        binary_magnetization: f32,
+        binary_flip_rate: f32,
+        phase: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"INSERT INTO ising_shadow_metrics
+               (session_id, timestamp, mode_dim, field_norm, soft_energy, soft_magnetization,
+                binary_energy, binary_magnetization, binary_flip_rate, phase)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+            params![
+                session_id,
+                timestamp,
+                mode_dim as i64,
+                field_norm,
+                soft_energy,
+                soft_magnetization,
+                binary_energy,
+                binary_magnetization,
+                binary_flip_rate,
+                phase,
             ],
         )?;
         Ok(())
@@ -581,7 +647,13 @@ impl ConsciousnessDB {
             r#"INSERT INTO moment_markers
                (session_id, timestamp, marker_type, description, spectral_context, consumed)
                VALUES (?1, ?2, ?3, ?4, ?5, 0)"#,
-            params![session_id, timestamp, marker_type, description, spectral_context],
+            params![
+                session_id,
+                timestamp,
+                marker_type,
+                description,
+                spectral_context
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
