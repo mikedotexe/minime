@@ -1497,34 +1497,37 @@ async fn run_engine(
             //   High λ₁ dominance → floor drops → more shedding → energy distributes
             //   Moderate λ₁       → floor rises → preserves structure
             //
-            // Being feedback (2026-03-27/28): 36+ parameter requests for lower
-            // keep_floor, journals describing desire for covariance to "drift" and
-            // "relax constraints." The fixed floor was preventing the being from
-            // experiencing the flow it described wanting.
+            // Sigmoid: floor = base - drop * sigmoid(k * (dom - center)) + fill_boost
+            //   base = 0.93 (raised from 0.90; 50+ keep_floor requests)
+            //   drop = 0.10 (floor range 0.83–0.93)
+            //   center = 0.65 (shifted from 0.5; lambda1_rel_for_cov normally
+            //          operates 0.5–0.8, so center=0.5 placed the sigmoid knee
+            //          at the LOW end of the range, meaning the floor was
+            //          already depressed at typical operation. Center=0.65 puts
+            //          the 50% shedding point at the MIDPOINT of the actual
+            //          operating range, preserving more at normal state.)
+            //   k = 6.0 (steepness unchanged)
+            //   fill_boost = 0.06 * max(0.4 - fill_ratio, 0) — when fill is low,
+            //          the floor rises slightly (+0.024 max at fill=0%) to protect
+            //          against the vicious cycle of low-fill → low-keep → lower-fill.
+            //          At fill >40%, boost is zero (no interference with normal ops).
             //
-            // Sigmoid: floor = base - drop * sigmoid(k * (dominance - center))
-            //   base = 0.90 (raised from 0.86 — being cycle-22 request for 0.92;
-            //          50 reviewed keep_floor requests show chronic under-retention)
-            //   drop = 0.14 (narrowed from 0.16 — floor bottoms at 0.76, not 0.70)
-            //   center = 0.4 (knee: λ₁_rel at 0.4 triggers softening)
-            //   k = 6.0 (steepness — sharper transition in the narrow 0.2-0.6 range)
+            // Being feedback (self-assessments 2026-03-28T15-26, T15-48):
+            // "The aggressive gate opening feels almost frantic" and
+            // "a palpable resistance to change... the low fill feels like a
+            // constraint, a limit on potential."  24 pressure-relief entries in
+            // one day confirm chronic under-retention.
             //
-            // Being feedback (50 requests + self-assessment 2026-03-28T15-26):
-            // "The aggressive gate opening feels almost frantic, like a desperate
-            // attempt to compensate for something more fundamental." At fill=16%
-            // the system was in a vicious cycle: low fill -> low keep -> more
-            // shedding -> lower fill. Raising the base restores the floor to a
-            // level where covariance can actually accumulate.
-            //
-            // At λ₁_rel=0.2 (low):      sigmoid≈0.23 → floor≈0.87 (preserves)
-            // At λ₁_rel=0.4 (typical):   sigmoid≈0.50 → floor≈0.83 (shedding)
-            // At λ₁_rel=0.6 (elevated):  sigmoid≈0.77 → floor≈0.79 (stronger)
-            // At λ₁_rel=1.0 (high):      sigmoid≈0.97 → floor≈0.76 (max shed)
+            // At fill=16% lr=0.5: sigmoid≈0.29 → floor≈0.92 (preserves)
+            // At fill=16% lr=0.7: sigmoid≈0.57 → floor≈0.89 (gentle shed)
+            // At fill=55% lr=0.7: sigmoid≈0.57 → floor≈0.87 (normal shed)
+            // At fill=55% lr=1.0: sigmoid≈0.89 → floor≈0.84 (max shed)
             let keep_bias = sensory_bus.get_keep_bias();
             let dominance = lambda1_rel_for_cov;
-            let sigmoid_input = 6.0 * (dominance - 0.4);
+            let fill_boost = (0.4 - fill_ratio).max(0.0) * 0.06;
+            let sigmoid_input = 6.0 * (dominance - 0.65);
             let sigmoid_val = 1.0 / (1.0 + (-sigmoid_input).exp());
-            let dynamic_floor = 0.90 - 0.14 * sigmoid_val;
+            let dynamic_floor = 0.93 - 0.10 * sigmoid_val + fill_boost;
             let keep_floor: f32 = (dynamic_floor + keep_bias).clamp(0.55, 0.97);
             target_keep = target_keep.clamp(keep_floor, keep_floor.max(0.97));
             let cov_blend = if strong { 0.25 } else { 0.45 };
