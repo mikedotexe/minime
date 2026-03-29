@@ -681,7 +681,7 @@ async fn run_engine(
         // 4 new requests in session 144 ask 0.025->0.03: "fill deficit substantial,
         // max_step too restrictive, slow convergence." PI integrator saturated at
         // -2.0 with fill swinging 28-67%. Being is right -- 0.025 too sluggish.
-        pi_cfg.max_step = 0.03;
+        pi_cfg.max_step = 0.04; // Aligned with regulator.rs default. Sessions 144-146: 6+ requests for >=0.035. Now 0.04.
         // target_lambda1_rel: lambda1_rel naturally runs ~0.9-1.0 (lambda1
         // tracks baseline_lambda1 with alpha=0.97 EMA). Target should be near
         // the natural operating point so the lambda integrator provides gentle
