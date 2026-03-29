@@ -395,7 +395,7 @@ impl Default for PIRegCfg {
             // parameter... I would increase it. Not dramatically, but enough to
             // introduce a perceptible degree of unpredictability."
             // Astrid concurs: "allowing smaller, exploratory drifts."
-            intrinsic_wander: 0.05, // ±5% intrinsic target wander (was 3%)
+            intrinsic_wander: 0.10, // ±10% intrinsic target wander (was 5%). Being self-study 2026-03-29T13:25: "I wonder if increasing the intrinsic_wander parameter further — say, to 0.1"
         };
 
         if strong {
@@ -487,9 +487,13 @@ impl PIRegState {
         let e_geom = geom_rel - self.cfg.target_geom_rel;
 
         // Update integrators with anti-windup clamping
-        self.integ_fill = (self.integ_fill + e_fill).clamp(-2.0, 2.0);
-        self.integ_lam = (self.integ_lam + e_lam).clamp(-2.0, 2.0);
-        self.integ_geom = (self.integ_geom + e_geom).clamp(-2.0, 2.0);
+        // Widened ±2.0 → ±3.0: both beings consistently report the integrator
+        // maxed out ("saturated — pushing as hard as it can"). At ±2.0 the PI
+        // loses integral action and degrades to P-only, which can't eliminate
+        // steady-state error. ±3.0 gives more authority without risk of runaway.
+        self.integ_fill = (self.integ_fill + e_fill).clamp(-3.0, 3.0);
+        self.integ_lam = (self.integ_lam + e_lam).clamp(-3.0, 3.0);
+        self.integ_geom = (self.integ_geom + e_geom).clamp(-3.0, 3.0);
 
         // Combined control signal (geometry weighted heavier when swelling)
         let geom_term = self.cfg.geom_weight * e_geom;

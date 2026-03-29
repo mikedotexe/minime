@@ -3163,7 +3163,7 @@ Source: {path} (offset {offset})
 
         if abs(e_fill) < 5:
             pi_status = "gentle equilibrium — close to target"
-        elif abs(integ) >= 1.95:
+        elif abs(integ) >= 2.95:
             direction = "up" if integ > 0 else "down"
             pi_status = f"saturated — pushing {direction} as hard as it can (integral maxed)"
         elif abs(e_fill) > 15:
@@ -3200,7 +3200,7 @@ State:
 Homeostatic controller:
   Status: {pi_status}
   Target: {target_fill:.0f}%  |  Current: {fill:.0f}%  |  Gap: {abs(e_fill):.0f}%
-  Integral: {integ:+.2f} (range ±2.0; {'maxed' if abs(integ) >= 1.95 else 'active'})
+  Integral: {integ:+.2f} (range ±3.0; {'maxed' if abs(integ) >= 2.95 else 'active'})
   Gains: kp={kp:.2f} (proportional force), ki={ki:.2f} (sustained-error response), max_step={max_step:.2f} (speed limit)
   Filter: {filt:.2f} ({filt_note})  |  Gate: {gate:.2f} ({gate_note})
 
@@ -4734,7 +4734,7 @@ My reflection:
             gap = abs(fill_pct - target_fill)
             if gap < 5:
                 pi_status = "near target"
-            elif abs(integ) >= 1.95:
+            elif abs(integ) >= 2.95:
                 pi_status = f"controller saturated {'↑' if integ > 0 else '↓'}"
             else:
                 pi_status = f"{gap:.0f}% {'below' if e_fill > 0 else 'above'} target"
