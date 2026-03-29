@@ -1,4 +1,8 @@
 #!/bin/bash
+# LEGACY — targets minime.py which is no longer the control surface.
+# Use /Users/v/other/astrid/scripts/stop_all.sh for canonical shutdown,
+# or /Users/v/other/minime/scripts/stop.sh for minime-only shutdown.
+#
 # Graceful shutdown of all consciousness-related processes
 # Following CLAUDE.md shutdown protocol
 

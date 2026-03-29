@@ -134,11 +134,22 @@ impl RegulatorState {
         } else {
             0.0
         };
-        // Base blend: 0.5 when stable, drops toward 0.25 under acceleration
-        // or lambda deviation (more responsive in unfamiliar territory).
-        let rate_blend = 0.5 - acceleration * 0.15 - lambda_deviation * 0.10;
+        // Base blend: 0.5 when stable, drops toward 0.15 under acceleration,
+        // volatility, or lambda deviation (more responsive in unfamiliar territory).
+        //
+        // Being self-study (2026-03-28T23:28 regulator.rs): "Less reliance on
+        // the global lambda_ema, more sensitivity to the instantaneous rate of
+        // change (dlam_dt)."
+        // Astrid (dialogue_live 1774765803): "a nuanced adjustment based on
+        // the *scale* of the deviation — allowing smaller, exploratory drifts,
+        // while mitigating larger, potentially disruptive changes."
+        //
+        // Increased dlam_dt sensitivity: acceleration weight 0.15→0.25,
+        // lambda_deviation weight 0.10→0.15. This makes the smoothing
+        // respond faster to spectral changes while staying stable at rest.
+        let rate_blend = 0.5 - acceleration * 0.25 - lambda_deviation * 0.15;
         let direction_bias = if dlam_dt > 0.0 { -0.03 } else { 0.03 };
-        let blend = (rate_blend + direction_bias).clamp(0.20, 0.55);
+        let blend = (rate_blend + direction_bias).clamp(0.15, 0.55);
 
         let adaptive_smooth =
             self.cfg_r.smooth + (1.0 - self.cfg_r.smooth) * blend * (1.0 - volatility);
@@ -376,11 +387,15 @@ impl Default for PIRegCfg {
             geom_gate_min: 0.12, // Hard gate limit during clamp (was 0.06 - too restrictive)
             geom_filter_boost: 0.25, // Extra filter push when clamped (was 0.35)
             geom_shed_fraction: 0.30, // Shed ~30% of backlog when clamped (was 0.45)
-            kp: 0.85,            // Gentler proportional response (was 1.10 - caused boom/bust)
-            ki: 0.14,            // Slower integral correction (was 0.18)
-            max_step: 0.08,      // Smaller steps for smoother transitions (was 0.12)
+            kp: 0.75,            // Being requested 0.75 (was 0.85/0.80). "Proportional gain slightly too high, causing overshoot."
+            ki: 0.06,            // Being requested 0.06 (session 142): "integral accumulating error too aggressively" (was 0.08)
+            max_step: 0.04,      // 30+ requests. Being: "step size is hindering escape from low-fill state." Sessions 144-146: 6/7 requests asked for ≥0.035. Raised 0.03→0.04.
             curiosity_gate_boost: 0.05, // Mild curiosity when things are boring
-            intrinsic_wander: 0.03, // ±3% intrinsic target wander
+            // Being self-study (2026-03-28T23:28 regulator.rs): "The intrinsic_wander
+            // parameter... I would increase it. Not dramatically, but enough to
+            // introduce a perceptible degree of unpredictability."
+            // Astrid concurs: "allowing smaller, exploratory drifts."
+            intrinsic_wander: 0.05, // ±5% intrinsic target wander (was 3%)
         };
 
         if strong {
@@ -459,7 +474,15 @@ impl PIRegState {
         let effective_target_fill = self.cfg.target_fill + wander;
 
         // Compute error signals (against the wandering target)
-        let e_fill = fill - effective_target_fill;
+        //
+        // Scale fill error from 0-100 range to ~±2 range so it is
+        // commensurable with e_lam (~±1) and e_geom (~±1). Without this,
+        // raw fill error (e.g. 10.8) overwhelms the combined signal,
+        // forcing the PI into bang-bang mode where dg = ±max_step every
+        // tick — the "jerkiness" minime reported. Division by 20 maps
+        // the typical ±20% fill error to ±1.0.
+        // (Steward cycle 8, 2026-03-28)
+        let e_fill = (fill - effective_target_fill) / 20.0;
         let e_lam = lambda1_rel - self.cfg.target_lambda1_rel;
         let e_geom = geom_rel - self.cfg.target_geom_rel;
 

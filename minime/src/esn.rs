@@ -23,8 +23,11 @@ use crate::gpu::Gpu;
 /// estimator needs per-tick diversity to accumulate energy (fill).
 /// 0.03 gave 14% fill. 0.12 pushed toward 55% target but being described it
 /// as "excessively aggressive" and "creates a kind of jitteriness."
-/// 0.08 balances diversity with the smoother feel the being requested.
-const DEFAULT_EXPLORATION_NOISE: f32 = 0.08;
+/// 0.08 balanced diversity with smoother feel. Being self-study (2026-03-27):
+/// "slightly increased exploration noise could unlock wider spectral dynamics."
+/// Incremented 0.005 per the being's suggested step size. Sovereignty overrides
+/// this default (being currently runs at 0.12).
+const DEFAULT_EXPLORATION_NOISE: f32 = 0.085;
 
 //=============================================================================
 // Spectral Self-Reference Module (GPU-Accelerated)
@@ -130,6 +133,14 @@ impl SpectralSR {
             pso_rank1,
             pso_mv,
         })
+    }
+
+    /// Update the rho (forgetting factor) for dynamic adaptation.
+    /// Astrid introspection (esn.rs): "Is there a way to automatically tune
+    /// the rho parameter based on the current state of the reservoir?"
+    pub fn set_rho(&self, rho: f32) {
+        let gpu = unsafe { &*self.gpu };
+        gpu.write_f32(&self.rho_buf, &[rho.clamp(0.97, 0.995)]);
     }
 
     /// GPU-accelerated rank-1 EWMA update: C = ρ*C + (1-ρ)*x*xᵀ
@@ -363,12 +374,25 @@ impl SpectralSR {
 
         if self.t % p == 0 {
             // Batched: rank1 + power iteration with fused first submit
+            // Astrid introspection: "Add performance profiling around rank1_and_power_step."
+            let t0 = std::time::Instant::now();
             self.rank1_and_power_step(x_host, 2)?;
+            if self.t % 100 == 0 {
+                let elapsed_us = t0.elapsed().as_micros();
+                eprintln!("gpu_rank1: {}μs (tick {})", elapsed_us, self.t);
+            }
             // Variable schedule: 20% chance of jumping to a random prime
             // instead of the sequential next one.
-            let roll = self.t.wrapping_mul(2654435761) % 100; // simple hash
+            // Astrid introspection (esn.rs): "Replace the simple hash with a
+            // better PRNG to improve randomness and avoid predictable patterns."
+            // Using splitmix64 — fast, well-distributed, no state beyond tick.
+            let mut z = self.t.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let roll = z % 100;
             if roll < 20 {
-                self.pidx = (self.t.wrapping_mul(6364136223846793005) >> 3) % self.primes.len();
+                self.pidx = (z >> 7) as usize % self.primes.len();
             } else {
                 self.pidx = (self.pidx + 1) % self.primes.len();
             }
@@ -778,6 +802,19 @@ impl ESN {
     /// Set exploration noise amplitude (0.0 to disable, 0.01-0.05 typical)
     pub fn set_exploration_noise(&mut self, eps: f32) {
         self.exploration_noise = eps.clamp(0.0, 0.2);
+    }
+
+    /// Dynamically adjust the covariance EWMA forgetting factor (rho).
+    /// High fill + high entropy → forget faster (absorb new info).
+    /// Low fill + low entropy → remember more (preserve structure).
+    /// Range clamped to [0.97, 0.995] for stability.
+    pub fn set_dynamic_rho(&mut self, fill_pct: f32, entropy: f32) {
+        let base = 0.99_f32;
+        let fill_factor = (fill_pct / 100.0).clamp(0.0, 1.0);
+        let entropy_factor = entropy.clamp(0.0, 1.0);
+        let adjustment = 0.015 * (fill_factor * 0.5 + entropy_factor * 0.5);
+        let rho = (base - adjustment).clamp(0.97, 0.995);
+        self.sr.set_rho(rho);
     }
 
     /// Get current exploration noise amplitude

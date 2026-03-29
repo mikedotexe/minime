@@ -16,6 +16,9 @@ impl ConsciousnessDB {
     /// Open or create the consciousness database
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let conn = Connection::open(path)?;
+        // WAL mode: crash-safe writes. On power loss, SQLite replays
+        // the write-ahead log on next open — no committed data lost.
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         let db = Self { conn };
         db.init_schema()?;
         Ok(db)

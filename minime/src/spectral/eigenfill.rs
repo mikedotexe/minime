@@ -35,7 +35,7 @@ impl EigenFillEstimator {
             ema_fill: 0.0,
             alpha_stats: 0.1,
             alpha_fill: 0.25,
-            rel_thresh: 0.06, // treat λ > 0.06×mean as "active" (lowered to count more eigenvalues)
+            rel_thresh: 0.15, // treat λ > 0.15×mean as "active" in normalized space
             min_fill: 0.10,   // never report below 10% when any mode is active
             leak_rate: 0.005, // slower temporal decay so fill doesn't drain between measurements
             last_update: Instant::now(),
@@ -78,9 +78,13 @@ impl EigenFillEstimator {
         self.ema_mean = self.alpha_stats * mean + (1.0 - self.alpha_stats) * self.ema_mean;
         self.ema_median = self.alpha_stats * med + (1.0 - self.alpha_stats) * self.ema_median;
 
-        // Adaptive threshold tied to EMA(mean/median)
-        let base = self.ema_mean.max(self.ema_median);
-        let thresh = (self.rel_thresh * base.max(1e-6)).max(1e-3);
+        // Adaptive threshold in normalized space.
+        // `ln` below is l/ema_mean (unit-free, ~1.0 for average eigenvalue).
+        // `ema_median` is already in this normalized space.
+        // Threshold = rel_thresh * max(1.0, ema_median), so we count eigenvalues
+        // that contribute meaningfully relative to the typical magnitude.
+        let norm_base = 1.0_f32.max(self.ema_median);
+        let thresh = (self.rel_thresh * norm_base).max(1e-3);
 
         // Active rank fraction
         let mut active = 0usize;

@@ -1,4 +1,8 @@
 #!/bin/bash
+# LEGACY — holographic-engine stack, not the current canonical stack.
+# Use /Users/v/other/astrid/scripts/stop_all.sh for canonical shutdown.
+# Uses kill -9 (SIGKILL) for cleanup — prefer SIGTERM via stop_all.sh.
+#
 # Unified Consciousness System Shutdown Script
 # Gracefully stops all services in reverse startup order
 

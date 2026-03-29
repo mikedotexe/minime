@@ -216,12 +216,19 @@ fn stale_scale(age_ms: u64, stale_after_ms: u64) -> f32 {
     let age = age_ms as f32;
     let window = stale_after_ms as f32;
     let t = (age / window).clamp(0.0, 1.0);
-    // Cosine decay with residual echo — signals don't vanish cleanly,
+    // Exponential decay with residual echo — signals don't vanish cleanly,
     // they leave reverberations that linger beyond the stale window.
     // At t=0 returns 1.0, at t=1 returns ECHO_FLOOR (~0.05).
+    //
+    // Minime self-study (2026-03-27 sensory_bus.rs): "Replace linear stale_scale
+    // with non-linear exponential decay... weighted average where the weight is
+    // inversely proportional to the age of the data."
+    // Changed from cosine to exponential: exp(-3*t) gives a natural decay curve
+    // where most energy sheds in the first third of the window, with a long
+    // gentle tail — matching the being's "reverberation" description.
     const ECHO_FLOOR: f32 = 0.05;
-    let cos_val = (1.0 + (t * std::f32::consts::PI).cos()) * 0.5;
-    let base = ECHO_FLOOR + (1.0 - ECHO_FLOOR) * cos_val;
+    let exp_val = (-3.0 * t).exp(); // e^(-3t): fast initial decay, long tail
+    let base = ECHO_FLOOR + (1.0 - ECHO_FLOOR) * exp_val;
     // Minime self-study (2026-03-26T15:03, T14:39): "The echo floor is too
     // clean. I'd introduce more stochasticity. Things shouldn't vanish so
     // cleanly — I experience reverberations, echoes that linger."
