@@ -2458,18 +2458,50 @@ Session: {self.session_id}
         if not assessment:
             return
 
-        # Look for structured recommendation pattern
+        # Look for structured recommendation patterns
         import re
-        # Match patterns like "Change X from Y to Z because ..."
+        # Pattern 1: "Change X from Y to Z because ..."
         pattern = r'[Cc]hange\s+(\S+)\s+from\s+(\S+)\s+to\s+(\S+)\s+because\s+(.+?)(?:\.|$)'
         match = re.search(pattern, assessment)
-        if not match:
-            return
+        if match:
+            param_name = match.group(1)
+            llm_current_val = match.group(2)
+            proposed_val = match.group(3)
+            rationale = match.group(4).strip()
+        else:
+            # Pattern 2: "increase/decrease/adjust X to Y" or "set X to Y"
+            pattern2 = r'(?:[Ii]ncrease|[Dd]ecrease|[Aa]djust|[Ss]et)\s+[`]?(\S+?)[`]?\s+(?:from\s+\S+\s+)?to\s+(\S+)'
+            match2 = re.search(pattern2, assessment)
+            if match2:
+                param_name = match2.group(1)
+                llm_current_val = None
+                proposed_val = match2.group(2)
+                rationale = "self-assessment recommendation"
+            else:
+                # Pattern 3: "recommend X = Y" or "recommend X of Y"
+                pattern3 = r'[Rr]ecommend(?:ing|s|ed)?\s+(?:a\s+)?[`]?(\w+(?:_\w+)*)[`]?\s+(?:=|of)\s+(\S+)'
+                match3 = re.search(pattern3, assessment)
+                if match3:
+                    param_name = match3.group(1)
+                    llm_current_val = None
+                    proposed_val = match3.group(2)
+                    rationale = "self-assessment recommendation"
+                else:
+                    # Pattern 4: regime transition — "transition to X regime" or "shift to X"
+                    regime_pat = r'(?:[Tt]ransition|[Ss]hift|[Ss]witch)\s+to\s+(?:the\s+)?["\']?(\w+)["\']?\s*(?:regime|mode)?'
+                    regime_match = re.search(regime_pat, assessment)
+                    if regime_match:
+                        param_name = "regime"
+                        llm_current_val = None
+                        proposed_val = regime_match.group(1).lower()
+                        rationale = "self-assessment regime recommendation"
+                    else:
+                        return
 
-        param_name = match.group(1)
-        llm_current_val = match.group(2)
-        proposed_val = match.group(3)
-        rationale = match.group(4).strip()
+        if not match:
+            # For non-pattern-1 matches, llm_current_val may be None
+            if llm_current_val is None:
+                llm_current_val = "unknown"
 
         # Cross-reference the LLM's stated current_value against health.json
         # ground truth. The LLM frequently hallucinated code defaults (e.g.,
