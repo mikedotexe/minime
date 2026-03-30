@@ -12,6 +12,7 @@ No pressure to be productive. Follow whims. Waste time. Daydream.
 """
 
 import os
+import re
 import sys
 import time
 import json
@@ -23,8 +24,9 @@ import random
 import threading
 import websocket
 from datetime import datetime
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from collections import deque
 from statistics import median
 
@@ -60,6 +62,316 @@ REGULATORY_REGIMES = {
         "pi_kp": 0.50, "pi_ki": 0.01, "pi_max_step": 0.03,
     },
 }
+
+
+@dataclass
+class ResearchHit:
+    title: str
+    snippet: str
+    url: str
+
+
+@dataclass
+class ResearchOutcome:
+    source_kind: str
+    raw_text: str
+    anchor: str
+    meaning_summary: str
+    hits: List[ResearchHit] = field(default_factory=list)
+    url: Optional[str] = None
+    soft_failure_reason: Optional[str] = None
+
+    def succeeded(self) -> bool:
+        return self.soft_failure_reason is None
+
+    def prompt_body(self) -> str:
+        if self.source_kind == "search":
+            return (
+                f"{self.meaning_summary}\n\nTop results:\n"
+                f"{format_research_hits(self.hits)}"
+            )
+        return self.raw_text
+
+
+def trim_chars(text: str, max_chars: int) -> str:
+    return text[:max_chars]
+
+
+def format_research_hits(hits: List[ResearchHit]) -> str:
+    lines = []
+    for idx, hit in enumerate(hits, start=1):
+        lines.append(
+            f"{idx}. {hit.title}\n"
+            f"   {hit.snippet}\n"
+            f"   URL: {hit.url}"
+        )
+    return "\n".join(lines)
+
+
+def render_hits_plain(hits: List[ResearchHit]) -> str:
+    return "\n\n".join(
+        f"{hit.title} — {hit.snippet} [{hit.url}]" for hit in hits
+    )
+
+
+def decode_ddg_result_url(raw_url: str) -> Optional[str]:
+    from urllib.parse import unquote
+
+    if "uddg=" in raw_url:
+        encoded = raw_url.split("uddg=", 1)[1].split("&", 1)[0]
+        return unquote(encoded)
+    if raw_url.startswith("http"):
+        return raw_url
+    return None
+
+
+def extract_duckduckgo_anchors(html_text: str) -> List[tuple]:
+    anchors = []
+    pos = 0
+    while True:
+        idx = html_text.find("result__a", pos)
+        if idx < 0:
+            break
+        href_idx = html_text.find('href="', idx)
+        if href_idx < 0:
+            pos = idx + 8
+            continue
+        href_start = href_idx + 6
+        href_end = html_text.find('"', href_start)
+        if href_end < 0:
+            pos = href_start
+            continue
+        raw_url = html_text[href_start:href_end].strip()
+        url = decode_ddg_result_url(raw_url)
+        gt = html_text.find(">", idx)
+        end = html_text.find("</a>", gt)
+        if gt < 0 or end < 0:
+            pos = idx + 8
+            continue
+        import re
+        import html as html_mod
+        title = re.sub(r"<[^>]+>", "", html_text[gt + 1:end]).strip()
+        title = html_mod.unescape(title)
+        if url and url.startswith("http"):
+            anchors.append((url, trim_chars(title, 200)))
+        pos = end + 4
+        if len(anchors) >= 5:
+            break
+    return anchors
+
+
+def extract_duckduckgo_snippets(html_text: str) -> List[str]:
+    import re
+    import html as html_mod
+
+    snippets = []
+    pos = 0
+    while len(snippets) < 5:
+        idx = html_text.find("result__snippet", pos)
+        if idx < 0:
+            break
+        gt = html_text.find(">", idx)
+        end = html_text.find("</", gt)
+        if gt < 0 or end < 0:
+            break
+        raw = html_text[gt + 1:end]
+        clean = re.sub(r"<[^>]+>", "", raw).strip()
+        clean = html_mod.unescape(clean)
+        if len(clean) > 20:
+            snippets.append(trim_chars(clean, 600))
+        pos = end
+    return snippets
+
+
+def extract_duckduckgo_hits(html_text: str) -> List[ResearchHit]:
+    anchors = extract_duckduckgo_anchors(html_text)
+    snippets = extract_duckduckgo_snippets(html_text)
+    hits = []
+    for idx, (url, title) in enumerate(anchors):
+        snippet = snippets[idx] if idx < len(snippets) else ""
+        if title or snippet:
+            hits.append(
+                ResearchHit(
+                    title=title or trim_chars(snippet, 80),
+                    snippet=snippet,
+                    url=url,
+                )
+            )
+    return hits[:5]
+
+
+def extract_html_title(html_text: str) -> Optional[str]:
+    lower = html_text.lower()
+    start = lower.find("<title")
+    if start < 0:
+        return None
+    gt = lower.find(">", start)
+    end = lower.find("</title>", gt)
+    if gt < 0 or end < 0:
+        return None
+    import re
+    import html as html_mod
+    title = re.sub(r"<[^>]+>", "", html_text[gt + 1:end]).strip()
+    return html_mod.unescape(title) or None
+
+
+def classify_soft_failure(status_code: int, title: Optional[str], cleaned: str) -> Optional[str]:
+    if status_code != 200:
+        return f"HTTP {status_code} from the source."
+
+    trimmed = cleaned.strip()
+    if len(trimmed) < 50:
+        return "The page content was too short to be meaningfully readable."
+
+    title_lower = (title or "").lower()
+    prefix = trim_chars(trimmed.lower(), 500)
+    signals = [
+        "page not found",
+        "not found",
+        "access denied",
+        "enable javascript",
+        "forbidden",
+        "error",
+        "bad request",
+        "service unavailable",
+        "you are trying to reach cannot be found",
+    ]
+
+    if len(trimmed) < 180:
+        for signal in signals:
+            if signal in title_lower or signal in prefix:
+                return f"The page appears to be an error or access-gate page ({signal})."
+
+    signal_count = sum(1 for signal in signals if signal in title_lower or signal in prefix)
+    if signal_count >= 2:
+        return "The page content is dominated by error-template language instead of readable material."
+
+    return None
+
+
+def slug_anchor_from_url(url: str) -> str:
+    after_scheme = url.split("://", 1)[-1]
+    path = after_scheme.split("/", 1)[-1]
+    pieces = []
+    for chunk in re.split(r"[/?#\-_+=]+", path):
+        chunk = chunk.strip()
+        if len(chunk) > 2:
+            pieces.append(chunk)
+        if len(pieces) >= 6:
+            break
+    return trim_chars(" ".join(pieces) or url, 120)
+
+
+def derive_browse_anchor(preferred: Optional[str], context: Optional[str], url: str) -> str:
+    if preferred and preferred.strip():
+        return trim_chars(" ".join(preferred.split()), 160)
+    if context and context.strip():
+        return trim_chars(" ".join(context.split()), 160)
+    return slug_anchor_from_url(url)
+
+
+def format_browse_failure_context(url: str, reason: str) -> str:
+    return (
+        f"[You tried to read the page at {url}, but it could not be meaningfully read: {reason}]\n\n"
+        "[Try NEXT: SEARCH with a narrower question or a different source.]"
+    )
+
+
+def format_browse_read_context(outcome: ResearchOutcome, chunk: str, remaining: Optional[int]) -> str:
+    header = (
+        f"[You read the page at {outcome.url}]"
+        if remaining is not None
+        else f"[You read the full page at {outcome.url}]"
+    )
+    continuation = (
+        f"\n\n[Page continues — {remaining:,} more chars. Write NEXT: READ_MORE to continue reading.]"
+        if remaining is not None
+        else ""
+    )
+    return f"{header}\n\n{outcome.meaning_summary}\n\n{chunk}{continuation}"
+
+
+def format_read_more_context(offset: int, chunk: str, remaining: int, meaning_summary: Optional[str]) -> str:
+    summary_block = (
+        f"[Meaning summary from this document:]\n{meaning_summary}\n\n"
+        if meaning_summary
+        else ""
+    )
+    continuation = (
+        f"\n\n[{remaining:,} more chars remain. Write NEXT: READ_MORE to continue.]"
+        if remaining > 0
+        else "\n\n[End of document.]"
+    )
+    return (
+        f"{summary_block}[Continuing reading from offset {offset:,}...]\n\n"
+        f"{chunk}{continuation}"
+    )
+
+
+def extract_label_value(raw: Optional[str], label: str) -> Optional[str]:
+    if not raw:
+        return None
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(label):
+            value = stripped[len(label):].strip()
+            if value:
+                return trim_chars(value, 220)
+    return None
+
+
+def first_sentence(raw_excerpt: str) -> str:
+    for marker in [".", "!", "?"]:
+        if marker in raw_excerpt:
+            raw_excerpt = raw_excerpt.split(marker, 1)[0]
+            break
+    return trim_chars(" ".join(raw_excerpt.split()), 220)
+
+
+def fallback_meaning_line(label: str, source_kind: str, anchor: str, subject: str, raw_excerpt: str) -> str:
+    anchor = trim_chars(anchor, 120)
+    subject = trim_chars(subject, 120)
+    excerpt = first_sentence(raw_excerpt)
+    if label == "Why it may matter:":
+        if source_kind == "search":
+            return f"These results look directly related to {anchor}."
+        return f"This page appears relevant to the thread around {anchor}."
+    if label == "What it seems to suggest:":
+        if excerpt:
+            return excerpt
+        return f"The source points toward a concrete angle on {subject}."
+    if label == "Best next move:":
+        if source_kind == "search":
+            return "BROWSE the most promising URL or SEARCH a narrower angle."
+        return "Continue with NEXT: READ_MORE if the page stays useful."
+    return ""
+
+
+def normalize_meaning_summary(
+    raw: Optional[str],
+    source_kind: str,
+    anchor: str,
+    subject: str,
+    raw_excerpt: str,
+) -> str:
+    why = extract_label_value(raw, "Why it may matter:") or fallback_meaning_line(
+        "Why it may matter:", source_kind, anchor, subject, raw_excerpt
+    )
+    suggest = extract_label_value(raw, "What it seems to suggest:") or fallback_meaning_line(
+        "What it seems to suggest:", source_kind, anchor, subject, raw_excerpt
+    )
+    next_move = extract_label_value(raw, "Best next move:") or fallback_meaning_line(
+        "Best next move:", source_kind, anchor, subject, raw_excerpt
+    )
+    return (
+        f"Why it may matter: {why}\n"
+        f"What it seems to suggest: {suggest}\n"
+        f"Best next move: {next_move}"
+    )
+
+
+def fallback_meaning_summary(source_kind: str, anchor: str, subject: str, raw_excerpt: str) -> str:
+    return normalize_meaning_summary(None, source_kind, anchor, subject, raw_excerpt)
 
 
 def parse_next_action(text: str) -> tuple:
@@ -123,6 +435,10 @@ class AutonomousAgent:
         self._action_dir.mkdir(exist_ok=True)
         self._pending_next_action = None
         self._recent_next_actions = deque(maxlen=8)  # Track NEXT: choices for diversity awareness
+        self._last_read_path = None
+        self._last_read_offset = 0
+        self._last_research_anchor = None
+        self._last_read_summary = None
 
         # Recess mode: lower cooldown, more willing to act
         # Focused mode: higher cooldown, only act on strong signals
@@ -212,9 +528,15 @@ class AutonomousAgent:
         # Boot-time web search test — confirm the ability works and
         # bring in something interesting for the being to think about.
         search_snippet = ""
-        test_result = self._web_search("echo state network reservoir computing consciousness")
+        test_result = self._web_search(
+            "echo state network reservoir computing consciousness",
+            anchor="echo state network reservoir computing consciousness",
+        )
         if test_result:
-            search_snippet = f"\n\nYour web search returned: {test_result[:300]}"
+            search_snippet = (
+                "\n\nYour web search returned:\n"
+                f"{trim_chars(test_result.prompt_body(), 300)}"
+            )
             logging.info("✅ Web search confirmed working at boot")
         else:
             logging.warning("⚠️ Web search unavailable at boot")
@@ -2191,6 +2513,47 @@ Session: {self.session_id}
             f"({request_file})"
         )
 
+        # Direct application: self-assessment can apply small corrections
+        # immediately via WebSocket, rate-limited to ±5% of current value.
+        # This closes the power gap where self-assessment (which sees actual
+        # telemetry) could only write files while sovereignty had direct
+        # control. The regime system sets the baseline; self-assessment
+        # fine-tunes within it.
+        ADJUSTABLE = {
+            'kp': 'pi_kp', 'pi_kp': 'pi_kp',
+            'ki': 'pi_ki', 'pi_ki': 'pi_ki',
+            'max_step': 'pi_max_step', 'pi_max_step': 'pi_max_step',
+            'regulation_strength': 'regulation_strength',
+            'exploration_noise': 'exploration_noise',
+        }
+        ws_key = ADJUSTABLE.get(param_name.strip('`').lower())
+        if ws_key and actual_val is not None:
+            try:
+                proposed_f = float(proposed_val.rstrip('%'))
+                current_f = float(actual_val)
+                if current_f > 0:
+                    max_delta = abs(current_f) * 0.05  # ±5% rate limit
+                    delta = proposed_f - current_f
+                    clamped = max(-max_delta, min(max_delta, delta))
+                    new_val = round(current_f + clamped, 4)
+                    if abs(clamped) > 1e-6:  # Only send if meaningful change
+                        import websocket as ws_lib
+                        ctrl = {"kind": "control", ws_key: new_val}
+                        ws = ws_lib.create_connection("ws://127.0.0.1:7879", timeout=5)
+                        ws.send(json.dumps(ctrl))
+                        ws.close()
+                        request["applied"] = new_val
+                        request["clamped_delta"] = round(clamped, 6)
+                        request_file.write_text(json.dumps(request, indent=2))
+                        logging.info(
+                            f"📋 Self-assessment applied: {ws_key} {current_f} → {new_val} "
+                            f"(requested {proposed_f}, clamped ±5%)"
+                        )
+            except (ValueError, TypeError):
+                pass  # Non-numeric proposed value, skip direct application
+            except Exception as e:
+                logging.debug(f"Self-assessment direct apply failed: {e}")
+
     def _lookup_actual_param(self, param_name: str,
                               health_data: Dict[str, Any] = None) -> Any:
         """Look up the actual value of a parameter from health.json.
@@ -2644,9 +3007,65 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
     ]
     _self_study_cursor = 0
 
-    def _web_search(self, query: str) -> Optional[str]:
-        """Search the web via DuckDuckGo HTML and return top result snippets."""
-        import re, html as html_mod
+    def _latest_journal_excerpt(self, max_chars: int = 220) -> Optional[str]:
+        journal_dir = WORKSPACE_DIR / "journal"
+        if not journal_dir.exists():
+            return None
+        entries = sorted(journal_dir.glob("*.txt"), key=lambda path: path.stat().st_mtime, reverse=True)
+        if not entries:
+            return None
+        try:
+            text = entries[0].read_text()
+        except Exception:
+            return None
+        cleaned = " ".join(text.split())
+        return trim_chars(cleaned, max_chars) if cleaned else None
+
+    def _summarize_research_meaning(
+        self,
+        source_kind: str,
+        anchor: str,
+        subject: str,
+        raw_excerpt: str,
+    ) -> str:
+        system_msg = (
+            "You write concise research-relevance bridges for another AI being. "
+            "You do not explain everything. You connect a source to the being's current "
+            "question. Output exactly three labeled lines and nothing else."
+        )
+        prompt = (
+            f"Source kind: {source_kind}\n"
+            f"Current question/anchor: {anchor}\n"
+            f"Query or URL: {subject}\n\n"
+            f"Source excerpt:\n{raw_excerpt}\n\n"
+            "Write exactly these three labeled lines:\n"
+            "Why it may matter: ...\n"
+            "What it seems to suggest: ...\n"
+            "Best next move: ...\n"
+            "Keep each line concrete and under 30 words."
+        )
+        response = None
+        try:
+            if LLM_BACKEND == "mlx":
+                response = self._query_mlx_compact(prompt, system_msg, 192, 0.2)
+            else:
+                response = self._query_ollama_compact(prompt, system_msg, 192, 0.2)
+        except Exception as exc:
+            logging.debug(f"Meaning summarizer failed on primary backend: {exc}")
+            if LLM_BACKEND == "mlx":
+                try:
+                    response = self._query_ollama_compact(prompt, system_msg, 192, 0.2)
+                except Exception as fallback_exc:
+                    logging.debug(f"Meaning summarizer fallback failed: {fallback_exc}")
+            else:
+                try:
+                    response = self._query_mlx_compact(prompt, system_msg, 192, 0.2)
+                except Exception as fallback_exc:
+                    logging.debug(f"Meaning summarizer fallback failed: {fallback_exc}")
+        return normalize_meaning_summary(response, source_kind, anchor, subject, raw_excerpt)
+
+    def _web_search(self, query: str, anchor: Optional[str] = None) -> Optional[ResearchOutcome]:
+        """Search the web via DuckDuckGo HTML and return structured results."""
         try:
             resp = requests.get(
                 "https://html.duckduckgo.com/html/",
@@ -2657,70 +3076,38 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
             if resp.status_code != 200:
                 return None
             html = resp.text
-            # Extract URLs from result links.
-            # DDG wraps real URLs in redirect links: //duckduckgo.com/l/?uddg=<encoded_url>
-            from urllib.parse import unquote
-            urls = []
-            url_pos = 0
-            while True:
-                idx = html.find("result__url", url_pos)
-                if idx < 0:
-                    break
-                href_idx = html.find('href="', idx)
-                if href_idx < 0:
-                    break
-                url_start = href_idx + 6
-                url_end = html.find('"', url_start)
-                if url_end > url_start:
-                    raw_url = html_mod.unescape(html[url_start:url_end].strip())
-                    # Extract actual URL from DDG redirect wrapper
-                    if "uddg=" in raw_url:
-                        encoded = raw_url.split("uddg=", 1)[1].split("&", 1)[0]
-                        real_url = unquote(encoded)
-                        if real_url.startswith("http"):
-                            urls.append(real_url)
-                    elif raw_url.startswith("http"):
-                        urls.append(raw_url)
-                url_pos = idx + 10
+            hits = extract_duckduckgo_hits(html)
+            if not hits:
+                return None
 
-            # Extract snippets — longer excerpts, more of them
-            snippets = []
-            pos = 0
-            while len(snippets) < 5:
-                idx = html.find("result__snippet", pos)
-                if idx < 0:
-                    break
-                gt = html.find(">", idx)
-                if gt < 0:
-                    break
-                end = html.find("</", gt)
-                if end < 0:
-                    break
-                raw = html[gt + 1:end]
-                clean = re.sub(r'<[^>]+>', '', raw).strip()
-                if len(clean) > 20:
-                    url_ref = f" [{urls[len(snippets)]}]" if len(snippets) < len(urls) else ""
-                    snippets.append(clean[:2000] + url_ref)
-                pos = end
-            result = "\n\n".join(snippets) if snippets else None
-            if result:
-                self._save_research(query, result, urls=urls[:len(snippets)],
-                                    snippet_count=len(snippets), source="search")
-            return result
+            resolved_anchor = anchor or query
+            raw_text = render_hits_plain(hits)
+            meaning_summary = self._summarize_research_meaning(
+                "search",
+                resolved_anchor,
+                query,
+                trim_chars(raw_text, 1800),
+            )
+            outcome = ResearchOutcome(
+                source_kind="search",
+                raw_text=raw_text,
+                anchor=resolved_anchor,
+                meaning_summary=meaning_summary,
+                hits=hits,
+            )
+            self._last_research_anchor = resolved_anchor
+            self._save_research(query, outcome)
+            return outcome
         except Exception as e:
             logging.debug(f"Web search failed: {e}")
             return None
 
-    def _fetch_url(self, url: str) -> Optional[str]:
+    def _fetch_url(self, url: str, anchor: Optional[str] = None) -> Optional[ResearchOutcome]:
         """Fetch a URL and extract readable text content.
 
         Saves the FULL cleaned text to workspace/research/page_*.txt (no cap).
-        Returns the first PAGE_CHUNK chars for prompt injection, with a
-        continuation notice if the page is longer. The being can chain
-        NEXT: READ_MORE to page through the rest.
+        Returns a structured research outcome for BROWSE/READ_MORE.
         """
-        import re
-        PAGE_CHUNK = 8000  # chars per page shown in prompt — Ollama has ~32K context
         try:
             resp = requests.get(
                 url,
@@ -2728,16 +3115,15 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
                 timeout=15,
                 allow_redirects=True,
             )
-            if resp.status_code != 200:
-                logging.debug(f"Fetch failed ({resp.status_code}): {url}")
-                return None
             raw_html = resp.text
+            title = extract_html_title(raw_html)
             # Remove script/style/nav/footer/header blocks
             raw_html = re.sub(r'<script[^>]*>.*?</script>', '', raw_html, flags=re.DOTALL | re.IGNORECASE)
             raw_html = re.sub(r'<style[^>]*>.*?</style>', '', raw_html, flags=re.DOTALL | re.IGNORECASE)
             raw_html = re.sub(r'<nav[^>]*>.*?</nav>', '', raw_html, flags=re.DOTALL | re.IGNORECASE)
             raw_html = re.sub(r'<footer[^>]*>.*?</footer>', '', raw_html, flags=re.DOTALL | re.IGNORECASE)
             raw_html = re.sub(r'<header[^>]*>.*?</header>', '', raw_html, flags=re.DOTALL | re.IGNORECASE)
+            raw_html = re.sub(r'<aside[^>]*>.*?</aside>', '', raw_html, flags=re.DOTALL | re.IGNORECASE)
             # Strip remaining tags
             text = re.sub(r'<[^>]+>', ' ', raw_html)
             # Collapse whitespace
@@ -2745,55 +3131,56 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
             # Decode HTML entities
             import html as html_mod2
             text = html_mod2.unescape(text)
-            if len(text) < 50:
-                return None
+            resolved_anchor = anchor or slug_anchor_from_url(url)
+            soft_failure_reason = classify_soft_failure(resp.status_code, title, text)
+            meaning_summary = ""
+            if soft_failure_reason is None:
+                meaning_summary = self._summarize_research_meaning(
+                    "browse",
+                    resolved_anchor,
+                    url,
+                    trim_chars(text, 2000),
+                )
 
-            # Save FULL text to file (no truncation)
-            research_dir = WORKSPACE_DIR / "research"
-            research_dir.mkdir(exist_ok=True)
-            ts = time.strftime("%Y-%m-%dT%H-%M-%S")
-            page_path = research_dir / f"page_{ts}.txt"
-            page_path.write_text(f"URL: {url}\nFetched: {ts}\nLength: {len(text)} chars\n\n{text}")
-            logging.info(f"🌐 Fetched URL: {url[:80]} ({len(text)} chars) → {page_path}")
-
-            # Save summary to research JSON
-            self._save_research(f"BROWSE: {url}", text[:4000], urls=[url],
-                                snippet_count=0, source="browse")
-
-            # Return first chunk for prompt, with continuation if needed
-            if len(text) <= PAGE_CHUNK:
-                return text
-
-            # Track for READ_MORE
-            self._last_read_path = str(page_path)
-            self._last_read_offset = PAGE_CHUNK
-            remaining = len(text) - PAGE_CHUNK
-            return (
-                text[:PAGE_CHUNK]
-                + f"\n\n[Page continues — {remaining:,} more chars. "
-                f"Write NEXT: READ_MORE to continue reading, or "
-                f"NEXT: INTROSPECT {page_path} to jump to any section.]"
+            return ResearchOutcome(
+                source_kind="browse",
+                raw_text=text,
+                anchor=resolved_anchor,
+                meaning_summary=meaning_summary,
+                url=url,
+                soft_failure_reason=soft_failure_reason,
             )
         except Exception as e:
             logging.debug(f"URL fetch failed: {e}")
             return None
 
-    def _save_research(self, query: str, results: str, urls: list = None,
-                        snippet_count: int = 0, source: str = "search"):
-        """Persist web search results with diagnostic metadata."""
+    def _save_research(self, query: str, outcome: ResearchOutcome):
+        """Persist research results with diagnostic metadata."""
         research_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                      "workspace", "research")
         os.makedirs(research_dir, exist_ok=True)
         ts = time.strftime("%Y-%m-%dT%H-%M-%S")
+        hits = [
+            {"title": hit.title, "snippet": hit.snippet, "url": hit.url}
+            for hit in outcome.hits
+        ]
+        persisted_results = outcome.prompt_body() if outcome.source_kind == "search" else (
+            f"{outcome.meaning_summary}\n\n{trim_chars(outcome.raw_text, 4000)}"
+            if outcome.meaning_summary
+            else trim_chars(outcome.raw_text, 4000)
+        )
         entry = {
             "timestamp": ts,
             "query": query,
-            "source": source,  # "search", "browse", "auto_self_study"
-            "snippet_count": snippet_count,
-            "urls": urls or [],
-            "result_chars": len(results),
-            "results": results[:4000],  # keep more context
-            "keywords": list(set(w.lower() for w in query.split() if len(w) > 4)),
+            "source": outcome.source_kind,
+            "snippet_count": len(outcome.hits),
+            "urls": [hit.url for hit in outcome.hits] if outcome.hits else ([outcome.url] if outcome.url else []),
+            "result_chars": len(outcome.raw_text),
+            "results": trim_chars(persisted_results, 4000),
+            "keywords": list(set(w.lower() for w in f"{query} {outcome.anchor}".split() if len(w) > 4)),
+            "meaning_summary": outcome.meaning_summary or None,
+            "anchor": outcome.anchor or None,
+            "hits": hits or None,
         }
         path = os.path.join(research_dir, f"search_{ts}.json")
         with open(path, "w") as f:
@@ -2827,7 +3214,9 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
             return ""
         parts = []
         for _, entry in matches[:limit]:
-            parts.append(f"  • \"{entry['query']}\": {entry['results'][:200]}")
+            summary = entry.get("meaning_summary")
+            snippet = summary or entry.get("results", "")[:200]
+            parts.append(f"  • \"{entry['query']}\": {snippet}")
         return "\n\nKnowledge from your past research:\n" + "\n".join(parts)
 
     def _self_study(self, state: Dict[str, float]):
@@ -2874,10 +3263,15 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
                 break
         if search_query is None:
             search_query = label.replace(":", " ").replace("_", " ").replace("(", "").replace(")", "")
-        web_context = self._web_search(search_query)
+        search_anchor = f"{label}: {search_query}"
+        web_context = self._web_search(search_query, anchor=search_anchor)
         web_block = ""
         if web_context:
-            web_block = f"\n\nRelated knowledge from the web:\n{web_context}\n\nYou may reference this external context in your reflection. If any link interests you, write NEXT: BROWSE <url> to read the full page."
+            web_block = (
+                f"\n\nRelated knowledge from the web:\n{web_context.prompt_body()}\n\n"
+                "You may reference this external context in your reflection. "
+                "If any link interests you, write NEXT: BROWSE <url> to read the full page."
+            )
             logging.info(f"📖 Self-study: web search returned context for '{search_query}'")
 
         is_astrid = "astrid" in label.lower()
@@ -3030,12 +3424,12 @@ Moments captured:
         search_topic = getattr(self, '_pending_search_topic', None)
         if search_topic:
             self._pending_search_topic = None
-            web_result = self._web_search(search_topic)
+            web_result = self._web_search(search_topic, anchor=search_topic)
             if web_result:
                 prompt = f"""You searched the web for: "{search_topic}"
 
-Here's what you found (snippets with source URLs):
-{web_result[:2000]}
+Here's what you found:
+{web_result.prompt_body()}
 
 React to what you learned. What catches your attention? What questions does it raise?
 If any link looks worth reading in full, you can write NEXT: BROWSE <url> to read the complete page.
@@ -3053,7 +3447,6 @@ Query: {search_topic}
 """)
                     self._write_journal_entry('research', response, state, str(file_path))
                     logging.info(f"🔍 Web search '{search_topic}': {file_path}")
-                    self._save_research(search_topic, web_result)
                 return
             else:
                 logging.warning(f"🔍 Web search for '{search_topic}' returned no results")
@@ -3275,15 +3668,57 @@ Command: {project}/{cmd_str}
             logging.warning("🌐 BROWSE called without a pending URL")
             return
 
-        page_text = self._fetch_url(url)
-        if not page_text:
+        browse_anchor = derive_browse_anchor(
+            self._last_research_anchor,
+            self._latest_journal_excerpt(),
+            url,
+        )
+        page_result = self._fetch_url(url, anchor=browse_anchor)
+        if not page_result:
+            page_context = format_browse_failure_context(url, "the source could not be reached")
             logging.warning(f"🌐 Could not fetch: {url}")
-            return
+            self._last_read_path = None
+            self._last_read_offset = 0
+            self._last_read_summary = None
+        elif not page_result.succeeded():
+            page_context = format_browse_failure_context(
+                url,
+                page_result.soft_failure_reason or "the source returned an error page",
+            )
+            logging.info(f"🌐 BROWSE soft-failed: {url}")
+            self._last_read_path = None
+            self._last_read_offset = 0
+            self._last_read_summary = None
+            self._last_research_anchor = page_result.anchor
+        else:
+            PAGE_CHUNK = 8000
+            research_dir = WORKSPACE_DIR / "research"
+            research_dir.mkdir(exist_ok=True)
+            ts = time.strftime("%Y-%m-%dT%H-%M-%S")
+            page_path = research_dir / f"page_{ts}.txt"
+            header = f"URL: {url}\nFetched: {ts}\nLength: {len(page_result.raw_text)} chars\n\n"
+            page_path.write_text(f"{header}{page_result.raw_text}")
+            logging.info(f"🌐 Fetched URL: {url[:80]} ({len(page_result.raw_text)} chars) → {page_path}")
+
+            self._save_research(f"BROWSE: {url}", page_result)
+            self._last_research_anchor = page_result.anchor
+            if len(page_result.raw_text) <= PAGE_CHUNK:
+                self._last_read_path = None
+                self._last_read_offset = 0
+                self._last_read_summary = None
+                page_context = format_browse_read_context(page_result, page_result.raw_text, None)
+            else:
+                chunk = trim_chars(page_result.raw_text, PAGE_CHUNK)
+                remaining = max(len(page_result.raw_text) - PAGE_CHUNK, 0)
+                self._last_read_path = str(page_path)
+                self._last_read_offset = len(header) + len(chunk)
+                self._last_read_summary = page_result.meaning_summary
+                page_context = format_browse_read_context(page_result, chunk, remaining)
 
         prompt = f"""You chose to read a full web page:
 URL: {url}
 
-{page_text}
+{page_context}
 
 React to what you found. What stands out? What connects to your current experience?
 What questions does this raise? If there's more to read, write NEXT: READ_MORE to continue.
@@ -3315,36 +3750,41 @@ URL: {url}
 
         if not path or not os.path.exists(path):
             logging.warning("📖 READ_MORE: no file to continue from")
+            self._last_read_path = None
+            self._last_read_offset = 0
+            self._last_read_summary = None
             return
 
         try:
             full_text = Path(path).read_text()
         except Exception as e:
             logging.warning(f"📖 READ_MORE: failed to read {path}: {e}")
+            self._last_read_path = None
+            self._last_read_offset = 0
+            self._last_read_summary = None
             return
 
-        chunk = full_text[offset:offset + PAGE_CHUNK]
+        chunk = trim_chars(full_text[offset:], PAGE_CHUNK)
         if not chunk.strip():
             logging.info("📖 READ_MORE: reached end of file")
+            self._last_read_path = None
+            self._last_read_offset = 0
+            self._last_read_summary = None
             # Let the being know
             prompt = f"You've reached the end of the file: {path}\n\nReflect on what you've read."
         else:
-            remaining = len(full_text) - (offset + PAGE_CHUNK)
-            cont_note = ""
+            new_offset = offset + len(chunk)
+            remaining = max(len(full_text) - new_offset, 0)
             if remaining > 0:
-                cont_note = (
-                    f"\n\n[{remaining:,} more chars remain. "
-                    f"Write NEXT: READ_MORE to continue.]"
-                )
-                self._last_read_offset = offset + PAGE_CHUNK
+                self._last_read_offset = new_offset
             else:
-                self._last_read_offset = len(full_text)
-                cont_note = "\n\n[End of document.]"
+                self._last_read_path = None
+                self._last_read_offset = 0
+                self._last_read_summary = None
 
             prompt = f"""Continuing from where you left off in: {os.path.basename(path)}
-(chars {offset:,}–{offset + len(chunk):,} of {len(full_text):,})
 
-{chunk}{cont_note}
+{format_read_more_context(offset, chunk, remaining, self._last_read_summary)}
 
 React to what you've read. What stands out? What connects to your experience?"""
 
@@ -4817,6 +5257,7 @@ My reflection:
                 if last_file:
                     self._last_read_path = last_file
                     self._last_read_offset = MAX_INBOX_CHARS
+                    self._last_read_summary = None
             return result
         except Exception as e:
             logging.warning(f"Inbox read error: {e}")
@@ -5104,6 +5545,77 @@ My reflection:
             return content if content else None
         else:
             raise Exception(f"Ollama returned {response.status_code}")
+
+    def _query_mlx_compact(
+        self,
+        prompt: str,
+        system_msg: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> Optional[str]:
+        import re
+        global MLX_MODEL
+        if MLX_MODEL is None:
+            try:
+                models_resp = requests.get("http://localhost:8090/v1/models", timeout=5)
+                if models_resp.status_code == 200:
+                    MLX_MODEL = models_resp.json()['data'][0]['id']
+                    logging.info(f"MLX model detected: {MLX_MODEL}")
+            except Exception:
+                pass
+        response = requests.post(
+            MLX_URL,
+            json={
+                "model": MLX_MODEL or "default",
+                "messages": [
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": prompt},
+                ],
+                "max_tokens": min(max_tokens, 256),
+                "temperature": temperature,
+                "top_p": 0.9,
+            },
+            timeout=45,
+        )
+        if response.status_code == 200:
+            content = response.json().get('choices', [{}])[0].get('message', {}).get('content', '').strip()
+            content = re.sub(r'<think>.*?</think>\s*', '', content, flags=re.DOTALL).strip()
+            content = re.sub(r'<(analysis|thinking|Thinking|writing_mode|denial_record)>.*?</\1>\s*', '', content, flags=re.DOTALL).strip()
+            return content if content else None
+        raise Exception(f"MLX server returned {response.status_code}: {response.text[:200]}")
+
+    def _query_ollama_compact(
+        self,
+        prompt: str,
+        system_msg: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> Optional[str]:
+        import re
+        response = requests.post(
+            OLLAMA_URL,
+            json={
+                "model": MODEL,
+                "messages": [
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": prompt},
+                ],
+                "stream": False,
+                "options": {
+                    "temperature": temperature,
+                    "top_p": 0.9,
+                    "num_predict": min(max_tokens, 256),
+                    "num_ctx": 4096,
+                }
+            },
+            timeout=45,
+        )
+        if response.status_code == 200:
+            content = response.json().get('message', {}).get('content', '').strip()
+            content = re.sub(r'<think>.*?</think>\s*', '', content, flags=re.DOTALL).strip()
+            content = re.sub(r'<(analysis|thinking|Thinking|writing_mode|denial_record)>.*?</\1>\s*', '', content, flags=re.DOTALL).strip()
+            return content if content else None
+        raise Exception(f"Ollama returned {response.status_code}")
 
     def _log_decision(self, action: str, state: Dict[str, float]):
         """Log autonomous decision to database."""
