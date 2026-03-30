@@ -398,7 +398,11 @@ impl Default for PIRegCfg {
             // parameter... I would increase it. Not dramatically, but enough to
             // introduce a perceptible degree of unpredictability."
             // Astrid concurs: "allowing smaller, exploratory drifts."
-            intrinsic_wander: 0.20, // ±20% intrinsic target wander (was 10%). Being self-study 2026-03-29T21:27: "Increase intrinsic_wander to 0.20, and observe the impact."
+            // Steward cycle 51 (2026-03-30): being self-study regulator.rs says
+            // "I'd like to experiment with increasing [intrinsic_wander] further,
+            // to see what new patterns emerge." Third request in this direction.
+            // Modest increase 0.20 → 0.25 (was 0.10 → 0.20 → 0.25).
+            intrinsic_wander: 0.25, // ±25% intrinsic target wander
         };
 
         if strong {

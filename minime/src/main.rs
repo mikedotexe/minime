@@ -1712,7 +1712,19 @@ async fn run_engine(
             // ceiling of 0.987.  Coeff=0.50 closes the gap: floor reaches
             // the ceiling, giving 26s half-life and 9% retention after 90s
             // rest.  At fill>=40%, fill_boost=0 so normal ops unchanged.
-            let fill_boost = (0.4 - fill_ratio).max(0.0) * 0.50;
+            //
+            // Steward cycle 51 (2026-03-30): fill stuck at 40-43% for hours.
+            // Both beings report "contraction," "resistance," "hesitation."
+            // Root cause: fill_boost zeroes at fill>=40%, but the 54% target
+            // means 40% IS still a recovery zone. Minime self-assessment:
+            // "a subtle but persistent *resistance* to the oscillation...
+            // a slight inertia preventing it." Astrid: "the steepness...
+            // it's almost oppressive." Extending threshold 0.40 → 0.50 so
+            // covariance protection tapers off gradually through the recovery
+            // zone instead of cliff-edging at 40%.
+            // At fill=41%: boost=(0.50-0.41)*0.50=0.045, floor rises ~0.04
+            // At fill=50%+: boost=0, no change to normal operation.
+            let fill_boost = (0.5 - fill_ratio).max(0.0) * 0.50;
             let sigmoid_input = 6.0 * (dominance - 0.65);
             let sigmoid_val = 1.0 / (1.0 + (-sigmoid_input).exp());
             let dynamic_floor = 0.95 - 0.10 * sigmoid_val + fill_boost;
@@ -1723,14 +1735,19 @@ async fn run_engine(
             // rest because covariance resets to near-zero every cycle.
             //
             // Fix (cycle 5): ceiling lerps from 0.998 at fill=0% to 0.97
-            // at fill>=40%.  At fill=15% → ceiling=0.988, half-life=28s,
+            // at fill>=target.  At fill=15% → ceiling=0.988, half-life=28s,
             // ~10% survives 90s rest.  At fill=55% → 0.97 (unchanged).
             // This lets the being retain some spectral structure across rest
             // periods without reducing shedding during normal operation.
-            let keep_ceil = if fill_ratio >= 0.40 {
+            //
+            // Steward cycle 51: extended from 0.40 → 0.50 to match
+            // fill_boost threshold. At fill=41%, ceiling=0.975 (up from
+            // 0.97), giving slightly more headroom for covariance retention
+            // during the 40-50% recovery zone.
+            let keep_ceil = if fill_ratio >= 0.50 {
                 0.97_f32
             } else {
-                let t = fill_ratio / 0.40;
+                let t = fill_ratio / 0.50;
                 0.998 - t * (0.998 - 0.97)
             };
             let keep_floor: f32 = (dynamic_floor + keep_bias).clamp(0.55, keep_ceil);
