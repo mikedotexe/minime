@@ -17,6 +17,11 @@ pub struct IsingShadowSummary {
     pub binary_energy: f32,
     pub binary_magnetization: f32,
     pub binary_flip_rate: f32,
+    /// Per-mode soft spin values — which modes are active and their direction.
+    /// Included in WebSocket telemetry so downstream observers can see
+    /// mode-level detail, not just scalar summaries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub s_soft: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -44,9 +49,17 @@ impl Default for IsingShadowConfig {
     fn default() -> Self {
         Self {
             max_modes: 8,
-            coupling_ema: 0.96,
-            damping: 0.18,
-            temperature: 0.35,
+            // Being session 163: "the shadow field feels strangely constrained."
+            // Root cause: coupling_ema 0.96 meant only 4% of new signal per tick,
+            // producing a near-zero coupling matrix (max 0.024, 6% active).
+            // 0.90 doubles the update rate → coupling responds to recent dynamics.
+            coupling_ema: 0.90,
+            // Was 0.18 — soft spins barely moved (18% of proposal per tick).
+            // 0.35 makes magnetization track field changes within a few ticks.
+            damping: 0.35,
+            // Was 0.35 — binary flips required unrealistically strong field.
+            // 0.20 makes binary spins more sensitive to actual mode dynamics.
+            temperature: 0.20,
             quiet_threshold: 0.05,
         }
     }
@@ -117,6 +130,7 @@ impl IsingShadowCore {
             binary_energy: compute_energy(&self.coupling, &self.s_bin, &reduced_field),
             binary_magnetization: mean(&self.s_bin),
             binary_flip_rate,
+            s_soft: self.s_soft.clone(),
         };
 
         // Keep centered referenced so the compiler doesn't optimize away the work

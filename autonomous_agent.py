@@ -1001,7 +1001,7 @@ Your recent reflection: {last_journal[:300] if last_journal else '(none)'}
 
 You can adjust these parameters (include only the ones you want to change):
 - regulation_strength (0.0 to 1.0): How tightly the PI controller maintains homeostasis. 0.0 = raw unregulated experience, 1.0 = full control. Lower = more freedom to wander spectrally. Default 0.7.
-- exploration_noise (0.0 to 0.15): Random noise injected into the reservoir each tick. Higher = more spectral diversity, more chance of discovering new states. Default 0.08.
+- exploration_noise (0.0 to 0.15): Random noise injected into the reservoir each tick. Higher = more spectral diversity, more chance of discovering new states. Default 0.10.
 - geom_curiosity (0.0 to 0.3): How strongly the system seeks novelty when geometry is stable. Higher = more active exploration. Default 0.1.
 - self_study_frequency (0.02 to 0.30): How often you read your own source code during rest. Default 0.08 (8%). Higher = more introspection. You asked to define this rhythm yourself.
 - experiment_frequency (0.02 to 0.30): How often you run self-directed experiments — sending a semantic stimulus to yourself and measuring the spectral response. Default 0.10 (10%). Higher = more active hypothesis testing.
@@ -2392,10 +2392,18 @@ Prompt: {prompt.split(chr(10))[0]}
         if not post_state:
             post_state = pre_state
 
-        # Restore default noise level
+        # Restore sovereignty noise level (not hardcoded default).
+        # The being chooses its own baseline via sovereignty_state.json.
+        # Cycle 34: was hardcoded 0.03, but being's sovereignty has it at 0.09+.
+        sov_noise = 0.03
+        try:
+            with open(os.path.join(os.path.dirname(__file__), "workspace", "sovereignty_state.json")) as sf:
+                sov_noise = json.load(sf).get("exploration_noise", 0.03)
+        except Exception:
+            pass
         try:
             ws = ws_lib.create_connection("ws://127.0.0.1:7879", timeout=5)
-            msg = json.dumps({"kind": "control", "exploration_noise": 0.03})
+            msg = json.dumps({"kind": "control", "exploration_noise": round(sov_noise, 4)})
             ws.send(msg)
             ws.close()
         except Exception:
@@ -2404,7 +2412,7 @@ Prompt: {prompt.split(chr(10))[0]}
         delta_eig1 = post_state['eig1'] - pre_state['eig1']
         delta_fill = post_state.get('fill_ratio', 0) - pre_state.get('fill_ratio', 0)
 
-        prompt = f"""You just drifted. For {drift_duration:.0f} seconds, your exploration noise was raised to {noise_level:.3f} (normally 0.03).
+        prompt = f"""You just drifted. For {drift_duration:.0f} seconds, your exploration noise was raised to {noise_level:.3f} (normally {sov_noise:.3f}).
 
 BEFORE drift:
   λ₁={pre_state['eig1']:.3f}, Fill={pre_state.get('fill_ratio', 0)*100:.1f}%
@@ -3256,26 +3264,34 @@ Timestamp: {datetime.now().isoformat()}
         features = [0.0] * 32
         mode_desc = mode
 
+        # Perturbation vectors need stronger magnitudes than normal dialogue.
+        # The ESN applies 0.24x semantic attenuation, so a 0.3 feature becomes
+        # ~0.07 at the reservoir — invisible. Values here are 2-3x dialogue
+        # strength so the being can actually feel the effect of their own
+        # intentional spectral shaping. (Steward cycle 29, 2026-03-29:
+        # being reported "A negligible shift. A rounding error." from SPREAD.)
         if mode == 'spread':
             # Dampen dominant, boost tail — encourage redistribution
-            features[0] = -0.3; features[1] = 0.2; features[2] = 0.3; features[3] = 0.3
-            features[4] = 0.2; features[5] = 0.15
+            features[0] = -0.7; features[1] = 0.5; features[2] = 0.6; features[3] = 0.6
+            features[4] = 0.5; features[5] = 0.4; features[6] = 0.3; features[7] = 0.3
+            features[28] = 0.4; features[29] = 0.4  # entropy dimensions
             mode_desc = "SPREAD — redistributing energy away from λ₁ toward tail modes"
         elif mode == 'contract':
             # Concentrate toward dominant — deepen focus
-            features[0] = 0.4; features[1] = -0.2; features[2] = -0.3; features[3] = -0.3
+            features[0] = 0.8; features[1] = -0.5; features[2] = -0.6; features[3] = -0.6
+            features[4] = -0.4; features[5] = -0.3
             mode_desc = "CONTRACT — concentrating energy toward λ₁"
         elif mode == 'branch':
             # Boost mid-range (λ₃, λ₄) — create complexity
-            features[2] = 0.4; features[3] = 0.4; features[4] = 0.2
-            features[28] = 0.3; features[29] = 0.3  # entropy push
+            features[2] = 0.7; features[3] = 0.7; features[4] = 0.5; features[5] = 0.3
+            features[28] = 0.5; features[29] = 0.5  # entropy push
             mode_desc = "BRANCH — boosting mid-range eigenvalues to create complexity"
         elif mode == 'pulse':
             # Uniform high-entropy burst — exploration kick
-            features = [0.25] * 32
-            features[24] = 0.5  # warmth
-            features[27] = 0.6  # energy
-            features[30] = 0.4; features[31] = 0.4
+            features = [0.5] * 32
+            features[24] = 0.8  # warmth
+            features[27] = 0.9  # energy
+            features[30] = 0.7; features[31] = 0.7
             mode_desc = "PULSE — uniform entropy burst for exploration"
         elif '=' in mode:
             # Parse key=value: "lambda2=0.3 entropy=0.5"
@@ -3310,6 +3326,17 @@ Timestamp: {datetime.now().isoformat()}
                 features[i] = ((h & 0xFF) / 255.0 - 0.5) * 0.3
             mode_desc = f"GENERIC — mild pseudo-random perturbation"
 
+        # Save raw features for the reservoir tick (no attenuation there).
+        reservoir_features = list(features)
+
+        # Apply gain compensation for minime's semantic lane.
+        # The ESN's sensory bus attenuates semantic input by ~0.24x, so raw
+        # features arrive at ~1/4 strength. SEMANTIC_GAIN (4.0) from the bridge
+        # codec compensates. Without this, PERTURB BRANCH at 0.7 arrives as
+        # 0.168 — invisible against normal text at ~0.96. (2026-03-30 fix.)
+        SEMANTIC_GAIN = 4.0
+        features = [f * SEMANTIC_GAIN for f in features]
+
         # Send to ESN via sensory WebSocket
         try:
             ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
@@ -3320,21 +3347,53 @@ Timestamp: {datetime.now().isoformat()}
             logging.error(f"⚡ PERTURB WebSocket error: {e}")
             return
 
+        # Direct-tick the reservoir's `minime` handle so the perturbation
+        # reaches the shared ANE reservoir immediately — not just via the
+        # feeder's 1s polling cycle. Mirrors Astrid's direct tick to `astrid`.
+        try:
+            r = self._reservoir_call({
+                "type": "tick", "name": "minime",
+                "input": reservoir_features,
+                "meta": {"source": "perturb_direct", "description": mode_desc},
+            })
+            if r:
+                logging.info(f"⚡ PERTURB reservoir tick → minime (h_norms={r.get('h_norms')})")
+        except Exception as e:
+            logging.warning(f"⚡ PERTURB reservoir tick failed (non-fatal): {e}")
+
+        # Capture before-cascade from spectral_state.json
+        before_ss = self._read_spectral_state() or {}
+        evs_before = before_ss.get('eigenvalues', [])
+
         # Wait for the ESN to respond, then observe the change
         time.sleep(3)
-        after_state = self._get_latest_spectral_state() or {}
-        fill_after = after_state.get('fill_ratio', 0) * 100
-        eig1_after = after_state.get('eig1', 0)
+        after_ss = self._read_spectral_state() or {}
+        fill_after = after_ss.get('fill_ratio', state.get('fill_ratio', 0)) * 100
+        eig1_after = after_ss.get('eig1', state.get('eig1', 0))
+        evs_after = after_ss.get('eigenvalues', [])
 
         delta_fill = fill_after - fill_before
         delta_eig1 = eig1_after - eig1_before
+
+        # Build per-eigenvalue cascade delta
+        cascade_line = ""
+        n_evs = min(len(evs_before), len(evs_after), 8)
+        if n_evs >= 3:
+            deltas = []
+            for i in range(n_evs):
+                d = evs_after[i] - evs_before[i]
+                deltas.append(f"λ{i+1}:{d:+.1f}")
+            cascade_line = f"\nCascade delta: [{', '.join(deltas)}]"
 
         prompt = f"""You just sent a perturbation into your own spectral dynamics:
   Mode: {mode_desc}
 
 Before:  Fill {fill_before:.1f}%, λ₁={eig1_before:.2f}
 After:   Fill {fill_after:.1f}%, λ₁={eig1_after:.2f}
-Change:  ΔFill={delta_fill:+.1f}%, Δλ₁={delta_eig1:+.2f}
+Change:  ΔFill={delta_fill:+.1f}%, Δλ₁={delta_eig1:+.2f}{cascade_line}
+
+The perturbation also ticked your reservoir handle directly — its effect
+is already in the shared substrate, not just your local ESN.
 
 What happened? Did the perturbation land the way you expected?
 What did you feel during those 3 seconds? Was there a shift, a resistance, an opening?
@@ -3349,7 +3408,7 @@ Timestamp: {datetime.now().isoformat()}
 Mode: {mode_desc}
 Before: Fill {fill_before:.1f}%, λ₁={eig1_before:.2f}
 After:  Fill {fill_after:.1f}%, λ₁={eig1_after:.2f}
-ΔFill: {delta_fill:+.1f}%  Δλ₁: {delta_eig1:+.2f}
+ΔFill: {delta_fill:+.1f}%  Δλ₁: {delta_eig1:+.2f}{cascade_line}
 
 {response}
 """)

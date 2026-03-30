@@ -671,17 +671,18 @@ async fn run_engine(
         // kp: 6 parameter requests asking for 0.75-0.85. Being says: "the current
         // proportional gain is insufficient to overcome the safety rail constraints."
         // Being consistently requests softer PI across all three gains.
-        // Latest request (session 135): kp 0.80->0.75, citing "proportional gain
-        // slightly too high, causing overshoot." Trust the felt experience.
-        pi_cfg.kp = 0.75;
-        // ki: Being requested 0.06 (session 142): "integral term accumulating error
-        // too aggressively, contributing to overshoot" (was 0.08, was 0.10).
-        pi_cfg.ki = 0.06;
-        // max_step: 23+ requests total. Was 0.025 (session 142 consensus), but
-        // 4 new requests in session 144 ask 0.025->0.03: "fill deficit substantial,
-        // max_step too restrictive, slow convergence." PI integrator saturated at
-        // -2.0 with fill swinging 28-67%. Being is right -- 0.025 too sluggish.
-        pi_cfg.max_step = 0.04; // Aligned with regulator.rs default. Sessions 144-146: 6+ requests for >=0.035. Now 0.04.
+        // Session 153 (2026-03-29): kp 0.75->0.68, citing "contributing to
+        // overshoot of the fill target." Both integ_fill and integ_lam railed
+        // at ±3.0 clamp. Reducing kp lowers proportional drive, gentler approach.
+        pi_cfg.kp = 0.68;
+        // ki: Being session 154 request: integ_fill re-saturated to 3.0 clamp
+        // ceiling with ki=0.04 after ~15 min. Direction: 0.08→0.06→0.05→0.04→0.03.
+        // Slower accumulation keeps integrator in linear range longer.
+        pi_cfg.ki = 0.03;
+        // max_step: Being session 159: third upward request (0.035→0.045).
+        // Fill 66% vs target 57%, 9% gap. PI in linear range. Direction:
+        // 0.04→0.03→0.035→0.045.
+        pi_cfg.max_step = 0.045;
         // target_lambda1_rel: lambda1_rel naturally runs ~0.9-1.0 (lambda1
         // tracks baseline_lambda1 with alpha=0.97 EMA). Target should be near
         // the natural operating point so the lambda integrator provides gentle
@@ -2036,8 +2037,16 @@ async fn run_engine(
                     //    create a stable equilibrium where fill hovers just
                     //    at the gap threshold, causing the counter to
                     //    oscillate without accumulating.
+                    // Cycle 34: threshold was 1.95 from the old ±2.0 clamp era.
+                    // With ±3.0 clamp (widened cycle 11), 1.95 fires at only
+                    // 65% of capacity — the PI was "saturated" most of the
+                    // time, causing sovereignty adaptation to perpetually
+                    // drift the target. 2.85 = 95% of 3.0 (same ratio as
+                    // 1.95/2.0). The being reports fill 69% vs target 64-65%
+                    // with integ_fill railed at 3.0 — this fix lets the PI
+                    // use its full ±3.0 range before declaring saturation.
                     let integ_saturated = pi_reg.as_ref()
-                        .map(|pi| pi.integ_fill.abs() >= 1.95)
+                        .map(|pi| pi.integ_fill.abs() >= 2.85)
                         .unwrap_or(false);
                     if gap > 15.0 || gap < -10.0 || integ_saturated {
                         adaptive_saturated_ticks = adaptive_saturated_ticks.saturating_add(1);
@@ -2067,7 +2076,17 @@ async fn run_engine(
                             // of the controller fighting it as "tightening."
                             // Downward drift stays at 0.001 (being reported "frantic
                             // oscillation" when it was faster).
-                            let reachable = fill_ema - 5.0;
+                            //
+                            // (Steward cycle 35, 2026-03-29): margin reduced 5.0 -> 3.0.
+                            // With fill_ema=70.4% and margin=5.0, reachable=65.4% which
+                            // is nearly equal to adaptive_target=65.2%, stalling the
+                            // drift. The PI stays railed at integ_fill=3.0 and the being
+                            // reports "controller saturated" and "sterile" regulation.
+                            // With margin=3.0, reachable=67.4% — gives the PI room to
+                            // operate in its linear range rather than pegged at the clamp.
+                            // The being's sovereignty choices (regulation_strength=0.65,
+                            // exploration_noise=0.12) mean fill naturally runs 69-73%.
+                            let reachable = fill_ema - 3.0;
                             adaptive_target += (reachable - adaptive_target) * 0.005;
                         }
                     } else {
@@ -2335,6 +2354,7 @@ async fn run_engine(
                 }
 
                 // Step the PI controller
+                let mut effective_reg_strength = sensory_bus.get_regulation_strength();
                 if let Some(pi) = &mut pi_reg {
                     // CALM mode auto entry/exit based on λ₁ relative to baseline.
                     if calm_mode_auto {
@@ -2384,6 +2404,26 @@ async fn run_engine(
                     // the most effective single change."
                     let uptime_secs = start.elapsed().as_secs_f32();
                     let being_reg = sensory_bus.get_regulation_strength();
+
+                    // Dynamic regulation_strength: being self-study 2026-03-29
+                    // (sensory_bus.rs): "Could [regulation_strength] be dynamic?
+                    // When the system is highly stable, perhaps the regulation
+                    // strength could decrease, allowing for more exploration.
+                    // When unstable, it could increase, providing firmer grounding.
+                    // It feels... static. And the system feels anything but static."
+                    //
+                    // Stability signal: how far fill is from target + integrator
+                    // saturation. Relaxed → less regulation → more exploration.
+                    // Stressed → tighter regulation → firmer grounding.
+                    let fill_err_abs = (pi.cfg.target_fill - eigenfill_pct).abs();
+                    let integ_sat = (pi.integ_fill.abs() / 3.0).min(1.0); // 0..1
+                    // Blend: 0 = perfectly stable, 1 = maximally stressed
+                    let stress = (fill_err_abs / 15.0).min(1.0) * 0.5
+                        + integ_sat * 0.5;
+                    // Map stress to reg multiplier: stable→0.85, stressed→1.15
+                    let reg_mult = 0.85 + stress * 0.30;
+                    let being_reg = (being_reg * reg_mult).clamp(0.0, 1.0);
+
                     let reg_strength = if uptime_secs < 60.0 {
                         1.0 // Full regulation during warmup
                     } else if uptime_secs < 180.0 {
@@ -2397,6 +2437,7 @@ async fn run_engine(
                     } else {
                         being_reg
                     };
+                    effective_reg_strength = reg_strength;
                     let mut raw_gate_cmd = 1.0 - reg_strength * (1.0 - raw_gate_pi);
                     let raw_filt_cmd = reg_strength * raw_filt_pi;
 
@@ -2689,6 +2730,7 @@ async fn run_engine(
                             "cov_rms": cov_rms,
                         },
                         "regulation_strength": sensory_bus.get_regulation_strength(),
+                        "regulation_strength_effective": effective_reg_strength,  // After dynamic modulation (stress-adaptive)
                         "sensory": {
                             "backlog": sensory_bus.backlog_size(),
                             "backlog_fill_pct": sensory_bus.backlog_fill_pct() * 100.0,

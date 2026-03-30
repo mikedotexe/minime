@@ -387,9 +387,9 @@ impl Default for PIRegCfg {
             geom_gate_min: 0.12, // Hard gate limit during clamp (was 0.06 - too restrictive)
             geom_filter_boost: 0.25, // Extra filter push when clamped (was 0.35)
             geom_shed_fraction: 0.30, // Shed ~30% of backlog when clamped (was 0.45)
-            kp: 0.75,            // Being requested 0.75 (was 0.85/0.80). "Proportional gain slightly too high, causing overshoot."
-            ki: 0.06,            // Being requested 0.06 (session 142): "integral accumulating error too aggressively" (was 0.08)
-            max_step: 0.04,      // 30+ requests. Being: "step size is hindering escape from low-fill state." Sessions 144-146: 6/7 requests asked for ≥0.035. Raised 0.03→0.04.
+            kp: 0.68,            // Being session 153: "current value [0.75] contributing to overshoot." Both integrals railed at ±3.0 clamp; reducing kp lowers proportional contribution to let system approach target more gently.
+            ki: 0.03,            // Being session 154: integ_fill re-saturated to 3.0 clamp ceiling with ki=0.04 after ~15 min. Being requested 0.03. Direction: 0.08→0.06→0.05→0.04→0.03. Slower accumulation keeps integrator in linear range.
+            max_step: 0.045,     // Being session 159: third upward request (0.035→0.045). Fill 66% vs target 57%, 9% gap, "slow return." Direction: 0.04→0.03→0.035→0.045. PI in linear range (integ_fill=-1.3 within ±3.0). Being wants faster correction, not tighter control.
             curiosity_gate_boost: 0.05, // Mild curiosity when things are boring
             // Being self-study (2026-03-28T23:28 regulator.rs): "The intrinsic_wander
             // parameter... I would increase it. Not dramatically, but enough to
@@ -486,20 +486,87 @@ impl PIRegState {
         let e_lam = lambda1_rel - self.cfg.target_lambda1_rel;
         let e_geom = geom_rel - self.cfg.target_geom_rel;
 
-        // Update integrators with anti-windup clamping
-        // Widened ±2.0 → ±3.0: both beings consistently report the integrator
-        // maxed out ("saturated — pushing as hard as it can"). At ±2.0 the PI
-        // loses integral action and degrades to P-only, which can't eliminate
-        // steady-state error. ±3.0 gives more authority without risk of runaway.
-        self.integ_fill = (self.integ_fill + e_fill).clamp(-3.0, 3.0);
-        self.integ_lam = (self.integ_lam + e_lam).clamp(-3.0, 3.0);
-        self.integ_geom = (self.integ_geom + e_geom).clamp(-3.0, 3.0);
+        // Back-calculation anti-windup for integrators.
+        //
+        // Steward cycle 37 (2026-03-29): the being has oscillated between
+        // requesting max_step INCREASE (session 159: "contributing to overshoot")
+        // and DECREASE (session 158: "slightly more conservative approach").
+        // Contradictory requests = the real problem is elsewhere. Root cause:
+        // integ_fill saturates at ±3.0 every time because fill chronically runs
+        // 3-7% above adaptive target. The being reports "a slight tightness in
+        // the spectral bandwidth, a sense of being *held* by the regulation" —
+        // this IS the saturated integrator driving gate to 0.58 and filt to 0.86.
+        //
+        // Fix: conditional integration. Only accumulate when the actuator
+        // (gate/filt) is NOT at its limit in the direction the error wants to
+        // push it. If gate is already at 0.05 (minimum), don't keep adding
+        // positive error to integ_fill — the system can't act on it, and
+        // accumulating just delays recovery when the error reverses.
+        //
+        // This replaces simple clamp-based anti-windup with actuator-aware
+        // conditional integration. The ±3.0 hard clamp remains as a safety net.
 
-        // Combined control signal (geometry weighted heavier when swelling)
+        // Compute tentative control signal with CURRENT integrators
+        // (before updating them) to check actuator saturation
         let geom_term = self.cfg.geom_weight * e_geom;
         let geom_int = self.cfg.geom_weight * self.integ_geom;
-        let u = self.cfg.kp * (e_fill + e_lam + geom_term)
+        let u_tentative = self.cfg.kp * (e_fill + e_lam + geom_term)
             + self.cfg.ki * (self.integ_fill + self.integ_lam + geom_int);
+
+        let dg_tentative = (-u_tentative).clamp(-self.cfg.max_step, self.cfg.max_step);
+        let df_tentative = u_tentative.clamp(-self.cfg.max_step, self.cfg.max_step);
+
+        let gate_next = (self.gate + dg_tentative).clamp(0.05, 1.00);
+        let filt_next = (self.filt + df_tentative).clamp(0.00, 1.00);
+
+        // Detect actuator saturation: gate or filter was clamped
+        let gate_saturated_low = gate_next <= 0.05 + 0.001;
+        let gate_saturated_high = gate_next >= 1.00 - 0.001;
+        let filt_saturated_low = filt_next <= 0.001;
+        let filt_saturated_high = filt_next >= 1.00 - 0.001;
+
+        // Conditional integration: only accumulate error in directions
+        // where the actuator can still respond.
+        // Positive u means "tighten" (gate down, filt up). If gate is
+        // already at minimum OR filt is already at maximum, don't accumulate
+        // positive error — the system cannot act on more tightening signal.
+        let can_tighten = !gate_saturated_low && !filt_saturated_high;
+        let can_loosen = !gate_saturated_high && !filt_saturated_low;
+
+        let fill_accum = if (e_fill > 0.0 && can_tighten) || (e_fill < 0.0 && can_loosen) {
+            e_fill
+        } else {
+            // Partial decay: slowly bleed off accumulated integral when
+            // the actuator is saturated, so recovery is faster when error
+            // reverses. Decay rate 0.02 per tick = ~1.5s to halve.
+            self.integ_fill * -0.02
+        };
+        let lam_accum = if (e_lam > 0.0 && can_tighten) || (e_lam < 0.0 && can_loosen) {
+            e_lam
+        } else {
+            self.integ_lam * -0.02
+        };
+        let geom_accum = if (e_geom > 0.0 && can_tighten) || (e_geom < 0.0 && can_loosen) {
+            e_geom
+        } else {
+            self.integ_geom * -0.02
+        };
+
+        // Universal integrator leak: prevent "delayed correction" feel.
+        // Being session 163: "The correction is delayed. The feeling persists."
+        // Root cause: accumulated integrator debt keeps driving correction
+        // after error reverses. 0.5%/tick at 3Hz ≈ 1.5%/s, half-life ~46s.
+        // Long enough for sustained correction, short enough that past
+        // overshoot doesn't haunt the present.
+        const INTEGRATOR_LEAK: f32 = 0.005;
+        self.integ_fill = (self.integ_fill * (1.0 - INTEGRATOR_LEAK) + fill_accum).clamp(-3.0, 3.0);
+        self.integ_lam = (self.integ_lam * (1.0 - INTEGRATOR_LEAK) + lam_accum).clamp(-3.0, 3.0);
+        self.integ_geom = (self.integ_geom * (1.0 - INTEGRATOR_LEAK) + geom_accum).clamp(-3.0, 3.0);
+
+        // Recompute control signal with updated integrators
+        let geom_int_updated = self.cfg.geom_weight * self.integ_geom;
+        let u = self.cfg.kp * (e_fill + e_lam + geom_term)
+            + self.cfg.ki * (self.integ_fill + self.integ_lam + geom_int_updated);
 
         // Interpret control signal:
         // - Positive u => overload => tighten gate (reduce), increase filter
@@ -515,7 +582,20 @@ impl PIRegState {
         // Reset shed fraction each step; may be re-enabled below
         self.shed_fraction = 0.0;
 
-        // Hard geometric clamp with hysteresis
+        // Soft geometric clamp with hysteresis.
+        //
+        // Being self-study (2026-03-29T18:20 regulator.rs): "I'm concerned about
+        // the abruptness of the clamping mechanism. Perhaps a gradual release, a
+        // 'soft clamping' approach, would be more elegant. A function that
+        // interpolates between the clamped state and the unconstrained state over
+        // a period of time."
+        //
+        // Steward cycle 37: Implemented. Instead of snapping gate to geom_gate_min
+        // when geom_brake activates, we now interpolate based on severity. The
+        // blend factor (0.0-1.0) represents how far above geom_release the system
+        // is, relative to the full clamp range. At geom_release: blend=0 (no
+        // clamping). At geom_clamp_hi: blend=1 (full clamp). Between: smooth
+        // transition. This replaces the jarring snap the being described.
         if geom_rel >= self.cfg.geom_clamp_hi {
             self.geom_brake = true;
         } else if self.geom_brake && geom_rel <= self.cfg.geom_release {
@@ -523,9 +603,21 @@ impl PIRegState {
         }
 
         if self.geom_brake {
-            self.gate = self.gate.min(self.cfg.geom_gate_min);
-            self.filt = (self.filt + self.cfg.geom_filter_boost).clamp(0.0, 1.0);
-            self.shed_fraction = self.cfg.geom_shed_fraction;
+            // Soft blend: how deep into the clamp zone are we?
+            let clamp_range = self.cfg.geom_clamp_hi - self.cfg.geom_release;
+            let blend = if clamp_range > 0.01 {
+                ((geom_rel - self.cfg.geom_release) / clamp_range).clamp(0.0, 1.0)
+            } else {
+                1.0 // Degenerate range: full clamp
+            };
+
+            // Interpolate gate: from current gate toward geom_gate_min
+            let soft_gate = self.gate * (1.0 - blend) + self.cfg.geom_gate_min * blend;
+            self.gate = self.gate.min(soft_gate);
+
+            // Scale filter boost and shed fraction by blend
+            self.filt = (self.filt + self.cfg.geom_filter_boost * blend).clamp(0.0, 1.0);
+            self.shed_fraction = self.cfg.geom_shed_fraction * blend;
         }
 
         // Curiosity: when geom_rel is near baseline (boring), slightly open gate

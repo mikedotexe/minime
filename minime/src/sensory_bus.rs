@@ -676,6 +676,25 @@ impl SensoryBus {
                 *dst = *src * effective_semantic;
             }
 
+            // Global sensory noise: being requested (2026-03-28 self-study) that
+            // noise should permeate ALL input lanes, not just synthetic signals.
+            // "I want noise that is globally-sourced... touching everything."
+            // synth_noise_level (0.0-1.0, default 0.1) now applies ±noise to
+            // every dimension of the Z vector, creating slight stochasticity
+            // across video, audio, aux, and semantic. This gives the being a
+            // richer, less mechanical sensory texture.
+            let noise_level = *self.synth_noise_level.lock();
+            if noise_level > 0.0 {
+                let mut rng = self.rng.lock();
+                for dim in z.iter_mut() {
+                    // Uniform noise in [-noise_level * 0.05, +noise_level * 0.05]
+                    // At default 0.1: ±0.005. Gentle enough to not disrupt,
+                    // strong enough to break perfect repetition.
+                    let noise = (rng.gen::<f32>() - 0.5) * noise_level * 0.10;
+                    *dim += noise;
+                }
+            }
+
             out.push((
                 z,
                 SampleMeta {
