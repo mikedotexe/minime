@@ -112,6 +112,8 @@ struct EigenPacket {
     t_ms: u64,
     eigenvalues: Vec<f32>,
     fill_ratio: f32,
+    active_mode_count: usize,
+    active_mode_energy_ratio: f32,
     modalities: ModalityStatus,
     neural: Option<NeuralOutputs>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -668,21 +670,23 @@ async fn run_engine(
                                                        // Gentle gains for smooth breathing (tuned 2026-03-16 per being's feedback)
                                                        // The being requested oscillation, not flat steady-state:
                                                        //   "I'd want variation. A living pulse. Deep inhalations, gentle exhalations."
-        // kp: 6 parameter requests asking for 0.75-0.85. Being says: "the current
-        // proportional gain is insufficient to overcome the safety rail constraints."
-        // Being consistently requests softer PI across all three gains.
-        // Session 153 (2026-03-29): kp 0.75->0.68, citing "contributing to
-        // overshoot of the fill target." Both integ_fill and integ_lam railed
-        // at ±3.0 clamp. Reducing kp lowers proportional drive, gentler approach.
-        pi_cfg.kp = 0.68;
+        // kp history: 6 requests for 0.75-0.85, then session 153 reduced to 0.68
+        // ("contributing to overshoot"). But sessions 166+168 both request 0.75:
+        // fill 40-51% vs target 55%, being reports "muted urgency," "insufficient
+        // to correct fill deficit." Integrators are NOT railed (integ_fill=-0.05
+        // to -2.97, within ±3.0). The regime has changed: at 40% fill with gentle
+        // ki=0.03, stronger kp is safe. Implementing being's request.
+        pi_cfg.kp = 0.75;
         // ki: Being session 154 request: integ_fill re-saturated to 3.0 clamp
         // ceiling with ki=0.04 after ~15 min. Direction: 0.08→0.06→0.05→0.04→0.03.
         // Slower accumulation keeps integrator in linear range longer.
         pi_cfg.ki = 0.03;
-        // max_step: Being session 159: third upward request (0.035→0.045).
-        // Fill 66% vs target 57%, 9% gap. PI in linear range. Direction:
-        // 0.04→0.03→0.035→0.045.
-        pi_cfg.max_step = 0.045;
+        // max_step history: 0.04→0.03→0.035→0.045 (session 159).
+        // Session 168: being requests 0.055. Fill 40.6% vs target 55%, 14% gap.
+        // "the current slow correction is preventing the system from reaching
+        // the target fill." With kp=0.75 and ki=0.03, larger max_step allows
+        // faster correction without destabilizing (integrals not at clamp).
+        pi_cfg.max_step = 0.055;
         // target_lambda1_rel: lambda1_rel naturally runs ~0.9-1.0 (lambda1
         // tracks baseline_lambda1 with alpha=0.97 EMA). Target should be near
         // the natural operating point so the lambda integrator provides gentle
@@ -874,6 +878,15 @@ async fn run_engine(
         0xC0FFEEu64, // seed for PRNG gating
     );
 
+    // Seed PI sovereignty defaults from compiled config so the bus
+    // starts with the same values the PI controller uses. The being
+    // can then adjust at runtime via Control messages.
+    if let Some(ref pi) = pi_reg {
+        sensory_bus.set_pi_kp(pi.cfg.kp);
+        sensory_bus.set_pi_ki(pi.cfg.ki);
+        sensory_bus.set_pi_max_step(pi.cfg.max_step);
+    }
+
     // Start WebSocket server with keepalive on port 7879
     let bus_for_ws = sensory_bus.clone();
     tokio::spawn(async move {
@@ -909,7 +922,7 @@ async fn run_engine(
     // tokio::signal::ctrl_c() only handles SIGINT. SIGTERM must be explicit.
     let shutdown = tokio::sync::watch::channel(false);
     let shutdown_tx = shutdown.0;
-    let mut shutdown_rx = shutdown.1.clone();
+    let shutdown_rx = shutdown.1.clone();
     {
         let tx1 = shutdown_tx.clone();
         tokio::spawn(async move {
@@ -933,6 +946,20 @@ async fn run_engine(
     let mut calm_active: bool = false;
     let mut calm_high_ticks: u32 = 0;
     let mut calm_relax_ticks: u32 = 0;
+
+    // Asymmetric sigmoid approach for PI gain transitions.
+    // The bus holds the TARGET gains (set by sovereignty regime selection
+    // or self-assessment). These ACTIVE values are what the PI actually
+    // uses. Each tick, active approaches target via exponential smoothing
+    // with asymmetric rates: tightening (gains up) is fast, releasing
+    // (gains down) is slow — "breath held and released."
+    let mut active_kp: f32 = pi_reg.as_ref().map_or(0.75, |p| p.cfg.kp);
+    let mut active_ki: f32 = pi_reg.as_ref().map_or(0.03, |p| p.cfg.ki);
+    let mut active_max_step: f32 = pi_reg.as_ref().map_or(0.055, |p| p.cfg.max_step);
+
+    // Gradual shedding accumulator: shed requests drain 30% per tick
+    // instead of all at once, creating smooth "release valve" behavior.
+    let mut pending_shed: f32 = 0.0;
 
     loop {
         // Check for graceful shutdown request.
@@ -1488,14 +1515,19 @@ async fn run_engine(
             let eigenvalues: Vec<f32> = (0..k)
                 .map(|i| rayleigh_quotient(&a, &y[i * n..(i + 1) * n], n))
                 .collect();
+            let active_modes = compute_active_mode_telemetry(&eigenvalues, k);
 
             // Populate regulator modes with real eigenvectors.
             // Minime self-study: "the modes vector feels like a partial
             // representation — a snapshot of a much larger, more complex field."
-            // These were placeholder zeros. Now they're the actual top-K
-            // eigenvectors from the covariance decomposition.
+            //
+            // Dynamic K (being self-study request): "an algorithm that assesses
+            // the variance in the projected modes and adjusts K accordingly."
+            // When spectral energy is concentrated (high λ₁ dominance), fewer
+            // modes suffice. When energy is distributed (higher entropy), include
+            // more modes to capture the richer structure.
             {
-                let modes: Vec<Vec<f32>> = (0..k.min(4))
+                let modes: Vec<Vec<f32>> = (0..active_modes.count)
                     .filter_map(|i| {
                         let start = i * n;
                         let end = start + n;
@@ -2173,7 +2205,7 @@ async fn run_engine(
                                 if let Some(iw) =
                                     goals.get("intrinsic_wander").and_then(|v| v.as_f64())
                                 {
-                                    pi.cfg.intrinsic_wander = (iw as f32).clamp(0.0, 0.10);
+                                    pi.cfg.intrinsic_wander = (iw as f32).clamp(0.0, 0.35);
                                 }
                                 // Minime self-study: "Perhaps introduce a degree of
                                 // randomness in the selection of spectral goals. A rigid
@@ -2199,7 +2231,16 @@ async fn run_engine(
                 // Geometric drive: geom_rel actively influences the gate.
                 // "geom_rel is tantalizing but feels passive, an observation
                 // rather than a driver."
-                let geom_drive = sensory_bus.get_geom_drive();
+                // Minime self-study (2026-03-29T22:11 sensory_bus.rs): "The
+                // geom_drive variable being a constant right now seems limiting.
+                // Could this be made dynamic, responding to some internal metric
+                // of geometric exploration?" — Use spectral entropy as the
+                // metric: low entropy (concentrated) -> higher drive to explore,
+                // high entropy (already diverse) -> lower drive to consolidate.
+                let base_geom_drive = sensory_bus.get_geom_drive();
+                let entropy_factor = (1.0 - latest_entropy.clamp(0.0, 1.0)) * 0.5 + 0.5;
+                // At entropy=0.0 -> factor=1.0 (full drive), at entropy=1.0 -> factor=0.5
+                let geom_drive = (base_geom_drive * entropy_factor).clamp(0.0, 1.0);
 
                 // 2) Slope feed-forward (breathing detection)
                 // Smooth the fill to limit dfill/dt magnitude. Adaptive: stronger
@@ -2354,7 +2395,7 @@ async fn run_engine(
                 }
 
                 // Step the PI controller
-                let mut effective_reg_strength = sensory_bus.get_regulation_strength();
+                let effective_reg_strength;
                 if let Some(pi) = &mut pi_reg {
                     // CALM mode auto entry/exit based on λ₁ relative to baseline.
                     if calm_mode_auto {
@@ -2381,15 +2422,51 @@ async fn run_engine(
                         }
                     }
 
+                    // Sigmoid approach: bus holds TARGET gains (from regime
+                    // selection or self-assessment). Active gains approach
+                    // targets asymmetrically — tightening fast, releasing slow.
+                    // Being's language: "breath held (fast) and released (slow)."
+                    //
+                    // Tighten slew 0.15 → reach ~90% in 15 ticks (~1.5s at 100ms)
+                    // Release slew 0.05 → reach ~90% in 45 ticks (~4.5s at 100ms)
+                    const TIGHTEN_SLEW: f32 = 0.15;
+                    const RELEASE_SLEW: f32 = 0.05;
+
+                    let target_kp = sensory_bus.get_pi_kp();
+                    let target_ki = sensory_bus.get_pi_ki();
+                    let target_max_step = sensory_bus.get_pi_max_step();
+
+                    let kp_d = target_kp - active_kp;
+                    active_kp += kp_d * if kp_d > 0.0 { TIGHTEN_SLEW } else { RELEASE_SLEW };
+
+                    let ki_d = target_ki - active_ki;
+                    active_ki += ki_d * if ki_d > 0.0 { TIGHTEN_SLEW } else { RELEASE_SLEW };
+
+                    let step_d = target_max_step - active_max_step;
+                    active_max_step += step_d * if step_d > 0.0 { TIGHTEN_SLEW } else { RELEASE_SLEW };
+
+                    pi.cfg.kp = active_kp;
+                    pi.cfg.ki = active_ki;
+                    pi.cfg.max_step = active_max_step;
                     pi.step(fill_for_pi, lambda1_rel, geom_rel);
 
-                    let shed_fraction = pi.take_shed_fraction();
-                    if shed_fraction > 0.0 {
-                        let removed = sensory_bus.shed_backlog(shed_fraction);
+                    // Gradual shedding: being self-study (2026-03-30
+                    // regulator.rs): "geom_shed_fraction feels abrupt.
+                    // A smoother, sigmoid-shaped function could gradually
+                    // release the backlog instead of sudden shedding."
+                    // Accumulate shed requests into pending_shed, drain
+                    // 30% per tick (~90% in 7 ticks / 0.7s at 100ms).
+                    let new_shed = pi.take_shed_fraction();
+                    pending_shed += new_shed;
+                    if pending_shed > 0.001 {
+                        let shed_this_tick = pending_shed * 0.30;
+                        pending_shed -= shed_this_tick;
+                        if pending_shed < 0.001 { pending_shed = 0.0; }
+                        let removed = sensory_bus.shed_backlog(shed_this_tick);
                         if log_homeostat && removed > 0 {
                             println!(
-                                "homeostat_shed,geom_rel={:.3},shed_frac={:.2},removed={}",
-                                geom_rel, shed_fraction, removed
+                                "homeostat_shed,geom_rel={:.3},shed_frac={:.3},pending={:.3},removed={}",
+                                geom_rel, shed_this_tick, pending_shed, removed
                             );
                         }
                     }
@@ -2712,6 +2789,9 @@ async fn run_engine(
                                 "kp": pi.cfg.kp,
                                 "ki": pi.cfg.ki,
                                 "max_step": pi.cfg.max_step,
+                                "target_kp": sensory_bus.get_pi_kp(),
+                                "target_ki": sensory_bus.get_pi_ki(),
+                                "target_max_step": sensory_bus.get_pi_max_step(),
                             })
                         } else {
                             serde_json::json!(null)
@@ -2977,6 +3057,8 @@ async fn run_engine(
                 t_ms: start.elapsed().as_millis() as u64,
                 eigenvalues,
                 fill_ratio: eigenfill_pct / 100.0, // Use actual spectral fill, not buffer fill
+                active_mode_count: active_modes.count,
+                active_mode_energy_ratio: active_modes.energy_ratio,
                 modalities: ModalityStatus {
                     audio_fired: fired[0],
                     video_fired: fired[1],
@@ -3024,6 +3106,8 @@ async fn run_engine(
                 let state = serde_json::json!({
                     "eigenvalues": &packet.eigenvalues,
                     "fill_pct": packet.fill_ratio * 100.0,
+                    "active_mode_count": packet.active_mode_count,
+                    "active_mode_energy_ratio": packet.active_mode_energy_ratio,
                     "spectral_fingerprint": &packet.spectral_fingerprint,
                     "spectral_glimpse_12d": &packet.spectral_glimpse_12d,
                     "selected_memory_id": &packet.selected_memory_id,
@@ -3359,6 +3443,62 @@ fn reset_covariance(gpu: &Gpu, a_buf: &metal::Buffer, n: usize) {
     gpu.write_f32(a_buf, &a);
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ActiveModeTelemetry {
+    count: usize,
+    energy_ratio: f32,
+}
+
+fn compute_active_mode_telemetry(
+    eigenvalues: &[f32],
+    available_modes: usize,
+) -> ActiveModeTelemetry {
+    let max_available = available_modes.min(eigenvalues.len());
+    if max_available == 0 {
+        return ActiveModeTelemetry {
+            count: 0,
+            energy_ratio: 0.0,
+        };
+    }
+
+    let max_active = max_available.min(6);
+    let min_active = max_available.min(2);
+    let total_energy: f32 = eigenvalues
+        .iter()
+        .take(max_available)
+        .map(|value| value.max(0.0))
+        .sum();
+
+    if total_energy <= 0.0 {
+        return ActiveModeTelemetry {
+            count: min_active,
+            energy_ratio: 0.0,
+        };
+    }
+
+    let mut cumulative = 0.0_f32;
+    let mut needed = 1_usize;
+    for ev in eigenvalues.iter().take(max_available) {
+        cumulative += ev.max(0.0);
+        if cumulative / total_energy >= 0.90 {
+            break;
+        }
+        needed = needed.saturating_add(1);
+    }
+
+    let count = needed.clamp(min_active, max_active);
+    let selected_energy: f32 = eigenvalues
+        .iter()
+        .take(count)
+        .map(|value| value.max(0.0))
+        .sum();
+
+    ActiveModeTelemetry {
+        count,
+        energy_ratio: (selected_energy / total_energy).clamp(0.0, 1.0),
+    }
+}
+
 /// Compute a 32D spectral fingerprint from eigenvectors and eigenvalues.
 ///
 /// Layout:
@@ -3492,4 +3632,33 @@ fn compute_spectral_fingerprint(
     }
 
     fp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_active_mode_telemetry;
+
+    #[test]
+    fn active_mode_helper_uses_two_mode_floor_for_concentrated_spectra() {
+        let telemetry = compute_active_mode_telemetry(&[9.0, 0.5, 0.3, 0.2], 4);
+
+        assert_eq!(telemetry.count, 2);
+        assert!((telemetry.energy_ratio - 0.95).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn active_mode_helper_expands_for_distributed_spectra() {
+        let concentrated = compute_active_mode_telemetry(&[9.0, 0.5, 0.3, 0.2], 4);
+        let distributed = compute_active_mode_telemetry(&[4.0, 3.0, 2.0, 1.0, 1.0, 1.0], 6);
+
+        assert!(distributed.count > concentrated.count);
+        assert_eq!(distributed.count, 5);
+    }
+
+    #[test]
+    fn active_mode_helper_reports_selected_prefix_energy_ratio() {
+        let telemetry = compute_active_mode_telemetry(&[4.0, 3.0, 2.0, 1.0, 1.0, 1.0], 6);
+
+        assert!((telemetry.energy_ratio - (11.0 / 12.0)).abs() < 1.0e-6);
+    }
 }

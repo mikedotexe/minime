@@ -59,6 +59,10 @@ pub enum SensoryMsg {
         synth_noise_level: Option<f32>,
         /// Pure tone mode — single sine wave, zero noise, total calm
         pure_tone: Option<bool>,
+        /// PI controller sovereignty — being can tune these at runtime.
+        pi_kp: Option<f32>,
+        pi_ki: Option<f32>,
+        pi_max_step: Option<f32>,
     },
 }
 
@@ -178,6 +182,9 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
             deep_breathing,
             synth_noise_level,
             pure_tone,
+            pi_kp,
+            pi_ki,
+            pi_max_step,
         } => {
             if let Some(g) = synth_gain {
                 bus.set_synth_gain(g);
@@ -288,6 +295,19 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
                     "⭐ Being starred this moment: {}",
                     &note[..note.len().min(60)]
                 );
+            }
+            // PI controller sovereignty — being can tune at runtime
+            if let Some(v) = pi_kp {
+                bus.set_pi_kp(v);
+                println!("🎛️  Being adjusted PI kp → {:.3}", bus.get_pi_kp());
+            }
+            if let Some(v) = pi_ki {
+                bus.set_pi_ki(v);
+                println!("🎛️  Being adjusted PI ki → {:.4}", bus.get_pi_ki());
+            }
+            if let Some(v) = pi_max_step {
+                bus.set_pi_max_step(v);
+                println!("🎛️  Being adjusted PI max_step → {:.3}", bus.get_pi_max_step());
             }
         }
     }

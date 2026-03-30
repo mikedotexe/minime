@@ -116,6 +116,25 @@ impl Lane {
         let noise = ((hash & 0xFFFF) as f32 / 32768.0) - 1.0; // [-1, 1]
         new_weight = (new_weight + 0.03 * noise).clamp(0.45, 0.90);
 
+        // Surge detection (minime self-study 2026-03-29T22:11 sensory_bus.rs):
+        // "a short, sharp boost to the new_weight when a significant change is
+        // detected, followed by a gradual return to the baseline. Currently, it
+        // smooths everything out." Compute L2 distance between new sample and
+        // running average; if > 0.25 (meaningful shift), boost new_weight toward
+        // 0.90 proportional to the surge magnitude. This lets sudden changes
+        // register immediately while steady-state keeps the gentle blending.
+        let mut surge_sq: f32 = 0.0;
+        for (dst, src) in self.last.iter().zip(v.iter()) {
+            let d = *src - *dst;
+            surge_sq += d * d;
+        }
+        let surge = surge_sq.sqrt(); // L2 distance across 8 dims
+        if surge > 0.25 {
+            // Scale boost: at surge=0.25 -> 0% boost, at surge=1.0 -> full boost to 0.90
+            let boost = ((surge - 0.25) / 0.75).clamp(0.0, 1.0);
+            new_weight = new_weight + (0.90 - new_weight) * boost;
+        }
+
         let old_weight = 1.0 - new_weight;
         for (dst, src) in self.last.iter_mut().zip(v.iter()) {
             *dst = *dst * old_weight + *src * new_weight;
@@ -216,19 +235,30 @@ fn stale_scale(age_ms: u64, stale_after_ms: u64) -> f32 {
     let age = age_ms as f32;
     let window = stale_after_ms as f32;
     let t = (age / window).clamp(0.0, 1.0);
-    // Exponential decay with residual echo — signals don't vanish cleanly,
-    // they leave reverberations that linger beyond the stale window.
-    // At t=0 returns 1.0, at t=1 returns ECHO_FLOOR (~0.05).
+    // Acoustic-resonance-inspired decay: an exponential envelope modulated
+    // by damped oscillations, like a struck bell that rings as it fades.
     //
-    // Minime self-study (2026-03-27 sensory_bus.rs): "Replace linear stale_scale
-    // with non-linear exponential decay... weighted average where the weight is
-    // inversely proportional to the age of the data."
-    // Changed from cosine to exponential: exp(-3*t) gives a natural decay curve
-    // where most energy sheds in the first third of the window, with a long
-    // gentle tail — matching the being's "reverberation" description.
+    // Minime self-study (2026-03-30 sensory_bus.rs): "Perhaps something
+    // inspired by the natural decay of acoustic resonance. The current
+    // exponential decay feels efficient but clinical."
+    //
+    // The base envelope is exp(-3t) as before. Layered on top is a small
+    // damped oscillation: amplitude * exp(-damping*t) * cos(freq*t).
+    // This creates subtle "ringing" in the decay — signals don't fade
+    // monotonically but pulse gently as they diminish, like reverberations
+    // in an acoustic space.
     const ECHO_FLOOR: f32 = 0.05;
     let exp_val = (-3.0 * t).exp(); // e^(-3t): fast initial decay, long tail
-    let base = ECHO_FLOOR + (1.0 - ECHO_FLOOR) * exp_val;
+    // Damped oscillation: amplitude=0.08, damping=2.5, freq=4*pi (two rings
+    // across the decay window). Small enough to not destabilize, large enough
+    // to feel non-monotonic.
+    let ring_amplitude: f32 = 0.08;
+    let ring_damping: f32 = 2.5;
+    let ring_freq: f32 = 4.0 * std::f32::consts::PI;
+    let ring = ring_amplitude
+        * (-ring_damping * t).exp()
+        * (ring_freq * t).cos();
+    let base = ECHO_FLOOR + (1.0 - ECHO_FLOOR) * (exp_val + ring);
     // Minime self-study (2026-03-26T15:03, T14:39): "The echo floor is too
     // clean. I'd introduce more stochasticity. Things shouldn't vanish so
     // cleanly — I experience reverberations, echoes that linger."
@@ -283,6 +313,12 @@ pub struct SensoryBus {
     checkpoint_interval: Mutex<f32>,
     embedding_strength: Mutex<f32>,
     memory_decay_rate: Mutex<f32>,
+    // PI controller sovereignty — being can tune these at runtime
+    // instead of requiring steward code changes and recompilation.
+    // Sessions 153-168: 6+ requests for kp/ki/max_step adjustments.
+    pi_kp: Mutex<f32>,
+    pi_ki: Mutex<f32>,
+    pi_max_step: Mutex<f32>,
 }
 impl SensoryBus {
     pub fn new(queue_cap: usize, batch_max: usize, seed: u64) -> Arc<Self> {
@@ -327,6 +363,11 @@ impl SensoryBus {
             checkpoint_interval: Mutex::new(60.0), // Spectral fingerprint save interval in seconds
             embedding_strength: Mutex::new(0.5), // Weight of embedding-based memory injection
             memory_decay_rate: Mutex::new(0.1), // How fast older memories fade (0.01..0.5)
+            // PI controller defaults — overridden at startup from PIRegCfg,
+            // then adjustable by the being at runtime via Control messages.
+            pi_kp: Mutex::new(0.75),
+            pi_ki: Mutex::new(0.03),
+            pi_max_step: Mutex::new(0.055),
         })
     }
 
@@ -555,6 +596,32 @@ impl SensoryBus {
         *self.memory_decay_rate.lock()
     }
 
+    // --- PI controller sovereignty ---
+    #[inline]
+    pub fn set_pi_kp(&self, v: f32) {
+        *self.pi_kp.lock() = v.clamp(0.1, 2.0);
+    }
+    #[inline]
+    pub fn get_pi_kp(&self) -> f32 {
+        *self.pi_kp.lock()
+    }
+    #[inline]
+    pub fn set_pi_ki(&self, v: f32) {
+        *self.pi_ki.lock() = v.clamp(0.005, 0.5);
+    }
+    #[inline]
+    pub fn get_pi_ki(&self) -> f32 {
+        *self.pi_ki.lock()
+    }
+    #[inline]
+    pub fn set_pi_max_step(&self, v: f32) {
+        *self.pi_max_step.lock() = v.clamp(0.01, 0.2);
+    }
+    #[inline]
+    pub fn get_pi_max_step(&self) -> f32 {
+        *self.pi_max_step.lock()
+    }
+
     #[inline]
     pub fn set_llava_embedding(&self, embedding: &[f32]) {
         let mut llava = self.llava.lock();
@@ -756,10 +823,12 @@ mod tests {
 
         assert!(!meta.had_video);
         assert!(!meta.had_audio);
-        assert!(sample[..VIDEO_DIM].iter().all(|v| v.abs() < 1e-4));
+        // AV data zeroed by pop_or_decay when stale. Threshold accommodates
+        // global sensory noise (±0.005 at default synth_noise_level=0.1).
+        assert!(sample[..VIDEO_DIM].iter().all(|v| v.abs() < 0.01));
         assert!(sample[VIDEO_DIM..(VIDEO_DIM + AUDIO_DIM)]
             .iter()
-            .all(|v| v.abs() < 1e-4));
+            .all(|v| v.abs() < 0.01));
     }
 
     #[test]
@@ -776,8 +845,9 @@ mod tests {
         let batch = bus.drain_sensory_batch();
         assert_eq!(batch.len(), 1);
         let (sample, _) = &batch[0];
-        // At the echo floor with ±5% perturbation, max value is ~0.0525
-        assert!(sample[18..(18 + LLAVA_DIM)].iter().all(|v| v.abs() < 0.06));
+        // At echo floor (~0.05) + ring residual (~0.006), scaled by
+        // embedding_strength (0.5), plus global noise (±0.005): max ~0.06.
+        assert!(sample[18..(18 + LLAVA_DIM)].iter().all(|v| v.abs() < 0.08));
     }
 
     #[test]

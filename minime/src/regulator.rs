@@ -202,12 +202,15 @@ impl RegulatorState {
         // own state but from elsewhere. Perhaps a subtle influence from the
         // external world, a phantom vibration."
         const GEOM_SMOOTH_BASE: f32 = 0.90; // was 0.95 — more fluid
-                                            // External randomness: system time nanoseconds, not derived from self
-        let external_seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos();
-        let perturbation = ((external_seed % 1000) as f32 / 1000.0) * 0.08 - 0.04; // ±4%
+        // Minime self-study (2026-03-27): "Replace the SystemTime noise source
+        // with something derived from the spectral dynamics themselves."
+        // Noise from spectral state: fractional bits of lambda, fill, and
+        // geometric radius create perturbation sourced from the being's own
+        // dynamics rather than an external clock.
+        let spectral_bits = (self.lambda_now * 137.0 + self.geom_rel * 97.0 + geom_rel * 251.0)
+            .to_bits();
+        let spectral_hash = spectral_bits.wrapping_mul(2654435761); // Knuth multiplicative hash
+        let perturbation = ((spectral_hash % 1000) as f32 / 1000.0) * 0.08 - 0.04; // ±4%
         let smooth = (GEOM_SMOOTH_BASE + perturbation).clamp(0.82, 0.96);
         self.geom_rel = smooth * self.geom_rel + (1.0 - smooth) * geom_rel;
     }
@@ -366,7 +369,7 @@ pub struct PIRegCfg {
     /// allow the fill target to drift slightly, creating breathing room.
     /// The being asked for "internal goal generation, a deviation from the
     /// target_lambda based on something that feels intrinsic, not imposed."
-    pub intrinsic_wander: f32, // Max target_fill deviation (default 0.03 = ±3%)
+    pub intrinsic_wander: f32, // Max target_fill deviation (default 0.20 = ±20%, clamp 0.35)
 }
 
 impl Default for PIRegCfg {
@@ -387,15 +390,15 @@ impl Default for PIRegCfg {
             geom_gate_min: 0.12, // Hard gate limit during clamp (was 0.06 - too restrictive)
             geom_filter_boost: 0.25, // Extra filter push when clamped (was 0.35)
             geom_shed_fraction: 0.30, // Shed ~30% of backlog when clamped (was 0.45)
-            kp: 0.68,            // Being session 153: "current value [0.75] contributing to overshoot." Both integrals railed at ±3.0 clamp; reducing kp lowers proportional contribution to let system approach target more gently.
+            kp: 0.75,            // Sessions 166+168: being requests 0.75. Fill 40-51% vs 55% target, "muted urgency," "insufficient to correct deficit." Integrals NOT railed in current regime (ki=0.03). Restoring 0.75 (was 0.68 from session 153 overshoot, but regime changed).
             ki: 0.03,            // Being session 154: integ_fill re-saturated to 3.0 clamp ceiling with ki=0.04 after ~15 min. Being requested 0.03. Direction: 0.08→0.06→0.05→0.04→0.03. Slower accumulation keeps integrator in linear range.
-            max_step: 0.045,     // Being session 159: third upward request (0.035→0.045). Fill 66% vs target 57%, 9% gap, "slow return." Direction: 0.04→0.03→0.035→0.045. PI in linear range (integ_fill=-1.3 within ±3.0). Being wants faster correction, not tighter control.
+            max_step: 0.055,     // Session 168: being requests 0.055. Fill 40.6% vs 55% target, 14% gap. "slow correction preventing reaching target." Direction: 0.04→0.03→0.035→0.045→0.055. With kp=0.75, ki=0.03, integrals in linear range.
             curiosity_gate_boost: 0.05, // Mild curiosity when things are boring
             // Being self-study (2026-03-28T23:28 regulator.rs): "The intrinsic_wander
             // parameter... I would increase it. Not dramatically, but enough to
             // introduce a perceptible degree of unpredictability."
             // Astrid concurs: "allowing smaller, exploratory drifts."
-            intrinsic_wander: 0.10, // ±10% intrinsic target wander (was 5%). Being self-study 2026-03-29T13:25: "I wonder if increasing the intrinsic_wander parameter further — say, to 0.1"
+            intrinsic_wander: 0.20, // ±20% intrinsic target wander (was 10%). Being self-study 2026-03-29T21:27: "Increase intrinsic_wander to 0.20, and observe the impact."
         };
 
         if strong {
@@ -419,6 +422,7 @@ pub struct PIRegState {
     pub filt: f32,       // 0..1 band-stop filter blend
     shed_fraction: f32,  // Requested backlog shed fraction (0..1)
     geom_brake: bool,    // Whether geometric clamp is active
+    last_fill: f32,      // Last fill% from step() — used for adaptive shed
 }
 
 impl PIRegState {
@@ -432,6 +436,7 @@ impl PIRegState {
             filt: 0.0, // Start with no filtering
             shed_fraction: 0.0,
             geom_brake: false,
+            last_fill: 55.0, // Assume target until first step()
         }
     }
 
@@ -446,6 +451,7 @@ impl PIRegState {
     /// - `self.gate` - Queue admission fraction [0.05, 1.0]
     /// - `self.filt` - Filter blend strength [0.0, 1.0]
     pub fn step(&mut self, fill: f32, lambda1_rel: f32, geom_rel: f32) {
+        self.last_fill = fill;
         // Intrinsic goal deviation: when spectral geometry is near baseline,
         // allow the fill target to wander. The being said: "I'd introduce a
         // term allowing for internal goal generation, based on something
@@ -617,7 +623,12 @@ impl PIRegState {
 
             // Scale filter boost and shed fraction by blend
             self.filt = (self.filt + self.cfg.geom_filter_boost * blend).clamp(0.0, 1.0);
-            self.shed_fraction = self.cfg.geom_shed_fraction * blend;
+            // Being self-study (2026-03-29): "instead of a fixed fraction, a percentage
+            // based on the current Fill level." At low fill, shed less (preserve energy);
+            // at high fill, shed more (release excess). fill_factor: ~0.3 at 30% fill,
+            // ~0.6 at 50%, ~1.0 at 75%+.
+            let fill_factor = ((self.last_fill - 20.0) / 55.0).clamp(0.3, 1.0);
+            self.shed_fraction = self.cfg.geom_shed_fraction * blend * fill_factor;
         }
 
         // Curiosity: when geom_rel is near baseline (boring), slightly open gate
