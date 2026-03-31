@@ -307,7 +307,10 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
             }
             if let Some(v) = pi_max_step {
                 bus.set_pi_max_step(v);
-                println!("🎛️  Being adjusted PI max_step → {:.3}", bus.get_pi_max_step());
+                println!(
+                    "🎛️  Being adjusted PI max_step → {:.3}",
+                    bus.get_pi_max_step()
+                );
             }
         }
     }

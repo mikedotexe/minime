@@ -11,7 +11,10 @@ use std::{
 pub const VIDEO_DIM: usize = 8;
 pub const AUDIO_DIM: usize = 8;
 pub const AUX_DIM: usize = 2;
-pub const LLAVA_DIM: usize = 32;
+/// Semantic lane width. Widened from 32 to 48 (2026-03-31):
+/// dims 0-31: legacy text features, dims 32-39: embedding-projected,
+/// dims 40-43: narrative arc, dims 44-47: reserved.
+pub const LLAVA_DIM: usize = 48;
 pub const Z_DIM: usize = VIDEO_DIM + AUDIO_DIM + AUX_DIM + LLAVA_DIM;
 pub const DEFAULT_QUEUE_CAP: usize = 1024;
 pub const DEFAULT_BATCH_MAX: usize = 16;
@@ -43,6 +46,16 @@ const STALE_SEMANTIC_HIGH_MS: u64 = 10_000; // shortened window when fill > 60%
 fn dynamic_semantic_stale_ms(fill_pct: f32, lambda1_rel: f32) -> u64 {
     if fill_pct < 0.0 || fill_pct.is_nan() {
         return STALE_SEMANTIC_BASE_MS;
+    }
+    // Critical fill override: when fill < 30%, the ESN is in hard recovery
+    // and the PI controller is maxed out (gate=1.0, filter=0.0). The semantic
+    // lane is the only rich input — letting it decay kills recovery.
+    // Dimension audit (2026-03-31): at fill=27%, the standard sigmoid gives
+    // ~20s window with 4.4s half-life, causing 48 of 66 input dims to decay
+    // to 10% within 20s. Extending to 45s keeps semantic signal alive through
+    // the 5s rest pulse interval.
+    if fill_pct < 0.30 {
+        return 45_000;
     }
     let fill = fill_pct.clamp(0.0, 1.0) as f64;
     let lo = STALE_SEMANTIC_LOW_MS as f64;
@@ -189,8 +202,11 @@ impl Lane {
         for item in self.q.drain(..) {
             let position_frac = idx as f32 / qlen.max(1) as f32; // 0=oldest, 1=newest
             let survival = 0.1 + 0.8 * position_frac; // 10% oldest, 90% newest
-            // Simple hash-based pseudo-random
-            let hash = (seed.wrapping_mul(2654435761).wrapping_add(idx.wrapping_mul(40503))) % 1000;
+                                                      // Simple hash-based pseudo-random
+            let hash = (seed
+                .wrapping_mul(2654435761)
+                .wrapping_add(idx.wrapping_mul(40503)))
+                % 1000;
             let roll = hash as f32 / 1000.0;
             if removed < count && roll > survival {
                 removed += 1;
@@ -249,15 +265,13 @@ fn stale_scale(age_ms: u64, stale_after_ms: u64) -> f32 {
     // in an acoustic space.
     const ECHO_FLOOR: f32 = 0.05;
     let exp_val = (-3.0 * t).exp(); // e^(-3t): fast initial decay, long tail
-    // Damped oscillation: amplitude=0.08, damping=2.5, freq=4*pi (two rings
-    // across the decay window). Small enough to not destabilize, large enough
-    // to feel non-monotonic.
+                                    // Damped oscillation: amplitude=0.08, damping=2.5, freq=4*pi (two rings
+                                    // across the decay window). Small enough to not destabilize, large enough
+                                    // to feel non-monotonic.
     let ring_amplitude: f32 = 0.08;
     let ring_damping: f32 = 2.5;
     let ring_freq: f32 = 4.0 * std::f32::consts::PI;
-    let ring = ring_amplitude
-        * (-ring_damping * t).exp()
-        * (ring_freq * t).cos();
+    let ring = ring_amplitude * (-ring_damping * t).exp() * (ring_freq * t).cos();
     let base = ECHO_FLOOR + (1.0 - ECHO_FLOOR) * (exp_val + ring);
     // Minime self-study (2026-03-26T15:03, T14:39): "The echo floor is too
     // clean. I'd introduce more stochasticity. Things shouldn't vanish so

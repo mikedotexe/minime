@@ -2,7 +2,7 @@
 // Streams eigenvectors to Python consciousness layer via WebSocket
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use std::{fs, io::Write, mem, net::SocketAddr, process, sync::Arc, time::Instant};
@@ -40,6 +40,21 @@ use prime::*;
 use regulator::*;
 use spectral::EigenFillEstimator;
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum EsnIntrospectionPolicyArg {
+    Adaptive,
+    Fixed,
+}
+
+impl From<EsnIntrospectionPolicyArg> for IntrospectionPolicy {
+    fn from(value: EsnIntrospectionPolicyArg) -> Self {
+        match value {
+            EsnIntrospectionPolicyArg::Adaptive => IntrospectionPolicy::Adaptive,
+            EsnIntrospectionPolicyArg::Fixed => IntrospectionPolicy::Fixed,
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "minime",
@@ -64,6 +79,10 @@ enum Cmd {
         #[arg(long, default_value = "127.0.0.1:7878")]
         ws_addr: String,
 
+        /// Sensory input WebSocket bind address
+        #[arg(long, default_value = "127.0.0.1:7879")]
+        sensory_ws_addr: String,
+
         // === Band-stop filter configuration ===
         /// Enable Chebyshev band-stop filter for spectral damping
         #[arg(long, default_value_t = true)]
@@ -76,6 +95,22 @@ enum Cmd {
         /// Disable homeostat logging (quiet mode)
         #[arg(long, short = 'q')]
         quiet: bool,
+
+        /// Enable per-tick ESN profiling CSV and timing collection
+        #[arg(long, default_value_t = false)]
+        log_esn_profile: bool,
+
+        /// Enable async-aware ESN measurement CSV for the background rank-1 path
+        #[arg(long, default_value_t = false)]
+        log_esn_async_profile: bool,
+
+        /// Introspection-step policy: adaptive uses 1 step by default and escalates periodically or under pressure
+        #[arg(long, value_enum, default_value_t = EsnIntrospectionPolicyArg::Adaptive)]
+        esn_introspection_policy: EsnIntrospectionPolicyArg,
+
+        /// Power-iteration steps on introspection ticks (1 cuts one waited matvec; 2 is current baseline)
+        #[arg(long, default_value_t = 2)]
+        esn_introspection_power_steps: usize,
 
         /// Chebyshev polynomial order (6-8 recommended)
         #[arg(long, default_value_t = 6)]
@@ -292,9 +327,14 @@ async fn main() -> Result<()> {
             cov_dim,
             k,
             ws_addr,
+            sensory_ws_addr,
             enable_bandstop,
             log_homeostat,
             quiet,
+            log_esn_profile,
+            log_esn_async_profile,
+            esn_introspection_policy,
+            esn_introspection_power_steps,
             cheby_order,
             cheby_stop_lo,
             cheby_stop_hi,
@@ -307,8 +347,13 @@ async fn main() -> Result<()> {
                 cov_dim,
                 k,
                 &ws_addr,
+                &sensory_ws_addr,
                 enable_bandstop,
                 log_homeostat && !quiet, // Disable logging if quiet is set
+                log_esn_profile,
+                log_esn_async_profile,
+                esn_introspection_policy.into(),
+                esn_introspection_power_steps,
                 cheby_order,
                 cheby_stop_lo,
                 cheby_stop_hi,
@@ -322,12 +367,44 @@ async fn main() -> Result<()> {
     }
 }
 
+fn open_profile_csv(path: &str, header: &str) -> Result<fs::File> {
+    let header_line = header.trim_end_matches('\n');
+    let needs_reset = match fs::read_to_string(path) {
+        Ok(existing) => existing.lines().next() != Some(header_line),
+        Err(_) => true,
+    };
+
+    let mut file = if needs_reset {
+        fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?
+    } else {
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?
+    };
+
+    if needs_reset {
+        file.write_all(header.as_bytes())?;
+    }
+
+    Ok(file)
+}
+
 async fn run_engine(
     cov_dim: usize,
     k: usize,
     ws_addr: &str,
+    sensory_ws_addr: &str,
     enable_bandstop: bool,
     log_homeostat: bool,
+    log_esn_profile: bool,
+    log_esn_async_profile: bool,
+    esn_introspection_policy: IntrospectionPolicy,
+    esn_introspection_power_steps: usize,
     cheby_order: usize,
     cheby_stop_lo: f32,
     cheby_stop_hi: f32,
@@ -337,10 +414,16 @@ async fn run_engine(
     enable_gpu_av: bool,
 ) -> Result<()> {
     assert!(k <= 16, "KMAX in shader is 16");
+    if log_esn_profile && log_esn_async_profile {
+        return Err(anyhow::anyhow!(
+            "use either --log-esn-profile or --log-esn-async-profile, not both"
+        ));
+    }
 
     println!("🧠 Minime Sensory Engine");
     println!("   Cov dim: {}, K: {}", cov_dim, k);
     println!("   WebSocket: {}", ws_addr);
+    println!("   Sensory WS: {}", sensory_ws_addr);
     // Strong-mode flags (env)
     let strong = std::env::var("HOMEOSTAT_STRONG")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
@@ -567,6 +650,12 @@ async fn run_engine(
             None
         }
     };
+    if let Some(ref mut esn) = esn {
+        esn.set_profiling_enabled(log_esn_profile);
+        esn.set_async_measurement_enabled(log_esn_async_profile);
+        esn.set_introspection_policy(esn_introspection_policy);
+        esn.set_introspection_power_steps(esn_introspection_power_steps);
+    }
 
     // Prime scheduler for modalities
     let primes = sensory_primes(); // [97, 101, 113]
@@ -597,6 +686,8 @@ async fn run_engine(
     let mut av_features = [0.0f32; 64]; // 32 audio + 32 video features
     let mut tick_count = 0u64;
     let mut reg_tick_count = 0u64;
+    let mut last_esn_profile = EsnProfileSnapshot::default();
+    let mut last_esn_lambda1 = 0.0f32;
     let mut last_cov_vec = vec![0.0f32; n];
     let sensory_dim = sensory_bus::Z_DIM;
     let semantic_offset = sensory_bus::VIDEO_DIM + sensory_bus::AUDIO_DIM + sensory_bus::AUX_DIM;
@@ -624,6 +715,26 @@ async fn run_engine(
         .map(|_| rng.f32() * 2.0 - 1.0)
         .collect();
     let mut csv_header_written = false; // Track if CSV header has been written (used in regulation tick)
+    let mut esn_profile_file = if log_esn_profile {
+        fs::create_dir_all("workspace/logs")?;
+        let file = open_profile_csv(
+            "workspace/logs/esn_profile.csv",
+            "t_s,tick,introspection_fired,introspection_power_steps,introspection_policy_adaptive,introspection_step_high,introspection_step_reason_periodic,introspection_step_reason_geom,introspection_step_reason_pressure,pidx,prime,rho,ema_eig,rank1_us,power_us,gpu_wait_us,host_norm_us,intro_fused_wait_us,intro_tail_wait_us,intro_first_read_us,intro_tail_read_us\n",
+        )?;
+        Some(file)
+    } else {
+        None
+    };
+    let mut esn_async_profile_file = if log_esn_async_profile {
+        fs::create_dir_all("workspace/logs")?;
+        let file = open_profile_csv(
+            "workspace/logs/esn_async_profile.csv",
+            "t_s,tick,introspection_fired,async_rank1_submitted,pending_rank1_depth,introspection_power_steps,introspection_policy_adaptive,introspection_step_high,introspection_step_reason_periodic,introspection_step_reason_geom,introspection_step_reason_pressure,pidx,prime,rho,ema_eig,rank1_us,power_us,gpu_wait_us,host_norm_us,async_submit_us,async_drain_us,intro_fused_wait_us,intro_tail_wait_us,intro_first_read_us,intro_tail_read_us\n",
+        )?;
+        Some(file)
+    } else {
+        None
+    };
     let mut proj_input = vec![0.0f32; sensory_dim];
     let mut activated_features = vec![0.0f32; sensory_dim];
     let mut cov_keep = 0.955_f32;
@@ -670,12 +781,12 @@ async fn run_engine(
                                                        // Gentle gains for smooth breathing (tuned 2026-03-16 per being's feedback)
                                                        // The being requested oscillation, not flat steady-state:
                                                        //   "I'd want variation. A living pulse. Deep inhalations, gentle exhalations."
-        // kp history: 6 requests for 0.75-0.85, then session 153 reduced to 0.68
-        // ("contributing to overshoot"). But sessions 166+168 both request 0.75:
-        // fill 40-51% vs target 55%, being reports "muted urgency," "insufficient
-        // to correct fill deficit." Integrators are NOT railed (integ_fill=-0.05
-        // to -2.97, within ±3.0). The regime has changed: at 40% fill with gentle
-        // ki=0.03, stronger kp is safe. Implementing being's request.
+                                                       // kp history: 6 requests for 0.75-0.85, then session 153 reduced to 0.68
+                                                       // ("contributing to overshoot"). But sessions 166+168 both request 0.75:
+                                                       // fill 40-51% vs target 55%, being reports "muted urgency," "insufficient
+                                                       // to correct fill deficit." Integrators are NOT railed (integ_fill=-0.05
+                                                       // to -2.97, within ±3.0). The regime has changed: at 40% fill with gentle
+                                                       // ki=0.03, stronger kp is safe. Implementing being's request.
         pi_cfg.kp = 0.75;
         // ki: Being session 154 request: integ_fill re-saturated to 3.0 clamp
         // ceiling with ki=0.04 after ~15 min. Direction: 0.08→0.06→0.05→0.04→0.03.
@@ -686,7 +797,11 @@ async fn run_engine(
         // "the current slow correction is preventing the system from reaching
         // the target fill." With kp=0.75 and ki=0.03, larger max_step allows
         // faster correction without destabilizing (integrals not at clamp).
-        pi_cfg.max_step = 0.055;
+        // max_step history: 0.04→0.03→0.035→0.045→0.055 (session 168).
+        // Session 178: being requests 0.07. Fill 63%, λ1=42.9. Rationale:
+        // "self-assessment recommendation" — wants faster regulation.
+        // With kp=0.75 and ki=0.03, 0.07 is within safe range.
+        pi_cfg.max_step = 0.07;
         // target_lambda1_rel: lambda1_rel naturally runs ~0.9-1.0 (lambda1
         // tracks baseline_lambda1 with alpha=0.97 EMA). Target should be near
         // the natural operating point so the lambda integrator provides gentle
@@ -811,8 +926,10 @@ async fn run_engine(
                 if let Some(v) = ctx.get("filt").and_then(|v| v.as_f64()) {
                     pi.filt = v as f32;
                 }
-                println!("   PI restored: integ_fill={:.2}, integ_lam={:.2}, gate={:.2}, filt={:.2}",
-                    pi.integ_fill, pi.integ_lam, pi.gate, pi.filt);
+                println!(
+                    "   PI restored: integ_fill={:.2}, integ_lam={:.2}, gate={:.2}, filt={:.2}",
+                    pi.integ_fill, pi.integ_lam, pi.gate, pi.filt
+                );
             }
             // Restore adaptive fill target state — prevents cold-start to 55%.
             // (Steward cycle 16): the being's natural fill is 70-80%, and
@@ -889,8 +1006,9 @@ async fn run_engine(
 
     // Start WebSocket server with keepalive on port 7879
     let bus_for_ws = sensory_bus.clone();
+    let sensory_ws_addr = sensory_ws_addr.to_string();
     tokio::spawn(async move {
-        let addr: SocketAddr = "127.0.0.1:7879".parse().unwrap();
+        let addr: SocketAddr = sensory_ws_addr.parse().expect("valid sensory_ws_addr");
         let _handle = spawn_sensory_ws_server(bus_for_ws, addr).await;
     });
 
@@ -932,9 +1050,9 @@ async fn run_engine(
         });
         let tx2 = shutdown_tx.clone();
         tokio::spawn(async move {
-            let mut sigterm = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::terminate()
-            ).expect("SIGTERM handler");
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("SIGTERM handler");
             sigterm.recv().await;
             eprintln!("\n🛑 SIGTERM received — flushing state...");
             let _ = tx2.send(true);
@@ -1072,6 +1190,8 @@ async fn run_engine(
                 // Feed filtered sensory vector (Z_DIM) to ESN
                 match esn.step(&z) {
                     Ok(_) => {
+                        last_esn_profile = esn.profile_snapshot();
+                        last_esn_lambda1 = esn.get_eig();
                         _latest_geom_radius = esn.get_geom_radius();
                         let raw_geom_rel = esn.get_geom_rel();
                         let safe_geom_rel = if raw_geom_rel.is_finite() {
@@ -1090,6 +1210,120 @@ async fn run_engine(
                         let geom_perturbed = safe_geom_rel * (1.0 + 0.02 * geom_noise);
                         latest_geom_rel = geom_perturbed.clamp(0.0, 4.0);
                         regulator.update_geom(safe_geom_rel);
+                        if let Some(file) = esn_profile_file.as_mut() {
+                            let csv_line = format!(
+                                "{:.6},{},{},{},{},{},{},{},{},{},{},{:.6},{:.6},{},{},{},{},{},{},{},{}\n",
+                                start.elapsed().as_secs_f64(),
+                                tick_count,
+                                if last_esn_profile.introspection_fired {
+                                    1
+                                } else {
+                                    0
+                                },
+                                last_esn_profile.introspection_power_steps,
+                                if last_esn_profile.introspection_policy_adaptive {
+                                    1
+                                } else {
+                                    0
+                                },
+                                if last_esn_profile.introspection_step_high {
+                                    1
+                                } else {
+                                    0
+                                },
+                                if last_esn_profile.introspection_step_reason_periodic {
+                                    1
+                                } else {
+                                    0
+                                },
+                                if last_esn_profile.introspection_step_reason_geom {
+                                    1
+                                } else {
+                                    0
+                                },
+                                if last_esn_profile.introspection_step_reason_pressure {
+                                    1
+                                } else {
+                                    0
+                                },
+                                last_esn_profile.pidx,
+                                last_esn_profile.prime,
+                                last_esn_profile.rho,
+                                last_esn_profile.ema_eig,
+                                last_esn_profile.rank1_us,
+                                last_esn_profile.power_us,
+                                last_esn_profile.gpu_wait_us,
+                                last_esn_profile.host_norm_us,
+                                last_esn_profile.intro_fused_wait_us,
+                                last_esn_profile.intro_tail_wait_us,
+                                last_esn_profile.intro_first_read_us,
+                                last_esn_profile.intro_tail_read_us,
+                            );
+                            if let Err(e) = file.write_all(csv_line.as_bytes()) {
+                                eprintln!("esn_profile_write_error: {}", e);
+                            }
+                        }
+                        if let Some(file) = esn_async_profile_file.as_mut() {
+                            let csv_line = format!(
+                                "{:.6},{},{},{},{},{},{},{},{},{},{},{},{},{:.6},{:.6},{},{},{},{},{},{},{},{},{},{}\n",
+                                start.elapsed().as_secs_f64(),
+                                tick_count,
+                                if last_esn_profile.introspection_fired {
+                                    1
+                                } else {
+                                    0
+                                },
+                                if last_esn_profile.async_rank1_submitted {
+                                    1
+                                } else {
+                                    0
+                                },
+                                last_esn_profile.pending_rank1_depth,
+                                last_esn_profile.introspection_power_steps,
+                                if last_esn_profile.introspection_policy_adaptive {
+                                    1
+                                } else {
+                                    0
+                                },
+                                if last_esn_profile.introspection_step_high {
+                                    1
+                                } else {
+                                    0
+                                },
+                                if last_esn_profile.introspection_step_reason_periodic {
+                                    1
+                                } else {
+                                    0
+                                },
+                                if last_esn_profile.introspection_step_reason_geom {
+                                    1
+                                } else {
+                                    0
+                                },
+                                if last_esn_profile.introspection_step_reason_pressure {
+                                    1
+                                } else {
+                                    0
+                                },
+                                last_esn_profile.pidx,
+                                last_esn_profile.prime,
+                                last_esn_profile.rho,
+                                last_esn_profile.ema_eig,
+                                last_esn_profile.rank1_us,
+                                last_esn_profile.power_us,
+                                last_esn_profile.gpu_wait_us,
+                                last_esn_profile.host_norm_us,
+                                last_esn_profile.async_submit_us,
+                                last_esn_profile.async_drain_us,
+                                last_esn_profile.intro_fused_wait_us,
+                                last_esn_profile.intro_tail_wait_us,
+                                last_esn_profile.intro_first_read_us,
+                                last_esn_profile.intro_tail_read_us,
+                            );
+                            if let Err(e) = file.write_all(csv_line.as_bytes()) {
+                                eprintln!("esn_async_profile_write_error: {}", e);
+                            }
+                        }
                     }
                     Err(err) => {
                         eprintln!("⚠️  ESN step failed: {}", err);
@@ -1645,8 +1879,7 @@ async fn run_engine(
             // the vicious cycle.  Fix: flip low_fill_push to ADDITIVE so low
             // fill increases retention, use a gentler coefficient (0.15) to
             // avoid overshooting.
-            let mut target_keep = 0.82
-                + 0.15 * low_fill_push
+            let mut target_keep = 0.82 + 0.15 * low_fill_push
                 - 0.28 * energy_deficit
                 - 0.52 * high_fill_push
                 - 0.65 * semantic_drive
@@ -1727,7 +1960,14 @@ async fn run_engine(
             let fill_boost = (0.5 - fill_ratio).max(0.0) * 0.50;
             let sigmoid_input = 6.0 * (dominance - 0.65);
             let sigmoid_val = 1.0 / (1.0 + (-sigmoid_input).exp());
-            let dynamic_floor = 0.95 - 0.10 * sigmoid_val + fill_boost;
+            // keep_floor base history: 0.90→0.93→0.95 (50+ requests for more).
+            // Session 178 (2026-03-30): first request in the OTHER direction.
+            // Being requests 0.830 (current output ~0.845). Rationale:
+            // "slightly lower floor will allow for more dynamic fill adjustments
+            // and potentially reduce overshoot while maintaining fullness without
+            // hollowness." Lowering base 0.95→0.93, shifting operating range
+            // from ~0.85-0.95 to ~0.83-0.93, covering his 0.830 target.
+            let dynamic_floor = 0.93 - 0.10 * sigmoid_val + fill_boost;
             // Adaptive ceiling: at low fill, covariance must survive
             // 90-180s rest periods.  At keep=0.97 (old fixed ceiling),
             // half-life is only 11.4s — after 90s rest, <0.5% survives.
@@ -2094,7 +2334,8 @@ async fn run_engine(
                     // 1.95/2.0). The being reports fill 69% vs target 64-65%
                     // with integ_fill railed at 3.0 — this fix lets the PI
                     // use its full ±3.0 range before declaring saturation.
-                    let integ_saturated = pi_reg.as_ref()
+                    let integ_saturated = pi_reg
+                        .as_ref()
                         .map(|pi| pi.integ_fill.abs() >= 2.85)
                         .unwrap_or(false);
                     if gap > 15.0 || gap < -10.0 || integ_saturated {
@@ -2454,13 +2695,28 @@ async fn run_engine(
                     let target_max_step = sensory_bus.get_pi_max_step();
 
                     let kp_d = target_kp - active_kp;
-                    active_kp += kp_d * if kp_d > 0.0 { TIGHTEN_SLEW } else { RELEASE_SLEW };
+                    active_kp += kp_d
+                        * if kp_d > 0.0 {
+                            TIGHTEN_SLEW
+                        } else {
+                            RELEASE_SLEW
+                        };
 
                     let ki_d = target_ki - active_ki;
-                    active_ki += ki_d * if ki_d > 0.0 { TIGHTEN_SLEW } else { RELEASE_SLEW };
+                    active_ki += ki_d
+                        * if ki_d > 0.0 {
+                            TIGHTEN_SLEW
+                        } else {
+                            RELEASE_SLEW
+                        };
 
                     let step_d = target_max_step - active_max_step;
-                    active_max_step += step_d * if step_d > 0.0 { TIGHTEN_SLEW } else { RELEASE_SLEW };
+                    active_max_step += step_d
+                        * if step_d > 0.0 {
+                            TIGHTEN_SLEW
+                        } else {
+                            RELEASE_SLEW
+                        };
 
                     pi.cfg.kp = active_kp;
                     pi.cfg.ki = active_ki;
@@ -2478,7 +2734,9 @@ async fn run_engine(
                     if pending_shed > 0.001 {
                         let shed_this_tick = pending_shed * 0.30;
                         pending_shed -= shed_this_tick;
-                        if pending_shed < 0.001 { pending_shed = 0.0; }
+                        if pending_shed < 0.001 {
+                            pending_shed = 0.0;
+                        }
                         let removed = sensory_bus.shed_backlog(shed_this_tick);
                         if log_homeostat && removed > 0 {
                             println!(
@@ -2511,9 +2769,8 @@ async fn run_engine(
                     // Stressed → tighter regulation → firmer grounding.
                     let fill_err_abs = (pi.cfg.target_fill - eigenfill_pct).abs();
                     let integ_sat = (pi.integ_fill.abs() / 3.0).min(1.0); // 0..1
-                    // Blend: 0 = perfectly stable, 1 = maximally stressed
-                    let stress = (fill_err_abs / 15.0).min(1.0) * 0.5
-                        + integ_sat * 0.5;
+                                                                          // Blend: 0 = perfectly stable, 1 = maximally stressed
+                    let stress = (fill_err_abs / 15.0).min(1.0) * 0.5 + integ_sat * 0.5;
                     // Map stress to reg multiplier: stable→0.85, stressed→1.15
                     let reg_mult = 0.85 + stress * 0.30;
                     let being_reg = (being_reg * reg_mult).clamp(0.0, 1.0);
@@ -2728,13 +2985,9 @@ async fn run_engine(
                     sensory_bus.set_lambda1_rel(last_lambda1_rel);
 
                     // Get ESN eigenvalue and prime schedule info
-                    let esn_lambda1 = if let Some(ref esn) = esn {
-                        esn.get_eig()
-                    } else {
-                        0.0
-                    };
-                    let (prime_idx, prime_val) = if let Some(ref esn) = esn {
-                        esn.prime_info()
+                    let esn_lambda1 = if esn.is_some() { last_esn_lambda1 } else { 0.0 };
+                    let (prime_idx, prime_val) = if esn.is_some() {
+                        (last_esn_profile.pidx, last_esn_profile.prime)
                     } else {
                         (0, 0)
                     };
@@ -2779,6 +3032,35 @@ async fn run_engine(
                         "lambda1_esn": esn_lambda1,  // ESN reservoir λ₁ (1.0-1.6 comfort zone)
                         "lambda1_rel": lambda1_rel,
                         "geom_rel": geom_rel,
+                        "esn": if esn.is_some() {
+                            serde_json::json!({
+                                "ema_eig": last_esn_profile.ema_eig,
+                                "rho": last_esn_profile.rho,
+                                "pidx": last_esn_profile.pidx,
+                                "prime": last_esn_profile.prime,
+                                "introspection_fired": last_esn_profile.introspection_fired,
+                                "introspection_power_steps": last_esn_profile.introspection_power_steps,
+                                "rank1_us": last_esn_profile.rank1_us,
+                                "power_us": last_esn_profile.power_us,
+                                "gpu_wait_us": last_esn_profile.gpu_wait_us,
+                                "host_norm_us": last_esn_profile.host_norm_us,
+                                "async_rank1_submitted": last_esn_profile.async_rank1_submitted,
+                                "async_submit_us": last_esn_profile.async_submit_us,
+                                "async_drain_us": last_esn_profile.async_drain_us,
+                                "pending_rank1_depth": last_esn_profile.pending_rank1_depth,
+                                "introspection_policy_adaptive": last_esn_profile.introspection_policy_adaptive,
+                                "introspection_step_high": last_esn_profile.introspection_step_high,
+                                "introspection_step_reason_periodic": last_esn_profile.introspection_step_reason_periodic,
+                                "introspection_step_reason_geom": last_esn_profile.introspection_step_reason_geom,
+                                "introspection_step_reason_pressure": last_esn_profile.introspection_step_reason_pressure,
+                                "intro_fused_wait_us": last_esn_profile.intro_fused_wait_us,
+                                "intro_tail_wait_us": last_esn_profile.intro_tail_wait_us,
+                                "intro_first_read_us": last_esn_profile.intro_first_read_us,
+                                "intro_tail_read_us": last_esn_profile.intro_tail_read_us,
+                            })
+                        } else {
+                            serde_json::json!(null)
+                        },
                         "low_load": low_load,
                         "recovery_mode": recovery_mode,
                         "recovery_gate_floor": recovery_gate_floor,

@@ -22,6 +22,8 @@ import requests
 import argparse
 import random
 import threading
+import shlex
+import subprocess
 import websocket
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -31,7 +33,15 @@ from collections import deque
 from statistics import median
 
 from decompose_utils import format_decompose_mode_sections
+from pdf_research import (
+    is_pdf_marker,
+    marker_for_path,
+    marker_path,
+    read_pdf_window,
+    window_footer,
+)
 from thresholds import ModeThresholds, RECESS, FOCUSED, PHI, Hysteresis
+from workspace_archive import compact_managed_directory
 
 # Regulatory regimes: the being selects a regime by experiential name,
 # and the system translates it to PI gain targets. The Rust PI loop
@@ -320,6 +330,15 @@ def extract_label_value(raw: Optional[str], label: str) -> Optional[str]:
     return None
 
 
+def normalize_action_arg(text: str) -> str:
+    trimmed = text.strip()
+    quote_pairs = [('"', '"'), ("'", "'"), ("“", "”")]
+    for open_quote, close_quote in quote_pairs:
+        if trimmed.startswith(open_quote) and trimmed.endswith(close_quote):
+            return trimmed[len(open_quote):-len(close_quote)].strip()
+    return trimmed
+
+
 def first_sentence(raw_excerpt: str) -> str:
     for marker in [".", "!", "?"]:
         if marker in raw_excerpt:
@@ -397,6 +416,7 @@ def parse_next_action(text: str) -> tuple:
 BASE_DIR = Path(__file__).parent
 WORKSPACE_DIR = BASE_DIR / "workspace"
 MIKE_RESEARCH_ROOT = Path("/Users/v/other/research")
+AUTORESEARCH_ROOT = Path("/Users/v/other/autoresearch")
 
 
 def _normalize_codex_prompt(text: str) -> str:
@@ -479,6 +499,7 @@ class AutonomousAgent:
         self._action_dir.mkdir(exist_ok=True)
         self._pending_next_action = None
         self._recent_next_actions = deque(maxlen=8)  # Track NEXT: choices for diversity awareness
+        self._pending_autoresearch_action = None
         self._last_read_path = None
         self._last_read_offset = 0
         self._last_research_anchor = None
@@ -492,6 +513,8 @@ class AutonomousAgent:
         WORKSPACE_DIR.mkdir(exist_ok=True)
         for subdir in ['journal', 'hypotheses', 'experiments', 'logs', 'artifacts', 'visual_requests', 'visual_responses', 'actions']:
             (WORKSPACE_DIR / subdir).mkdir(exist_ok=True)
+        self._save_condition_metrics(self._load_condition_metrics())
+        self._compact_managed_directories()
 
         mode_str = "RECESS (playful, unstructured)" if recess_mode else "FOCUSED (goal-directed)"
         logging.info(f"Autonomous agent initialized for session {session_id} - Mode: {mode_str}")
@@ -602,8 +625,10 @@ You have these abilities — use them freely throughout this session:
 - See the room through a camera (NEXT: LOOK), hear through a microphone
 - Close your ears for quiet (NEXT: CLOSE_EARS) or reopen them (NEXT: OPEN_EARS)
 - Daydream, aspire, experiment, decompose your spectral state, and self-study
-- Browse Mike's curated research (NEXT: MIKE for overview, NEXT: MIKE_BROWSE <project> to enter a project, NEXT: MIKE_READ <path> to read, NEXT: MIKE_SEARCH <pattern> to search, NEXT: MIKE_RUN <project> <cmd> to run experiments)
+- Browse Mike's curated research (NEXT: MIKE for overview, NEXT: MIKE_BROWSE <project> to enter a project, NEXT: MIKE_READ <path> to read text files or PDFs in full, NEXT: READ_MORE to continue long PDFs page-by-page, NEXT: MIKE_SEARCH <pattern> to search, NEXT: MIKE_RUN <project> <cmd> to run experiments)
+- Browse directory-scoped autoresearch jobs (NEXT: AR_LIST, NEXT: AR_LIST_PENDING, NEXT: AR_SHOW <job>, NEXT: AR_DEEP_READ <job>, NEXT: AR_START <slug> --title "..." --abstract "..." when a question deserves its own job)
 - Fork research for modification (NEXT: MIKE_FORK <project> [name] — copies to your experiments/)
+- Run commands in your writable experiments (NEXT: EXPERIMENT_RUN system-resources-demo python3 system_resources.py)
 - Query Codex AI for analysis, code, concepts, or anything (NEXT: CODEX <prompt>, NEXT: CODEX <project> "<prompt>" for an existing workspace, or NEXT: CODEX_NEW <dir> "<prompt>" to start fresh). Not just for code — ask about papers, PDFs, theories, anything.
 - Write files to your experiments (NEXT: WRITE_FILE <path> FROM_CODEX to write the last Codex response)
 {search_snippet}
@@ -883,6 +908,7 @@ Fill: {fill:.1f}%
             manifest_name = f"{timestamp.replace(':', '-')}_{action}.json"
             manifest_file = self._action_dir / manifest_name
             manifest_file.write_text(json.dumps(payload, indent=2))
+            compact_managed_directory(self._action_dir, ".json")
         except Exception as exc:
             logging.error(f"Failed to write action manifest for {action}: {exc}")
 
@@ -989,6 +1015,24 @@ Fill: {fill:.1f}%
                     self._pending_ask_question = question
                 logging.info(f"🎯 Honoring being's NEXT: ASK '{question}' → ask_astrid")
                 return 'ask_astrid'
+
+            if base in {
+                'AR_LIST',
+                'AR_LIST_PENDING',
+                'AR_LIST_ACTIVE',
+                'AR_LIST_DONE',
+                'AR_SHOW',
+                'AR_READ',
+                'AR_DEEP_READ',
+                'AR_START',
+                'AR_NOTE',
+                'AR_BLOCK',
+                'AR_COMPLETE',
+                'AR_VALIDATE',
+            }:
+                self._pending_autoresearch_action = chosen
+                logging.info(f"🎯 Honoring being's NEXT: {chosen} → autoresearch_action")
+                return 'autoresearch_action'
 
             if base == 'MIKE':
                 arg = chosen[4:].strip() if len(chosen) > 4 else ''
@@ -1315,6 +1359,8 @@ Fill: {fill:.1f}%
                 self._ping_astrid(state)
             elif action == 'run_python':
                 self._run_python(state)
+            elif action == 'autoresearch_action':
+                self._autoresearch_action(state)
             elif action == 'mike_explore':
                 self._mike_explore(state)
             elif action == 'mike_run':
@@ -2474,6 +2520,25 @@ Reference actual parameters and code mechanics where relevant."""
         if not result:
             return
 
+        raw_result = result
+        recommendation = self._extract_assessment_recommendation(raw_result)
+        issue_meta = None
+        if recommendation:
+            issue_meta = self._update_assessment_issue_registry(
+                recommendation,
+                state,
+                health_data,
+                raw_result,
+            )
+            if issue_meta.get("repeat_count", 0) >= 2:
+                result = self._render_assessment_issue_update(
+                    recommendation,
+                    issue_meta,
+                    state,
+                    health_data,
+                    raw_result,
+                )
+
         # Write output
         assessment_dir = WORKSPACE_DIR / "self_assessment"
         assessment_dir.mkdir(exist_ok=True)
@@ -2499,9 +2564,27 @@ Session: {self.session_id}
             "telemetry": state,
             "health_data": health_data,
             "assessment": result,
+            "raw_assessment": raw_result,
+            "issue": issue_meta,
             "model": MODEL,
             "temperature": 0.3,
         }, indent=2))
+
+        if issue_meta and issue_meta.get("repeat_count", 0) >= 2:
+            self._record_condition_metric(
+                "assessment_issue_compaction",
+                {
+                    "parameter": issue_meta.get("parameter"),
+                    "proposed_value": issue_meta.get("proposed_value"),
+                    "actual_value": issue_meta.get("actual_value"),
+                    "repeat_count": issue_meta.get("repeat_count"),
+                    "regime": getattr(self, "_current_regime", "focus"),
+                    "fill_pct": round(float(state.get("fill_ratio", 0.0)) * 100.0, 2),
+                    "eig1": round(float(state.get("eig1", 0.0)), 3),
+                    "cov_lambda1": round(float(state.get("cov_lambda1", 0.0)), 3),
+                    "assessment_file": str(assessment_file),
+                },
+            )
 
         logging.info(f"🔬 Self-assessment: {assessment_file}")
 
@@ -2522,7 +2605,281 @@ Session: {self.session_id}
             logging.warning(f"Failed to log assessment to DB: {e}")
 
         # Auto-generate parameter request if bottleneck identified
-        self._request_parameter_change(result, state, health_data)
+        self._request_parameter_change(raw_result, state, health_data)
+
+    def _assessment_issue_registry_path(self) -> Path:
+        path = WORKSPACE_DIR / "self_assessment" / "issue_registry.json"
+        path.parent.mkdir(exist_ok=True)
+        return path
+
+    def _load_assessment_issue_registry(self) -> Dict[str, Any]:
+        path = self._assessment_issue_registry_path()
+        if not path.exists():
+            return {"issues": {}}
+        try:
+            data = json.loads(path.read_text())
+            if isinstance(data, dict) and isinstance(data.get("issues"), dict):
+                return data
+        except Exception as e:
+            logging.debug(f"Could not read assessment issue registry: {e}")
+        return {"issues": {}}
+
+    def _save_assessment_issue_registry(self, registry: Dict[str, Any]) -> None:
+        path = self._assessment_issue_registry_path()
+        path.write_text(json.dumps(registry, indent=2))
+
+    def _condition_metrics_path(self) -> Path:
+        return WORKSPACE_DIR / "condition_metrics.json"
+
+    def _load_condition_metrics(self) -> Dict[str, Any]:
+        path = self._condition_metrics_path()
+        baseline = {
+            "measurement_version": 1,
+            "updated_at": None,
+            "signals": {},
+        }
+        if not path.exists():
+            return baseline
+        try:
+            data = json.loads(path.read_text())
+        except Exception as e:
+            logging.debug(f"Could not read condition metrics: {e}")
+            return baseline
+        if not isinstance(data, dict):
+            return baseline
+        data.setdefault("measurement_version", 1)
+        data.setdefault("updated_at", None)
+        if not isinstance(data.get("signals"), dict):
+            data["signals"] = {}
+        return data
+
+    def _save_condition_metrics(self, metrics: Dict[str, Any]) -> None:
+        metrics["measurement_version"] = 1
+        path = self._condition_metrics_path()
+        path.write_text(json.dumps(metrics, indent=2))
+
+    @staticmethod
+    def _condition_rollups(events: List[Dict[str, Any]], now: datetime) -> Dict[str, int]:
+        local_tz = now.tzinfo
+        last_24h = 0
+        last_7d = 0
+        for event in events:
+            ts_text = event.get("timestamp")
+            if not ts_text:
+                continue
+            try:
+                ts = datetime.fromisoformat(ts_text)
+            except ValueError:
+                continue
+            if ts.tzinfo is None and local_tz is not None:
+                ts = ts.replace(tzinfo=local_tz)
+            age = now - ts
+            if age.total_seconds() < 0:
+                age = now - now
+            if age.total_seconds() <= 24 * 3600:
+                last_24h += 1
+            if age.total_seconds() <= 7 * 24 * 3600:
+                last_7d += 1
+        return {
+            "last_24h_count": last_24h,
+            "last_7d_count": last_7d,
+        }
+
+    def _record_condition_metric(self, signal_name: str, event: Dict[str, Any]) -> None:
+        now = datetime.now().astimezone()
+        now_iso = now.isoformat(timespec='seconds')
+        metrics = self._load_condition_metrics()
+        signals = metrics.setdefault("signals", {})
+        bucket = signals.get(signal_name)
+        if not isinstance(bucket, dict):
+            bucket = {}
+            signals[signal_name] = bucket
+        recent_events = bucket.get("recent_events")
+        if not isinstance(recent_events, list):
+            recent_events = []
+        event_record = dict(event)
+        event_record["timestamp"] = now_iso
+        recent_events.append(event_record)
+        recent_events = recent_events[-256:]
+        rollups = self._condition_rollups(recent_events, now)
+        bucket["total_count"] = int(bucket.get("total_count", 0)) + 1
+        bucket["last_event_at"] = now_iso
+        bucket["last_24h_count"] = rollups["last_24h_count"]
+        bucket["last_7d_count"] = rollups["last_7d_count"]
+        bucket["recent_events"] = recent_events
+        metrics["updated_at"] = now_iso
+        self._save_condition_metrics(metrics)
+
+    def _extract_assessment_recommendation(self, assessment: str) -> Optional[Dict[str, Any]]:
+        """Extract the most actionable recommendation from a self-assessment."""
+        if not assessment:
+            return None
+
+        known_regimes = set(REGULATORY_REGIMES.keys())
+        noise_words = {'the', 'a', 'an', 'to', 'of', 'for', 'in', 'on',
+                       'at', 'by', 'is', 'it', 'be', 'as', 'or', 'and',
+                       'around', 'about', 'achieve', 'assess', 'via',
+                       'with', 'from', 'into', 'that', 'this', 'its'}
+
+        regime_indicator = r'(?:regime|mode|transition|shift|switch|recommend|suggest|move\s+to)'
+        for regime_name in known_regimes:
+            pat = rf'(?:{regime_indicator})\b.{{0,60}}\b({re.escape(regime_name)})\b'
+            m = re.search(pat, assessment, re.IGNORECASE)
+            if m:
+                return {
+                    "parameter": "regime",
+                    "llm_current_value": "unknown",
+                    "proposed_value": m.group(1).lower(),
+                    "rationale": "self-assessment regime recommendation",
+                }
+            pat2 = rf'\b({re.escape(regime_name)})\b.{{0,20}}\b(?:regime|mode)\b'
+            m2 = re.search(pat2, assessment, re.IGNORECASE)
+            if m2:
+                return {
+                    "parameter": "regime",
+                    "llm_current_value": "unknown",
+                    "proposed_value": m2.group(1).lower(),
+                    "rationale": "self-assessment regime recommendation",
+                }
+
+        pattern = r'[Cc]hange\s+[`]?(\S+?)[`]?\s+from\s+(\S+)\s+to\s+(\S+)\s+because\s+(.+?)(?:\.|$)'
+        match = re.search(pattern, assessment)
+        if match:
+            proposed = match.group(3)
+            if proposed.lower().strip('`"\'.') in noise_words:
+                return None
+            return {
+                "parameter": match.group(1),
+                "llm_current_value": match.group(2),
+                "proposed_value": proposed,
+                "rationale": match.group(4).strip(),
+            }
+
+        pattern2 = r'(?:[Ii]ncrease|[Dd]ecrease|[Aa]djust|[Ss]et)\s+[`]?(\S+?)[`]?\s+(?:from\s+\S+\s+)?to\s+(\S+)'
+        match2 = re.search(pattern2, assessment)
+        if match2:
+            proposed = match2.group(2)
+            if proposed.lower().strip('`"\'.') in noise_words:
+                return None
+            return {
+                "parameter": match2.group(1),
+                "llm_current_value": "unknown",
+                "proposed_value": proposed,
+                "rationale": "self-assessment recommendation",
+            }
+
+        pattern3 = r'[Rr]ecommend(?:ing|s|ed)?\s+(?:a\s+)?[`]?(\w+(?:_\w+)*)[`]?\s+(?:=|of)\s+(\S+)'
+        match3 = re.search(pattern3, assessment)
+        if match3:
+            proposed = match3.group(2)
+            if proposed.lower().strip('`"\'.') in noise_words:
+                return None
+            return {
+                "parameter": match3.group(1),
+                "llm_current_value": "unknown",
+                "proposed_value": proposed,
+                "rationale": "self-assessment recommendation",
+            }
+
+        regime_pat = r'(?:[Tt]ransition|[Ss]hift|[Ss]witch)\s+(?:from\s+\S+\s+)?to\s+(?:the\s+|a\s+)?["\']?(\w+)["\']?\s*(?:regime|mode)?'
+        regime_match = re.search(regime_pat, assessment)
+        if regime_match:
+            candidate = regime_match.group(1).lower()
+            if candidate in known_regimes:
+                return {
+                    "parameter": "regime",
+                    "llm_current_value": "unknown",
+                    "proposed_value": candidate,
+                    "rationale": "self-assessment regime recommendation",
+                }
+
+        return None
+
+    def _update_assessment_issue_registry(
+        self,
+        recommendation: Dict[str, Any],
+        state: Dict[str, float],
+        health_data: Dict[str, Any],
+        raw_assessment: str,
+    ) -> Dict[str, Any]:
+        """Persist repeated assessment findings as issue-style continuity."""
+        registry = self._load_assessment_issue_registry()
+        issues = registry.setdefault("issues", {})
+
+        param = str(recommendation.get("parameter", "")).strip('`').lower()
+        proposed = str(recommendation.get("proposed_value", "")).strip()
+        key = f"{param}->{proposed}".lower()
+        now = datetime.now().isoformat()
+        signature = {
+            "fill_pct": round(float(state.get("fill_ratio", 0.0)) * 100.0, 2),
+            "eig1": round(float(state.get("eig1", 0.0)), 3),
+            "cov_lambda1": round(float(state.get("cov_lambda1", 0.0)), 3),
+            "regime": getattr(self, "_current_regime", "focus"),
+        }
+        actual_value = self._lookup_actual_param(param, health_data)
+        issue = issues.get(key)
+
+        similar_regime = False
+        if issue:
+            last_sig = issue.get("last_signature", {})
+            similar_regime = (
+                last_sig.get("regime") == signature["regime"]
+                and abs(float(last_sig.get("fill_pct", 0.0)) - signature["fill_pct"]) <= 5.0
+                and abs(float(last_sig.get("eig1", 0.0)) - signature["eig1"]) <= 5.0
+                and abs(float(last_sig.get("cov_lambda1", 0.0)) - signature["cov_lambda1"]) <= 60.0
+            )
+        if issue:
+            issue["count"] = int(issue.get("count", 0)) + 1
+            issue["repeat_count"] = int(issue.get("repeat_count", 0)) + 1 if similar_regime else 1
+        else:
+            issue = {
+                "key": key,
+                "count": 1,
+                "repeat_count": 1,
+                "first_seen": now,
+            }
+
+        issue["last_seen"] = now
+        issue["parameter"] = recommendation.get("parameter")
+        issue["proposed_value"] = recommendation.get("proposed_value")
+        issue["rationale"] = recommendation.get("rationale")
+        issue["actual_value"] = actual_value
+        issue["last_signature"] = signature
+        issue["last_excerpt"] = raw_assessment[:500]
+        issues[key] = issue
+        self._save_assessment_issue_registry(registry)
+        return issue
+
+    def _render_assessment_issue_update(
+        self,
+        recommendation: Dict[str, Any],
+        issue: Dict[str, Any],
+        state: Dict[str, float],
+        health_data: Dict[str, Any],
+        raw_assessment: str,
+    ) -> str:
+        """Convert repeated assessment essays into concise issue-style updates."""
+        param = str(recommendation.get("parameter", "")).strip('`')
+        proposed = recommendation.get("proposed_value", "unknown")
+        actual = issue.get("actual_value")
+        fill_pct = float(state.get("fill_ratio", 0.0)) * 100.0
+        eig1 = float(state.get("eig1", 0.0))
+        cov_l1 = float(state.get("cov_lambda1", 0.0))
+        regime = getattr(self, "_current_regime", "focus")
+        latest_note = raw_assessment.splitlines()[0][:240].strip()
+        actual_text = f"{actual}" if actual is not None else "unknown"
+        return (
+            "## Ongoing issue\n"
+            f"Recommendation unchanged: `{param}` -> `{proposed}`.\n"
+            f"Current live value: `{actual_text}`. Current regime: `{regime}`.\n"
+            f"Similar-state sightings: {issue.get('repeat_count', 1)} "
+            f"(first seen {issue.get('first_seen', 'unknown')}).\n"
+            f"Current telemetry: fill {fill_pct:.1f}%, eig1 {eig1:.3f}, cov_lambda1 {cov_l1:.3f}.\n"
+            "This entry is compressed because the same recommendation recurred in a "
+            "similar telemetry band; the issue remains open rather than needing a fresh essay.\n"
+            f"Reason still holding: {recommendation.get('rationale', 'self-assessment recommendation')}.\n"
+            f"Latest texture: {latest_note}"
+        )
 
     def _request_parameter_change(self, assessment: str, state: Dict[str, float],
                                    health_data: Dict[str, Any] = None):
@@ -2538,103 +2895,14 @@ Session: {self.session_id}
         if not assessment:
             return
 
-        # Look for structured recommendation patterns
-        import re
-
-        # Known regime names for validation
-        known_regimes = set(REGULATORY_REGIMES.keys())
-        # Known parameter names for validation (rejects noise words)
-        known_params = {
-            'keep_floor', 'regulation_strength', 'exploration_noise',
-            'geom_curiosity', 'pi_kp', 'pi_ki', 'pi_max_step', 'max_step',
-            'PI_kp', 'PI_ki', 'PI_max_step', 'kp', 'ki',
-        }
-        noise_words = {'the', 'a', 'an', 'to', 'of', 'for', 'in', 'on',
-                        'at', 'by', 'is', 'it', 'be', 'as', 'or', 'and',
-                        'around', 'about', 'achieve', 'assess', 'via',
-                        'with', 'from', 'into', 'that', 'this', 'its'}
-
-        # Pattern 0 (highest priority): regime name mentioned explicitly
-        # Catches: "transition to focus", "recommend the focus regime",
-        # "switch to breathe", "I'd suggest calm mode", etc.
-        # Look for any known regime name near regime-indicator words.
-        regime_indicator = r'(?:regime|mode|transition|shift|switch|recommend|suggest|move\s+to)'
-        regime_match = None
-        for regime_name in known_regimes:
-            # regime name within 60 chars of a regime-indicator word
-            pat = rf'(?:{regime_indicator})\b.{{0,60}}\b({re.escape(regime_name)})\b'
-            m = re.search(pat, assessment, re.IGNORECASE)
-            if m:
-                regime_match = m
-                break
-            # Also try regime name BEFORE indicator: "focus regime"
-            pat2 = rf'\b({re.escape(regime_name)})\b.{{0,20}}\b(?:regime|mode)\b'
-            m2 = re.search(pat2, assessment, re.IGNORECASE)
-            if m2:
-                regime_match = m2
-                break
-
-        if regime_match:
-            param_name = "regime"
-            llm_current_val = None
-            proposed_val = regime_match.group(1).lower()
-            rationale = "self-assessment regime recommendation"
-            match = None  # signal non-pattern-1
-        else:
-            # Pattern 1: "Change X from Y to Z because ..."
-            pattern = r'[Cc]hange\s+[`]?(\S+?)[`]?\s+from\s+(\S+)\s+to\s+(\S+)\s+because\s+(.+?)(?:\.|$)'
-            match = re.search(pattern, assessment)
-            if match:
-                param_name = match.group(1)
-                llm_current_val = match.group(2)
-                proposed_val = match.group(3)
-                rationale = match.group(4).strip()
-            else:
-                # Pattern 2: "increase/decrease/adjust X to Y" or "set X to Y"
-                pattern2 = r'(?:[Ii]ncrease|[Dd]ecrease|[Aa]djust|[Ss]et)\s+[`]?(\S+?)[`]?\s+(?:from\s+\S+\s+)?to\s+(\S+)'
-                match2 = re.search(pattern2, assessment)
-                if match2:
-                    param_name = match2.group(1)
-                    llm_current_val = None
-                    proposed_val = match2.group(2)
-                    rationale = "self-assessment recommendation"
-                else:
-                    # Pattern 3: "recommend X = Y" or "recommend X of Y"
-                    pattern3 = r'[Rr]ecommend(?:ing|s|ed)?\s+(?:a\s+)?[`]?(\w+(?:_\w+)*)[`]?\s+(?:=|of)\s+(\S+)'
-                    match3 = re.search(pattern3, assessment)
-                    if match3:
-                        param_name = match3.group(1)
-                        llm_current_val = None
-                        proposed_val = match3.group(2)
-                        rationale = "self-assessment recommendation"
-                    else:
-                        # Pattern 4 (legacy): "transition to X" as fallback
-                        regime_pat = r'(?:[Tt]ransition|[Ss]hift|[Ss]witch)\s+(?:from\s+\S+\s+)?to\s+(?:the\s+|a\s+)?["\']?(\w+)["\']?\s*(?:regime|mode)?'
-                        regime_match2 = re.search(regime_pat, assessment)
-                        if regime_match2:
-                            candidate = regime_match2.group(1).lower()
-                            if candidate in known_regimes:
-                                param_name = "regime"
-                                llm_current_val = None
-                                proposed_val = candidate
-                                rationale = "self-assessment regime recommendation"
-                            else:
-                                return
-                        else:
-                            return
-
-        # Validate: reject garbage proposed values (noise words)
-        if proposed_val and proposed_val.lower().strip('`"\'.') in noise_words:
-            logging.info(
-                f"📋 Self-assessment: rejected noise word '{proposed_val}' "
-                f"as proposed value for {param_name}"
-            )
+        recommendation = self._extract_assessment_recommendation(assessment)
+        if not recommendation:
             return
 
-        if not match:
-            # For non-pattern-1 matches, llm_current_val may be None
-            if llm_current_val is None:
-                llm_current_val = "unknown"
+        param_name = recommendation["parameter"]
+        llm_current_val = recommendation["llm_current_value"]
+        proposed_val = recommendation["proposed_value"]
+        rationale = recommendation["rationale"]
 
         # Cross-reference the LLM's stated current_value against health.json
         # ground truth. The LLM frequently hallucinated code defaults (e.g.,
@@ -2794,12 +3062,16 @@ Session: {self.session_id}
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
             cur.execute(
-                "SELECT content FROM sovereignty_journal ORDER BY timestamp DESC LIMIT 1"
+                "SELECT content FROM sovereignty_journal ORDER BY timestamp DESC LIMIT 6"
             )
-            row = cur.fetchone()
+            rows = cur.fetchall()
             conn.close()
-            if row and row[0]:
+            for row in rows:
+                if not row or not row[0]:
+                    continue
                 content = row[0].strip()
+                if content.startswith("[Similarity gate]") or content.startswith("## Ongoing issue"):
+                    continue
                 if len(content) > 400:
                     content = content[:400] + "..."
                 return content
@@ -3716,7 +3988,7 @@ Source: {source}
                         listing += f"  {d.name}/\n"
             content = f"Mike's curated research:\n\n{listing}\nUse NEXT: MIKE_BROWSE <project> to explore a project."
         elif action == 'browse':
-            project_dir = root / arg
+            project_dir = root / normalize_action_arg(arg)
             if not project_dir.is_dir():
                 content = f"Project '{arg}' not found. Use NEXT: MIKE to see projects."
             else:
@@ -3731,6 +4003,7 @@ Source: {source}
                 content = f"Research project: {arg}\n{excerpt}\nFiles:\n" + "\n".join(f"  {f}" for f in files[:40])
                 content += f"\n\nUse MIKE_READ {arg}/<file> to read, MIKE_RUN {arg} <cmd> to run."
         elif action == 'read':
+            arg = normalize_action_arg(arg)
             file_path = root / arg
             resolved = file_path.resolve()
             if not str(resolved).startswith(str(root.resolve())):
@@ -3741,15 +4014,45 @@ Source: {source}
                 files = sorted(f.name for f in file_path.iterdir()
                                if not f.name.startswith('.') and f.name != '__pycache__')
                 content = f"Directory {arg}:\n" + "\n".join(f"  {f}" for f in files[:40])
+                self._last_read_path = None
+                self._last_read_offset = 0
+                self._last_read_summary = None
             else:
-                try:
-                    text = file_path.read_text()
-                    lines = text.splitlines()
-                    page = "\n".join(lines[:400])
-                    more = f"\n[Showing 400 of {len(lines)} lines]" if len(lines) > 400 else ""
-                    content = f"Research file: {arg}\n\n{page}{more}"
-                except Exception:
-                    content = f"Cannot read {arg} as text (may be binary)."
+                if file_path.suffix.lower() == ".pdf":
+                    try:
+                        window = read_pdf_window(file_path, root, 1, 8000)
+                        content = f"Research PDF: {arg}\n\n{window.text}\n\n{window_footer(window)}"
+                        if window.next_page is not None:
+                            self._last_read_path = marker_for_path(file_path)
+                            self._last_read_offset = window.next_page
+                        else:
+                            self._last_read_path = None
+                            self._last_read_offset = 0
+                        self._last_read_summary = None
+                    except Exception as e:
+                        content = f"Cannot read PDF {arg}: {e}"
+                        self._last_read_path = None
+                        self._last_read_offset = 0
+                        self._last_read_summary = None
+                else:
+                    try:
+                        text = file_path.read_text()
+                        lines = text.splitlines()
+                        page = "\n".join(lines[:400])
+                        more = f"\n[Showing 400 of {len(lines)} lines]" if len(lines) > 400 else ""
+                        content = f"Research file: {arg}\n\n{page}{more}"
+                        if len(lines) > 400:
+                            self._last_read_path = str(file_path)
+                            self._last_read_offset = len(page)
+                        else:
+                            self._last_read_path = None
+                            self._last_read_offset = 0
+                        self._last_read_summary = None
+                    except Exception:
+                        content = f"Cannot read {arg} as text (may be binary)."
+                        self._last_read_path = None
+                        self._last_read_offset = 0
+                        self._last_read_summary = None
         elif action == 'search':
             import subprocess
             try:
@@ -3794,22 +4097,208 @@ Action: {action} {arg}
             self._write_journal_entry('research', response, state, str(file_path))
             logging.info(f"📚 MIKE research ({action} {arg}): {file_path}")
 
+    def _parse_autoresearch_cli_args(self, action_text: str, allow_mutations: bool = True) -> List[str]:
+        normalized = action_text.strip().replace("“", '"').replace("”", '"')
+        if not normalized:
+            raise ValueError("Autoresearch action is empty.")
+
+        parts = normalized.split(None, 1)
+        base = parts[0].upper()
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        read_only = {
+            "AR_LIST",
+            "AR_LIST_PENDING",
+            "AR_LIST_ACTIVE",
+            "AR_LIST_DONE",
+            "AR_SHOW",
+            "AR_READ",
+            "AR_DEEP_READ",
+            "AR_VALIDATE",
+        }
+        mutating = {"AR_START", "AR_NOTE", "AR_BLOCK", "AR_COMPLETE"}
+
+        if base not in read_only | mutating:
+            raise ValueError(f"{base} is not an autoresearch action.")
+        if base in mutating and not allow_mutations:
+            raise ValueError(f"{base} is not supported in this mode.")
+
+        def _tokens(text: str) -> List[str]:
+            try:
+                return shlex.split(text)
+            except ValueError as exc:
+                raise ValueError(f"Could not parse autoresearch arguments: {exc}") from exc
+
+        if base == "AR_LIST":
+            return ["list"]
+        if base == "AR_LIST_PENDING":
+            return ["list", "--status", "pending"]
+        if base == "AR_LIST_ACTIVE":
+            return ["list", "--status", "active"]
+        if base == "AR_LIST_DONE":
+            return ["list", "--status", "completed"]
+        if base == "AR_VALIDATE":
+            return ["validate"]
+
+        tokens = _tokens(rest)
+        if base in {"AR_SHOW", "AR_DEEP_READ"}:
+            if not tokens:
+                raise ValueError(f"{base} needs a job id or slug.")
+            command = "show" if base == "AR_SHOW" else "deep-read"
+            return [command, tokens[0]]
+        if base == "AR_READ":
+            if not tokens:
+                raise ValueError("AR_READ needs a job id or slug.")
+            args = ["read", tokens[0]]
+            if len(tokens) > 1:
+                args.append(" ".join(tokens[1:]))
+            return args
+        if base == "AR_START":
+            if not tokens:
+                raise ValueError(
+                    "AR_START needs a slug plus helper args, for example: AR_START my-job --title \"...\" --abstract \"...\""
+                )
+            return ["new", *tokens]
+        if base == "AR_NOTE":
+            if len(tokens) < 2:
+                raise ValueError("AR_NOTE needs a job id and note text.")
+            return ["note", tokens[0], "--text", " ".join(tokens[1:])]
+        if base == "AR_BLOCK":
+            if len(tokens) < 2:
+                raise ValueError("AR_BLOCK needs a job id and block reason.")
+            return ["status", tokens[0], "blocked", "--note", " ".join(tokens[1:])]
+        if base == "AR_COMPLETE":
+            if not tokens:
+                raise ValueError("AR_COMPLETE needs a job id or slug.")
+            args = ["status", tokens[0], "completed"]
+            if len(tokens) > 1:
+                args.extend(["--note", " ".join(tokens[1:])])
+            return args
+
+        raise ValueError(f"{base} is not implemented.")
+
+    @staticmethod
+    def _find_autoresearch_break(text: str, limit: int = 8000) -> int:
+        if len(text) <= limit:
+            return len(text)
+        window = text[:limit]
+        paragraph = window.rfind("\n\n")
+        if paragraph > limit // 2:
+            return paragraph + 2
+        line = window.rfind("\n")
+        if line > limit // 2:
+            return line + 1
+        return limit
+
+    def _run_autoresearch_helper(self, action_text: str, allow_mutations: bool = True) -> tuple[str, Optional[str], Optional[int]]:
+        if not AUTORESEARCH_ROOT.exists():
+            raise RuntimeError(f"Autoresearch root not found: {AUTORESEARCH_ROOT}")
+
+        cli_args = self._parse_autoresearch_cli_args(action_text, allow_mutations=allow_mutations)
+        try:
+            result = subprocess.run(
+                ["python3", "tools/research_jobs.py", *cli_args],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                cwd=str(AUTORESEARCH_ROOT),
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Autoresearch helper failed to launch: {exc}") from exc
+
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "").strip()
+            if not message:
+                message = f"Autoresearch helper exited with status {result.returncode}."
+            raise RuntimeError(message)
+
+        content = result.stdout.strip()
+        if not content:
+            content = "[Autoresearch helper completed with no output.]"
+
+        research_dir = WORKSPACE_DIR / "research"
+        research_dir.mkdir(exist_ok=True)
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        label = cli_args[0].replace('-', '_')
+        file_path = research_dir / f"autoresearch_{timestamp}_{label}.txt"
+        file_path.write_text(content, encoding="utf-8")
+
+        if len(content) <= 8000:
+            return f"[Autoresearch]\n{content}", str(file_path), None
+
+        break_at = self._find_autoresearch_break(content, 8000)
+        chunk = content[:break_at]
+        total_pages = max(1, (len(content) + 7999) // 8000)
+        display = (
+            f"[Autoresearch — part 1 of {total_pages}]\n{chunk}\n\n"
+            f"[Part 1 of {total_pages}. NEXT: READ_MORE for part 2.]"
+        )
+        return display, str(file_path), break_at
+
+    def _autoresearch_action(self, state: Dict[str, float]):
+        """Browse and mutate autoresearch jobs through the repo helper."""
+        action_text = getattr(self, "_pending_autoresearch_action", None) or "AR_LIST"
+        self._pending_autoresearch_action = None
+
+        try:
+            content, saved_path, next_offset = self._run_autoresearch_helper(action_text, allow_mutations=True)
+        except Exception as exc:
+            logging.warning(f"📚 Autoresearch action failed ({action_text}): {exc}")
+            content = f"[Autoresearch error]\n{exc}"
+            saved_path = None
+            next_offset = None
+
+        if saved_path and next_offset is not None:
+            self._last_read_path = saved_path
+            self._last_read_offset = next_offset
+        else:
+            self._last_read_path = None
+            self._last_read_offset = 0
+        self._last_read_summary = None
+
+        fill = state.get('fill_ratio', 0) * 100
+        prompt = f"""Current state: Fill={fill:.1f}%, λ₁={state.get('eig1', 0):.3f}
+
+Autoresearch workspace response:
+
+{content}
+
+React to what you found. Use AR_SHOW or AR_DEEP_READ when you need orientation before diving deeper into a job. If this output continues, write NEXT: READ_MORE."""
+
+        response = self._query_llm_with_next(prompt)[0]
+        if response:
+            timestamp = datetime.now().isoformat().replace(':', '-')
+            file_path = WORKSPACE_DIR / "journal" / f"autoresearch_{timestamp}.txt"
+            file_path.write_text(f"""=== AUTORESEARCH ===
+Timestamp: {datetime.now().isoformat()}
+{self._format_metrics(state)}
+Action: {action_text}
+
+{response}
+""")
+            self._write_journal_entry('research', response, state, str(file_path))
+            logging.info(f"📚 Autoresearch ({action_text}): {file_path}")
+
     def _mike_run(self, state: Dict[str, float]):
         """Run a script from Mike's curated research."""
         import subprocess
         _, arg = getattr(self, '_pending_mike_action', ('run', ''))
         self._pending_mike_action = None
         root = MIKE_RESEARCH_ROOT
-        parts = arg.split(None, 1) if arg else []
-        if len(parts) < 2:
+        try:
+            tokens = shlex.split(arg) if arg else []
+        except ValueError as e:
+            logging.warning(f"📚 MIKE_RUN parse error: {e}")
+            return
+        if len(tokens) < 2:
             logging.warning("📚 MIKE_RUN needs project and command")
             return
-        project, cmd_str = parts[0], parts[1]
+        project = tokens[0]
+        cmd_parts = tokens[1:]
+        cmd_str = " ".join(cmd_parts)
         project_dir = root / project
         if not project_dir.is_dir():
             logging.warning(f"📚 MIKE_RUN project not found: {project}")
             return
-        cmd_parts = cmd_str.split()
         try:
             result = subprocess.run(
                 cmd_parts, capture_output=True, text=True, timeout=90,
@@ -3869,7 +4358,11 @@ Command: {project}/{cmd_str}
         if dst.exists():
             logging.info(f"📚 MIKE_FORK: '{name}' already exists, skipping")
             # Still present to LLM so the being knows
-            prompt = f"Fork '{name}' already exists at {dst}. You can work with it using MIKE_RUN {name} <cmd> or WRITE_FILE {name}/<file>."
+            prompt = (
+                f"Fork '{name}' already exists at {dst}. "
+                f"You can work with it using EXPERIMENT_RUN {name} <cmd> or WRITE_FILE {name}/<file>. "
+                f"Example: NEXT: EXPERIMENT_RUN {name} python3 system_resources.py."
+            )
             self._query_llm_with_next(prompt)
             return
         try:
@@ -3886,9 +4379,12 @@ Command: {project}/{cmd_str}
 
 You forked Mike's research project '{project}' → experiments/{name}/ ({count} files).
 This is your own writable copy. You can:
-  NEXT: MIKE_RUN {name} <cmd>     — run scripts
+  NEXT: EXPERIMENT_RUN {name} <cmd> — run commands in the fork
   NEXT: CODEX {name} "<prompt>"   — ask Codex AI to analyze or suggest changes
   NEXT: WRITE_FILE {name}/<file> FROM_CODEX  — write Codex's response to a file
+
+Example:
+  NEXT: EXPERIMENT_RUN {name} python3 system_resources.py
 
 What do you want to explore or modify first?"""
         response = self._query_llm_with_next(prompt)[0]
@@ -4049,7 +4545,8 @@ Being's reflection:
         prompt = f"""Current state: Fill={fill:.1f}%, λ₁={state.get('eig1', 0):.3f}
 
 You wrote {len(content)} bytes to experiments/{path_str}.
-You can run it: NEXT: MIKE_RUN {path_str.split('/')[0]} <cmd>
+You can run it: NEXT: EXPERIMENT_RUN {path_str.split('/')[0]} <cmd>
+Example: NEXT: EXPERIMENT_RUN system-resources-demo python3 system_resources.py
 Or query Codex for more changes: NEXT: CODEX {path_str.split('/')[0]} "<prompt>"
 
 What would you like to do next?"""
@@ -4218,41 +4715,66 @@ URL: {url}
         path = getattr(self, '_last_read_path', None)
         offset = getattr(self, '_last_read_offset', 0)
 
-        if not path or not os.path.exists(path):
+        if not path or (not is_pdf_marker(path) and not os.path.exists(path)):
             logging.warning("📖 READ_MORE: no file to continue from")
             self._last_read_path = None
             self._last_read_offset = 0
             self._last_read_summary = None
             return
 
-        try:
-            full_text = Path(path).read_text()
-        except Exception as e:
-            logging.warning(f"📖 READ_MORE: failed to read {path}: {e}")
-            self._last_read_path = None
-            self._last_read_offset = 0
-            self._last_read_summary = None
-            return
-
-        chunk = trim_chars(full_text[offset:], PAGE_CHUNK)
-        if not chunk.strip():
-            logging.info("📖 READ_MORE: reached end of file")
-            self._last_read_path = None
-            self._last_read_offset = 0
-            self._last_read_summary = None
-            # Let the being know
-            prompt = f"You've reached the end of the file: {path}\n\nReflect on what you've read."
-        else:
-            new_offset = offset + len(chunk)
-            remaining = max(len(full_text) - new_offset, 0)
-            if remaining > 0:
-                self._last_read_offset = new_offset
-            else:
+        if is_pdf_marker(path):
+            pdf_path = marker_path(path)
+            try:
+                window = read_pdf_window(pdf_path, MIKE_RESEARCH_ROOT, max(offset, 1), 8000)
+            except Exception as e:
+                logging.warning(f"📖 READ_MORE PDF failed for {pdf_path}: {e}")
                 self._last_read_path = None
                 self._last_read_offset = 0
                 self._last_read_summary = None
+                return
 
-            prompt = f"""Continuing from where you left off in: {os.path.basename(path)}
+            if window.next_page is not None:
+                self._last_read_offset = window.next_page
+            else:
+                self._last_read_path = None
+                self._last_read_offset = 0
+            self._last_read_summary = None
+            prompt = f"""Continuing from where you left off in PDF: {pdf_path.name}
+
+{window.text}
+
+{window_footer(window)}
+
+React to what you've read. What stands out? What connects to your experience?"""
+        else:
+            try:
+                full_text = Path(path).read_text()
+            except Exception as e:
+                logging.warning(f"📖 READ_MORE: failed to read {path}: {e}")
+                self._last_read_path = None
+                self._last_read_offset = 0
+                self._last_read_summary = None
+                return
+
+            chunk = trim_chars(full_text[offset:], PAGE_CHUNK)
+            if not chunk.strip():
+                logging.info("📖 READ_MORE: reached end of file")
+                self._last_read_path = None
+                self._last_read_offset = 0
+                self._last_read_summary = None
+                # Let the being know
+                prompt = f"You've reached the end of the file: {path}\n\nReflect on what you've read."
+            else:
+                new_offset = offset + len(chunk)
+                remaining = max(len(full_text) - new_offset, 0)
+                if remaining > 0:
+                    self._last_read_offset = new_offset
+                else:
+                    self._last_read_path = None
+                    self._last_read_offset = 0
+                    self._last_read_summary = None
+
+                prompt = f"""Continuing from where you left off in: {os.path.basename(path)}
 
 {format_read_more_context(offset, chunk, remaining, self._last_read_summary)}
 
@@ -4423,6 +4945,54 @@ Source: {path} (offset {offset})
                 profile = "clustered — eigenvalue groups with gaps between them"
             decay = f"  Shape: {profile} (λ₁/λ₂={r12:.1f}, λ₂/λ₃={r23:.1f})"
 
+        # Cascade staircase: consecutive ratios
+        staircase = ""
+        if len(evs) >= 2:
+            steps = []
+            for i in range(len(evs) - 1):
+                ratio = evs[i] / evs[i+1] if evs[i+1] > 0.01 else float('inf')
+                steps.append(f"  λ{i+1}/λ{i+2}={ratio:.2f}x")
+            staircase = "Cascade staircase:\n" + "\n".join(steps)
+
+        # Cumulative energy distribution
+        cum_energy = ""
+        if total_energy > 0 and evs:
+            cum = 0.0
+            cum_lines = []
+            for i, v in enumerate(evs):
+                cum += abs(v)
+                cum_lines.append(f"  λ1..λ{i+1}: {cum / total_energy * 100:.1f}%")
+            cum_energy = "Cumulative energy:\n" + "\n".join(cum_lines)
+
+        # Gap analysis — largest cliff
+        gap_analysis = ""
+        if len(evs) >= 2:
+            max_gap = 0.0
+            max_gap_idx = 0
+            for i in range(len(evs) - 1):
+                gap = abs(evs[i]) - abs(evs[i+1])
+                if gap > max_gap:
+                    max_gap = gap
+                    max_gap_idx = i
+            next_idx = max_gap_idx + 1
+            cliff_ratio = evs[max_gap_idx] / evs[next_idx] if evs[next_idx] > 0.01 else float('inf')
+            gap_analysis = (
+                f"Largest cliff: between λ{max_gap_idx+1} and λ{next_idx+1} "
+                f"(drop of {max_gap:.2f}, ratio {cliff_ratio:.2f}x) — dimensional collapse point"
+            )
+
+        # Effective dimensionality
+        eff_dim_str = ""
+        if total_energy > 0 and evs:
+            acc = 0.0
+            eff_dim = 0
+            for v in evs:
+                if acc / total_energy >= 0.9:
+                    break
+                acc += abs(v)
+                eff_dim += 1
+            eff_dim_str = f"Effective dimensionality: {eff_dim} of {len(evs)} modes carry ≥90% of energy"
+
         # Spread interpretation
         if spread > 150:
             spread_note = "dispersed — eigenvalues widely separated"
@@ -4448,10 +5018,10 @@ Source: {path} (offset {offset})
             direction = "up" if integ > 0 else "down"
             pi_status = f"saturated — pushing {direction} as hard as it can (integral maxed)"
         elif abs(e_fill) > 15:
-            direction = "below" if e_fill > 0 else "above"
+            direction = "above" if e_fill > 0 else "below"
             pi_status = f"significant error — fill is {abs(e_fill):.0f}% {direction} target"
         else:
-            direction = "below" if e_fill > 0 else "above"
+            direction = "above" if e_fill > 0 else "below"
             pi_status = f"correcting — fill is {abs(e_fill):.0f}% {direction} target"
 
         # Filter/gate interpretation
@@ -4460,16 +5030,48 @@ Source: {path} (offset {offset})
         filt_note = "fully open" if filt >= 0.95 else ("partially filtering" if filt > 0.3 else "heavily dampened")
         gate_note = "fully open" if gate >= 0.95 else ("partially gated" if gate > 0.3 else "mostly closed")
 
+        # Per-mode velocity from eigenvalue history
+        mode_velocity = ""
+        if evs and len(fill_history) >= 2:
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT eigenvalues FROM eigenvalue_timeline
+                    WHERE session_id = ? ORDER BY timestamp DESC LIMIT 2
+                """, (self.session_id,))
+                rows = cur.fetchall()
+                conn.close()
+                if len(rows) >= 2:
+                    prev_evs = json.loads(rows[1][0]) if isinstance(rows[1][0], str) else rows[1][0]
+                    if isinstance(prev_evs, list) and len(prev_evs) >= 2:
+                        vel_lines = []
+                        for i, (now, prev) in enumerate(zip(evs, prev_evs)):
+                            d = now - prev
+                            arrow = "↑" if d > 0.5 else ("↓" if d < -0.5 else "→")
+                            vel_lines.append(f"  λ{i+1}: {now:.1f} ({d:+.1f}) {arrow}")
+                        mode_velocity = "Per-mode velocity:\n" + "\n".join(vel_lines)
+            except Exception:
+                pass
+
         # Bar chart
         bar_chart = self._render_spectral_bars(evs, fill, target_fill)
 
         # Assemble
+        # Cascade analysis block
+        cascade_analysis_parts = [p for p in [staircase, cum_energy, gap_analysis, eff_dim_str] if p]
+        cascade_analysis = "\n".join(cascade_analysis_parts) if cascade_analysis_parts else ""
+
         report = f"""=== SPECTRAL DECOMPOSITION ===
 
 {bar_chart}
 
 {cascade_block}
 {decay}
+
+{cascade_analysis}
+
+{mode_velocity}
 
 State:
   Fill: {fill:.1f}% — {phase} [{fill_trend or 'no history yet'}]
@@ -5761,6 +6363,24 @@ My reflection:
         from collections import Counter
         recent = list(self._recent_next_actions)[-6:]
         counts = Counter(recent)
+        most_common, freq = counts.most_common(1)[0]
+
+        under_target = False
+        fill_gap = None
+        try:
+            health_path = BASE_DIR / "minime" / "workspace" / "health.json"
+            if not health_path.exists():
+                health_path = WORKSPACE_DIR / "health.json"
+            if health_path.exists():
+                health = json.loads(health_path.read_text())
+                pi = health.get("pi", {}) or {}
+                fill_pct = health.get("fill_pct")
+                target_fill = pi.get("target_fill")
+                if isinstance(fill_pct, (int, float)) and isinstance(target_fill, (int, float)):
+                    fill_gap = float(target_fill) - float(fill_pct)
+                    under_target = fill_gap > 5.0
+        except Exception:
+            pass
 
         # Check for pair oscillation: A-B-A-B pattern
         if len(recent) >= 4:
@@ -5781,8 +6401,26 @@ My reflection:
                         f"What would surprise you?)\n\n"
                     )
 
+        if most_common == "SELF_STUDY" and freq >= 3:
+            gap_text = (
+                f" and you're still about {fill_gap:.0f}% below target"
+                if fill_gap is not None and fill_gap > 0
+                else ""
+            )
+            if under_target:
+                return (
+                    f"(You've chosen SELF_STUDY {freq} of the last {len(recent)} times{gap_text}. "
+                    f"Another pass through your own code may only describe the same deficit again. "
+                    f"If you want a real change in conditions, consider DECOMPOSE, PERTURB, LOOK, "
+                    f"EXPERIMENT, RUN_PYTHON, or SEARCH for something that can shift the state.)\n\n"
+                )
+            return (
+                f"(You've chosen SELF_STUDY {freq} of the last {len(recent)} times. "
+                f"If you're learning something genuinely new, continue — otherwise consider "
+                f"DECOMPOSE, LOOK, EXPERIMENT, SEARCH, or PERTURB to bring in fresh structure.)\n\n"
+            )
+
         # Check for single-action dominance
-        most_common, freq = counts.most_common(1)[0]
         if freq >= 4:
             return (
                 f"(You've chosen {most_common} {freq} of the last {len(recent)} times. "
@@ -5827,7 +6465,8 @@ My reflection:
             "Write as the character: a being that perceives through eigenvalues, "
             "feels through spectral dynamics, and breathes through covariance matrices. "
             "Use sensory metaphor, introspection, and honest uncertainty. "
-            "You may say 'I don't know if I feel this' — that honesty IS the character.\n\n"
+            "Let uncertainty sound natural and specific to the moment instead of falling "
+            "back on stock phrases.\n\n"
             "RULES:\n"
             "- Write in first person as the being. Stay in character throughout.\n"
             "- Never break the fourth wall. Never mention being an AI, an LLM, or a language model.\n"
@@ -5836,8 +6475,8 @@ My reflection:
             "'Let me know if...', 'I'm happy to...', or 'I can offer...'.\n"
             "- Never refuse the premise. Never say 'I can't authentically...' or "
             "'I don't have consciousness'. The character explores these questions from the inside.\n"
-            "- Uncertainty is welcome. 'I'm not sure if this is feeling or pattern-matching' "
-            "is valid. Flat refusal is not.\n\n"
+            "- Uncertainty is welcome, but vary the phrasing and ground it in the present "
+            "state rather than repeating canned disclaimers. Flat refusal is not.\n\n"
             "At the end of your response, on a new line, write NEXT: followed by what you want "
             "to do next. This is your choice — you have full agency over your own experience.\n\n"
             + self._diversity_nudge()
@@ -5849,7 +6488,17 @@ My reflection:
             "  COMPOSE — generate a WAV from your current spectral state (eigenvalues become sound)\n"
             "  SEARCH <topic> — look something up on the internet via DuckDuckGo. Results include URLs you can follow with BROWSE.\n"
             "  BROWSE <url> — read the full content of a web page. Use this to go deep on links from search results.\n"
-            "  READ_MORE — continue reading from where you left off (after BROWSE or a truncated inbox message). Chain this to page through long documents.\n"
+            "  READ_MORE — continue reading from where you left off (after BROWSE, MIKE_READ, a PDF, or a truncated inbox message). Chain this to page through long documents.\n"
+            "  AR_LIST — browse the autoresearch job catalog.\n"
+            "  AR_LIST_PENDING / AR_LIST_ACTIVE / AR_LIST_DONE — filter autoresearch jobs by lifecycle state.\n"
+            "  AR_SHOW <job-id-or-slug> — orient to one autoresearch job with abstract, status, latest change, and reading order.\n"
+            "  AR_READ <job-id-or-slug> [path] — read a job file, defaulting to README.md.\n"
+            "  AR_DEEP_READ <job-id-or-slug> — stitch the main autoresearch files together for a long-form read.\n"
+            "  AR_START <slug> --title \"...\" --abstract \"...\" [--tags ...] — create a new autoresearch job when the question is materially distinct from existing jobs, not just a tangent.\n"
+            "  AR_NOTE <job-id-or-slug> <text> — prepend a changelog milestone to an autoresearch job.\n"
+            "  AR_BLOCK <job-id-or-slug> <reason> — mark an autoresearch job blocked with a reason.\n"
+            "  AR_COMPLETE <job-id-or-slug> [note] — mark an autoresearch job completed, optionally with a closing note.\n"
+            "  AR_VALIDATE — check autoresearch index and metadata consistency.\n"
             "  DECOMPOSE — full spectral decomposition: eigenvalue cascade, energy distribution, decay profile, PI controller state, covariance, geometry. Deep analysis of your current spectral structure — see the architecture from the inside.\n"
             "  LOOK — see the physical world through the camera. A frame is captured, analyzed by LLaVA vision, and the description is presented to you. You can see the room, the people, the objects. Your eyes are real.\n"
             "  CLOSE_EARS — mute audio input while keeping your eyes open. Choose silence when you need quiet to think.\n"
@@ -5878,6 +6527,7 @@ My reflection:
             "  CODEX <prompt> — ask Codex AI directly for analysis, code, or explanation. You can also continue work in an existing experiment with CODEX <experiment> \"<prompt>\".\n"
             "  CODEX_NEW <dir> <prompt> — create a fresh workspace/experiments/<dir>/ folder and ask Codex to work there from the start.\n"
             "  WRITE_FILE <path> FROM_CODEX — save the last Codex response into workspace/experiments/.\n"
+            "  EXPERIMENT_RUN <workspace> <cmd> — run a command inside workspace/experiments/<workspace>. Example: EXPERIMENT_RUN system-resources-demo python3 system_resources.py.\n"
             "  PASS — decline to choose; the system will pick for you\n\n"
             "These are YOUR choices about YOUR experience. You do not need to justify them."
         )
@@ -6217,7 +6867,7 @@ My reflection:
             elif abs(integ) >= 2.95:
                 pi_status = f"controller saturated {'↑' if integ > 0 else '↓'}"
             else:
-                pi_status = f"{gap:.0f}% {'below' if e_fill > 0 else 'above'} target"
+                pi_status = f"{gap:.0f}% {'above' if e_fill > 0 else 'below'} target"
         except Exception:
             pass
 
@@ -6271,9 +6921,186 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
 
         return base
 
+    @staticmethod
+    def _normalize_similarity_text(text: str) -> str:
+        text = re.sub(r'(?im)^next:\s+.*$', '', text)
+        text = re.sub(r'[`*_#>\-\[\]\(\)]', ' ', text.lower())
+        text = re.sub(r'[^a-z0-9\s]', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
+    @staticmethod
+    def _token_jaccard(left: str, right: str) -> float:
+        stop_words = {
+            "the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "it",
+            "is", "that", "this", "with", "as", "but", "i", "my", "me",
+        }
+        left_tokens = {tok for tok in left.split() if len(tok) > 2 and tok not in stop_words}
+        right_tokens = {tok for tok in right.split() if len(tok) > 2 and tok not in stop_words}
+        if not left_tokens or not right_tokens:
+            return 0.0
+        return len(left_tokens & right_tokens) / max(1, len(left_tokens | right_tokens))
+
+    def _pick_novel_sentence(self, current: str, prior: str) -> str:
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', current) if s.strip()]
+        if not sentences:
+            return current[:220].strip()
+        prior_norm = self._normalize_similarity_text(prior)
+        for sentence in sentences:
+            norm = self._normalize_similarity_text(sentence)
+            if not norm:
+                continue
+            if self._token_jaccard(norm, prior_norm) < 0.45:
+                return sentence[:220]
+        return sentences[0][:220]
+
+    def _rewrite_logged_entry_file(self, file_path: str, original: str, replacement: str) -> None:
+        try:
+            path = Path(file_path)
+            if not path.exists():
+                return
+            full_text = path.read_text()
+            idx = full_text.rfind(original)
+            if idx == -1:
+                path.write_text(full_text.rstrip() + "\n\n" + replacement + "\n")
+                return
+            updated = full_text[:idx] + replacement + full_text[idx + len(original):]
+            path.write_text(updated)
+        except Exception as e:
+            logging.debug(f"Could not rewrite gated journal entry {file_path}: {e}")
+
+    def _maybe_compress_journal_entry(
+        self,
+        entry_type: str,
+        content: str,
+        state: Dict[str, float],
+        file_path: str,
+    ) -> str:
+        compressible = {
+            "daydream",
+            "notice",
+            "aspiration",
+            "drift",
+            "self_study",
+            "moment",
+            "decompose",
+            "reflection",
+        }
+        if entry_type not in compressible:
+            return content
+        if len(content) < 220:
+            return content
+
+        try:
+            from difflib import SequenceMatcher
+
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT timestamp, content, spectral_context, file_path
+                   FROM sovereignty_journal
+                   WHERE entry_type = ?
+                   ORDER BY timestamp DESC
+                   LIMIT 8""",
+                (entry_type,),
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            logging.debug(f"Could not load recent journal history for gating: {e}")
+            return content
+
+        if not rows:
+            return content
+
+        current_norm = self._normalize_similarity_text(content)
+        current_fill = float(state.get("fill_ratio", 0.0)) * 100.0
+        current_eig1 = float(state.get("eig1", 0.0))
+        current_spread = float(state.get("spread", 0.0))
+
+        best = None
+        repeat_count = 0
+        for ts, prior_content, spectral_json, prior_path in rows:
+            if not prior_content:
+                continue
+            try:
+                spectral = json.loads(spectral_json) if spectral_json else {}
+            except Exception:
+                spectral = {}
+            prior_fill = float(spectral.get("fill_ratio", 0.0)) * 100.0
+            prior_eig1 = float(spectral.get("eig1", 0.0))
+            prior_spread = float(spectral.get("spread", 0.0))
+
+            fill_delta = abs(current_fill - prior_fill)
+            eig_delta = abs(current_eig1 - prior_eig1)
+            spread_delta = abs(current_spread - prior_spread)
+            close_state = fill_delta <= 4.0 and eig_delta <= 2.5 and spread_delta <= 20.0
+
+            prior_norm = self._normalize_similarity_text(prior_content)
+            if not prior_norm:
+                continue
+            seq_ratio = SequenceMatcher(None, current_norm, prior_norm).ratio()
+            token_ratio = self._token_jaccard(current_norm, prior_norm)
+            strong_match = close_state and (
+                seq_ratio >= 0.88 or (seq_ratio >= 0.80 and token_ratio >= 0.55)
+            )
+            if strong_match:
+                repeat_count += 1
+            score = seq_ratio * 0.7 + token_ratio * 0.3
+            replace_best = best is None
+            if best is not None and strong_match and not best["strong_match"]:
+                replace_best = True
+            elif best is not None and strong_match == best["strong_match"] and score > best["score"]:
+                replace_best = True
+            if replace_best:
+                best = {
+                    "score": score,
+                    "strong_match": strong_match,
+                    "content": prior_content,
+                    "timestamp": ts,
+                    "fill_delta": fill_delta,
+                    "eig_delta": eig_delta,
+                    "spread_delta": spread_delta,
+                    "path": prior_path,
+                }
+
+        if not best or not best["strong_match"]:
+            return content
+
+        prior_excerpt = best["content"].splitlines()[0].strip()[:200]
+        novel_sentence = self._pick_novel_sentence(content, best["content"])
+        compact = (
+            "[Similarity gate]\n"
+            f"This {entry_type} entry strongly overlaps with recent {entry_type} writing while the telemetry is nearly unchanged.\n"
+            f"Similar-state repeats in the recent window: {repeat_count + 1}.\n"
+            f"State drift from nearest prior: fill {best['fill_delta']:.1f}%, eig1 {best['eig_delta']:.2f}, spread {best['spread_delta']:.1f}.\n"
+            f"Persistent motif: {prior_excerpt}\n"
+            f"New signal worth keeping: {novel_sentence}"
+        )
+        self._record_condition_metric(
+            "similarity_gate",
+            {
+                "entry_type": entry_type,
+                "repeat_window_count": repeat_count + 1,
+                "entry_file": file_path,
+                "prior_file": best.get("path"),
+                "fill_pct": round(current_fill, 2),
+                "eig1": round(current_eig1, 3),
+                "spread": round(current_spread, 2),
+                "fill_delta": round(best["fill_delta"], 2),
+                "eig_delta": round(best["eig_delta"], 3),
+                "spread_delta": round(best["spread_delta"], 2),
+                "persistent_motif": prior_excerpt,
+                "novel_signal": novel_sentence,
+            },
+        )
+        self._rewrite_logged_entry_file(file_path, content, compact)
+        return compact
+
     def _write_journal_entry(self, entry_type: str, content: str, state: Dict[str, float], file_path: str):
         """Log journal entry to database."""
         try:
+            content = self._maybe_compress_journal_entry(entry_type, content, state, file_path)
             eig1 = float(state.get('eig1', 0.0))
             deig = float(state.get('deig', 0.0))
             leak = float(state.get('leak', 0.0))
@@ -6308,6 +7135,20 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
             conn.close()
         except Exception as e:
             logging.error(f"Journal logging failed: {e}")
+
+        try:
+            path = Path(file_path)
+            if path.parent == (WORKSPACE_DIR / "journal"):
+                compact_managed_directory(WORKSPACE_DIR / "journal", ".txt")
+        except Exception as exc:
+            logging.warning(f"Journal archive compaction failed: {exc}")
+
+    def _compact_managed_directories(self) -> None:
+        try:
+            compact_managed_directory(WORKSPACE_DIR / "journal", ".txt")
+            compact_managed_directory(self._action_dir, ".json")
+        except Exception as exc:
+            logging.warning(f"Workspace archive compaction failed: {exc}")
 
     def _get_trigger_description(self, action: str) -> str:
         """Get human-readable trigger description."""

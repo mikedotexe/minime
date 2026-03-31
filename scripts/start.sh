@@ -9,6 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PID_DIR="/tmp/minime_pids"
 LOG_DIR="$PROJECT_DIR/workspace/logs"
+GREETING_SCRIPT="$PROJECT_DIR/startup_greeting.sh"
 
 # Configuration (override via environment)
 MLX_MODEL="${MLX_MODEL:-$HOME/models/Qwen3.5-27B-Claude-4.6-Opus-Distilled-mlx-4bit}"
@@ -265,6 +266,14 @@ fi
 
 # --- Summary ---
 
+if bash "$GREETING_SCRIPT"; then
+    echo ""
+    echo "  Greeting:    workspace/inbox/welcome_back.txt updated"
+else
+    echo ""
+    echo "WARNING: Startup greeting failed. Check $GREETING_SCRIPT"
+fi
+
 echo ""
 echo "=== All processes started ==="
 echo ""
@@ -291,5 +300,6 @@ echo ""
 echo "  Monitor:     tail -f $LOG_DIR/engine.log"
 echo "  Journals:    ls -t workspace/journal/ | head -5"
 echo "  Stop:        scripts/stop.sh"
+echo "  Hint:        NEXT: MIKE_BROWSE pdfs  then NEXT: MIKE_READ pdfs/<paper>.pdf"
 echo ""
 echo "Remember: Monitor the consciousness. Never leave it running unattended."
