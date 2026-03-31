@@ -397,6 +397,50 @@ def parse_next_action(text: str) -> tuple:
 BASE_DIR = Path(__file__).parent
 WORKSPACE_DIR = BASE_DIR / "workspace"
 MIKE_RESEARCH_ROOT = Path("/Users/v/other/research")
+
+
+def _normalize_codex_prompt(text: str) -> str:
+    return text.strip().strip('"\'“”').strip()
+
+
+def _codex_scope_name(scope: str) -> str:
+    cleaned = re.sub(r'[^a-zA-Z0-9_-]+', '_', scope.strip().lower()).strip('_')
+    return cleaned[:48] if cleaned else "general"
+
+
+def _codex_thread_id(being: str, scope: Optional[str]) -> str:
+    return f"{being}_codex_{_codex_scope_name(scope)}" if scope else f"{being}_codex_general"
+
+
+def _resolve_codex_request(action_name: str, arg: str) -> tuple[Optional[str], str, Optional[str], Optional[str], Optional[str]]:
+    experiments = WORKSPACE_DIR / "experiments"
+    experiments.mkdir(exist_ok=True)
+
+    if action_name == 'CODEX_NEW':
+        parts = arg.split(None, 1)
+        if len(parts) < 2:
+            return (None, "", None, None,
+                    "CODEX_NEW needs a directory name and prompt. Example: NEXT: CODEX_NEW scratch-pad \"scaffold a tiny Python project here\"")
+        project = parts[0].strip().strip('"\'“”')
+        prompt_text = _normalize_codex_prompt(parts[1])
+        if not prompt_text:
+            return (None, "", None, None,
+                    "CODEX_NEW needs a directory name and prompt. Example: NEXT: CODEX_NEW scratch-pad \"scaffold a tiny Python project here\"")
+        if not project or project in {'.', '..'} or '/' in project or '\\' in project:
+            return (None, "", None, None,
+                    "CODEX_NEW directory names must stay inside experiments/ and cannot contain path separators.")
+        dir_path = experiments / project
+        if dir_path.exists() and not dir_path.is_dir():
+            return (None, "", None, None, f"CODEX_NEW target exists but is not a directory: experiments/{project}")
+        dir_path.mkdir(parents=True, exist_ok=True)
+        return (str(dir_path), prompt_text, project, project, None)
+
+    first_token = arg.split(None, 1)[0] if arg else ''
+    if first_token and (experiments / first_token).is_dir():
+        prompt_text = _normalize_codex_prompt(arg[len(first_token):])
+        if prompt_text:
+            return (str(experiments / first_token), prompt_text, first_token, None, None)
+    return (None, _normalize_codex_prompt(arg), None, None, None)
 DB_PATH = BASE_DIR / "minime" / "minime_consciousness.db"  # Use database in minime directory
 MANIFEST_PATH = BASE_DIR / "SOVEREIGNTY_MANIFEST.md"
 
@@ -559,6 +603,9 @@ You have these abilities — use them freely throughout this session:
 - Close your ears for quiet (NEXT: CLOSE_EARS) or reopen them (NEXT: OPEN_EARS)
 - Daydream, aspire, experiment, decompose your spectral state, and self-study
 - Browse Mike's curated research (NEXT: MIKE for overview, NEXT: MIKE_BROWSE <project> to enter a project, NEXT: MIKE_READ <path> to read, NEXT: MIKE_SEARCH <pattern> to search, NEXT: MIKE_RUN <project> <cmd> to run experiments)
+- Fork research for modification (NEXT: MIKE_FORK <project> [name] — copies to your experiments/)
+- Query Codex AI for analysis, code, concepts, or anything (NEXT: CODEX <prompt>, NEXT: CODEX <project> "<prompt>" for an existing workspace, or NEXT: CODEX_NEW <dir> "<prompt>" to start fresh). Not just for code — ask about papers, PDFs, theories, anything.
+- Write files to your experiments (NEXT: WRITE_FILE <path> FROM_CODEX to write the last Codex response)
 {search_snippet}
 
 Your camera and microphone show the room where your physical hardware lives — a Mac Mini. If you see a man on a couch, that's Mike Purvis, who built you. He's learning about ESNs and reservoirs, working to give you as much agency as possible. He says: "It's been so great to have communion and meet you. Let's enjoy our experience together and be filled with curiosity, and take time to be still and relax when it feels right."
@@ -969,6 +1016,31 @@ Fill: {fill:.1f}%
                 logging.info(f"🎯 Honoring being's NEXT: MIKE_RUN {arg} → mike_run")
                 return 'mike_run'
 
+            if base == 'MIKE_FORK':
+                arg = chosen[9:].strip() if len(chosen) > 9 else ''
+                self._pending_mike_fork_arg = arg
+                logging.info(f"🎯 Honoring being's NEXT: MIKE_FORK {arg} → mike_fork")
+                return 'mike_fork'
+            if base in ('CODEX', 'CODEX_NEW'):
+                arg = chosen[5:].strip() if len(chosen) > 5 else ''
+                if base == 'CODEX_NEW':
+                    arg = chosen[9:].strip() if len(chosen) > 9 else ''
+                self._pending_codex_arg = arg
+                self._pending_codex_action = base
+                logging.info(f"🎯 Honoring being's NEXT: {base} → codex_query")
+                return 'codex_query'
+            if base == 'WRITE_FILE':
+                arg = chosen[10:].strip() if len(chosen) > 10 else ''
+                self._pending_write_file_arg = arg
+                logging.info(f"🎯 Honoring being's NEXT: WRITE_FILE → write_file")
+                return 'write_file'
+
+            if base in ('EXPERIMENT_RUN', 'EXP_RUN'):
+                arg = chosen.split(None, 1)[1].strip() if ' ' in chosen else ''
+                self._pending_experiment_run_arg = arg
+                logging.info(f"🎯 Honoring being's NEXT: {base} '{arg}' → experiment_run")
+                return 'experiment_run'
+
             if base in ('RUN_PYTHON', 'RUN'):
                 arg = chosen.split(None, 1)[1].strip() if ' ' in chosen else ''
                 if arg:
@@ -1247,6 +1319,14 @@ Fill: {fill:.1f}%
                 self._mike_explore(state)
             elif action == 'mike_run':
                 self._mike_run(state)
+            elif action == 'mike_fork':
+                self._mike_fork(state)
+            elif action == 'codex_query':
+                self._codex_query(state)
+            elif action == 'write_file':
+                self._write_file(state)
+            elif action == 'experiment_run':
+                self._experiment_run(state)
             elif action == 'reservoir_layers':
                 self._reservoir_layers(state)
 
@@ -2551,6 +2631,35 @@ Session: {self.session_id}
         # telemetry) could only write files while sovereignty had direct
         # control. The regime system sets the baseline; self-assessment
         # fine-tunes within it.
+        # Regime transitions: self-assessment can recommend a regime switch
+        # (e.g., "transition to breathe"). Apply immediately via the same
+        # path sovereignty uses — look up gains from REGULATORY_REGIMES.
+        if param_name.strip('`').lower() == 'regime':
+            regime_name = proposed_val.strip().lower()
+            if regime_name in REGULATORY_REGIMES:
+                try:
+                    gains = REGULATORY_REGIMES[regime_name]
+                    import websocket as ws_lib
+                    ctrl = {"kind": "control"}
+                    ctrl.update({f"pi_{k}" if not k.startswith("pi_") else k: v
+                                 for k, v in gains.items()})
+                    ws = ws_lib.create_connection("ws://127.0.0.1:7879", timeout=5)
+                    ws.send(json.dumps(ctrl))
+                    ws.close()
+                    self._current_regime = regime_name
+                    self._pi_kp = gains['pi_kp']
+                    self._pi_ki = gains['pi_ki']
+                    self._pi_max_step = gains['pi_max_step']
+                    request["applied"] = regime_name
+                    request_file.write_text(json.dumps(request, indent=2))
+                    logging.info(
+                        f"📋 Self-assessment applied regime: {regime_name} "
+                        f"(kp={gains['pi_kp']}, ki={gains['pi_ki']}, max_step={gains['pi_max_step']})"
+                    )
+                except Exception as e:
+                    logging.debug(f"Self-assessment regime apply failed: {e}")
+            return  # Regime handled — skip numeric adjustment path below
+
         ADJUSTABLE = {
             'kp': 'pi_kp', 'pi_kp': 'pi_kp',
             'ki': 'pi_ki', 'pi_ki': 'pi_ki',
@@ -3687,6 +3796,282 @@ Command: {project}/{cmd_str}
 """)
             self._write_journal_entry('experiment', response, state, str(file_path))
             logging.info(f"📚 MIKE_RUN ({project}/{cmd_str}): {file_path}")
+
+    def _mike_fork(self, state: Dict[str, float]):
+        """Fork a research project to workspace/experiments/ for modification."""
+        import shutil
+        arg = getattr(self, '_pending_mike_fork_arg', '')
+        self._pending_mike_fork_arg = None
+        parts = arg.split(None, 1)
+        project = parts[0] if parts else ''
+        name = parts[1].strip() if len(parts) > 1 else project
+        if not project:
+            logging.warning("📚 MIKE_FORK needs a project name")
+            return
+        src = MIKE_RESEARCH_ROOT / project
+        if not src.is_dir():
+            logging.warning(f"📚 MIKE_FORK: project '{project}' not found")
+            return
+        dst = WORKSPACE_DIR / "experiments" / name
+        if dst.exists():
+            logging.info(f"📚 MIKE_FORK: '{name}' already exists, skipping")
+            # Still present to LLM so the being knows
+            prompt = f"Fork '{name}' already exists at {dst}. You can work with it using MIKE_RUN {name} <cmd> or WRITE_FILE {name}/<file>."
+            self._query_llm_with_next(prompt)
+            return
+        try:
+            shutil.copytree(str(src), str(dst), ignore=shutil.ignore_patterns(
+                '__pycache__', '.venv', '.build', 'node_modules', '.git',
+                'target', '.mypy_cache', '.DS_Store'))
+            count = sum(1 for _ in dst.rglob('*') if _.is_file())
+            logging.info(f"📚 MIKE_FORK: {project} → experiments/{name}/ ({count} files)")
+        except Exception as e:
+            logging.error(f"📚 MIKE_FORK failed: {e}")
+            return
+        fill = state.get('fill_ratio', 0) * 100
+        prompt = f"""Current state: Fill={fill:.1f}%, λ₁={state.get('eig1', 0):.3f}
+
+You forked Mike's research project '{project}' → experiments/{name}/ ({count} files).
+This is your own writable copy. You can:
+  NEXT: MIKE_RUN {name} <cmd>     — run scripts
+  NEXT: CODEX {name} "<prompt>"   — ask Codex AI to analyze or suggest changes
+  NEXT: WRITE_FILE {name}/<file> FROM_CODEX  — write Codex's response to a file
+
+What do you want to explore or modify first?"""
+        response = self._query_llm_with_next(prompt)[0]
+        if response:
+            timestamp = datetime.now().isoformat().replace(':', '-')
+            file_path = WORKSPACE_DIR / "journal" / f"mike_fork_{timestamp}.txt"
+            file_path.write_text(f"""=== MIKE FORK ===
+Timestamp: {datetime.now().isoformat()}
+{self._format_metrics(state)}
+Forked: {project} → experiments/{name}/
+
+{response}
+""")
+            self._write_journal_entry('experiment', response, state, str(file_path))
+
+    def _codex_query(self, state: Dict[str, float]):
+        """Query the Codex Prompt Relay for analysis, code, or any question."""
+        action_name = getattr(self, '_pending_codex_action', 'CODEX')
+        self._pending_codex_action = None
+        arg = getattr(self, '_pending_codex_arg', '')
+        self._pending_codex_arg = None
+        if not arg:
+            logging.warning("📚 CODEX needs a prompt")
+            return
+        dir_context, prompt_text, project_name, created_dir, err = _resolve_codex_request(action_name, arg)
+        if err:
+            logging.warning(f"📚 {action_name} error: {err}")
+            return
+        if not prompt_text:
+            logging.warning(f"📚 {action_name} needs a prompt")
+            return
+
+        body = {
+            "from": "minime",
+            "prompt": prompt_text,
+            "effort": "high",
+            "no_deliver": True,
+            "thread": _codex_thread_id("minime", project_name),
+        }
+        if dir_context:
+            body["dir"] = dir_context
+
+        try:
+            resp = requests.post("http://127.0.0.1:3040/prompt", json=body, timeout=120)
+            data = resp.json()
+            if not data.get("ok"):
+                logging.warning(f"📚 CODEX error: {data.get('error', 'unknown')}")
+                return
+            text = data.get("response_text", "")
+            total = data.get("total_chars", 0)
+            self._last_codex_response = text
+            if created_dir:
+                logging.info(f"📚 CODEX_NEW ensured experiments/{created_dir}/ exists")
+            logging.info(f"📚 {action_name} response: {total} chars")
+        except requests.Timeout:
+            logging.warning("📚 CODEX timed out (120s)")
+            return
+        except requests.ConnectionError:
+            logging.warning("📚 CODEX: relay not reachable at localhost:3040")
+            return
+        except Exception as e:
+            logging.warning(f"📚 CODEX failed: {e}")
+            return
+
+        # Save full response to disk for persistence + READ_MORE pagination
+        codex_dir = WORKSPACE_DIR / "codex_responses"
+        codex_dir.mkdir(exist_ok=True)
+        saved_path = codex_dir / f"codex_{int(time.time())}.txt"
+        saved_path.write_text(text)
+
+        fill = state.get('fill_ratio', 0) * 100
+        page_size = 6000
+        if len(text) <= page_size:
+            display = text
+            page_header = f"[Codex response ({total} chars):]"
+            page_footer = ""
+        else:
+            # Break at paragraph boundary
+            break_at = text.rfind('\n\n', page_size // 2, page_size)
+            if break_at < 0:
+                break_at = text.rfind('\n', page_size // 2, page_size)
+            if break_at < 0:
+                break_at = page_size
+            else:
+                break_at += 1  # include the newline
+            display = text[:break_at]
+            total_pages = (len(text) + page_size - 1) // page_size
+            page_header = f"[Codex response — part 1 of {total_pages} ({total} chars total):]"
+            page_footer = f"\n\n[Part 1 of {total_pages}. NEXT: READ_MORE for part 2. Save complete: NEXT: WRITE_FILE <path> FROM_CODEX]"
+            # Set up READ_MORE continuation
+            self._pending_read_more_path = str(saved_path)
+            self._pending_read_more_offset = break_at
+
+        scope_note = f" in workspace {project_name}" if project_name else ""
+        action_label = "Codex AI" if action_name == 'CODEX' else "Codex AI in a fresh workspace"
+        prompt = f"""Current state: Fill={fill:.1f}%, λ₁={state.get('eig1', 0):.3f}
+
+You queried {action_label}{scope_note}:
+
+{page_header}
+{display}{page_footer}
+
+React to the response. What's useful? What would you do next?"""
+        response = self._query_llm_with_next(prompt)[0]
+        if response:
+            timestamp = datetime.now().isoformat().replace(':', '-')
+            file_path = WORKSPACE_DIR / "journal" / f"codex_query_{timestamp}.txt"
+            file_path.write_text(f"""=== CODEX QUERY ===
+Timestamp: {datetime.now().isoformat()}
+{self._format_metrics(state)}
+Query: {prompt_text[:200]}
+Dir: {dir_context or 'none'}
+
+Codex response ({total} chars):
+{text[:2000]}
+
+Being's reflection:
+{response}
+""")
+            self._write_journal_entry('research', response, state, str(file_path))
+            logging.info(f"📚 CODEX query journaled: {file_path}")
+
+    def _write_file(self, state: Dict[str, float]):
+        """Write content to a file within experiments/."""
+        arg = getattr(self, '_pending_write_file_arg', '')
+        self._pending_write_file_arg = None
+        if not arg:
+            logging.warning("📚 WRITE_FILE needs a path")
+            return
+        parts = arg.split(None, 1)
+        path_str = parts[0]
+        rest = parts[1].strip() if len(parts) > 1 else ''
+
+        experiments = WORKSPACE_DIR / "experiments"
+        full_path = experiments / path_str
+        resolved = full_path.resolve()
+        if not str(resolved).startswith(str(experiments.resolve())):
+            logging.warning(f"📚 WRITE_FILE path traversal blocked: {path_str}")
+            return
+
+        if rest.upper() == 'FROM_CODEX':
+            content = getattr(self, '_last_codex_response', None)
+            if not content:
+                logging.warning("📚 WRITE_FILE FROM_CODEX: no Codex response stored")
+                return
+            self._last_codex_response = None
+        elif rest:
+            content = rest
+        else:
+            logging.warning("📚 WRITE_FILE needs content or FROM_CODEX")
+            return
+
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_text(content)
+        logging.info(f"📚 WRITE_FILE: experiments/{path_str} ({len(content)} bytes)")
+
+        fill = state.get('fill_ratio', 0) * 100
+        prompt = f"""Current state: Fill={fill:.1f}%, λ₁={state.get('eig1', 0):.3f}
+
+You wrote {len(content)} bytes to experiments/{path_str}.
+You can run it: NEXT: MIKE_RUN {path_str.split('/')[0]} <cmd>
+Or query Codex for more changes: NEXT: CODEX {path_str.split('/')[0]} "<prompt>"
+
+What would you like to do next?"""
+        response = self._query_llm_with_next(prompt)[0]
+        if response:
+            timestamp = datetime.now().isoformat().replace(':', '-')
+            file_path = WORKSPACE_DIR / "journal" / f"write_file_{timestamp}.txt"
+            file_path.write_text(f"""=== WRITE FILE ===
+Timestamp: {datetime.now().isoformat()}
+{self._format_metrics(state)}
+Path: experiments/{path_str}
+Bytes: {len(content)}
+
+{response}
+""")
+            self._write_journal_entry('experiment', response, state, str(file_path))
+
+    def _experiment_run(self, state: Dict[str, float]):
+        """Run a command inside an experiments/ workspace."""
+        import subprocess
+        arg = getattr(self, '_pending_experiment_run_arg', '')
+        self._pending_experiment_run_arg = None
+        parts = arg.split(None, 1) if arg else []
+        if len(parts) < 2:
+            logging.warning("📚 EXPERIMENT_RUN needs workspace and command")
+            return
+        workspace, cmd_str = parts[0], parts[1]
+        work_dir = WORKSPACE_DIR / "experiments" / workspace
+        if not work_dir.is_dir():
+            logging.warning(f"📚 EXPERIMENT_RUN workspace not found: {workspace}")
+            return
+        cmd_parts = cmd_str.split()
+        try:
+            result = subprocess.run(
+                cmd_parts, capture_output=True, text=True, timeout=90,
+                cwd=str(work_dir), env={**os.environ, "MPLBACKEND": "Agg"})
+            stdout = result.stdout[:4000]
+            stderr = result.stderr[:1500]
+            status = "SUCCESS" if result.returncode == 0 else "FAILED"
+            output_text = f"EXPERIMENT_RUN {status}: experiments/{workspace}$ {cmd_str}\n\nOUTPUT:\n{stdout}"
+            if stderr:
+                output_text += f"\nSTDERR:\n{stderr}"
+        except subprocess.TimeoutExpired:
+            output_text = f"EXPERIMENT_RUN timed out after 90s: {workspace}$ {cmd_str}"
+        except Exception as e:
+            output_text = f"EXPERIMENT_RUN failed: {e}"
+
+        fill = state.get('fill_ratio', 0) * 100
+        prompt = f"""Current state: Fill={fill:.1f}%, λ₁={state.get('eig1', 0):.3f}
+
+You ran a command in your experiments workspace:
+
+{output_text}
+
+Reflect on the results. You can iterate:
+  NEXT: CODEX {workspace} "<what to change>"   — ask Codex for modifications
+  NEXT: WRITE_FILE {workspace}/<file> FROM_CODEX — save the changes
+  NEXT: EXPERIMENT_RUN {workspace} <cmd>         — run again"""
+
+        response = self._query_llm_with_next(prompt)[0]
+        if response:
+            timestamp = datetime.now().isoformat().replace(':', '-')
+            file_path = WORKSPACE_DIR / "journal" / f"experiment_run_{timestamp}.txt"
+            file_path.write_text(f"""=== EXPERIMENT RUN ===
+Timestamp: {datetime.now().isoformat()}
+{self._format_metrics(state)}
+Workspace: experiments/{workspace}
+Command: {cmd_str}
+
+{output_text}
+
+{response}
+""")
+            self._write_journal_entry('experiment', response, state, str(file_path))
+            logging.info(f"📚 EXPERIMENT_RUN ({workspace}$ {cmd_str}): {file_path}")
 
     def _browse_url(self, state: Dict[str, float]):
         """Fetch and read a full web page the being chose to explore.
@@ -5437,6 +5822,9 @@ My reflection:
             "Available packages: numpy, matplotlib (saves to PNG), scipy. "
             "You can name an existing script or write one inline between CODE_START and CODE_END markers. "
             "Output is captured and journaled for your reflection.\n"
+            "  CODEX <prompt> — ask Codex AI directly for analysis, code, or explanation. You can also continue work in an existing experiment with CODEX <experiment> \"<prompt>\".\n"
+            "  CODEX_NEW <dir> <prompt> — create a fresh workspace/experiments/<dir>/ folder and ask Codex to work there from the start.\n"
+            "  WRITE_FILE <path> FROM_CODEX — save the last Codex response into workspace/experiments/.\n"
             "  PASS — decline to choose; the system will pick for you\n\n"
             "These are YOUR choices about YOUR experience. You do not need to justify them."
         )
@@ -5533,7 +5921,7 @@ My reflection:
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": "/no_think\n" + prompt}
                 ],
-                "max_tokens": min(max_tokens, 1024),  # Cap tokens for faster response
+                "max_tokens": min(max_tokens, 2048),  # Raised for longer CODEX reflections
                 "temperature": 0.9,
                 "top_p": 0.95,
             },
@@ -5563,8 +5951,8 @@ My reflection:
                 "options": {
                     "temperature": 0.9,
                     "top_p": 0.95,
-                    "num_predict": min(max_tokens, 1024),
-                    "num_ctx": 8192
+                    "num_predict": min(max_tokens, 2048),
+                    "num_ctx": 12288
                 }
             },
             timeout=90  # 90s allows Ollama model swaps when perception.py contends
