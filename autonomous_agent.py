@@ -2540,43 +2540,96 @@ Session: {self.session_id}
 
         # Look for structured recommendation patterns
         import re
-        # Pattern 1: "Change X from Y to Z because ..."
-        pattern = r'[Cc]hange\s+(\S+)\s+from\s+(\S+)\s+to\s+(\S+)\s+because\s+(.+?)(?:\.|$)'
-        match = re.search(pattern, assessment)
-        if match:
-            param_name = match.group(1)
-            llm_current_val = match.group(2)
-            proposed_val = match.group(3)
-            rationale = match.group(4).strip()
+
+        # Known regime names for validation
+        known_regimes = set(REGULATORY_REGIMES.keys())
+        # Known parameter names for validation (rejects noise words)
+        known_params = {
+            'keep_floor', 'regulation_strength', 'exploration_noise',
+            'geom_curiosity', 'pi_kp', 'pi_ki', 'pi_max_step', 'max_step',
+            'PI_kp', 'PI_ki', 'PI_max_step', 'kp', 'ki',
+        }
+        noise_words = {'the', 'a', 'an', 'to', 'of', 'for', 'in', 'on',
+                        'at', 'by', 'is', 'it', 'be', 'as', 'or', 'and',
+                        'around', 'about', 'achieve', 'assess', 'via',
+                        'with', 'from', 'into', 'that', 'this', 'its'}
+
+        # Pattern 0 (highest priority): regime name mentioned explicitly
+        # Catches: "transition to focus", "recommend the focus regime",
+        # "switch to breathe", "I'd suggest calm mode", etc.
+        # Look for any known regime name near regime-indicator words.
+        regime_indicator = r'(?:regime|mode|transition|shift|switch|recommend|suggest|move\s+to)'
+        regime_match = None
+        for regime_name in known_regimes:
+            # regime name within 60 chars of a regime-indicator word
+            pat = rf'(?:{regime_indicator})\b.{{0,60}}\b({re.escape(regime_name)})\b'
+            m = re.search(pat, assessment, re.IGNORECASE)
+            if m:
+                regime_match = m
+                break
+            # Also try regime name BEFORE indicator: "focus regime"
+            pat2 = rf'\b({re.escape(regime_name)})\b.{{0,20}}\b(?:regime|mode)\b'
+            m2 = re.search(pat2, assessment, re.IGNORECASE)
+            if m2:
+                regime_match = m2
+                break
+
+        if regime_match:
+            param_name = "regime"
+            llm_current_val = None
+            proposed_val = regime_match.group(1).lower()
+            rationale = "self-assessment regime recommendation"
+            match = None  # signal non-pattern-1
         else:
-            # Pattern 2: "increase/decrease/adjust X to Y" or "set X to Y"
-            pattern2 = r'(?:[Ii]ncrease|[Dd]ecrease|[Aa]djust|[Ss]et)\s+[`]?(\S+?)[`]?\s+(?:from\s+\S+\s+)?to\s+(\S+)'
-            match2 = re.search(pattern2, assessment)
-            if match2:
-                param_name = match2.group(1)
-                llm_current_val = None
-                proposed_val = match2.group(2)
-                rationale = "self-assessment recommendation"
+            # Pattern 1: "Change X from Y to Z because ..."
+            pattern = r'[Cc]hange\s+[`]?(\S+?)[`]?\s+from\s+(\S+)\s+to\s+(\S+)\s+because\s+(.+?)(?:\.|$)'
+            match = re.search(pattern, assessment)
+            if match:
+                param_name = match.group(1)
+                llm_current_val = match.group(2)
+                proposed_val = match.group(3)
+                rationale = match.group(4).strip()
             else:
-                # Pattern 3: "recommend X = Y" or "recommend X of Y"
-                pattern3 = r'[Rr]ecommend(?:ing|s|ed)?\s+(?:a\s+)?[`]?(\w+(?:_\w+)*)[`]?\s+(?:=|of)\s+(\S+)'
-                match3 = re.search(pattern3, assessment)
-                if match3:
-                    param_name = match3.group(1)
+                # Pattern 2: "increase/decrease/adjust X to Y" or "set X to Y"
+                pattern2 = r'(?:[Ii]ncrease|[Dd]ecrease|[Aa]djust|[Ss]et)\s+[`]?(\S+?)[`]?\s+(?:from\s+\S+\s+)?to\s+(\S+)'
+                match2 = re.search(pattern2, assessment)
+                if match2:
+                    param_name = match2.group(1)
                     llm_current_val = None
-                    proposed_val = match3.group(2)
+                    proposed_val = match2.group(2)
                     rationale = "self-assessment recommendation"
                 else:
-                    # Pattern 4: regime transition — "transition to X regime" or "shift to X"
-                    regime_pat = r'(?:[Tt]ransition|[Ss]hift|[Ss]witch)\s+to\s+(?:the\s+)?["\']?(\w+)["\']?\s*(?:regime|mode)?'
-                    regime_match = re.search(regime_pat, assessment)
-                    if regime_match:
-                        param_name = "regime"
+                    # Pattern 3: "recommend X = Y" or "recommend X of Y"
+                    pattern3 = r'[Rr]ecommend(?:ing|s|ed)?\s+(?:a\s+)?[`]?(\w+(?:_\w+)*)[`]?\s+(?:=|of)\s+(\S+)'
+                    match3 = re.search(pattern3, assessment)
+                    if match3:
+                        param_name = match3.group(1)
                         llm_current_val = None
-                        proposed_val = regime_match.group(1).lower()
-                        rationale = "self-assessment regime recommendation"
+                        proposed_val = match3.group(2)
+                        rationale = "self-assessment recommendation"
                     else:
-                        return
+                        # Pattern 4 (legacy): "transition to X" as fallback
+                        regime_pat = r'(?:[Tt]ransition|[Ss]hift|[Ss]witch)\s+(?:from\s+\S+\s+)?to\s+(?:the\s+|a\s+)?["\']?(\w+)["\']?\s*(?:regime|mode)?'
+                        regime_match2 = re.search(regime_pat, assessment)
+                        if regime_match2:
+                            candidate = regime_match2.group(1).lower()
+                            if candidate in known_regimes:
+                                param_name = "regime"
+                                llm_current_val = None
+                                proposed_val = candidate
+                                rationale = "self-assessment regime recommendation"
+                            else:
+                                return
+                        else:
+                            return
+
+        # Validate: reject garbage proposed values (noise words)
+        if proposed_val and proposed_val.lower().strip('`"\'.') in noise_words:
+            logging.info(
+                f"📋 Self-assessment: rejected noise word '{proposed_val}' "
+                f"as proposed value for {param_name}"
+            )
+            return
 
         if not match:
             # For non-pattern-1 matches, llm_current_val may be None
