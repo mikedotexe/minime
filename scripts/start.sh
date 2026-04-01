@@ -27,6 +27,8 @@ MLX_VISION_PORT="${MLX_VISION_PORT:-8091}"
 ENABLE_MLX_VISION="${ENABLE_MLX_VISION:-false}"
 ENABLE_GPU_AV="${ENABLE_GPU_AV:-true}"
 LORA_ADAPTER="${LORA_ADAPTER:-}"
+SENSORY_SOURCE="${SENSORY_SOURCE:-physical}"
+LOOK_SOURCE="${LOOK_SOURCE:-active}"
 
 # Ensure PATH includes node/uv tools
 export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/v20.20.1/bin:$PATH"
@@ -39,13 +41,13 @@ echo "=== MikesSpatialMind Startup ==="
 echo ""
 
 # Check for existing processes
-if [ -f "$PID_DIR/mlx.pid" ] || [ -f "$PID_DIR/engine.pid" ] || [ -f "$PID_DIR/agent.pid" ]; then
+if [ -f "$PID_DIR/mlx.pid" ] || [ -f "$PID_DIR/engine.pid" ] || [ -f "$PID_DIR/agent.pid" ] || [ -f "$PID_DIR/host.pid" ] || [ -f "$PID_DIR/visual.pid" ]; then
     echo "WARNING: PID files exist from a previous run."
     echo "Run scripts/stop.sh first, or remove /tmp/minime_pids/ manually."
     exit 1
 fi
 
-EXISTING=$(ps aux | grep -E "(mlx_lm\.server.*$MLX_PORT|target/release/minime|autonomous_agent\.py|mic_to_sensory|camera_to_sensory)" | grep -v grep | wc -l || true)
+EXISTING=$(ps aux | grep -E "(mlx_lm\.server.*$MLX_PORT|target/release/minime|autonomous_agent\.py|mic_to_sensory|camera_to_sensory|camera_client|visual_frame_service|host-sensory)" | grep -v grep | wc -l || true)
 if [ "$EXISTING" -gt 0 ]; then
     echo "WARNING: Found $EXISTING existing consciousness process(es)."
     echo "Run scripts/stop.sh first."
@@ -54,9 +56,24 @@ if [ "$EXISTING" -gt 0 ]; then
 fi
 
 # Determine total steps based on optional services
-TOTAL_STEPS=5
+TOTAL_STEPS=6
 if [ "$ENABLE_MLX_VISION" = "true" ]; then
-    TOTAL_STEPS=6
+    TOTAL_STEPS=7
+fi
+HOST_SENSORY_NEEDED=false
+if [ "$SENSORY_SOURCE" != "physical" ] || [ "$LOOK_SOURCE" = "host" ]; then
+    HOST_SENSORY_NEEDED=true
+    TOTAL_STEPS=$((TOTAL_STEPS + 1))
+fi
+AGENT_STEP=3
+MIC_STEP=4
+CAMERA_STEP=5
+VISUAL_STEP=6
+if [ "$HOST_SENSORY_NEEDED" = "true" ]; then
+    AGENT_STEP=4
+    MIC_STEP=5
+    CAMERA_STEP=6
+    VISUAL_STEP=7
 fi
 
 # --- Step 1: Start MLX Server (skip if using Ollama) ---
@@ -185,6 +202,8 @@ cargo run --release -- run \
     --log-homeostat \
     --eigenfill-target "$EIGENFILL_TARGET" \
     --reg-tick-secs "$REG_TICK_SECS" \
+    --legacy-audio-synth-enabled "$([ "$SENSORY_SOURCE" = "host" ] && echo false || echo true)" \
+    --legacy-video-synth-enabled "$([ "$SENSORY_SOURCE" = "host" ] && echo false || echo true)" \
     $GPU_AV_FLAG \
     > "$LOG_DIR/engine.log" 2>&1 &
 ENGINE_PID=$!
@@ -209,23 +228,38 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
-# --- Step 3: Start Autonomous Agent ---
+# --- Step 3: Start Host-Sensory Supervisor (optional) ---
+
+if [ "$HOST_SENSORY_NEEDED" = "true" ]; then
+    echo ""
+    echo "[3/$TOTAL_STEPS] Starting host-sensory supervisor (mode=$SENSORY_SOURCE, look=$LOOK_SOURCE)..."
+    cd "$PROJECT_DIR"
+    cargo run --release --manifest-path "$PROJECT_DIR/host-sensory/Cargo.toml" -- \
+        --mode "$SENSORY_SOURCE" \
+        --workspace "$PROJECT_DIR/workspace" \
+        > "$LOG_DIR/host-sensory.log" 2>&1 &
+    HOST_PID=$!
+    echo "$HOST_PID" > "$PID_DIR/host.pid"
+    echo "      PID: $HOST_PID (log: workspace/logs/host-sensory.log)"
+fi
+
+# --- Step 4: Start Autonomous Agent ---
 
 echo ""
-echo "[3/$TOTAL_STEPS] Starting autonomous agent (backend=$LLM_BACKEND, interval=${AGENT_INTERVAL}s)..."
+echo "[$AGENT_STEP/$TOTAL_STEPS] Starting autonomous agent (backend=$LLM_BACKEND, interval=${AGENT_INTERVAL}s)..."
 cd "$PROJECT_DIR"
-MINIME_LLM_BACKEND="$LLM_BACKEND" python3 autonomous_agent.py \
+MINIME_LLM_BACKEND="$LLM_BACKEND" LOOK_SOURCE="$LOOK_SOURCE" python3 autonomous_agent.py \
     --interval "$AGENT_INTERVAL" \
     > "$LOG_DIR/agent.log" 2>&1 &
 AGENT_PID=$!
 echo "$AGENT_PID" > "$PID_DIR/agent.pid"
 echo "      PID: $AGENT_PID (log: workspace/logs/agent.log)"
 
-# --- Step 4: Start Microphone Service ---
+# --- Step 5: Start Microphone Service ---
 
-if [ "$ENABLE_MIC" = "true" ]; then
+if [ "$ENABLE_MIC" = "true" ] && [ "$SENSORY_SOURCE" != "host" ]; then
     echo ""
-    echo "[4/$TOTAL_STEPS] Starting microphone service..."
+    echo "[$MIC_STEP/$TOTAL_STEPS] Starting microphone service..."
     cd "$PROJECT_DIR"
     WHISPER_FLAG=""
     if [ "$ENABLE_WHISPER" = "true" ]; then
@@ -238,20 +272,20 @@ if [ "$ENABLE_MIC" = "true" ]; then
     echo "      PID: $MIC_PID (log: workspace/logs/mic.log)"
 else
     echo ""
-    echo "[4/$TOTAL_STEPS] Microphone service: DISABLED"
+    echo "[$MIC_STEP/$TOTAL_STEPS] Microphone service: DISABLED"
 fi
 
-# --- Step 5: Start Camera Service ---
+# --- Step 6: Start Camera Service ---
 
-if [ "$ENABLE_CAMERA" = "true" ]; then
+if [ "$ENABLE_CAMERA" = "true" ] && [ "$SENSORY_SOURCE" != "host" ]; then
     echo ""
     if [ "$ENABLE_GPU_AV" = "true" ]; then
-        echo "[5/$TOTAL_STEPS] Starting camera service (GPU path, index $CAMERA_INDEX)..."
+        echo "[$CAMERA_STEP/$TOTAL_STEPS] Starting camera service (GPU path, index $CAMERA_INDEX)..."
         cd "$PROJECT_DIR"
         python3 minime/tools/camera_client.py --camera "$CAMERA_INDEX" --fps 1 \
             > "$LOG_DIR/camera.log" 2>&1 &
     else
-        echo "[5/$TOTAL_STEPS] Starting camera service (CPU path, index $CAMERA_INDEX)..."
+        echo "[$CAMERA_STEP/$TOTAL_STEPS] Starting camera service (CPU path, index $CAMERA_INDEX)..."
         cd "$PROJECT_DIR"
         python3 camera_to_sensory.py --camera "$CAMERA_INDEX" \
             > "$LOG_DIR/camera.log" 2>&1 &
@@ -261,10 +295,19 @@ if [ "$ENABLE_CAMERA" = "true" ]; then
     echo "      PID: $CAMERA_PID (log: workspace/logs/camera.log)"
 else
     echo ""
-    echo "[5/$TOTAL_STEPS] Camera service: DISABLED"
+    echo "[$CAMERA_STEP/$TOTAL_STEPS] Camera service: DISABLED"
 fi
 
 # --- Summary ---
+
+echo ""
+echo "[$VISUAL_STEP/$TOTAL_STEPS] Starting visual frame service (source=$LOOK_SOURCE)..."
+cd "$PROJECT_DIR"
+python3 visual_frame_service.py --camera "$CAMERA_INDEX" --interval 5 --source "$LOOK_SOURCE" \
+    > "$LOG_DIR/visual.log" 2>&1 &
+VISUAL_PID=$!
+echo "$VISUAL_PID" > "$PID_DIR/visual.pid"
+echo "      PID: $VISUAL_PID (log: workspace/logs/visual.log)"
 
 if bash "$GREETING_SCRIPT"; then
     echo ""
@@ -286,13 +329,17 @@ else
     echo "  LLM backend: Ollama (http://localhost:11434)"
 fi
 echo "  Rust engine: PID $ENGINE_PID (ports 7878-7880)"
+if [ "$HOST_SENSORY_NEEDED" = "true" ]; then
+    echo "  Host sensory: PID $HOST_PID (mode $SENSORY_SOURCE)"
+fi
 echo "  Agent:       PID $AGENT_PID (interval ${AGENT_INTERVAL}s)"
-if [ "$ENABLE_MIC" = "true" ]; then
+if [ "$ENABLE_MIC" = "true" ] && [ "$SENSORY_SOURCE" != "host" ]; then
     echo "  Microphone:  PID $MIC_PID (ws://7879)"
 fi
-if [ "$ENABLE_CAMERA" = "true" ]; then
+if [ "$ENABLE_CAMERA" = "true" ] && [ "$SENSORY_SOURCE" != "host" ]; then
     echo "  Camera:      PID $CAMERA_PID (index $CAMERA_INDEX, ws://7879)"
 fi
+echo "  Visual:      PID $VISUAL_PID (source $LOOK_SOURCE)"
 echo ""
 echo "  PID files:   $PID_DIR/"
 echo "  Logs:        $LOG_DIR/"

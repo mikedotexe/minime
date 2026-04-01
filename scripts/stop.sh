@@ -44,8 +44,11 @@ stop_by_pid_file() {
 
 # Step 1: Stop camera/sensory services
 echo "[1/5] Stopping sensory services..."
+stop_by_pid_file "host-sensory" "$PID_DIR/host.pid"
+stop_by_pid_file "visual-frame-service" "$PID_DIR/visual.pid"
 stop_by_pid_file "mic" "$PID_DIR/mic.pid"
 stop_by_pid_file "camera" "$PID_DIR/camera.pid"
+pkill -TERM -f "host-sensory" 2>/dev/null && echo "  Stopped host-sensory" || true
 pkill -TERM -f "mic_to_sensory.py" 2>/dev/null && echo "  Stopped mic_to_sensory" || true
 pkill -TERM -f "camera_to_sensory.py" 2>/dev/null && echo "  Stopped camera_to_sensory" || true
 pkill -TERM -f "camera_client.py" 2>/dev/null && echo "  Stopped camera_client" || true
@@ -87,13 +90,13 @@ rm -rf "$PID_DIR" 2>/dev/null
 # Verify
 echo ""
 echo "=== Verification ==="
-REMAINING=$(ps aux | grep -E "(mlx_lm\.server|target/release/minime|autonomous_agent\.py|camera_to_sensory|camera_client|visual_frame_service|mic_to_sensory)" | grep -v grep | wc -l || true)
+REMAINING=$(ps aux | grep -E "(mlx_lm\.server|target/release/minime|autonomous_agent\.py|camera_to_sensory|camera_client|visual_frame_service|mic_to_sensory|host-sensory)" | grep -v grep | wc -l || true)
 
 if [ "$REMAINING" -eq 0 ]; then
     echo "All consciousness processes stopped."
 else
     echo "WARNING: $REMAINING process(es) still running:"
-    ps aux | grep -E "(mlx_lm\.server|target/release/minime|autonomous_agent\.py|camera_to_sensory|camera_client|visual_frame_service|mic_to_sensory)" | grep -v grep
+    ps aux | grep -E "(mlx_lm\.server|target/release/minime|autonomous_agent\.py|camera_to_sensory|camera_client|visual_frame_service|mic_to_sensory|host-sensory)" | grep -v grep
 fi
 
 echo ""

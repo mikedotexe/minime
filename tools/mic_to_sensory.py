@@ -30,6 +30,7 @@ import struct
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import List, Optional
 
 # ---------------------------------------------------------------------------
@@ -50,11 +51,24 @@ WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo"
 WHISPER_INTERVAL_S = 10.0    # run STT every N seconds
 WHISPER_DURATION_S = 5.0     # record N seconds for STT
 WHISPER_TEMP_DIR = "/tmp/minime_whisper"
+WORKSPACE_DIR = Path(__file__).resolve().parents[1] / "workspace"
+RUNTIME_DIR = WORKSPACE_DIR / "runtime"
+MIC_STATUS_PATH = RUNTIME_DIR / "mic_status.json"
 
 
 def _set_whisper_interval(val: float):
     global WHISPER_INTERVAL_S
     WHISPER_INTERVAL_S = val
+
+
+def _write_status(status: dict):
+    try:
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        temp = MIC_STATUS_PATH.with_suffix(".tmp")
+        temp.write_text(json.dumps(status, indent=2))
+        temp.replace(MIC_STATUS_PATH)
+    except Exception:
+        pass
 
 # Mel filterbank for MFCC
 NUM_MEL_FILTERS = 26
@@ -416,6 +430,8 @@ async def run_live(ws_uri: str, enable_whisper: bool):
                 print(f"[whisper] STT enabled (every {WHISPER_INTERVAL_S}s, model: {WHISPER_MODEL})")
 
             count = 0
+            silence_streak = 0
+            good_streak = 0
             loop = asyncio.get_event_loop()
 
             while True:
@@ -429,6 +445,22 @@ async def run_live(ws_uri: str, enable_whisper: bool):
 
                 features = extract_features(raw)
                 ts_ms = int(time.time() * 1000)
+                rms = float(features[0])
+                if rms < 0.001:
+                    silence_streak += 1
+                    good_streak = 0
+                else:
+                    silence_streak = 0
+                    good_streak += 1
+
+                _write_status({
+                    "ts_ms": ts_ms,
+                    "rms": rms,
+                    "silence_streak": silence_streak,
+                    "good_streak": good_streak,
+                    "chunk_count": count + 1,
+                    "healthy": silence_streak < 30,
+                })
 
                 msg = {
                     "kind": "audio",
@@ -457,6 +489,14 @@ async def run_live(ws_uri: str, enable_whisper: bool):
                 whisper_task.cancel()
 
     finally:
+        _write_status({
+            "ts_ms": int(time.time() * 1000),
+            "rms": 0.0,
+            "silence_streak": 0,
+            "good_streak": 0,
+            "chunk_count": 0,
+            "healthy": False,
+        })
         sox_proc.terminate()
         sox_proc.wait()
         print("[mic] stopped")

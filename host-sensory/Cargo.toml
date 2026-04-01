@@ -1,0 +1,27 @@
+[package]
+name = "host-sensory"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "host_sensory"
+path = "src/lib.rs"
+
+[[bin]]
+name = "host-sensory"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+futures-util = "0.3"
+hound = "3.5.1"
+image = { version = "0.25.5", default-features = false, features = ["jpeg", "png"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sysinfo = "0.38.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "signal"] }
+tokio-tungstenite = "0.21"
+
+[workspace]

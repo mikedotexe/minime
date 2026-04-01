@@ -29,6 +29,9 @@ WORKSPACE_DIR = Path(__file__).parent / "workspace"
 REQUESTS_DIR = WORKSPACE_DIR / "visual_requests"
 RESPONSES_DIR = WORKSPACE_DIR / "visual_responses"
 CAPTURES_DIR = WORKSPACE_DIR / "visual_captures"
+RUNTIME_DIR = WORKSPACE_DIR / "runtime"
+HOST_FRAME_PATH = RUNTIME_DIR / "host_frame.jpg"
+SENSORY_SOURCE_PATH = RUNTIME_DIR / "sensory_source.json"
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 LLAVA_MODEL = "llava-llama3"
@@ -36,23 +39,41 @@ WS_URI = "ws://127.0.0.1:7879"
 
 
 class VisualFrameService:
-    def __init__(self, camera_index: int = 0, poll_interval: float = 5.0):
+    def __init__(self, camera_index: int = 0, poll_interval: float = 5.0, source: str = "active"):
         self.camera_index = camera_index
         self.poll_interval = poll_interval
+        self.source = source
         self.running = False
 
         for d in [REQUESTS_DIR, RESPONSES_DIR, CAPTURES_DIR,
                   REQUESTS_DIR / "processed", RESPONSES_DIR / "processed"]:
             d.mkdir(parents=True, exist_ok=True)
 
-    def capture_frame(self) -> Optional[np.ndarray]:
+    def _active_source(self) -> str:
+        if self.source in ("physical", "host"):
+            return self.source
+        try:
+            data = json.loads(SENSORY_SOURCE_PATH.read_text())
+            return data.get("video", {}).get("source", "physical")
+        except Exception:
+            return "physical"
+
+    def capture_frame(self) -> tuple[Optional[np.ndarray], str]:
+        source = self._active_source()
+        if source == "host":
+            frame = cv2.imread(str(HOST_FRAME_PATH), cv2.IMREAD_GRAYSCALE)
+            if frame is None:
+                logging.error("Host-state frame not accessible")
+                return None, source
+            return frame, source
+
         cap = cv2.VideoCapture(self.camera_index)
         if not cap.isOpened():
             logging.error("Camera not accessible")
-            return None
+            return None, source
         ret, frame = cap.read()
         cap.release()
-        return frame if ret else None
+        return (frame if ret else None), source
 
     def analyze_with_llava(self, frame: np.ndarray, prompt: str) -> Optional[str]:
         import requests
@@ -121,12 +142,13 @@ class VisualFrameService:
 
         logging.info(f"Processing visual request: {request_id}")
 
-        frame = self.capture_frame()
+        frame, capture_source = self.capture_frame()
         if frame is None:
             response = {
                 "visual_available": False,
-                "description": "Camera not accessible",
+                "description": "Host-state frame not accessible" if capture_source == "host" else "Camera not accessible",
                 "error": "capture_failed",
+                "source": capture_source,
             }
         else:
             timestamp = datetime.now().isoformat().replace(":", "-")
@@ -151,6 +173,7 @@ class VisualFrameService:
                 "image_path": str(image_path),
                 "image_filename": image_filename,
                 "image_base64": image_b64,
+                "source": capture_source,
             }
 
         response["request_id"] = request_id
@@ -192,9 +215,14 @@ def main():
     parser = argparse.ArgumentParser(description="Visual Frame Service")
     parser.add_argument("--camera", type=int, default=0)
     parser.add_argument("--interval", type=float, default=5.0)
+    parser.add_argument("--source", choices=("active", "physical", "host"), default="active")
     args = parser.parse_args()
 
-    service = VisualFrameService(camera_index=args.camera, poll_interval=args.interval)
+    service = VisualFrameService(
+        camera_index=args.camera,
+        poll_interval=args.interval,
+        source=args.source,
+    )
     service.start()
 
 

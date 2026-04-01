@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -23,6 +24,19 @@ logger = logging.getLogger(__name__)
 
 # Feature extraction settings
 VIDEO_FEAT_DIM = 8  # Must match ESN server SENS_DIM (8 video + 8 audio)
+WORKSPACE_DIR = Path(__file__).resolve().parent / "workspace"
+RUNTIME_DIR = WORKSPACE_DIR / "runtime"
+CAMERA_STATUS_PATH = RUNTIME_DIR / "camera_status.json"
+
+
+def write_camera_status(status: dict):
+    try:
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        temp = CAMERA_STATUS_PATH.with_suffix(".tmp")
+        temp.write_text(json.dumps(status, indent=2))
+        temp.replace(CAMERA_STATUS_PATH)
+    except Exception:
+        pass
 
 class CameraToSensoryBridge:
     def __init__(self, camera_index: int = 0, ws_uri: str = "ws://127.0.0.1:7879"):
@@ -145,6 +159,11 @@ class CameraToSensoryBridge:
                         "features": features.tolist(),
                         "ts_ms": int(time.time() * 1000),
                     }
+                    write_camera_status({
+                        "ts_ms": message["ts_ms"],
+                        "frame_count": frame_count + 1,
+                        "healthy": True,
+                    })
 
                     # Send to ESN server
                     await websocket.send(json.dumps(message))
@@ -159,6 +178,11 @@ class CameraToSensoryBridge:
         except Exception as e:
             logger.error(f"❌ Error: {e}")
         finally:
+            write_camera_status({
+                "ts_ms": int(time.time() * 1000),
+                "frame_count": frame_count,
+                "healthy": False,
+            })
             if hasattr(self.camera, 'stop'):
                 self.camera.stop()
             else:

@@ -59,6 +59,10 @@ pub enum SensoryMsg {
         synth_noise_level: Option<f32>,
         /// Pure tone mode — single sine wave, zero noise, total calm
         pure_tone: Option<bool>,
+        /// Gate the legacy internal synthetic audio lane.
+        legacy_audio_synth: Option<bool>,
+        /// Gate the legacy internal synthetic video lane.
+        legacy_video_synth: Option<bool>,
         /// PI controller sovereignty — being can tune these at runtime.
         pi_kp: Option<f32>,
         pi_ki: Option<f32>,
@@ -182,6 +186,8 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
             deep_breathing,
             synth_noise_level,
             pure_tone,
+            legacy_audio_synth,
+            legacy_video_synth,
             pi_kp,
             pi_ki,
             pi_max_step,
@@ -283,6 +289,20 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
                 } else {
                     println!("🔔 Being exited pure tone");
                 }
+            }
+            if let Some(v) = legacy_audio_synth {
+                bus.set_legacy_audio_synth_enabled(v);
+                println!(
+                    "🎚️  Legacy audio synth {}",
+                    if v { "enabled" } else { "disabled" }
+                );
+            }
+            if let Some(v) = legacy_video_synth {
+                bus.set_legacy_video_synth_enabled(v);
+                println!(
+                    "🎚️  Legacy video synth {}",
+                    if v { "enabled" } else { "disabled" }
+                );
             }
             if let Some(v) = synth_noise_level {
                 bus.set_synth_noise_level(v);
