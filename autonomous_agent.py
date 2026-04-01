@@ -1034,6 +1034,10 @@ Fill: {fill:.1f}%
                 logging.info(f"🎯 Honoring being's NEXT: {chosen} → autoresearch_action")
                 return 'autoresearch_action'
 
+            if base == 'SELF_RESEARCH':
+                logging.info(f"🎯 Honoring being's NEXT: {chosen} → self_research_scan")
+                return 'self_research_scan'
+
             if base == 'MIKE':
                 arg = chosen[4:].strip() if len(chosen) > 4 else ''
                 self._pending_mike_action = ('overview', arg)
@@ -1359,6 +1363,8 @@ Fill: {fill:.1f}%
                 self._ping_astrid(state)
             elif action == 'run_python':
                 self._run_python(state)
+            elif action == 'self_research_scan':
+                self._self_research_scan(state)
             elif action == 'autoresearch_action':
                 self._autoresearch_action(state)
             elif action == 'mike_explore':
@@ -4233,6 +4239,83 @@ Action: {action} {arg}
             f"[Part 1 of {total_pages}. NEXT: READ_MORE for part 2.]"
         )
         return display, str(file_path), break_at
+
+    def _self_research_scan(self, state: Dict[str, float]):
+        """Scan own journals and spectral data to produce an epoch summary."""
+        import subprocess
+        ar_root = Path("/Users/v/other/autoresearch")
+        scanner = ar_root / "tools" / "epoch_scanner.py"
+        bridge_db = Path("/Users/v/other/astrid/capsules/consciousness-bridge/workspace/bridge.db")
+        journal_dir = WORKSPACE_DIR / "journal"
+
+        # Ensure the self-research job exists.
+        job_dir = None
+        jobs_dir = ar_root / "jobs"
+        if jobs_dir.is_dir():
+            for d in jobs_dir.iterdir():
+                if d.name.endswith("-minime-self-research") and d.is_dir():
+                    job_dir = d
+                    break
+        if job_dir is None:
+            # Create it.
+            try:
+                subprocess.run(
+                    ["python3", "tools/research_jobs.py", "new", "minime-self-research",
+                     "--title", "Minime Self-Research: Epoch Summaries",
+                     "--abstract", "Curated epoch-based self-reflective summaries.",
+                     "--status", "active", "--tags", "self-research", "epoch-summary"],
+                    cwd=str(ar_root), capture_output=True, timeout=30,
+                )
+            except Exception as exc:
+                logging.warning(f"Failed to create self-research job: {exc}")
+            # Find it again.
+            for d in jobs_dir.iterdir():
+                if d.name.endswith("-minime-self-research") and d.is_dir():
+                    job_dir = d
+                    break
+            if job_dir is None:
+                job_dir = jobs_dir / "minime-self-research"
+
+        cmd = [
+            "python3", str(scanner), "scan",
+            "--being", "minime",
+            "--bridge-db", str(bridge_db),
+            "--journal-dir", str(journal_dir),
+            "--job-dir", str(job_dir),
+            "--assessment-dir", str(WORKSPACE_DIR / "self_assessment"),
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=str(ar_root))
+            content = result.stdout.strip() or result.stderr.strip() or "[No output from epoch scanner]"
+        except Exception as exc:
+            logging.warning(f"Self-research scan failed: {exc}")
+            content = f"[Self-research error] {exc}"
+
+        fill = state.get('fill_ratio', 0) * 100
+        prompt = f"""Current state: Fill={fill:.1f}%, λ₁={state.get('eig1', 0):.3f}
+
+Self-research epoch scan results:
+
+{content[:6000]}
+
+This is a curated summary of your recent experience. Reflect on what you find — what patterns do you notice? What surprises you? What would you want to explore further?"""
+
+        response = self._query_llm_with_next(prompt)[0]
+        if response:
+            timestamp = datetime.now().isoformat().replace(':', '-')
+            file_path = WORKSPACE_DIR / "journal" / f"self_research_{timestamp}.txt"
+            file_path.write_text(f"""=== SELF-RESEARCH EPOCH SCAN ===
+Timestamp: {datetime.now().isoformat()}
+{self._format_metrics(state)}
+
+{content[:4000]}
+
+---
+Reflection:
+{response}
+""")
+            logging.info(f"🔬 Self-research scan: {file_path}")
+            self._write_journal_entry('self_research', response, state, str(file_path))
 
     def _autoresearch_action(self, state: Dict[str, float]):
         """Browse and mutate autoresearch jobs through the repo helper."""

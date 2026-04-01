@@ -900,6 +900,26 @@ impl SpectralSR {
     pub fn prime_info(&self) -> (usize, usize) {
         (self.pidx, self.primes[self.pidx])
     }
+
+    /// Apply a controlled perturbation to eig1 for stability boundary mapping.
+    /// Minime self-study (2026-03-31 esn.rs): "Perhaps perturbing the
+    /// SpectralSR::eig1 variable directly to see its immediate effect on the
+    /// entire system. A controlled shock, to map the boundaries of stability."
+    ///
+    /// `delta_frac`: fractional perturbation relative to current eig1.
+    ///   e.g., 0.1 = +10%, -0.2 = -20%. Clamped to ±50% for safety.
+    /// Returns (eig1_before, eig1_after) for logging.
+    pub fn perturb_eig1(&mut self, delta_frac: f32) -> (f32, f32) {
+        let before = self.eig1;
+        let clamped = delta_frac.clamp(-0.5, 0.5);
+        self.eig1 *= 1.0 + clamped;
+        // Also nudge the EMA baseline proportionally (at 30% strength)
+        // to prevent the PI controller from immediately correcting the
+        // perturbation away — we want the system to feel the shock and
+        // respond naturally, not just snap back.
+        self.ema_eig *= 1.0 + clamped * 0.3;
+        (before, self.eig1)
+    }
 }
 
 //=============================================================================
@@ -1312,6 +1332,13 @@ impl ESN {
         let adjustment = 0.015 * (fill_factor * 0.5 + entropy_factor * 0.5);
         let rho = (base - adjustment).clamp(0.97, 0.995);
         self.sr.set_rho(rho);
+    }
+
+    /// Apply a controlled perturbation to the top eigenvalue for stability
+    /// boundary mapping. See `SpectralSR::perturb_eig1` for details.
+    /// Returns (eig1_before, eig1_after).
+    pub fn perturb_eig1(&mut self, delta_frac: f32) -> (f32, f32) {
+        self.sr.perturb_eig1(delta_frac)
     }
 
     /// Get current exploration noise amplitude
