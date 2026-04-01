@@ -124,6 +124,23 @@ impl Gpu {
     pub fn read_f32(&self, buf: &Buffer, count: usize) -> Vec<f32> {
         unsafe { slice::from_raw_parts(buf.contents() as *const f32, count) }.to_vec()
     }
+
+    // Borrow a shared buffer as an f32 slice without cloning.
+    pub fn as_f32_slice<'a>(&self, buf: &'a Buffer, count: usize) -> &'a [f32] {
+        debug_assert!(count * mem::size_of::<f32>() <= buf.length() as usize);
+        unsafe { slice::from_raw_parts(buf.contents() as *const f32, count) }
+    }
+
+    // Borrow a shared buffer as a mutable f32 slice without cloning.
+    pub fn as_f32_slice_mut<'a>(&self, buf: &'a Buffer, count: usize) -> &'a mut [f32] {
+        debug_assert!(count * mem::size_of::<f32>() <= buf.length() as usize);
+        unsafe { slice::from_raw_parts_mut(buf.contents() as *mut f32, count) }
+    }
+
+    pub fn mark_modified_f32(&self, buf: &Buffer, count: usize) {
+        let bytes = count * mem::size_of::<f32>();
+        buf.did_modify_range(NSRange::new(0, bytes as u64));
+    }
 }
 
 // CPU Gram-Schmidt orthonormalization (cache handoff pattern)
@@ -190,4 +207,28 @@ pub fn write_slice<T: Copy>(buf: &Buffer, data: &[T]) {
 // Generic read_vec helper for any Copy + Default type
 pub fn read_vec<T: Copy + Default>(buf: &Buffer, count: usize) -> Vec<T> {
     unsafe { slice::from_raw_parts(buf.contents() as *const T, count).to_vec() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Gpu;
+
+    #[test]
+    fn borrowed_shared_views_reflect_in_place_mutations() -> anyhow::Result<()> {
+        let gpu = Gpu::new()?;
+        let buf = gpu.new_shared((4 * std::mem::size_of::<f32>()) as u64);
+
+        gpu.write_f32(&buf, &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(gpu.as_f32_slice(&buf, 4), &[1.0, 2.0, 3.0, 4.0]);
+
+        {
+            let slice = gpu.as_f32_slice_mut(&buf, 4);
+            slice[1] = 9.0;
+            slice[3] = -2.0;
+        }
+        gpu.mark_modified_f32(&buf, 4);
+
+        assert_eq!(gpu.as_f32_slice(&buf, 4), &[1.0, 9.0, 3.0, -2.0]);
+        Ok(())
+    }
 }

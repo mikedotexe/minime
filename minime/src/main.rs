@@ -20,6 +20,7 @@ mod cheby;
 mod db;
 mod esn;
 mod gpu;
+mod handoff_diag;
 mod ising_shadow;
 mod memory_bank;
 mod nn;
@@ -33,6 +34,7 @@ use cheby::*;
 use db::*;
 use esn::*;
 use gpu::*;
+use handoff_diag::*;
 use ising_shadow::*;
 use memory_bank::*;
 use nn::*;
@@ -103,6 +105,10 @@ enum Cmd {
         /// Enable async-aware ESN measurement CSV for the background rank-1 path
         #[arg(long, default_value_t = false)]
         log_esn_async_profile: bool,
+
+        /// Enable diagnostics-only shared-buffer handoff verification logging
+        #[arg(long, default_value_t = false)]
+        log_handoff_diagnostics: bool,
 
         /// Introspection-step policy: adaptive uses 1 step by default and escalates periodically or under pressure
         #[arg(long, value_enum, default_value_t = EsnIntrospectionPolicyArg::Adaptive)]
@@ -333,6 +339,7 @@ async fn main() -> Result<()> {
             quiet,
             log_esn_profile,
             log_esn_async_profile,
+            log_handoff_diagnostics,
             esn_introspection_policy,
             esn_introspection_power_steps,
             cheby_order,
@@ -352,6 +359,7 @@ async fn main() -> Result<()> {
                 log_homeostat && !quiet, // Disable logging if quiet is set
                 log_esn_profile,
                 log_esn_async_profile,
+                log_handoff_diagnostics,
                 esn_introspection_policy.into(),
                 esn_introspection_power_steps,
                 cheby_order,
@@ -403,6 +411,7 @@ async fn run_engine(
     log_homeostat: bool,
     log_esn_profile: bool,
     log_esn_async_profile: bool,
+    log_handoff_diagnostics: bool,
     esn_introspection_policy: IntrospectionPolicy,
     esn_introspection_power_steps: usize,
     cheby_order: usize,
@@ -424,6 +433,9 @@ async fn run_engine(
     println!("   Cov dim: {}, K: {}", cov_dim, k);
     println!("   WebSocket: {}", ws_addr);
     println!("   Sensory WS: {}", sensory_ws_addr);
+    if log_handoff_diagnostics {
+        println!("   🔎 Handoff diagnostics: ENABLED");
+    }
     // Strong-mode flags (env)
     let strong = std::env::var("HOMEOSTAT_STRONG")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
@@ -732,6 +744,15 @@ async fn run_engine(
             "t_s,tick,introspection_fired,async_rank1_submitted,pending_rank1_depth,introspection_power_steps,introspection_policy_adaptive,introspection_step_high,introspection_step_reason_periodic,introspection_step_reason_geom,introspection_step_reason_pressure,pidx,prime,rho,ema_eig,rank1_us,power_us,gpu_wait_us,host_norm_us,async_submit_us,async_drain_us,intro_fused_wait_us,intro_tail_wait_us,intro_first_read_us,intro_tail_read_us\n",
         )?;
         Some(file)
+    } else {
+        None
+    };
+    let mut handoff_diag_file = if log_handoff_diagnostics {
+        fs::create_dir_all("workspace/logs")?;
+        Some(open_profile_csv(
+            "workspace/logs/handoff_diagnostics.csv",
+            csv_header(),
+        )?)
     } else {
         None
     };
@@ -1739,16 +1760,83 @@ async fn run_engine(
             // GPU: Block power iteration step (cache handoff)
             gpu.block_matvec(&a_buf, &x_buf, &y_buf, n as u32, k as u32)?;
 
-            // CPU: Orthonormalize (Gram-Schmidt)
-            let mut y = gpu.read_f32(&y_buf, n * k);
-            gs_orthonormalize_colmajor(&mut y, n, k);
-            gpu.write_f32(&x_buf, &y);
+            if let Some(file) = handoff_diag_file.as_mut() {
+                {
+                    let a_view = gpu.as_f32_slice(&a_buf, n * n);
+                    let x_view = gpu.as_f32_slice(&x_buf, n * k);
+                    let y_view = gpu.as_f32_slice(&y_buf, n * k);
+
+                    prefault_f32(y_view);
+                    let y_seq_read_us = sequential_read_us_f32(y_view);
+                    let y_random_probe = random_probe_ns_per_access_f32(y_view);
+                    let y_ref = cpu_block_matvec_reference(a_view, x_view, n, k);
+                    let (integrity_ok, max_abs_diff) = integrity_check(y_view, &y_ref);
+                    let y_record = HandoffDiagRecord {
+                        t_s: start.elapsed().as_secs_f64(),
+                        tick: tick_count,
+                        stage: "history_fire_post_block_matvec",
+                        buffer: "y_buf",
+                        bytes: n * k * mem::size_of::<f32>(),
+                        prefaulted: true,
+                        seq_read_us: y_seq_read_us,
+                        random_probe_ns_per_access: y_random_probe,
+                        integrity_ok: Some(integrity_ok),
+                        max_abs_diff: Some(max_abs_diff),
+                        small_value_low_confidence: small_value_low_confidence(
+                            y_seq_read_us,
+                            n * k * mem::size_of::<f32>(),
+                        ),
+                    };
+                    if let Err(e) = file.write_all(y_record.to_csv_line().as_bytes()) {
+                        eprintln!("handoff_diag_write_error: {}", e);
+                    }
+
+                    prefault_f32(a_view);
+                    let a_seq_read_us = sequential_read_us_f32(a_view);
+                    let a_random_probe = random_probe_ns_per_access_f32(a_view);
+                    let a_record = HandoffDiagRecord {
+                        t_s: start.elapsed().as_secs_f64(),
+                        tick: tick_count,
+                        stage: "history_fire_covariance_probe",
+                        buffer: "a_buf",
+                        bytes: n * n * mem::size_of::<f32>(),
+                        prefaulted: true,
+                        seq_read_us: a_seq_read_us,
+                        random_probe_ns_per_access: a_random_probe,
+                        integrity_ok: None,
+                        max_abs_diff: None,
+                        small_value_low_confidence: small_value_low_confidence(
+                            a_seq_read_us,
+                            n * n * mem::size_of::<f32>(),
+                        ),
+                    };
+                    if let Err(e) = file.write_all(a_record.to_csv_line().as_bytes()) {
+                        eprintln!("handoff_diag_write_error: {}", e);
+                    }
+                }
+            }
+
+            // CPU: Orthonormalize (Gram-Schmidt) in shared memory, then copy
+            // the normalized basis into x_buf for the next GPU step.
+            {
+                let y_shared = gpu.as_f32_slice_mut(&y_buf, n * k);
+                gs_orthonormalize_colmajor(y_shared, n, k);
+            }
+            {
+                let y_shared = gpu.as_f32_slice(&y_buf, n * k);
+                let x_shared = gpu.as_f32_slice_mut(&x_buf, n * k);
+                x_shared.copy_from_slice(y_shared);
+            }
+            gpu.mark_modified_f32(&x_buf, n * k);
+            let y = gpu.as_f32_slice(&y_buf, n * k);
 
             // Compute eigenvalues (Rayleigh quotients)
-            let a = gpu.read_f32(&a_buf, n * n);
-            let eigenvalues: Vec<f32> = (0..k)
-                .map(|i| rayleigh_quotient(&a, &y[i * n..(i + 1) * n], n))
-                .collect();
+            let eigenvalues: Vec<f32> = {
+                let a = gpu.as_f32_slice(&a_buf, n * n);
+                (0..k)
+                    .map(|i| rayleigh_quotient(a, &y[i * n..(i + 1) * n], n))
+                    .collect()
+            };
             let active_modes = compute_active_mode_telemetry(&eigenvalues, k);
 
             // Populate regulator modes with real eigenvectors.
@@ -2249,6 +2337,7 @@ async fn run_engine(
                         eigenfill_pct, lambda1
                     );
                 }
+                let a = gpu.as_f32_slice(&a_buf, n * n);
                 source.update(eigenfill_pct, lambda1, &a);
             } else if log_homeostat {
                 eprintln!("DEBUG: spectral_source is None!");
@@ -3451,10 +3540,13 @@ async fn run_engine(
                 let prev = LAST_CHECKPOINT.load(std::sync::atomic::Ordering::Relaxed);
                 if now_ms.saturating_sub(prev) > 30_000 {
                     LAST_CHECKPOINT.store(now_ms, std::sync::atomic::Ordering::Relaxed);
-                    let cov_data = gpu.read_f32(&a_buf, n * n);
+                    let cov_data = gpu.as_f32_slice(&a_buf, n * n);
                     if cov_data.iter().all(|v| v.is_finite()) {
-                        let bytes: Vec<u8> =
-                            cov_data.iter().flat_map(|f| f.to_le_bytes()).collect();
+                        let mut bytes =
+                            Vec::with_capacity(cov_data.len() * std::mem::size_of::<f32>());
+                        for value in cov_data.iter() {
+                            bytes.extend_from_slice(&value.to_le_bytes());
+                        }
                         // Save the primary checkpoint (always latest)
                         let _ = std::fs::write(&cov_checkpoint_path, &bytes);
 
@@ -3673,17 +3765,73 @@ fn rank1_update(
     keep: f32,
     trace_target: f32,
 ) {
-    if z.iter().any(|v| !v.is_finite()) {
-        eprintln!("[cov] skipped rank1 update due to non-finite input");
-        return;
+    let outcome = {
+        let a = gpu.as_f32_slice_mut(a_buf, n * n);
+        rank1_update_inplace_matrix(a, z, n, keep, trace_target)
+    };
+
+    match outcome {
+        CovarianceUpdateOutcome::Skipped => {
+            eprintln!("[cov] skipped rank1 update due to non-finite input");
+        }
+        CovarianceUpdateOutcome::Modified => {
+            gpu.mark_modified_f32(a_buf, n * n);
+        }
+        CovarianceUpdateOutcome::ResetRequired => {
+            reset_covariance(gpu, a_buf, n);
+        }
     }
+}
+
+#[allow(dead_code)]
+fn decay_covariance(gpu: &Gpu, a_buf: &metal::Buffer, n: usize, keep: f32, trace_target: f32) {
+    let should_reset = {
+        let a = gpu.as_f32_slice_mut(a_buf, n * n);
+        !decay_covariance_inplace_matrix(a, n, keep, trace_target)
+    };
+    if should_reset {
+        reset_covariance(gpu, a_buf, n);
+    } else {
+        gpu.mark_modified_f32(a_buf, n * n);
+    }
+}
+
+fn reset_covariance(gpu: &Gpu, a_buf: &metal::Buffer, n: usize) {
+    eprintln!("[cov] covariance reset to identity");
+    {
+        let a = gpu.as_f32_slice_mut(a_buf, n * n);
+        reset_covariance_inplace(a, n);
+    }
+    gpu.mark_modified_f32(a_buf, n * n);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CovarianceUpdateOutcome {
+    Skipped,
+    Modified,
+    ResetRequired,
+}
+
+fn rank1_update_inplace_matrix(
+    a: &mut [f32],
+    z: &[f32],
+    n: usize,
+    keep: f32,
+    trace_target: f32,
+) -> CovarianceUpdateOutcome {
+    assert_eq!(a.len(), n * n);
+    assert_eq!(z.len(), n);
+
+    if z.iter().any(|v| !v.is_finite()) {
+        return CovarianceUpdateOutcome::Skipped;
+    }
+
+    if !a.iter().all(|v| v.is_finite()) {
+        return CovarianceUpdateOutcome::ResetRequired;
+    }
+
     let keep = keep.clamp(0.0, 0.9999);
     let gain = 1.0 - keep;
-    let mut a = gpu.read_f32(a_buf, n * n);
-    if !a.iter().all(|v| v.is_finite()) {
-        reset_covariance(gpu, a_buf, n);
-        return;
-    }
     for i in 0..n {
         let zi = z[i];
         for j in 0..n {
@@ -3691,55 +3839,55 @@ fn rank1_update(
             a[idx] = keep * a[idx] + gain * zi * z[j];
         }
     }
+
     let target_trace = trace_target.max(1.0);
     let trace: f32 = (0..n).map(|i| a[i * n + i]).sum();
-    if trace.is_finite() && trace > 1e-6 {
-        let scale = (target_trace / trace).clamp(0.0, 2.0);
-        for val in &mut a {
-            *val *= scale;
-        }
-    } else {
-        reset_covariance(gpu, a_buf, n);
-        return;
+    if !trace.is_finite() || trace <= 1e-6 {
+        return CovarianceUpdateOutcome::ResetRequired;
     }
+
+    let scale = (target_trace / trace).clamp(0.0, 2.0);
+    for val in a.iter_mut() {
+        *val *= scale;
+    }
+
     if a.iter().all(|v| v.is_finite()) {
-        gpu.write_f32(a_buf, &a);
+        CovarianceUpdateOutcome::Modified
     } else {
-        reset_covariance(gpu, a_buf, n);
+        CovarianceUpdateOutcome::ResetRequired
     }
 }
 
-#[allow(dead_code)]
-fn decay_covariance(gpu: &Gpu, a_buf: &metal::Buffer, n: usize, keep: f32, trace_target: f32) {
+fn decay_covariance_inplace_matrix(a: &mut [f32], n: usize, keep: f32, trace_target: f32) -> bool {
+    assert_eq!(a.len(), n * n);
+
     let keep = keep.clamp(0.0, 0.9999);
-    let mut a = gpu.read_f32(a_buf, n * n);
     if !a.iter().all(|v| v.is_finite()) {
-        reset_covariance(gpu, a_buf, n);
-        return;
+        return false;
     }
-    for val in &mut a {
+    for val in a.iter_mut() {
         *val *= keep;
     }
     let trace: f32 = (0..n).map(|i| a[i * n + i]).sum();
-    if trace.is_finite() && trace > 1e-6 {
-        let target_trace = trace_target.max(1.0);
-        let scale = (target_trace / trace).min(1.0);
-        for val in &mut a {
-            *val *= scale;
-        }
-        gpu.write_f32(a_buf, &a);
-    } else {
-        reset_covariance(gpu, a_buf, n);
+    if !trace.is_finite() || trace <= 1e-6 {
+        return false;
     }
+
+    let target_trace = trace_target.max(1.0);
+    let scale = (target_trace / trace).min(1.0);
+    for val in a.iter_mut() {
+        *val *= scale;
+    }
+
+    a.iter().all(|v| v.is_finite())
 }
 
-fn reset_covariance(gpu: &Gpu, a_buf: &metal::Buffer, n: usize) {
-    eprintln!("[cov] covariance reset to identity");
-    let mut a = vec![0.0f32; n * n];
+fn reset_covariance_inplace(a: &mut [f32], n: usize) {
+    assert_eq!(a.len(), n * n);
+    a.fill(0.0);
     for i in 0..n {
         a[i * n + i] = 1.0;
     }
-    gpu.write_f32(a_buf, &a);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -3935,7 +4083,9 @@ fn compute_spectral_fingerprint(
 
 #[cfg(test)]
 mod tests {
-    use super::compute_active_mode_telemetry;
+    use super::{
+        compute_active_mode_telemetry, rank1_update_inplace_matrix, CovarianceUpdateOutcome,
+    };
 
     #[test]
     fn active_mode_helper_uses_two_mode_floor_for_concentrated_spectra() {
@@ -3959,5 +4109,40 @@ mod tests {
         let telemetry = compute_active_mode_telemetry(&[4.0, 3.0, 2.0, 1.0, 1.0, 1.0], 6);
 
         assert!((telemetry.energy_ratio - (11.0 / 12.0)).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn rank1_update_in_place_matches_copy_reference() {
+        let n = 4;
+        let keep = 0.93;
+        let trace_target = 3.25;
+        let z = [0.25, -0.5, 0.75, 1.0];
+        let mut inplace = vec![
+            1.0, 0.1, 0.2, 0.3, 0.1, 1.1, 0.4, 0.5, 0.2, 0.4, 1.2, 0.6, 0.3, 0.5, 0.6, 1.3,
+        ];
+        let mut reference = inplace.clone();
+
+        let outcome = rank1_update_inplace_matrix(&mut inplace, &z, n, keep, trace_target);
+        assert_eq!(outcome, CovarianceUpdateOutcome::Modified);
+
+        let keep = keep.clamp(0.0, 0.9999);
+        let gain = 1.0 - keep;
+        for i in 0..n {
+            let zi = z[i];
+            for j in 0..n {
+                let idx = i * n + j;
+                reference[idx] = keep * reference[idx] + gain * zi * z[j];
+            }
+        }
+        let target_trace = trace_target.max(1.0);
+        let trace: f32 = (0..n).map(|i| reference[i * n + i]).sum();
+        let scale = (target_trace / trace).clamp(0.0, 2.0);
+        for value in &mut reference {
+            *value *= scale;
+        }
+
+        for (lhs, rhs) in inplace.iter().zip(reference.iter()) {
+            assert!((lhs - rhs).abs() < 1.0e-6);
+        }
     }
 }

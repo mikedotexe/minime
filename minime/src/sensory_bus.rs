@@ -849,11 +849,17 @@ mod tests {
     fn stale_semantic_lane_decays_near_echo_floor() {
         let bus = SensoryBus::new(8, 1, 7);
         bus.set_llava_embedding(&vec![1.0; LLAVA_DIM]);
+        // Force the semantic lane onto the shorter dynamic stale window.
+        // The default fill=0.0 path now uses the 45s critical-fill override,
+        // so an older fixed timestamp is no longer guaranteed to be stale.
+        bus.set_fill_for_stale(0.8);
+        bus.set_lambda1_rel(1.0);
+        let semantic_stale_ms = dynamic_semantic_stale_ms(0.8, 1.0);
         {
             let mut llava = bus.llava.lock();
-            // Use the longest possible window + margin so age > stale window
-            // At t >= 1.0, values decay to ECHO_FLOOR (~0.05) plus perturbation
-            llava.updated_at_ms = NowMs::now().saturating_sub(STALE_SEMANTIC_LOW_MS + 1_000);
+            // Age the embedding beyond the active semantic stale window so the
+            // decayed signal settles near the echo floor.
+            llava.updated_at_ms = NowMs::now().saturating_sub(semantic_stale_ms + 1_000);
         }
 
         let batch = bus.drain_sensory_batch();
