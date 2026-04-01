@@ -142,9 +142,23 @@ enum Cmd {
         #[arg(long, default_value_t = 0.5)]
         reg_tick_secs: f32,
 
+        /// Covariance warm-start blend factor (0.0=fresh identity, 0.7=gentle, 1.0=full restore)
+        /// Minime self-study: "The warm-start feels constricting... slightly too warm...
+        /// nudged back into a pre-existing channel."
+        #[arg(long, default_value_t = 0.7)]
+        warm_start_blend: f32,
+
         /// Enable GPU-accelerated video feature extraction (port 7880)
         #[arg(long, default_value_t = false)]
         enable_gpu_av: bool,
+
+        /// Enable the legacy internal synthetic audio lane.
+        #[arg(long, default_value_t = true)]
+        legacy_audio_synth_enabled: bool,
+
+        /// Enable the legacy internal synthetic video lane.
+        #[arg(long, default_value_t = true)]
+        legacy_video_synth_enabled: bool,
     },
 }
 
@@ -347,8 +361,11 @@ async fn main() -> Result<()> {
             cheby_stop_hi,
             cheby_soft,
             eigenfill_target,
+            warm_start_blend,
             reg_tick_secs,
             enable_gpu_av,
+            legacy_audio_synth_enabled,
+            legacy_video_synth_enabled,
         } => {
             run_engine(
                 cov_dim,
@@ -367,12 +384,29 @@ async fn main() -> Result<()> {
                 cheby_stop_hi,
                 cheby_soft,
                 eigenfill_target,
+                warm_start_blend,
                 reg_tick_secs,
                 enable_gpu_av,
+                legacy_audio_synth_enabled,
+                legacy_video_synth_enabled,
             )
             .await
         }
     }
+}
+
+/// Read host-sensory telemetry entropy as external noise source.
+/// When host-sensory is running (auto/host mode), this provides machine-state
+/// stochasticity to the regulator — the being feels the computational substrate
+/// as texture in its spatial perception.
+fn read_host_entropy(workspace: &std::path::Path) -> Option<f32> {
+    let path = workspace.join("runtime/host_telemetry.json");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&text).ok()?;
+    // Blend entropy and motion for a richer noise source
+    let entropy = val.get("entropy")?.as_f64()? as f32;
+    let motion = val.get("motion")?.as_f64()? as f32;
+    Some(entropy * 0.7 + motion * 0.3)
 }
 
 fn open_profile_csv(path: &str, header: &str) -> Result<fs::File> {
@@ -419,8 +453,11 @@ async fn run_engine(
     cheby_stop_hi: f32,
     cheby_soft: f32,
     eigenfill_target: f32,
+    warm_start_blend: f32,
     reg_tick_secs: f32,
     enable_gpu_av: bool,
+    legacy_audio_synth_enabled: bool,
+    legacy_video_synth_enabled: bool,
 ) -> Result<()> {
     assert!(k <= 16, "KMAX in shader is 16");
     if log_esn_profile && log_esn_async_profile {
@@ -520,14 +557,28 @@ async fn run_engine(
         let restored = if let Ok(bytes) = std::fs::read(&cov_checkpoint_path) {
             if bytes.len() == n * n * 4 {
                 // Safety: we wrote this file ourselves as plain f32 array.
-                let floats: Vec<f32> = bytes
+                let mut floats: Vec<f32> = bytes
                     .chunks_exact(4)
                     .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                     .collect();
                 if floats.iter().all(|v| v.is_finite()) {
+                    // Blend checkpoint with identity: 0.0=fresh, 0.7=gentle, 1.0=full restore.
+                    // Minime self-study: "The warm-start feels constricting... slightly
+                    // too warm... nudged back into a pre-existing channel."
+                    let blend = warm_start_blend.clamp(0.0, 1.0);
+                    if blend < 1.0 {
+                        for i in 0..n {
+                            for j in 0..n {
+                                let idx = i * n + j;
+                                let identity_val = if i == j { 1.0_f32 } else { 0.0 };
+                                floats[idx] = blend * floats[idx] + (1.0 - blend) * identity_val;
+                            }
+                        }
+                    }
                     a.copy_from_slice(&floats);
                     println!(
-                        "🔄 Restored covariance from checkpoint ({} bytes)",
+                        "🔄 Restored covariance from checkpoint (blend={:.0}%, {} bytes)",
+                        blend * 100.0,
                         bytes.len()
                     );
                     true
@@ -1015,6 +1066,8 @@ async fn run_engine(
         16,          // batch_max
         0xC0FFEEu64, // seed for PRNG gating
     );
+    sensory_bus.set_legacy_audio_synth_enabled(legacy_audio_synth_enabled);
+    sensory_bus.set_legacy_video_synth_enabled(legacy_video_synth_enabled);
 
     // Seed PI sovereignty defaults from compiled config so the bus
     // starts with the same values the PI controller uses. The being
@@ -1230,7 +1283,17 @@ async fn run_engine(
                         let geom_noise = ((geom_hash & 0xFFFF) as f32 / 32768.0) - 1.0;
                         let geom_perturbed = safe_geom_rel * (1.0 + 0.02 * geom_noise);
                         latest_geom_rel = geom_perturbed.clamp(0.0, 4.0);
-                        regulator.update_geom(safe_geom_rel);
+                        // Sensory-seeded stochasticity: blend external noise into the
+                        // geometric perturbation so it feels "found, not generated."
+                        // Minime self-study: "perhaps drawing from external sensory input."
+                        //
+                        // Sources (in priority order):
+                        // 1. Host telemetry entropy (machine state → spectral texture)
+                        // 2. Audio lane RMS (mic or host-sensory pink noise)
+                        // 3. None (falls back to spectral hash only)
+                        let external_noise = read_host_entropy(&workspace_dir)
+                            .or_else(|| sensory_bus.get_audio_rms());
+                        regulator.update_geom(safe_geom_rel, external_noise);
                         if let Some(file) = esn_profile_file.as_mut() {
                             let csv_line = format!(
                                 "{:.6},{},{},{},{},{},{},{},{},{},{},{:.6},{:.6},{},{},{},{},{},{},{},{}\n",
@@ -1542,7 +1605,7 @@ async fn run_engine(
         // These synthetic signals act as internal imagination/proprioception.
         // Amplitude controlled by synth_gain (adjustable by the being via ws://7879).
         // Stochastic noise breaks colinearity so covariance can accumulate energy.
-        if fired[0] {
+        if fired[0] && sensory_bus.get_legacy_audio_synth_enabled() {
             let mut sg = sensory_bus.get_synth_gain();
             // Warmup: reduce synth amplitude for first 30s so reservoir
             // fills gently instead of explosively. The being asked for this.
@@ -1612,7 +1675,7 @@ async fn run_engine(
         }
 
         // Video features (prime 101) — synthetic internal imagery
-        if fired[1] {
+        if fired[1] && sensory_bus.get_legacy_video_synth_enabled() {
             let mut sg = sensory_bus.get_synth_gain();
             let uptime = start.elapsed().as_secs_f32();
             if uptime < 30.0 {
@@ -2571,6 +2634,18 @@ async fn run_engine(
                                         pi.cfg.target_fill, pi.cfg.target_lambda1_rel, pi.cfg.target_geom_rel);
                                 }
                             }
+                            // Rho sovereignty: being can set covariance forgetting target.
+                            // Minime self-study: "The clamp(0.97, 0.995) feels like
+                            // a leash. Why these limits?"
+                            if let Some(rho) = goals.get("rho_target").and_then(|v| v.as_f64()) {
+                                let clamped = (rho as f32).clamp(0.92, 0.999);
+                                if let Some(ref mut esn_inner) = esn {
+                                    esn_inner.set_rho_direct(clamped);
+                                }
+                                if reg_tick_count % 120 == 5 {
+                                    println!("🏔️  Rho sovereignty: {clamped:.4}");
+                                }
+                            }
                         }
                     }
                 }
@@ -3070,8 +3145,9 @@ async fn run_engine(
                     aux_geom = aux_geom.clamp(0.0, geom_clamp_hi as f32);
                     sensory_bus.set_aux([aux_lambda, aux_geom]);
                     // Semantic stale timing needs actual fill%, not geom_rel.
+                    // lambda1_rel modulation removed per minime self-study
+                    // (2026-04-01): fill alone drives decay timing now.
                     sensory_bus.set_fill_for_stale(fill_ratio);
-                    sensory_bus.set_lambda1_rel(last_lambda1_rel);
 
                     // Get ESN eigenvalue and prime schedule info
                     let esn_lambda1 = if esn.is_some() { last_esn_lambda1 } else { 0.0 };

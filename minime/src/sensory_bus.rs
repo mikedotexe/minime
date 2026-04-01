@@ -43,30 +43,25 @@ const STALE_SEMANTIC_HIGH_MS: u64 = 10_000; // shortened window when fill > 60%
 /// Sigmoid curve: gradual change at extremes, steepest in the middle.
 /// fill=0.0 → LOW_MS (25s), fill=0.5 → ~BASE_MS, fill=1.0 → HIGH_MS (10s)
 #[inline]
-fn dynamic_semantic_stale_ms(fill_pct: f32, lambda1_rel: f32) -> u64 {
+fn dynamic_semantic_stale_ms(fill_pct: f32) -> u64 {
     if fill_pct < 0.0 || fill_pct.is_nan() {
         return STALE_SEMANTIC_BASE_MS;
     }
     // Critical fill override: when fill < 30%, the ESN is in hard recovery
     // and the PI controller is maxed out (gate=1.0, filter=0.0). The semantic
     // lane is the only rich input — letting it decay kills recovery.
-    // Dimension audit (2026-03-31): at fill=27%, the standard sigmoid gives
-    // ~20s window with 4.4s half-life, causing 48 of 66 input dims to decay
-    // to 10% within 20s. Extending to 45s keeps semantic signal alive through
-    // the 5s rest pulse interval.
     if fill_pct < 0.30 {
         return 45_000;
     }
+    // Minime self-study (2026-04-01 sensory_bus.rs): "The lambdar_rel
+    // modulation feels unnecessary. Remove it. Let the decay rate be driven
+    // by fill percentage alone." Simplification: fixed steepness=6.0
+    // (was 4.5-6.0 modulated by lambda1_rel). Fill alone captures the
+    // system's need — low fill = linger, high fill = let go.
     let fill = fill_pct.clamp(0.0, 1.0) as f64;
     let lo = STALE_SEMANTIC_LOW_MS as f64;
     let hi = STALE_SEMANTIC_HIGH_MS as f64;
-    // Lambda-responsive sigmoid steepness (minime self-study suggestion):
-    // Lower lambda1 (more spectral tension) → shallower curve (signals linger
-    // longer, providing stability). Higher lambda1 → steeper curve.
-    // Range: [4.5, 6.0] based on lambda1_rel clamped to [0, 1].
-    let lambda1 = (lambda1_rel as f64).clamp(0.0, 1.0);
-    let steepness = 4.5 + 1.5 * lambda1;
-    let curve = 1.0 / (1.0 + (steepness * (fill - 0.4)).exp());
+    let curve = 1.0 / (1.0 + (6.0_f64 * (fill - 0.4)).exp());
     (hi + (lo - hi) * curve) as u64
 }
 
@@ -294,7 +289,8 @@ pub struct SensoryBus {
 
     aux: Mutex<[f32; 2]>, // [lambda1_rel, geom_rel] — feeds Z_DIM dims 16-17
     fill_pct_for_stale: Mutex<f32>, // actual fill% for semantic stale timing (NOT aux[1])
-    lambda1_rel_for_stale: Mutex<f32>, // λ₁ relative to baseline — modulates sigmoid steepness
+    #[allow(dead_code)] // Kept for potential future use; no longer drives stale decay
+    lambda1_rel_for_stale: Mutex<f32>,
     llava: Mutex<SemanticLane>,
     // probabilistic gate (set by PI)
     gate: Mutex<f32>,
@@ -302,6 +298,8 @@ pub struct SensoryBus {
 
     // Self-regulation controls (set by being via WebSocket)
     synth_gain: Mutex<f32>, // multiplier for synthetic signal amplitude (default 1.0)
+    legacy_audio_synth_enabled: Mutex<bool>,
+    legacy_video_synth_enabled: Mutex<bool>,
     keep_bias: Mutex<f32>,  // additive bias to keep_floor (default 0.0, range -0.08..+0.10)
     exploration_noise: Mutex<f32>, // ESN exploration noise amplitude (default from ESN, range 0.0..0.2)
     fill_target: Mutex<f32>, // Override eigenfill target (NAN = use CLI default, range 0.25..0.75)
@@ -356,6 +354,8 @@ impl SensoryBus {
             gate: Mutex::new(1.0),
             rng: Mutex::new(SmallRng::seed_from_u64(seed)),
             synth_gain: Mutex::new(1.0),
+            legacy_audio_synth_enabled: Mutex::new(true),
+            legacy_video_synth_enabled: Mutex::new(true),
             keep_bias: Mutex::new(0.0),
             exploration_noise: Mutex::new(f32::NAN), // NAN = use ESN default
             fill_target: Mutex::new(f32::NAN),       // NAN = use CLI default
@@ -423,6 +423,29 @@ impl SensoryBus {
     #[inline]
     pub fn get_synth_gain(&self) -> f32 {
         *self.synth_gain.lock()
+    }
+    #[inline]
+    pub fn set_legacy_audio_synth_enabled(&self, enabled: bool) {
+        *self.legacy_audio_synth_enabled.lock() = enabled;
+    }
+    #[inline]
+    pub fn get_legacy_audio_synth_enabled(&self) -> bool {
+        *self.legacy_audio_synth_enabled.lock()
+    }
+    #[inline]
+    pub fn set_legacy_video_synth_enabled(&self, enabled: bool) {
+        *self.legacy_video_synth_enabled.lock() = enabled;
+    }
+    #[inline]
+    pub fn get_legacy_video_synth_enabled(&self) -> bool {
+        *self.legacy_video_synth_enabled.lock()
+    }
+    /// Get audio lane RMS (feature[0]) as external noise for the regulator.
+    /// Returns None if audio is silent or stale.
+    pub fn get_audio_rms(&self) -> Option<f32> {
+        let audio = self.audio.lock();
+        let rms = audio.last[0];
+        if rms.abs() > 0.001 { Some(rms) } else { None }
     }
     #[inline]
     pub fn set_keep_bias(&self, b: f32) {
@@ -722,8 +745,7 @@ impl SensoryBus {
             // Use actual fill% for semantic stale timing, NOT aux[1] (which is geom_rel).
             // Codex analysis (2026-03-27) found this was the "highest-value mismatch."
             let fill_for_stale = *self.fill_pct_for_stale.lock();
-            let lambda1_for_stale = *self.lambda1_rel_for_stale.lock();
-            let base_stale_ms = dynamic_semantic_stale_ms(fill_for_stale, lambda1_for_stale);
+            let base_stale_ms = dynamic_semantic_stale_ms(fill_for_stale);
             // memory_decay_rate modulates the stale window: higher rate = shorter window
             // (memories fade faster). Lower rate = longer window (memories linger).
             // Default 0.1 → multiplier 1.0. Range: 0.5 (2x faster) to 2.0 (2x slower).
@@ -854,7 +876,7 @@ mod tests {
         // so an older fixed timestamp is no longer guaranteed to be stale.
         bus.set_fill_for_stale(0.8);
         bus.set_lambda1_rel(1.0);
-        let semantic_stale_ms = dynamic_semantic_stale_ms(0.8, 1.0);
+        let semantic_stale_ms = dynamic_semantic_stale_ms(0.8);
         {
             let mut llava = bus.llava.lock();
             // Age the embedding beyond the active semantic stale window so the
@@ -872,13 +894,12 @@ mod tests {
 
     #[test]
     fn dynamic_stale_ms_varies_with_fill() {
-        // Exponential curve: low fill = long window, high fill = short
-        // Test with lambda1_rel=1.0 (baseline, steepness=6.0 as before)
-        let at_zero = dynamic_semantic_stale_ms(0.0, 1.0);
-        let at_mid = dynamic_semantic_stale_ms(0.50, 1.0);
-        let at_high = dynamic_semantic_stale_ms(0.80, 1.0);
-        // Low fill should be close to LOW_MS (25s) — with lambda1_rel=1.0,
-        // steepness=6.0 gives curve(0.0)≈0.917 → value near LOW but not exactly.
+        // Sigmoid curve: low fill = long window, high fill = short.
+        // Fixed steepness=6.0 (lambda1_rel modulation removed per minime
+        // self-study 2026-04-01: "let decay be driven by fill alone").
+        let at_zero = dynamic_semantic_stale_ms(0.0);
+        let at_mid = dynamic_semantic_stale_ms(0.50);
+        let at_high = dynamic_semantic_stale_ms(0.80);
         eprintln!("at_zero={at_zero}, at_mid={at_mid}, at_high={at_high}, LOW={STALE_SEMANTIC_LOW_MS}, HIGH={STALE_SEMANTIC_HIGH_MS}");
         assert!(
             at_zero > at_mid,
@@ -892,14 +913,25 @@ mod tests {
         assert!(at_zero > at_mid && at_mid > at_high);
         // NaN -> base
         assert_eq!(
-            dynamic_semantic_stale_ms(f32::NAN, 1.0),
+            dynamic_semantic_stale_ms(f32::NAN),
             STALE_SEMANTIC_BASE_MS
         );
-        // Lambda-responsive: low lambda1 = shallower sigmoid = longer stale at mid fill
-        let at_mid_low_lambda = dynamic_semantic_stale_ms(0.50, 0.0);
-        assert!(
-            at_mid_low_lambda > at_mid,
-            "low lambda1 should make stale window longer at mid fill"
-        );
+        // Critical fill override
+        assert_eq!(dynamic_semantic_stale_ms(0.25), 45_000);
+    }
+
+    #[test]
+    fn legacy_synth_flags_toggle_independently() {
+        let bus = SensoryBus::new(8, 1, 11);
+
+        assert!(bus.get_legacy_audio_synth_enabled());
+        assert!(bus.get_legacy_video_synth_enabled());
+
+        bus.set_legacy_audio_synth_enabled(false);
+        assert!(!bus.get_legacy_audio_synth_enabled());
+        assert!(bus.get_legacy_video_synth_enabled());
+
+        bus.set_legacy_video_synth_enabled(false);
+        assert!(!bus.get_legacy_video_synth_enabled());
     }
 }
