@@ -38,7 +38,7 @@ from typing import List, Optional
 # ---------------------------------------------------------------------------
 
 SAMPLE_RATE = 16000          # 16 kHz mono
-CHUNK_DURATION_S = 0.1       # 100 ms per chunk
+CHUNK_DURATION_S = 0.5       # 500 ms per chunk (was 100ms; reduced from 10Hz to 2Hz to lower covariance input rate)
 CHUNK_SAMPLES = int(SAMPLE_RATE * CHUNK_DURATION_S)  # 1600 samples
 BYTES_PER_SAMPLE = 2         # 16-bit signed int
 CHUNK_BYTES = CHUNK_SAMPLES * BYTES_PER_SAMPLE

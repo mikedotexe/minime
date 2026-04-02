@@ -27,7 +27,7 @@ MLX_VISION_PORT="${MLX_VISION_PORT:-8091}"
 ENABLE_MLX_VISION="${ENABLE_MLX_VISION:-false}"
 ENABLE_GPU_AV="${ENABLE_GPU_AV:-true}"
 LORA_ADAPTER="${LORA_ADAPTER:-}"
-SENSORY_SOURCE="${SENSORY_SOURCE:-physical}"
+SENSORY_SOURCE="${SENSORY_SOURCE:-auto}"
 LOOK_SOURCE="${LOOK_SOURCE:-active}"
 
 # Ensure PATH includes node/uv tools
@@ -127,7 +127,7 @@ if [ "$LLM_BACKEND" = "mlx" ]; then
     fi
 else
     echo ""
-    echo "[1/$TOTAL_STEPS] LLM backend: Ollama (MLX server skipped — no GPU memory contention)"
+    echo "[1/$TOTAL_STEPS] LLM backend: Ollama (dedicated MLX server skipped — shared accelerator pressure may still exist)"
 fi
 
 # --- Step 1b: (Optional) Start MLX Vision Server ---

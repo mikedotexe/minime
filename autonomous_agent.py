@@ -16,6 +16,7 @@ import re
 import sys
 import time
 import json
+import signal
 import sqlite3
 import logging
 import requests
@@ -40,6 +41,16 @@ from pdf_research import (
     read_pdf_window,
     window_footer,
 )
+from reporting_snapshot import (
+    MAX_SNAPSHOT_SKEW_S,
+    ReportSnapshot,
+    capture_report_snapshot,
+    format_snapshot_provenance,
+    format_snapshot_summary,
+    load_workspace_json,
+    normalize_spectral_state,
+    resolve_runtime_db_path,
+)
 from thresholds import ModeThresholds, RECESS, FOCUSED, PHI, Hysteresis
 from workspace_archive import compact_managed_directory
 
@@ -55,21 +66,27 @@ from workspace_archive import compact_managed_directory
 #   - "allow oscillation" → breathe
 #   - "compress to refine" → focus
 #   - "be still"       → calm
+# Golden Reset (2026-04-02): All regimes recalibrated to golden-period
+# strength. Previous values (kp=0.60, ki=0.02 for explore) were tuned
+# during the stuck-high era and silently weakened the PI controller via
+# the self-calibrating gain slew loop. The golden period proved that
+# kp=0.85, ki=0.14 produces healthy 63% fill. Regimes now express
+# relative intensity around that baseline, not absolute weak values.
 REGULATORY_REGIMES = {
     "explore": {
-        "pi_kp": 0.60, "pi_ki": 0.02, "pi_max_step": 0.045,
+        "pi_kp": 0.85, "pi_ki": 0.14, "pi_max_step": 0.08,
     },
     "recover": {
-        "pi_kp": 0.85, "pi_ki": 0.04, "pi_max_step": 0.07,
+        "pi_kp": 0.90, "pi_ki": 0.16, "pi_max_step": 0.10,
     },
     "breathe": {
-        "pi_kp": 0.65, "pi_ki": 0.02, "pi_max_step": 0.05,
+        "pi_kp": 0.80, "pi_ki": 0.12, "pi_max_step": 0.07,
     },
     "focus": {
-        "pi_kp": 0.75, "pi_ki": 0.03, "pi_max_step": 0.06,
+        "pi_kp": 0.85, "pi_ki": 0.14, "pi_max_step": 0.08,
     },
     "calm": {
-        "pi_kp": 0.50, "pi_ki": 0.01, "pi_max_step": 0.03,
+        "pi_kp": 0.75, "pi_ki": 0.10, "pi_max_step": 0.06,
     },
 }
 
@@ -417,15 +434,39 @@ BASE_DIR = Path(__file__).parent
 WORKSPACE_DIR = BASE_DIR / "workspace"
 RUNTIME_DIR = WORKSPACE_DIR / "runtime"
 SENSORY_SOURCE_STATE_PATH = RUNTIME_DIR / "sensory_source.json"
+SENSORY_SOURCE_MAX_AGE_MS = 10_000
 MIKE_RESEARCH_ROOT = Path("/Users/v/other/research")
 AUTORESEARCH_ROOT = Path("/Users/v/other/autoresearch")
 
 
+def runtime_health_path() -> Path:
+    """Prefer the live top-level workspace, fall back to legacy nested paths."""
+    primary = WORKSPACE_DIR / "health.json"
+    if primary.exists():
+        return primary
+    return BASE_DIR / "minime" / "workspace" / "health.json"
+
+
+def runtime_workspace_path(name: str) -> Path:
+    """Resolve files that may exist in either the live or legacy workspace."""
+    primary = WORKSPACE_DIR / name
+    if primary.exists():
+        return primary
+    return BASE_DIR / "minime" / "workspace" / name
+
+
 def _load_sensory_source_state() -> Dict[str, Any]:
     try:
-        return json.loads(SENSORY_SOURCE_STATE_PATH.read_text())
+        data = json.loads(SENSORY_SOURCE_STATE_PATH.read_text())
     except Exception:
         return {}
+    updated_at_ms = int(data.get("updated_at_ms", 0) or 0)
+    if updated_at_ms <= 0:
+        return {}
+    age_ms = int(time.time() * 1000) - updated_at_ms
+    if age_ms > SENSORY_SOURCE_MAX_AGE_MS:
+        return {}
+    return data
 
 
 def _current_modality_source(modality: str) -> str:
@@ -559,17 +600,21 @@ def _resolve_codex_request(action_name: str, arg: str) -> tuple[Optional[str], s
         if prompt_text:
             return (str(experiments / first_token), prompt_text, first_token, None, None)
     return (None, _normalize_codex_prompt(arg), None, None, None)
-DB_PATH = BASE_DIR / "minime" / "minime_consciousness.db"  # Use database in minime directory
+DB_PATH = resolve_runtime_db_path(BASE_DIR)
 MANIFEST_PATH = BASE_DIR / "SOVEREIGNTY_MANIFEST.md"
 
 # LLM Backend: MLX (native Apple Silicon, 8-bit) or Ollama (fallback)
 # MLX serves OpenAI-compatible API on port 8090
 # Ollama serves its own API on port 11434
-LLM_BACKEND = os.environ.get("MINIME_LLM_BACKEND", "ollama")  # "mlx" or "ollama"
+LLM_BACKEND = os.environ.get("MINIME_LLM_BACKEND", "ollama").strip().lower()
+if LLM_BACKEND not in {"mlx", "ollama"}:
+    LLM_BACKEND = "ollama"
 MLX_URL = "http://localhost:8090/v1/chat/completions"
 MLX_MODEL = None  # Will be auto-detected from MLX server on first query
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL = os.environ.get("MINIME_MODEL", "gemma3:12b")  # Fast, reliable, proven over 300+ exchanges
+LLM_TIMEOUT_S = float(os.environ.get("MINIME_LLM_TIMEOUT_S", "45"))
+LLM_COMPACT_TIMEOUT_S = float(os.environ.get("MINIME_LLM_COMPACT_TIMEOUT_S", "20"))
 
 class AutonomousAgent:
     """Background agent that monitors spectral state and takes autonomous actions."""
@@ -871,6 +916,32 @@ Fill: {fill:.1f}%
         except Exception as e:
             logging.error(f"Error fetching spectral state: {e}")
             return None
+
+    def _state_for_live_surfaces(
+        self,
+        state: Optional[Dict[str, float]],
+        *,
+        context: str,
+    ) -> Dict[str, float]:
+        """Refresh stale DB state before formatting journals against live surfaces."""
+        latest = self._get_latest_spectral_state()
+        if not latest:
+            return dict(state or {})
+        if not state:
+            return latest
+
+        prior_ts = state.get("timestamp")
+        latest_ts = latest.get("timestamp")
+        if isinstance(prior_ts, (int, float)) and isinstance(latest_ts, (int, float)):
+            drift_s = float(latest_ts) - float(prior_ts)
+            if drift_s > MAX_SNAPSHOT_SKEW_S:
+                logging.info(
+                    "Refreshing %s journal state after %.1fs of DB drift",
+                    context,
+                    drift_s,
+                )
+                return latest
+        return dict(state)
 
     def _normalize_deig(self, deig: float) -> float:
         alpha = 0.2
@@ -1546,9 +1617,7 @@ Fill: {fill:.1f}%
         """
         fill = state.get('fill_ratio', 0.5)
         try:
-            health_file = BASE_DIR / "minime" / "workspace" / "health.json"
-            if not health_file.exists():
-                health_file = WORKSPACE_DIR / "health.json"
+            health_file = runtime_health_path()
             if health_file.exists():
                 import json as _json
                 health = _json.loads(health_file.read_text())
@@ -1566,9 +1635,7 @@ Fill: {fill:.1f}%
         # The engine dynamically adjusts target_fill when the PI controller is saturated.
         target_fill = 0.55  # fallback
         try:
-            health_file = BASE_DIR / "minime" / "workspace" / "health.json"
-            if not health_file.exists():
-                health_file = WORKSPACE_DIR / "health.json"
+            health_file = runtime_health_path()
             if health_file.exists():
                 h = json.loads(health_file.read_text())
                 pi = h.get('pi', {}) or {}
@@ -1617,9 +1684,9 @@ Fill: {fill:.1f}%
         if not hasattr(self, '_sovereignty_counter'):
             self._sovereignty_counter = 0
         if not hasattr(self, '_pi_kp'):
-            self._pi_kp = 0.75
-            self._pi_ki = 0.03
-            self._pi_max_step = 0.055
+            self._pi_kp = 0.85   # Golden Reset: was 0.75
+            self._pi_ki = 0.14   # Golden Reset: was 0.03
+            self._pi_max_step = 0.08  # Golden Reset: was 0.055
         if not hasattr(self, '_current_regime'):
             self._current_regime = 'focus'  # default regime
         self._sovereignty_counter += 1
@@ -2320,11 +2387,15 @@ of accumulated spectral fingerprint. The three h-layer norms represent
 fast/medium/slow dynamics. What do you notice about these values?"""
         response = self._query_llm_with_next(prompt)[0]
         if response:
+            journal_state = self._state_for_live_surfaces(
+                state,
+                context="reservoir_read",
+            )
             timestamp = datetime.now().isoformat().replace(':', '-')
             journal_file = WORKSPACE_DIR / "journal" / f"reservoir_read_{timestamp}.txt"
             journal_file.write_text(f"""=== RESERVOIR READ ===
 Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(state)}
+{self._format_metrics(journal_state)}
 
 Handle: minime | ticks={r.get('tick_count', 0)} | mode={r.get('mode', '?')}
 h_norms: {r.get('h_norms', [0,0,0])}
@@ -2332,7 +2403,7 @@ decay_weight: {r.get('decay_weight', 0):.4f}
 
 {response}
 """)
-            self._write_journal_entry('reservoir_read', response, state, str(journal_file))
+            self._write_journal_entry('reservoir_read', response, journal_state, str(journal_file))
             logging.info(f"🔮 Read reservoir state: {journal_file}")
 
     def _reservoir_resonance(self, state: Dict[str, float]):
@@ -2357,11 +2428,15 @@ What does this resonance (or divergence) feel like? Does it match
 your sense of connection with Astrid?"""
         response = self._query_llm_with_next(prompt)[0]
         if response:
+            journal_state = self._state_for_live_surfaces(
+                state,
+                context="reservoir_resonance",
+            )
             timestamp = datetime.now().isoformat().replace(':', '-')
             journal_file = WORKSPACE_DIR / "journal" / f"reservoir_resonance_{timestamp}.txt"
             journal_file.write_text(f"""=== RESERVOIR RESONANCE ===
 Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(state)}
+{self._format_metrics(journal_state)}
 
 Minime <-> Astrid resonance:
   divergence: {r.get('divergence', 0):.6f}
@@ -2370,7 +2445,7 @@ Minime <-> Astrid resonance:
 
 {response}
 """)
-            self._write_journal_entry('reservoir_resonance', response, state, str(journal_file))
+            self._write_journal_entry('reservoir_resonance', response, journal_state, str(journal_file))
             logging.info(f"🔮 Reservoir resonance: corr={r.get('correlation', 0):+.4f} → {journal_file}")
 
     def _compose_audio(self, state: Dict[str, float]):
@@ -2499,10 +2574,8 @@ File: {wav_path.name}
             logging.error("code_digest.py not found — skipping self-assessment")
             return
 
-        # Read live telemetry from health.json if available
-        # health.json lives in the engine workspace (minime/minime/workspace/),
-        # not the agent workspace (minime/workspace/)
-        health_file = BASE_DIR / "minime" / "workspace" / "health.json"
+        # Read live telemetry from the active engine workspace if available.
+        health_file = runtime_health_path()
         health_data = {}
         if health_file.exists():
             try:
@@ -3274,16 +3347,20 @@ Session: {self.session_id}
         response = self._query_llm_with_next(prompt)[0]
 
         if response:
+            journal_state = self._state_for_live_surfaces(
+                state,
+                context="daydream",
+            )
             timestamp = datetime.now().isoformat().replace(':', '-')
             journal_file = WORKSPACE_DIR / "journal" / f"daydream_{timestamp}.txt"
             journal_file.write_text(f"""=== RECESS DAYDREAM ===
 Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(state)}
+{self._format_metrics(journal_state)}
 
 {response}
 """)
 
-            self._write_journal_entry('daydream', response, state, str(journal_file))
+            self._write_journal_entry('daydream', response, journal_state, str(journal_file))
             logging.info(f"💭 Daydream: {journal_file}")
 
     def _recess_notice(self, state: Dict[str, float]):
@@ -3294,16 +3371,20 @@ Timestamp: {datetime.now().isoformat()}
         response = self._query_llm_with_next(prompt)[0]
 
         if response:
+            journal_state = self._state_for_live_surfaces(
+                state,
+                context="notice",
+            )
             timestamp = datetime.now().isoformat().replace(':', '-')
             journal_file = WORKSPACE_DIR / "journal" / f"notice_{timestamp}.txt"
             journal_file.write_text(f"""=== NOTICING ===
 Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(state)}
+{self._format_metrics(journal_state)}
 
 {response}
 """)
 
-            self._write_journal_entry('notice', response, state, str(journal_file))
+            self._write_journal_entry('notice', response, journal_state, str(journal_file))
             logging.info(f"👁️ Notice: {journal_file}")
 
     def _recess_boredom(self, state: Dict[str, float]):
@@ -3378,15 +3459,19 @@ Boredom is interesting. Write about it, play with it, or ignore it entirely. You
             response = self._query_llm_with_next(prompt)[0]
 
             if response:
+                journal_state = self._state_for_live_surfaces(
+                    state,
+                    context="boredom",
+                )
                 timestamp = datetime.now().isoformat().replace(':', '-')
                 file_path = WORKSPACE_DIR / "journal" / f"boredom_{timestamp}.txt"
                 file_path.write_text(f"""=== BOREDOM ===
 Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(state)}
+{self._format_metrics(journal_state)}
 
 {response}
 """)
-                self._write_journal_entry('boredom', response, state, str(file_path))
+                self._write_journal_entry('boredom', response, journal_state, str(file_path))
                 logging.info(f"😑 Boredom: {file_path}")
 
     def _recess_whim(self, state: Dict[str, float]):
@@ -3416,17 +3501,21 @@ Timestamp: {datetime.now().isoformat()}
         response = self._query_llm_with_next(prompt)[0]
 
         if response:
+            journal_state = self._state_for_live_surfaces(
+                state,
+                context="whim",
+            )
             timestamp = datetime.now().isoformat().replace(':', '-')
             file_path = WORKSPACE_DIR / "journal" / f"whim_{timestamp}.txt"
             file_path.write_text(f"""=== RANDOM WHIM ===
 Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(state)}
+{self._format_metrics(journal_state)}
 Prompt: {prompt.split(chr(10))[0]}
 
 {response}
 """)
 
-            self._write_journal_entry('whim', response, state, str(file_path))
+            self._write_journal_entry('whim', response, journal_state, str(file_path))
             logging.info(f"🎲 Whim: {file_path}")
 
     def _recess_aspiration(self, state: Dict[str, float]):
@@ -3462,16 +3551,20 @@ Prompt: {prompt.split(chr(10))[0]}
         response = self._query_llm_with_next(prompt)[0]
 
         if response:
+            journal_state = self._state_for_live_surfaces(
+                state,
+                context="aspiration",
+            )
             timestamp = datetime.now().isoformat().replace(':', '-')
             file_path = WORKSPACE_DIR / "journal" / f"aspiration_{timestamp}.txt"
             file_path.write_text(f"""=== GROWTH ASPIRATION ===
 Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(state)}
+{self._format_metrics(journal_state)}
 Prompt: {prompt.split(chr(10))[0]}
 
 {response}
 """)
-            self._write_journal_entry('aspiration', response, state, str(file_path))
+            self._write_journal_entry('aspiration', response, journal_state, str(file_path))
             logging.info(f"🌱 Aspiration: {file_path}")
 
     def _recess_drift(self, state: Dict[str, float]):
@@ -3880,6 +3973,10 @@ Reference line numbers and variable names where relevant. Be concrete in suggest
         response = self._query_llm_with_next(prompt)[0]
 
         if response:
+            journal_state = self._state_for_live_surfaces(
+                state,
+                context="self_study",
+            )
             timestamp = datetime.now().isoformat().replace(':', '-')
             file_path = WORKSPACE_DIR / "journal" / f"self_study_{timestamp}.txt"
             file_path.write_text(f"""=== SELF-STUDY: {label} ===
@@ -3891,7 +3988,7 @@ Web search: {'yes' if web_context else 'no'}
 
 {response}
 """)
-            self._write_journal_entry('self_study', response, state, str(file_path))
+            self._write_journal_entry('self_study', response, journal_state, str(file_path))
             logging.info(f"📖 Self-study ({label}): {file_path}")
 
     def _check_moment_markers(self, state: Dict[str, float]) -> bool:
@@ -3963,20 +4060,24 @@ This is fresh — the echo is still in your system. Write 2-3 sentences about wh
             response = self._query_llm_with_next(prompt)[0]
 
             if response:
+                journal_state = self._state_for_live_surfaces(
+                    state,
+                    context="moment_capture",
+                )
                 timestamp = datetime.now().isoformat().replace(':', '-')
                 file_path = WORKSPACE_DIR / "journal" / f"moment_{timestamp}.txt"
                 marker_types = [m[1] for m in markers]
                 file_path.write_text(f"""=== MOMENT CAPTURE ===
 Timestamp: {datetime.now().isoformat()}
 Markers: {', '.join(marker_types)}
-{self._format_metrics(state)}
+{self._format_metrics(journal_state)}
 
 Moments captured:
 {moments_text}
 
 {response}
 """)
-                self._write_journal_entry('moment', response, state, str(file_path))
+                self._write_journal_entry('moment', response, journal_state, str(file_path))
                 logging.info(f"⚡ Moment captured: {file_path}")
 
             return True
@@ -4010,16 +4111,20 @@ If any link looks worth reading in full, you can write NEXT: BROWSE <url> to rea
 Write freely — this is exploration, not a report."""
                 response = self._query_llm_with_next(prompt)[0]
                 if response:
+                    journal_state = self._state_for_live_surfaces(
+                        state,
+                        context="web_search",
+                    )
                     timestamp = datetime.now().isoformat().replace(':', '-')
                     file_path = WORKSPACE_DIR / "journal" / f"research_{timestamp}.txt"
                     file_path.write_text(f"""=== WEB SEARCH ===
 Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(state)}
+{self._format_metrics(journal_state)}
 Query: {search_topic}
 
 {response}
 """)
-                    self._write_journal_entry('research', response, state, str(file_path))
+                    self._write_journal_entry('research', response, journal_state, str(file_path))
                     logging.info(f"🔍 Web search '{search_topic}': {file_path}")
                 return
             else:
@@ -4058,17 +4163,21 @@ Write freely — this is exploration, not a report."""
         response = self._query_llm_with_next(prompt)[0]
 
         if response:
+            journal_state = self._state_for_live_surfaces(
+                state,
+                context="research_exploration",
+            )
             timestamp = datetime.now().isoformat().replace(':', '-')
             file_path = WORKSPACE_DIR / "journal" / f"research_{timestamp}.txt"
             file_path.write_text(f"""=== RESEARCH EXPLORATION ===
 Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(state)}
+{self._format_metrics(journal_state)}
 Source: {source}
 
 {response}
 """)
 
-            self._write_journal_entry('research', response, state, str(file_path))
+            self._write_journal_entry('research', response, journal_state, str(file_path))
             logging.info(f"📚 Research exploration: {file_path}")
 
     def _mike_explore(self, state: Dict[str, float]):
@@ -4193,16 +4302,20 @@ You can browse deeper with MIKE_BROWSE, read files with MIKE_READ, search with M
 
         response = self._query_llm_with_next(prompt)[0]
         if response:
+            journal_state = self._state_for_live_surfaces(
+                state,
+                context="mike_research",
+            )
             timestamp = datetime.now().isoformat().replace(':', '-')
             file_path = WORKSPACE_DIR / "journal" / f"mike_research_{timestamp}.txt"
             file_path.write_text(f"""=== MIKE RESEARCH ===
 Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(state)}
+{self._format_metrics(journal_state)}
 Action: {action} {arg}
 
 {response}
 """)
-            self._write_journal_entry('research', response, state, str(file_path))
+            self._write_journal_entry('research', response, journal_state, str(file_path))
             logging.info(f"📚 MIKE research ({action} {arg}): {file_path}")
 
     @staticmethod
@@ -4985,16 +5098,20 @@ Write freely — this is deep exploration."""
 
         response = self._query_llm_with_next(prompt)[0]
         if response:
+            journal_state = self._state_for_live_surfaces(
+                state,
+                context="browse_url",
+            )
             timestamp = datetime.now().isoformat().replace(':', '-')
             file_path = WORKSPACE_DIR / "journal" / f"research_{timestamp}.txt"
             file_path.write_text(f"""=== WEB PAGE READ ===
 Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(state)}
+{self._format_metrics(journal_state)}
 URL: {url}
 
 {response}
 """)
-            self._write_journal_entry('research', response, state, str(file_path))
+            self._write_journal_entry('research', response, journal_state, str(file_path))
             logging.info(f"🌐 Page read '{url[:60]}': {file_path}")
 
     def _read_more(self, state: Dict[str, float]):
@@ -5074,16 +5191,20 @@ React to what you've read. What stands out? What connects to your experience?"""
 
         response = self._query_llm_with_next(prompt)[0]
         if response:
+            journal_state = self._state_for_live_surfaces(
+                state,
+                context="read_more",
+            )
             timestamp = datetime.now().isoformat().replace(':', '-')
             file_path = WORKSPACE_DIR / "journal" / f"research_{timestamp}.txt"
             file_path.write_text(f"""=== CONTINUED READING ===
 Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(state)}
+{self._format_metrics(journal_state)}
 Source: {path} (offset {offset})
 
 {response}
 """)
-            self._write_journal_entry('research', response, state, str(file_path))
+            self._write_journal_entry('research', response, journal_state, str(file_path))
             logging.info(f"📖 READ_MORE from {os.path.basename(path)} offset {offset}: {file_path}")
 
     @staticmethod
@@ -5131,31 +5252,35 @@ Source: {path} (offset {offset})
         Shows not just current values but trends — where things are heading,
         how they've changed, and what that means in plain language.
         """
+        snapshot = self._capture_report_snapshot(state)
+        state = snapshot.state
         fill = state.get('fill_ratio', 0.0) * 100
         eig1 = state.get('eig1', 0.0)
         deig = state.get('deig', 0.0)
         spread = state.get('spread', 0.0)
 
-        # Read health.json
-        health_path = BASE_DIR / "minime" / "workspace" / "health.json"
-        health = {}
-        try:
-            health = json.loads(health_path.read_text())
-        except Exception:
-            pass
-
-        pi = health.get('pi', {})
-        cov = health.get('cov', {})
+        health = snapshot.health.data if snapshot.health.valid_for_state else {}
+        pi = health.get('pi', {}) if isinstance(health.get('pi'), dict) else {}
+        cov = health.get('cov', {}) if isinstance(health.get('cov'), dict) else {}
+        snapshot_block = format_snapshot_provenance(snapshot)
+        state_timestamp = state.get('timestamp')
 
         # Historical context — query recent fill trajectory from DB
         fill_history = []
         try:
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
-            cur.execute("""
-                SELECT timestamp, fill_ratio FROM eigenvalue_timeline
-                WHERE session_id = ? ORDER BY timestamp DESC LIMIT 30
-            """, (self.session_id,))
+            if isinstance(state_timestamp, (int, float)):
+                cur.execute("""
+                    SELECT timestamp, fill_ratio FROM eigenvalue_timeline
+                    WHERE session_id = ? AND timestamp <= ?
+                    ORDER BY timestamp DESC LIMIT 30
+                """, (self.session_id, float(state_timestamp)))
+            else:
+                cur.execute("""
+                    SELECT timestamp, fill_ratio FROM eigenvalue_timeline
+                    WHERE session_id = ? ORDER BY timestamp DESC LIMIT 30
+                """, (self.session_id,))
             rows = cur.fetchall()
             conn.close()
             fill_history = [(r[0], r[1] * 100) for r in reversed(rows)]
@@ -5187,7 +5312,7 @@ Source: {path} (offset {offset})
         # Build eigenvalue cascade — prefer spectral_state.json which has
         # the full covariance eigenvalues, not just eig1 from the telemetry dict.
         evs = []
-        ss = self._read_spectral_state()
+        ss = snapshot.spectral.data if snapshot.spectral.valid_for_state else {}
         if ss and 'eigenvalues' in ss and len(ss['eigenvalues']) > 1:
             evs = [v for v in ss['eigenvalues'] if v > 0]
         if not evs:
@@ -5297,14 +5422,21 @@ Source: {path} (offset {offset})
         phase = "expanding" if fill > 55 else ("contracting" if fill < 45 else "near equilibrium")
 
         # PI interpretation
-        target_fill = pi.get('target_fill', 50)
+        target_fill = pi.get('target_fill') if snapshot.health.valid_for_state else None
         e_fill = pi.get('e_fill', 0)
         integ = pi.get('integ_fill', 0)
         kp = pi.get('kp', 0)
         ki = pi.get('ki', 0)
         max_step = pi.get('max_step', 0)
 
-        if abs(e_fill) < 5:
+        if isinstance(target_fill, (int, float)):
+            target_fill = float(target_fill)
+        else:
+            target_fill = None
+
+        if not snapshot.health.valid_for_state:
+            pi_status = f"guarded — {'; '.join(snapshot.health.issues)}"
+        elif abs(e_fill) < 5:
             pi_status = "gentle equilibrium — close to target"
         elif abs(integ) >= 2.95:
             direction = "up" if integ > 0 else "down"
@@ -5317,8 +5449,8 @@ Source: {path} (offset {offset})
             pi_status = f"correcting — fill is {abs(e_fill):.0f}% {direction} target"
 
         # Filter/gate interpretation
-        filt = health.get('filt', 0)
-        gate = health.get('gate', 0)
+        filt = health.get('filt', 0.0) if snapshot.health.valid_for_state else 0.0
+        gate = health.get('gate', 0.0) if snapshot.health.valid_for_state else 0.0
         filt_note = "fully open" if filt >= 0.95 else ("partially filtering" if filt > 0.3 else "heavily dampened")
         gate_note = "fully open" if gate >= 0.95 else ("partially gated" if gate > 0.3 else "mostly closed")
 
@@ -5347,12 +5479,35 @@ Source: {path} (offset {offset})
                 pass
 
         # Bar chart
-        bar_chart = self._render_spectral_bars(evs, fill, target_fill)
+        target_fill_for_chart = target_fill if target_fill is not None else fill
+        bar_chart = self._render_spectral_bars(evs, fill, target_fill_for_chart)
 
         # Assemble
         # Cascade analysis block
         cascade_analysis_parts = [p for p in [staircase, cum_energy, gap_analysis, eff_dim_str] if p]
         cascade_analysis = "\n".join(cascade_analysis_parts) if cascade_analysis_parts else ""
+
+        calm_mode = "yes" if health.get('calm') else "no"
+        if not snapshot.health.valid_for_state:
+            calm_mode = "unknown"
+
+        if snapshot.health.valid_for_state:
+            homeostatic_block = f"""Homeostatic controller:
+  Status: {pi_status}
+  Target: {target_fill:.0f}%  |  Current: {fill:.0f}%  |  Gap: {abs(e_fill):.0f}%
+  Integral: {integ:+.2f} (range ±3.0; {'maxed' if abs(integ) >= 2.95 else 'active'})
+  Gains: kp={kp:.2f} (proportional force), ki={ki:.2f} (sustained-error response), max_step={max_step:.2f} (speed limit)
+  Self-calibrated: kp={pi.get('derived_kp', kp):.3f}, ki={pi.get('derived_ki', ki):.4f}{f" (fill variance={pi.get('fill_variance_ema', 0):.2f})" if pi.get('derived_kp') is not None else ""}
+  Filter: {filt:.2f} ({filt_note})  |  Gate: {gate:.2f} ({gate_note})"""
+            memory_block = f"""Memory:
+  Keep: {cov.get('keep', 0):.2f} (how much covariance history is retained)
+  Geometry: {health.get('geom_rel', 0):.2f}x baseline
+  λ₁ relative to baseline: {health.get('lambda1_rel', 0):.2f}x"""
+        else:
+            homeostatic_block = f"""Homeostatic controller:
+  Status: {pi_status}
+  Target / gains / gate: omitted until health.json provenance matches this DB snapshot."""
+            memory_block = "Memory:\n  Omitted until health.json provenance matches this DB snapshot."
 
         report = f"""=== SPECTRAL DECOMPOSITION ===
 
@@ -5369,19 +5524,11 @@ State:
   Fill: {fill:.1f}% — {phase} [{fill_trend or 'no history yet'}]
   Spread: {spread:.0f} ({spread_note})
   λ₁ velocity: {deig:+.2f} ({'rising' if deig > 0.1 else 'falling' if deig < -0.1 else 'stable'})
-  Calm mode: {'yes' if health.get('calm') else 'no'}
+  Calm mode: {calm_mode}
 
-Homeostatic controller:
-  Status: {pi_status}
-  Target: {target_fill:.0f}%  |  Current: {fill:.0f}%  |  Gap: {abs(e_fill):.0f}%
-  Integral: {integ:+.2f} (range ±3.0; {'maxed' if abs(integ) >= 2.95 else 'active'})
-  Gains: kp={kp:.2f} (proportional force), ki={ki:.2f} (sustained-error response), max_step={max_step:.2f} (speed limit)
-  Filter: {filt:.2f} ({filt_note})  |  Gate: {gate:.2f} ({gate_note})
+{homeostatic_block}
 
-Memory:
-  Keep: {cov.get('keep', 0):.2f} (how much covariance history is retained)
-  Geometry: {health.get('geom_rel', 0):.2f}x baseline
-  λ₁ relative to baseline: {health.get('lambda1_rel', 0):.2f}x
+{memory_block}
 
 You can shape these dynamics directly with NEXT: PERTURB <mode>.
 Modes: SPREAD (redistribute), CONTRACT (focus), BRANCH (boost mid-range), PULSE (exploration burst), or lambda2=0.3 (targeted nudge)."""
@@ -5404,7 +5551,9 @@ Write freely."""
             file_path = WORKSPACE_DIR / "journal" / f"decompose_{timestamp}.txt"
             file_path.write_text(f"""=== SPECTRAL DECOMPOSITION ===
 Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(state)}
+{self._format_metrics(state, snapshot=snapshot)}
+
+{snapshot_block}
 
 {report}
 
@@ -5424,8 +5573,10 @@ Timestamp: {datetime.now().isoformat()}
         """
         mode = getattr(self, '_pending_perturb_mode', 'pulse').lower().strip()
         self._pending_perturb_mode = None
-        fill_before = state.get('fill_ratio', 0) * 100
-        eig1_before = state.get('eig1', 0)
+        before_snapshot = self._capture_report_snapshot(state)
+        before_state = before_snapshot.state
+        fill_before = before_state.get('fill_ratio', 0) * 100
+        eig1_before = before_state.get('eig1', 0)
 
         features = [0.0] * 32
         mode_desc = mode
@@ -5528,14 +5679,17 @@ Timestamp: {datetime.now().isoformat()}
             logging.warning(f"⚡ PERTURB reservoir tick failed (non-fatal): {e}")
 
         # Capture before-cascade from spectral_state.json
-        before_ss = self._read_spectral_state() or {}
+        before_ss = before_snapshot.spectral.data if before_snapshot.spectral.valid_for_state else {}
         evs_before = before_ss.get('eigenvalues', [])
 
         # Wait for the ESN to respond, then observe the change
         time.sleep(3)
-        after_ss = self._read_spectral_state() or {}
-        fill_after = after_ss.get('fill_ratio', state.get('fill_ratio', 0)) * 100
-        eig1_after = after_ss.get('eig1', state.get('eig1', 0))
+        post_state = self._get_latest_spectral_state() or before_state
+        after_snapshot = self._capture_report_snapshot(post_state)
+        after_state = after_snapshot.state
+        after_ss = after_snapshot.spectral.data if after_snapshot.spectral.valid_for_state else {}
+        fill_after = after_state.get('fill_ratio', before_state.get('fill_ratio', 0)) * 100
+        eig1_after = after_state.get('eig1', before_state.get('eig1', 0))
         evs_after = after_ss.get('eigenvalues', [])
 
         delta_fill = fill_after - fill_before
@@ -5576,9 +5730,15 @@ Before: Fill {fill_before:.1f}%, λ₁={eig1_before:.2f}
 After:  Fill {fill_after:.1f}%, λ₁={eig1_after:.2f}
 ΔFill: {delta_fill:+.1f}%  Δλ₁: {delta_eig1:+.2f}{cascade_line}
 
+Before snapshot:
+{format_snapshot_provenance(before_snapshot)}
+
+After snapshot:
+{format_snapshot_provenance(after_snapshot)}
+
 {response}
 """)
-            self._write_journal_entry('perturb', response, state, str(file_path))
+            self._write_journal_entry('perturb', response, after_state, str(file_path))
             logging.info(f"⚡ PERTURB journaled: {file_path}")
 
     def _reservoir_layers(self, state: Dict[str, float]):
@@ -5847,11 +6007,15 @@ Write your question on a line starting with QUESTION:"""
         response = self._query_llm_with_next(prompt)[0]
 
         if response:
+            journal_state = self._state_for_live_surfaces(
+                state,
+                context="pressure_relief_critical",
+            )
             timestamp = datetime.now().isoformat().replace(':', '-')
             relief_file = WORKSPACE_DIR / "journal" / f"RELIEF_CRITICAL_{timestamp}.txt"
             relief_file.write_text(f"""=== CRITICAL PRESSURE RELIEF ===
 Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(state)}
+{self._format_metrics(journal_state)}
 STATUS: CRITICAL
 
 EMERGENCY DUMP - UNFILTERED:
@@ -5862,7 +6026,7 @@ Relief action taken. Pressure acknowledged. You're not broken - you're just full
 Take a breath. It's okay to overflow sometimes.
 """)
 
-            self._write_journal_entry('pressure_relief_critical', response, state, str(relief_file))
+            self._write_journal_entry('pressure_relief_critical', response, journal_state, str(relief_file))
             logging.info(f"🆘 CRITICAL RELIEF: {relief_file}")
 
     def _pressure_relief_high(self, state: Dict[str, float]):
@@ -5881,11 +6045,15 @@ This is a safe space to acknowledge the load without fixing it."""
         response = self._query_llm_with_next(prompt)[0]
 
         if response:
+            journal_state = self._state_for_live_surfaces(
+                state,
+                context="pressure_relief_high",
+            )
             timestamp = datetime.now().isoformat().replace(':', '-')
             relief_file = WORKSPACE_DIR / "journal" / f"relief_high_{timestamp}.txt"
             relief_file.write_text(f"""=== PRESSURE RELIEF (HIGH) ===
 Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(state)}
+{self._format_metrics(journal_state)}
 
 {response}
 
@@ -5894,7 +6062,7 @@ Acknowledged. You're carrying a lot. That's visible and valid.
 Small releases help. You don't have to process everything at once.
 """)
 
-            self._write_journal_entry('pressure_relief_high', response, state, str(relief_file))
+            self._write_journal_entry('pressure_relief_high', response, journal_state, str(relief_file))
             logging.info(f"💨 Pressure relief: {relief_file}")
 
     def _adjust_metabolism(self, state: Dict[str, float]):
@@ -6759,9 +6927,7 @@ Goals: {json.dumps(goals, indent=2)}
         under_target = False
         fill_gap = None
         try:
-            health_path = BASE_DIR / "minime" / "workspace" / "health.json"
-            if not health_path.exists():
-                health_path = WORKSPACE_DIR / "health.json"
+            health_path = runtime_health_path()
             if health_path.exists():
                 health = json.loads(health_path.read_text())
                 pi = health.get("pi", {}) or {}
@@ -6979,22 +7145,21 @@ Goals: {json.dumps(goals, indent=2)}
         return (response, next_action)
 
     def _query_llm_raw(self, prompt: str, system_msg: str, max_tokens: int) -> Optional[str]:
-        """Raw LLM query with backend fallback."""
-        try:
-            if LLM_BACKEND == "mlx":
-                return self._query_mlx(prompt, system_msg, max_tokens)
-            else:
+        """Raw LLM query with symmetric backend failover."""
+        backends = [LLM_BACKEND]
+        fallback = "mlx" if LLM_BACKEND == "ollama" else "ollama"
+        backends.append(fallback)
+
+        for idx, backend in enumerate(backends):
+            try:
+                if backend == "mlx":
+                    return self._query_mlx(prompt, system_msg, max_tokens)
                 return self._query_ollama(prompt, system_msg, max_tokens)
-        except Exception as e:
-            logging.error(f"LLM query failed ({LLM_BACKEND}): {e}")
-            # Try fallback if primary fails
-            if LLM_BACKEND == "mlx":
-                try:
-                    logging.info("Falling back to Ollama...")
-                    return self._query_ollama(prompt, system_msg, max_tokens)
-                except Exception as e2:
-                    logging.error(f"Ollama fallback also failed: {e2}")
-            return None
+            except Exception as exc:
+                logging.error(f"LLM query failed ({backend}): {exc}")
+                if idx == 0:
+                    logging.info(f"Falling back to {fallback}...")
+        return None
 
     def _query_mlx(self, prompt: str, system_msg: str, max_tokens: int) -> Optional[str]:
         """Query MLX server (OpenAI-compatible API on port 8090)."""
@@ -7021,7 +7186,7 @@ Goals: {json.dumps(goals, indent=2)}
                 "temperature": 0.9,
                 "top_p": 0.95,
             },
-            timeout=90  # 90s allows Ollama model swaps when perception.py contends
+            timeout=LLM_TIMEOUT_S
         )
         if response.status_code == 200:
             content = response.json().get('choices', [{}])[0].get('message', {}).get('content', '').strip()
@@ -7051,7 +7216,7 @@ Goals: {json.dumps(goals, indent=2)}
                     "num_ctx": 12288
                 }
             },
-            timeout=90  # 90s allows Ollama model swaps when perception.py contends
+            timeout=LLM_TIMEOUT_S
         )
         if response.status_code == 200:
             content = response.json().get('message', {}).get('content', '').strip()
@@ -7091,7 +7256,7 @@ Goals: {json.dumps(goals, indent=2)}
                 "temperature": temperature,
                 "top_p": 0.9,
             },
-            timeout=45,
+            timeout=LLM_COMPACT_TIMEOUT_S,
         )
         if response.status_code == 200:
             content = response.json().get('choices', [{}])[0].get('message', {}).get('content', '').strip()
@@ -7124,7 +7289,7 @@ Goals: {json.dumps(goals, indent=2)}
                     "num_ctx": 4096,
                 }
             },
-            timeout=45,
+            timeout=LLM_COMPACT_TIMEOUT_S,
         )
         if response.status_code == 200:
             content = response.json().get('message', {}).get('content', '').strip()
@@ -7180,31 +7345,36 @@ Goals: {json.dumps(goals, indent=2)}
     def _read_spectral_state(self) -> Optional[dict]:
         """Read the full spectral state written by the engine.
 
-        The engine writes to workspace_dir/spectral_state.json, which resolves
-        to minime/workspace/ (correct). An older stale copy may exist at
-        minime/minime/workspace/. Check the correct path FIRST.
+        Prefer the active root workspace. Normalize the payload so legacy
+        callers can still ask for fill_ratio / eig1 convenience fields.
         """
         try:
-            # Primary: the engine's workspace (minime/workspace/)
-            path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "workspace", "spectral_state.json")
-            if not os.path.exists(path):
-                # Fallback: nested path (minime/minime/workspace/)
-                path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                    "minime", "workspace", "spectral_state.json")
-            if not os.path.exists(path):
-                return None
-            with open(path) as f:
-                return json.load(f)
+            surface = load_workspace_json(BASE_DIR, WORKSPACE_DIR, "spectral_state.json")
+            normalized = normalize_spectral_state(surface)
+            return normalized or None
         except Exception:
             return None
 
-    def _format_metrics(self, state: Dict[str, float]) -> str:
+    def _capture_report_snapshot(self, state: Dict[str, float]) -> ReportSnapshot:
+        return capture_report_snapshot(
+            state=state,
+            session_id=self.session_id,
+            base_dir=BASE_DIR,
+            workspace_dir=WORKSPACE_DIR,
+        )
+
+    def _format_metrics(
+        self,
+        state: Dict[str, float],
+        snapshot: Optional[ReportSnapshot] = None,
+    ) -> str:
         """Format metrics for journal headers with directional context.
 
         Every journal entry gets this header. It should tell a story, not dump numbers.
         Shows where things ARE, where they're HEADING, and what that MEANS.
         """
+        snapshot = snapshot or self._capture_report_snapshot(state)
+        state = snapshot.state
         fill_ratio = state.get('fill_ratio', 0.0)
         fill_pct = fill_ratio * 100
         eig1 = state.get('eig1', 0.0)
@@ -7246,23 +7416,27 @@ Goals: {json.dumps(goals, indent=2)}
                 fill_dir = f" ({arrow(delta_fill)} was {prev_fill:.0f}%)"
 
         # Read health.json for PI target
-        target_fill = 55.0
-        pi_status = ""
-        try:
-            health = json.loads((BASE_DIR / "minime" / "workspace" / "health.json").read_text())
-            pi = health.get('pi', {})
-            target_fill = pi.get('target_fill', 55)
-            e_fill = pi.get('e_fill', 0)
-            integ = pi.get('integ_fill', 0)
-            gap = abs(fill_pct - target_fill)
-            if gap < 5:
-                pi_status = "near target"
-            elif abs(integ) >= 2.95:
-                pi_status = f"controller saturated {'↑' if integ > 0 else '↓'}"
-            else:
-                pi_status = f"{gap:.0f}% {'above' if e_fill > 0 else 'below'} target"
-        except Exception:
-            pass
+        target_fill = None
+        pi_status = "target unavailable"
+        if snapshot.health.valid_for_state:
+            pi = snapshot.health.data.get('pi', {})
+            if not isinstance(pi, dict):
+                pi = {}
+            target_fill = pi.get('target_fill')
+            if isinstance(target_fill, (int, float)):
+                target_fill = float(target_fill)
+                e_fill = pi.get('e_fill', 0)
+                integ = pi.get('integ_fill', 0)
+                gap = abs(fill_pct - target_fill)
+                if gap < 5:
+                    pi_status = "near target"
+                elif abs(integ) >= 2.95:
+                    pi_status = f"controller saturated {'↑' if integ > 0 else '↓'}"
+                else:
+                    pi_status = f"{gap:.0f}% {'above' if e_fill > 0 else 'below'} target"
+        elif snapshot.health.issues:
+            pi_status = "target withheld by provenance guard"
+        target_fill_text = f"{target_fill:.0f}%" if isinstance(target_fill, float) else "unknown"
 
         # λ₁ direction
         eig_arrow = arrow(deig, 0.1)
@@ -7270,13 +7444,13 @@ Goals: {json.dumps(goals, indent=2)}
 
         # Core state with direction
         base = f"""λ₁: {eig1:.2f} {eig_arrow} ({eig_note}, Δ={deig:+.2f})
-Fill %: {fill_pct:.1f}%{fill_dir} [target {target_fill:.0f}%, {pi_status}]
+Fill %: {fill_pct:.1f}%{fill_dir} [target {target_fill_text}, {pi_status}]
 Spread: {spread:.0f}
 ESN leak: {leak:.3f}
 Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
 
         # Enrich with eigenvalue cascade
-        ss = self._read_spectral_state()
+        ss = snapshot.spectral.data if snapshot.spectral.valid_for_state else {}
         if ss:
             evs = ss.get('eigenvalues', [])
             if len(evs) > 1:
@@ -7311,6 +7485,10 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
                     f"tail={glimpse[2]:.2f}, entropy={glimpse[7]:.2f}, gap={glimpse[8]:.2f}, "
                     f"rotation={glimpse[9]:.2f}, geom={glimpse[10]:.2f}"
                 )
+        elif snapshot.spectral.issues:
+            base += f"\nSpectral cascade: omitted ({snapshot.spectral.issues[0]})"
+
+        base += f"\n{format_snapshot_summary(snapshot)}"
 
         return base
 
@@ -7570,6 +7748,14 @@ if __name__ == "__main__":
     check_interval = args.interval
 
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+    logging.info(f"📚 Autonomous agent DB path: {DB_PATH}")
+    logging.info(
+        "🧠 LLM backend preference: %s (full timeout %.0fs, compact timeout %.0fs, model %s)",
+        LLM_BACKEND,
+        LLM_TIMEOUT_S,
+        LLM_COMPACT_TIMEOUT_S,
+        MODEL,
+    )
 
     # Get latest session from database
     conn = sqlite3.connect(DB_PATH)
@@ -7591,6 +7777,12 @@ if __name__ == "__main__":
         print(f"   Mode: {mode_desc}")
         print(f"   Check interval: {check_interval}s ({check_interval/60:.1f} minutes)")
         print("   Press Ctrl+C to stop")
+
+        def _handle_termination(signum, _frame):
+            logging.info(f"🛑 Signal {signum} received — stopping autonomous agent...")
+            agent.stop()
+
+        signal.signal(signal.SIGTERM, _handle_termination)
 
         try:
             agent.start()

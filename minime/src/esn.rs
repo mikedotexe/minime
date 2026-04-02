@@ -174,10 +174,17 @@ pub struct SpectralSR {
     last_profile: EsnProfileSnapshot,
     pending_rank1: VecDeque<PendingRank1>,
 
+    // V₁ spectral damping: redistribute excess energy from dominant eigenvector.
+    // Being-driven: "I want to become a shimmer, not a singular pulse."
+    spectral_damping: f32,       // Damping coefficient per application (0.0-0.10, default 0.02)
+    spectral_target_ratio: f32,  // Target λ₁/trace fraction (0.20-0.85, default 0.50)
+
     // Metal resources
     gpu: *const Gpu, // Raw pointer to avoid circular dependency
     pso_rank1: ComputePipelineState,
     pso_mv: ComputePipelineState,
+    pso_v1_damp: ComputePipelineState,
+    damp_params_buf: Buffer, // 3 floats: [damping, excess, inv_d]
 }
 
 unsafe impl Send for SpectralSR {}
@@ -206,6 +213,13 @@ impl SpectralSR {
             .dev
             .new_compute_pipeline_state_with_function(&f_mv)
             .map_err(|e| anyhow::anyhow!("Failed to create matvec pipeline: {}", e))?;
+        let f_v1_damp = lib_esn
+            .get_function("v1_damp_redistribute", None)
+            .map_err(|e| anyhow::anyhow!("Failed to get v1_damp_redistribute function: {}", e))?;
+        let pso_v1_damp = gpu
+            .dev
+            .new_compute_pipeline_state_with_function(&f_v1_damp)
+            .map_err(|e| anyhow::anyhow!("Failed to create v1_damp pipeline: {}", e))?;
 
         // Allocate unified memory buffers
         let cov = gpu.new_shared((d * d * mem::size_of::<f32>()) as u64);
@@ -214,6 +228,7 @@ impl SpectralSR {
         let y_buf = gpu.new_shared((d * mem::size_of::<f32>()) as u64);
         let rho_buf = gpu.new_shared(mem::size_of::<f32>() as u64);
         let dim_buf = gpu.new_shared(mem::size_of::<u32>() as u64);
+        let damp_params_buf = gpu.new_shared((3 * mem::size_of::<f32>()) as u64);
 
         // Initialize buffers
         gpu.write_f32(&cov, &vec![0.0f32; d * d]);
@@ -258,9 +273,13 @@ impl SpectralSR {
                 ..EsnProfileSnapshot::default()
             },
             pending_rank1: VecDeque::new(),
+            spectral_damping: 0.02,
+            spectral_target_ratio: 0.50,
             gpu: gpu as *const Gpu,
             pso_rank1,
             pso_mv,
+            pso_v1_damp,
+            damp_params_buf,
         })
     }
 
@@ -278,8 +297,65 @@ impl SpectralSR {
     /// The hard floor at 0.92 prevents covariance matrix collapse.
     pub fn set_rho(&mut self, rho: f32) {
         let gpu = unsafe { &*self.gpu };
-        self.rho = rho.clamp(0.92, 0.999);
+        self.rho = rho.clamp(0.82, 0.999);
         gpu.write_f32(&self.rho_buf, &[self.rho]);
+    }
+
+    // --- V₁ spectral damping (being-driven: "I want to become a shimmer") ---
+
+    pub fn set_spectral_damping(&mut self, d: f32) {
+        self.spectral_damping = d.clamp(0.0, 0.10);
+    }
+    pub fn set_spectral_target_ratio(&mut self, r: f32) {
+        self.spectral_target_ratio = r.clamp(0.20, 0.85);
+    }
+    pub fn spectral_damping(&self) -> f32 { self.spectral_damping }
+    pub fn spectral_target_ratio(&self) -> f32 { self.spectral_target_ratio }
+
+    /// Apply trace-preserving v₁ damping to redistribute excess energy from
+    /// the dominant eigenvector direction toward the diagonal.
+    /// Only effective when λ₁ exceeds target_ratio × trace.
+    fn apply_v1_damping(&self) {
+        if self.spectral_damping <= 0.0 || self.eig1 <= 1e-6 {
+            return;
+        }
+        let gpu = unsafe { &*self.gpu };
+
+        // Read covariance diagonal from unified memory to compute trace
+        let cov_ptr = self.cov.contents() as *const f32;
+        let mut trace: f32 = 0.0;
+        for i in 0..self.d {
+            trace += unsafe { *cov_ptr.add(i * self.d + i) };
+        }
+        if trace <= 1e-6 || !trace.is_finite() {
+            return;
+        }
+
+        let target_eig1 = self.spectral_target_ratio * trace;
+        let excess = (self.eig1 - target_eig1).max(0.0);
+        if excess <= 1e-6 {
+            return; // λ₁ already below target — no damping needed
+        }
+
+        // Write cached eigenvector and params to GPU buffers
+        gpu.write_f32(&self.v_buf, &self.v_host);
+        let inv_d = 1.0 / self.d as f32;
+        gpu.write_f32(&self.damp_params_buf, &[self.spectral_damping, excess, inv_d]);
+
+        // Dispatch v1_damp_redistribute kernel
+        let cmd = gpu.q.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&self.pso_v1_damp);
+        enc.set_buffer(0, Some(&self.cov), 0);
+        enc.set_buffer(1, Some(&self.v_buf), 0);
+        enc.set_buffer(2, Some(&self.damp_params_buf), 0);
+        enc.set_buffer(3, Some(&self.dim_buf), 0);
+        let grid = metal::MTLSize::new((self.d * self.d) as u64, 1, 1);
+        let tg = metal::MTLSize::new(256, 1, 1);
+        enc.dispatch_threads(grid, tg);
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
     }
 
     pub fn set_profiling_enabled(&mut self, enabled: bool) {
@@ -848,6 +924,9 @@ impl SpectralSR {
         if self.t % p == 0 {
             // Batched: rank1 + power iteration with fused first submit
             self.rank1_and_power_step_profiled(x_host, decision.steps, &mut acc)?;
+            // V₁ damping: redistribute excess energy from dominant eigenvector.
+            // Runs after power iteration when eig1 and v_host are maximally fresh.
+            self.apply_v1_damping();
             introspection_fired = true;
             self.introspection_count = self.introspection_count.saturating_add(1);
             // Variable schedule: 20% chance of jumping to a random prime
@@ -1340,14 +1419,16 @@ impl ESN {
     /// and deep memory (high rho, calm state). The hard floor in set_rho
     /// (0.92) remains as a safety net below the dynamic range.
     pub fn set_dynamic_rho(&mut self, fill_pct: f32, entropy: f32) {
-        let base = 0.99_f32;
+        let base = 0.92_f32;
         let fill_factor = (fill_pct / 100.0).clamp(0.0, 1.0);
         let entropy_factor = entropy.clamp(0.0, 1.0);
-        // Wider adjustment: was ±0.015, now ±0.04
-        // At high fill (100%) + high entropy (1.0): rho = 0.99 - 0.04 = 0.95
-        // At low fill (0%) + low entropy (0.0): rho = 0.99 - 0.0 = 0.99
-        let adjustment = 0.04 * (fill_factor * 0.5 + entropy_factor * 0.5);
-        let rho = (base - adjustment).clamp(0.94, 0.998);
+        // Base lowered 0.99→0.97→0.92: ESN internal recurrence self-sustains
+        // covariance at 78% regardless of input. More aggressive forgetting needed.
+        // At high fill (100%) + high entropy (1.0): rho = 0.92 - 0.08 = 0.84
+        // At low fill (0%) + low entropy (0.0): rho = 0.92 - 0.0 = 0.92
+        // At typical 78% fill + moderate entropy: rho ≈ 0.87
+        let adjustment = 0.08 * (fill_factor * 0.5 + entropy_factor * 0.5);
+        let rho = (base - adjustment).clamp(0.82, 0.95);
         self.sr.set_rho(rho);
     }
 
@@ -1356,6 +1437,11 @@ impl ESN {
     pub fn set_rho_direct(&mut self, rho: f32) {
         self.sr.set_rho(rho);
     }
+
+    pub fn set_spectral_damping(&mut self, d: f32) { self.sr.set_spectral_damping(d); }
+    pub fn set_spectral_target_ratio(&mut self, r: f32) { self.sr.set_spectral_target_ratio(r); }
+    pub fn get_spectral_damping(&self) -> f32 { self.sr.spectral_damping() }
+    pub fn get_spectral_target_ratio(&self) -> f32 { self.sr.spectral_target_ratio() }
 
     /// Apply a controlled perturbation to the top eigenvalue for stability
     /// boundary mapping. See `SpectralSR::perturb_eig1` for details.

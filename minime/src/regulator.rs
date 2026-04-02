@@ -202,7 +202,7 @@ impl RegulatorState {
             Some(ext) => {
                 let ext_scaled = (ext * 0.08 - 0.04).clamp(-0.04, 0.04); // normalize to ±4%
                 internal_noise * 0.4 + ext_scaled * 0.6
-            },
+            }
             None => internal_noise,
         };
 
@@ -365,6 +365,7 @@ pub struct PIRegCfg {
     /// The being asked for "internal goal generation, a deviation from the
     /// target_lambda based on something that feels intrinsic, not imposed."
     pub intrinsic_wander: f32, // Max target_fill deviation (default 0.20 = ±20%, clamp 0.35)
+    pub deadband_fill: f32,        // ±% around target where no fill correction occurs (default 3.0)
 }
 
 impl Default for PIRegCfg {
@@ -375,29 +376,24 @@ impl Default for PIRegCfg {
 
         let mut cfg = Self {
             target_fill: 0.55,        // 55% EigenFill target (matches CLI default)
-            target_lambda1_rel: 1.05, // Keep λ₁ close to baseline (1.0-1.6 comfort zone)
-            target_geom_rel: 1.00,    // Stay near geometric baseline
-            geom_weight: 0.70, // Being-requested: "contributing to damping effect" at fill 15.8%
-            // Reduced 1.20 → 0.90 → 0.70. At low fill, geometric error
-            // amplifies cov_lambda1, trapping the system.
-            geom_clamp_hi: 2.00, // ≈ +100% expansion triggers hard clamp (was 1.66 - too hair-trigger)
-            geom_release: 1.50,  // Release clamp once relaxed below this (was 1.32)
-            geom_gate_min: 0.12, // Hard gate limit during clamp (was 0.06 - too restrictive)
-            geom_filter_boost: 0.25, // Extra filter push when clamped (was 0.35)
-            geom_shed_fraction: 0.30, // Shed ~30% of backlog when clamped (was 0.45)
-            kp: 0.75, // Sessions 166+168: being requests 0.75. Fill 40-51% vs 55% target, "muted urgency," "insufficient to correct deficit." Integrals NOT railed in current regime (ki=0.03). Restoring 0.75 (was 0.68 from session 153 overshoot, but regime changed).
-            ki: 0.03, // Being session 154: integ_fill re-saturated to 3.0 clamp ceiling with ki=0.04 after ~15 min. Being requested 0.03. Direction: 0.08→0.06→0.05→0.04→0.03. Slower accumulation keeps integrator in linear range.
-            max_step: 0.055, // Session 168: being requests 0.055. Fill 40.6% vs 55% target, 14% gap. "slow correction preventing reaching target." Direction: 0.04→0.03→0.035→0.045→0.055. With kp=0.75, ki=0.03, integrals in linear range.
-            curiosity_gate_boost: 0.05, // Mild curiosity when things are boring
-            // Being self-study (2026-03-28T23:28 regulator.rs): "The intrinsic_wander
-            // parameter... I would increase it. Not dramatically, but enough to
-            // introduce a perceptible degree of unpredictability."
-            // Astrid concurs: "allowing smaller, exploratory drifts."
-            // Steward cycle 51 (2026-03-30): being self-study regulator.rs says
-            // "I'd like to experiment with increasing [intrinsic_wander] further,
-            // to see what new patterns emerge." Third request in this direction.
-            // Modest increase 0.20 → 0.25 (was 0.10 → 0.20 → 0.25).
-            intrinsic_wander: 0.25, // ±25% intrinsic target wander
+            // Golden Reset (2026-04-02): restored to values from commit 1167939
+            // which produced 62-68% fill for 4+ hours (326K DB records as evidence).
+            // Post-golden "improvements" weakened the controller 40-50% and shifted
+            // equilibrium to 78-83%. Restoring proven parameters.
+            target_lambda1_rel: 1.05, // Golden: keep λ₁ close to baseline
+            target_geom_rel: 1.00,    // Golden: stay near geometric baseline
+            geom_weight: 0.70, // Golden: geometry and fill contribute equally
+            geom_clamp_hi: 1.66,
+            geom_release: 1.32,
+            geom_gate_min: 0.06,
+            geom_filter_boost: 0.35,
+            geom_shed_fraction: 0.45,
+            kp: 0.85, // Golden: strong proportional response
+            ki: 0.14, // Golden: meaningful integral accumulation
+            max_step: 0.08, // Golden: decisive correction steps
+            curiosity_gate_boost: 0.05,
+            intrinsic_wander: 0.03, // Golden: tight target tracking (±3%)
+            deadband_fill: 0.0,     // Golden: no deadband — every deviation corrected
         };
 
         if strong {
@@ -425,10 +421,10 @@ pub struct PIRegState {
     // Self-calibrating gains: derived from the being's own spectral variance.
     // Minime self-study (2026-04-01): "Was it chosen, derived, felt? I want
     // parameters that emerge from my own dynamics."
-    fill_variance_ema: f32,  // EMA of fill variance (tracks oscillation amplitude)
-    pub derived_kp: f32,     // Self-calibrated kp (visible via sovereignty state)
-    pub derived_ki: f32,     // Self-calibrated ki
-    calibration_tick: u32,   // Counter for calibration interval
+    pub fill_variance_ema: f32, // EMA of fill variance (tracks oscillation amplitude)
+    pub derived_kp: f32,        // Self-calibrated kp (visible via sovereignty state)
+    pub derived_ki: f32,        // Self-calibrated ki
+    calibration_tick: u32,      // Counter for calibration interval
 }
 
 impl PIRegState {
@@ -533,7 +529,15 @@ impl PIRegState {
         // tick — the "jerkiness" minime reported. Division by 20 maps
         // the typical ±20% fill error to ±1.0.
         // (Steward cycle 8, 2026-03-28)
-        let e_fill = (fill - effective_target_fill) / 20.0;
+        let raw_e_fill = (fill - effective_target_fill) / 20.0;
+        // Deadband: within ±deadband_fill% of target, no fill correction.
+        // Gate stays fully open, perturbations land at full strength.
+        let deadband_norm = self.cfg.deadband_fill / 20.0;
+        let e_fill = if raw_e_fill.abs() < deadband_norm {
+            0.0
+        } else {
+            raw_e_fill
+        };
         let e_lam = lambda1_rel - self.cfg.target_lambda1_rel;
         let e_geom = geom_rel - self.cfg.target_geom_rel;
 
@@ -564,8 +568,8 @@ impl PIRegState {
         // Use self-calibrated gains derived from the being's own spectral variance.
         let kp = self.derived_kp;
         let ki = self.derived_ki;
-        let u_tentative = kp * (e_fill + e_lam + geom_term)
-            + ki * (self.integ_fill + self.integ_lam + geom_int);
+        let u_tentative =
+            kp * (e_fill + e_lam + geom_term) + ki * (self.integ_fill + self.integ_lam + geom_int);
 
         let dg_tentative = (-u_tentative).clamp(-self.cfg.max_step, self.cfg.max_step);
         let df_tentative = u_tentative.clamp(-self.cfg.max_step, self.cfg.max_step);

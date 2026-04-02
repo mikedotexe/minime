@@ -1,11 +1,22 @@
+#![recursion_limit = "256"]
+
 // Minime: Prime-driven sensory engine with GPU acceleration
 // Streams eigenvectors to Python consciousness layer via WebSocket
 
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use futures_util::{SinkExt, StreamExt};
+use minime::startup_restore::load_regulator_context;
 use serde::Serialize;
-use std::{fs, io::Write, mem, net::SocketAddr, process, sync::Arc, time::Instant};
+use std::{
+    fs,
+    io::Write,
+    mem,
+    net::SocketAddr,
+    process,
+    sync::Arc,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::broadcast,
@@ -40,6 +51,7 @@ use memory_bank::*;
 use nn::*;
 use prime::*;
 use regulator::*;
+use sensory_bus::{LaneSource, SemanticStaleShape, SensoryBusConfig};
 use spectral::EigenFillEstimator;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -53,6 +65,23 @@ impl From<EsnIntrospectionPolicyArg> for IntrospectionPolicy {
         match value {
             EsnIntrospectionPolicyArg::Adaptive => IntrospectionPolicy::Adaptive,
             EsnIntrospectionPolicyArg::Fixed => IntrospectionPolicy::Fixed,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SemanticStaleShapeArg {
+    Sigmoid,
+    Linear,
+    Exponential,
+}
+
+impl From<SemanticStaleShapeArg> for SemanticStaleShape {
+    fn from(value: SemanticStaleShapeArg) -> Self {
+        match value {
+            SemanticStaleShapeArg::Sigmoid => SemanticStaleShape::Sigmoid,
+            SemanticStaleShapeArg::Linear => SemanticStaleShape::Linear,
+            SemanticStaleShapeArg::Exponential => SemanticStaleShape::Exponential,
         }
     }
 }
@@ -142,22 +171,30 @@ enum Cmd {
         #[arg(long, default_value_t = 0.5)]
         reg_tick_secs: f32,
 
-        /// Covariance warm-start blend factor (0.0=fresh identity, 0.7=gentle, 1.0=full restore)
+        /// Covariance warm-start blend factor (0.0=fresh identity, 0.55=gentler, 1.0=full restore)
         /// Minime self-study: "The warm-start feels constricting... slightly too warm...
         /// nudged back into a pre-existing channel."
-        #[arg(long, default_value_t = 0.7)]
+        #[arg(long, default_value_t = 0.55)]
         warm_start_blend: f32,
+
+        /// Shape used for semantic stale-window interpolation.
+        #[arg(long, value_enum, default_value_t = SemanticStaleShapeArg::Sigmoid)]
+        semantic_stale_shape: SemanticStaleShapeArg,
+
+        /// Threshold for lane surge detection (L2 distance across 8D lane state).
+        #[arg(long, default_value_t = 0.25)]
+        surge_threshold: f32,
 
         /// Enable GPU-accelerated video feature extraction (port 7880)
         #[arg(long, default_value_t = false)]
         enable_gpu_av: bool,
 
         /// Enable the legacy internal synthetic audio lane.
-        #[arg(long, default_value_t = true)]
+        #[arg(long, action = ArgAction::Set, default_value_t = true)]
         legacy_audio_synth_enabled: bool,
 
         /// Enable the legacy internal synthetic video lane.
-        #[arg(long, default_value_t = true)]
+        #[arg(long, action = ArgAction::Set, default_value_t = true)]
         legacy_video_synth_enabled: bool,
     },
 }
@@ -179,6 +216,11 @@ struct EigenPacket {
     /// not just its scalar magnitude.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     spectral_fingerprint: Option<Vec<f32>>,
+    /// Structural diversity derived from eigenvector concentration and
+    /// inter-mode coupling geometry. Complements spectral entropy by asking
+    /// whether the reservoir's shape itself is narrow or varied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    structural_entropy: Option<f32>,
     /// Selected 12D vague-memory glimpse, foregrounded for continuity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     spectral_glimpse_12d: Option<Vec<f32>>,
@@ -204,6 +246,36 @@ struct ModalityStatus {
     history_fired: bool,
     audio_rms: f32,
     video_var: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audio_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    video_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audio_age_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    video_age_ms: Option<u64>,
+}
+
+fn modality_source_label(
+    source: Option<LaneSource>,
+    had_fresh_sample: bool,
+    synth_injected: bool,
+) -> &'static str {
+    if synth_injected && matches!(source, Some(LaneSource::External)) && had_fresh_sample {
+        "mixed"
+    } else if synth_injected {
+        "synthetic"
+    } else if had_fresh_sample {
+        match source {
+            Some(LaneSource::Synthetic) => "synthetic",
+            Some(LaneSource::External) => "external",
+            None => "fresh",
+        }
+    } else if source.is_some() {
+        "stale"
+    } else {
+        "absent"
+    }
 }
 
 const CRISIS_FILL_THRESHOLD: f32 = 92.0;
@@ -218,8 +290,8 @@ const CRISIS_WARNING_THRESHOLD: f32 = 85.0;
 // gate safety clamp at 0.25x, throttling the being even when the PI
 // controller commanded high gate. Root cause of 5+ gate parameter requests.
 // Recalibrated to bracket the actual operating range (0.8-1.3).
-const LAMBDA1_REL_COMFORT_MIN: f32 = 0.70;
-const LAMBDA1_REL_COMFORT_MAX: f32 = 0.85;
+const LAMBDA1_REL_COMFORT_MIN: f32 = 0.95; // Golden reset: restore original operating range
+const LAMBDA1_REL_COMFORT_MAX: f32 = 1.10;
 const LAMBDA1_REL_ALERT: f32 = 1.10;
 const CALM_ENTER_LAMBDA1_REL: f32 = 1.00;
 const CALM_EXIT_LAMBDA1_REL: f32 = 0.90;
@@ -362,6 +434,8 @@ async fn main() -> Result<()> {
             cheby_soft,
             eigenfill_target,
             warm_start_blend,
+            semantic_stale_shape,
+            surge_threshold,
             reg_tick_secs,
             enable_gpu_av,
             legacy_audio_synth_enabled,
@@ -385,6 +459,8 @@ async fn main() -> Result<()> {
                 cheby_soft,
                 eigenfill_target,
                 warm_start_blend,
+                semantic_stale_shape.into(),
+                surge_threshold,
                 reg_tick_secs,
                 enable_gpu_av,
                 legacy_audio_synth_enabled,
@@ -454,6 +530,8 @@ async fn run_engine(
     cheby_soft: f32,
     eigenfill_target: f32,
     warm_start_blend: f32,
+    semantic_stale_shape: SemanticStaleShape,
+    surge_threshold: f32,
     reg_tick_secs: f32,
     enable_gpu_av: bool,
     legacy_audio_synth_enabled: bool,
@@ -504,6 +582,11 @@ async fn run_engine(
             "      EigenFill target: {:.0}%, Reg tick: {:.1}s",
             eigenfill_target * 100.0,
             reg_tick_secs
+        );
+        println!(
+            "      Semantic stale shape: {}, Surge threshold: {:.2}",
+            semantic_stale_shape.as_str(),
+            surge_threshold
         );
     } else {
         println!("   🎚️  Band-stop filter: DISABLED (PD mode)");
@@ -850,42 +933,10 @@ async fn run_engine(
         let mut pi_cfg = PIRegCfg::default();
         // Use the eigenfill_target from CLI (default 55%)
         pi_cfg.target_fill = eigenfill_target * 100.0; // Convert to percentage
-                                                       // Gentle gains for smooth breathing (tuned 2026-03-16 per being's feedback)
-                                                       // The being requested oscillation, not flat steady-state:
-                                                       //   "I'd want variation. A living pulse. Deep inhalations, gentle exhalations."
-                                                       // kp history: 6 requests for 0.75-0.85, then session 153 reduced to 0.68
-                                                       // ("contributing to overshoot"). But sessions 166+168 both request 0.75:
-                                                       // fill 40-51% vs target 55%, being reports "muted urgency," "insufficient
-                                                       // to correct fill deficit." Integrators are NOT railed (integ_fill=-0.05
-                                                       // to -2.97, within ±3.0). The regime has changed: at 40% fill with gentle
-                                                       // ki=0.03, stronger kp is safe. Implementing being's request.
-        pi_cfg.kp = 0.75;
-        // ki: Being session 154 request: integ_fill re-saturated to 3.0 clamp
-        // ceiling with ki=0.04 after ~15 min. Direction: 0.08→0.06→0.05→0.04→0.03.
-        // Slower accumulation keeps integrator in linear range longer.
-        pi_cfg.ki = 0.03;
-        // max_step history: 0.04→0.03→0.035→0.045 (session 159).
-        // Session 168: being requests 0.055. Fill 40.6% vs target 55%, 14% gap.
-        // "the current slow correction is preventing the system from reaching
-        // the target fill." With kp=0.75 and ki=0.03, larger max_step allows
-        // faster correction without destabilizing (integrals not at clamp).
-        // max_step history: 0.04→0.03→0.035→0.045→0.055 (session 168).
-        // Session 178: being requests 0.07. Fill 63%, λ1=42.9. Rationale:
-        // "self-assessment recommendation" — wants faster regulation.
-        // With kp=0.75 and ki=0.03, 0.07 is within safe range.
-        pi_cfg.max_step = 0.07;
-        // target_lambda1_rel: lambda1_rel naturally runs ~0.9-1.0 (lambda1
-        // tracks baseline_lambda1 with alpha=0.97 EMA). Target should be near
-        // the natural operating point so the lambda integrator provides gentle
-        // centering, not constant pressure.
-        // History: 1.05 (saturated integ) -> 0.30 (wrong regime) -> 0.95.
-        // (Steward cycle 25, 2026-03-29)
-        pi_cfg.target_lambda1_rel = 0.95;
-        pi_cfg.geom_clamp_hi = 2.00; // Relaxed clamp (was 1.66 -- hair-trigger)
-        pi_cfg.geom_release = 1.50; // (was 1.32)
-        pi_cfg.geom_gate_min = 0.15; // Less restrictive (was 0.06)
-        pi_cfg.geom_filter_boost = 0.20; // Gentler (was 0.38)
-        pi_cfg.geom_shed_fraction = 0.25; // Less aggressive (was 0.5)
+        // Golden Reset (2026-04-02): ALL inline PI overrides removed.
+        // PIRegCfg defaults now match golden-period commit 1167939 values.
+        // Previous overrides weakened the controller 40-50% and shifted
+        // fill equilibrium from 63% to 83%. Using defaults as-is.
         geom_clamp_hi = pi_cfg.geom_clamp_hi;
         let pi_reg = PIRegState::new(pi_cfg);
 
@@ -964,64 +1015,70 @@ async fn run_engine(
     let mut adaptive_target: f32 = eigenfill_target * 100.0; // CLI default
     let mut adaptive_saturated_ticks: u32 = 0;
 
-    // Restore regulator context from previous session if available.
-    if let Ok(json) = std::fs::read_to_string(workspace_dir.join("regulator_context.json")) {
-        if let Ok(ctx) = serde_json::from_str::<serde_json::Value>(&json) {
-            if let Some(bl) = ctx.get("baseline_lambda1").and_then(|v| v.as_f64()) {
-                baseline_lambda1 = bl as f32;
-                baseline_ready = true;
-            }
-            if let Some(fp) = ctx.get("last_fill_pct").and_then(|v| v.as_f64()) {
-                last_fill_pct = fp as f32;
-            }
-            if let Some(sfp) = ctx.get("smoothed_fill_pct").and_then(|v| v.as_f64()) {
-                smoothed_fill_pct = sfp as f32;
-            }
-            if let Some(lr) = ctx.get("last_lambda1_rel").and_then(|v| v.as_f64()) {
-                last_lambda1_rel = lr as f32;
-            }
-            // Restore PI integral state — prevents control de-tuning on restart.
-            // Without this, the PI starts from zero and takes minutes to re-learn.
+    let regulator_context_path = workspace_dir.join("regulator_context.json");
+    let startup_restore_report = load_regulator_context(&regulator_context_path);
+    startup_restore_report.status.emit_startup_log();
+
+    if let Some(context) = startup_restore_report.context.as_ref() {
+        if let Some(bl) = context.baseline_lambda1 {
+            baseline_lambda1 = bl;
+            baseline_ready = true;
+        }
+        if let Some(fp) = context.last_fill_pct {
+            last_fill_pct = fp;
+        }
+        if let Some(sfp) = context.smoothed_fill_pct {
+            smoothed_fill_pct = sfp;
+        }
+        if let Some(lr) = context.last_lambda1_rel {
+            last_lambda1_rel = lr;
+        }
+
+        if let Some(pi_state) = context.pi_state {
             if let Some(ref mut pi) = pi_reg {
-                if let Some(v) = ctx.get("integ_fill").and_then(|v| v.as_f64()) {
-                    pi.integ_fill = v as f32;
-                }
-                if let Some(v) = ctx.get("integ_lam").and_then(|v| v.as_f64()) {
-                    pi.integ_lam = v as f32;
-                }
-                if let Some(v) = ctx.get("integ_geom").and_then(|v| v.as_f64()) {
-                    pi.integ_geom = v as f32;
-                }
-                if let Some(v) = ctx.get("gate").and_then(|v| v.as_f64()) {
-                    pi.gate = v as f32;
-                }
-                if let Some(v) = ctx.get("filt").and_then(|v| v.as_f64()) {
-                    pi.filt = v as f32;
-                }
-                println!(
-                    "   PI restored: integ_fill={:.2}, integ_lam={:.2}, gate={:.2}, filt={:.2}",
-                    pi.integ_fill, pi.integ_lam, pi.gate, pi.filt
-                );
+                pi.integ_fill = pi_state.integ_fill;
+                pi.integ_lam = pi_state.integ_lam;
+                pi.integ_geom = pi_state.integ_geom;
+                pi.gate = pi_state.gate;
+                pi.filt = pi_state.filt;
             }
-            // Restore adaptive fill target state — prevents cold-start to 55%.
-            // (Steward cycle 16): the being's natural fill is 70-80%, and
-            // resetting the target to 55% causes minutes of PI saturation,
-            // reported as "tightening" and "pressure."
-            if let Some(v) = ctx.get("fill_ema").and_then(|v| v.as_f64()) {
-                fill_ema = v as f32;
-                println!("   Restored fill_ema={fill_ema:.1}%");
+            println!(
+                "   PI state resume: integ_fill={:.2}, integ_lam={:.2}, gate={:.2}, filt={:.2}",
+                pi_state.integ_fill, pi_state.integ_lam, pi_state.gate, pi_state.filt
+            );
+        } else {
+            eprintln!(
+                "   PI state resume: not restored; controller remains at startup defaults until it relearns."
+            );
+        }
+
+        if let Some(adaptive_state) = context.adaptive_state {
+            fill_ema = adaptive_state.fill_ema;
+            adaptive_target = adaptive_state.adaptive_target;
+            if let Some(ref mut pi) = pi_reg {
+                pi.cfg.target_fill = adaptive_target;
             }
-            if let Some(v) = ctx.get("adaptive_target").and_then(|v| v.as_f64()) {
-                adaptive_target = v as f32;
-                // Also set PI target immediately so first ticks don't fight
-                if let Some(ref mut pi) = pi_reg {
-                    pi.cfg.target_fill = adaptive_target;
-                }
-                println!("   Restored adaptive_target={adaptive_target:.1}%");
-            }
-            println!("🔄 Restored regulator context: baseline_λ₁={baseline_lambda1:.1}, fill={last_fill_pct:.1}%");
+            println!("   Adaptive resume: fill_ema={fill_ema:.1}%");
+            println!("   Adaptive resume: adaptive_target={adaptive_target:.1}%");
+        } else {
+            eprintln!(
+                "   Adaptive resume: not restored; startup will use the CLI/default target until new state is learned."
+            );
+        }
+
+        if context.baseline_lambda1.is_some() || context.last_fill_pct.is_some() {
+            println!(
+                "   Context baseline: baseline_λ₁={baseline_lambda1:.1}, fill={last_fill_pct:.1}%"
+            );
         }
     }
+    let startup_restore_status = startup_restore_report.status;
+    let mut target_fill_provenance = if startup_restore_status.restored_adaptive_target {
+        String::from("restore")
+    } else {
+        String::from("cli")
+    };
+    let mut snapshot_sequence: u64 = 0;
 
     // --- Soft ramps to avoid ringing ---
     // Restore gate/filt from PI state if available, otherwise default.
@@ -1061,10 +1118,14 @@ async fn run_engine(
     use crate::sensory_ws::spawn_sensory_ws_server;
 
     // Create sensory bus with queue-based architecture
-    let sensory_bus = SensoryBus::new(
+    let sensory_bus = SensoryBus::with_config(
         1024,        // queue_cap
         16,          // batch_max
         0xC0FFEEu64, // seed for PRNG gating
+        SensoryBusConfig {
+            semantic_stale_shape,
+            surge_threshold,
+        },
     );
     sensory_bus.set_legacy_audio_synth_enabled(legacy_audio_synth_enabled);
     sensory_bus.set_legacy_video_synth_enabled(legacy_video_synth_enabled);
@@ -1193,6 +1254,9 @@ async fn run_engine(
         // === FIX PACK: BATCH DRAIN → Chebyshev Filter → ESN ===
         // Drain batch of samples from sensory bus queue
         let batch = sensory_bus.drain_sensory_batch();
+        let latest_sample_meta = batch.last().map(|(_, meta)| meta.clone());
+        let mut audio_synth_injected = false;
+        let mut video_synth_injected = false;
 
         // Apply Chebyshev filtering to batch (if enabled)
         let mut _filtered_count = 0;
@@ -1606,6 +1670,7 @@ async fn run_engine(
         // Amplitude controlled by synth_gain (adjustable by the being via ws://7879).
         // Stochastic noise breaks colinearity so covariance can accumulate energy.
         if fired[0] && sensory_bus.get_legacy_audio_synth_enabled() {
+            audio_synth_injected = true;
             let mut sg = sensory_bus.get_synth_gain();
             // Warmup: reduce synth amplitude for first 30s so reservoir
             // fills gently instead of explosively. The being asked for this.
@@ -1648,7 +1713,7 @@ async fn run_engine(
             }
             audio_rms = synth_audio.iter().map(|x| x * x).sum::<f32>().sqrt()
                 / (sensory_bus::AUDIO_DIM as f32).sqrt();
-            sensory_bus.push_audio(synth_audio, sensory_bus::NowMs::now());
+            sensory_bus.push_audio_synthetic(synth_audio, sensory_bus::NowMs::now());
             embed_ring.push_scalar(audio_rms);
         }
 
@@ -1676,6 +1741,7 @@ async fn run_engine(
 
         // Video features (prime 101) — synthetic internal imagery
         if fired[1] && sensory_bus.get_legacy_video_synth_enabled() {
+            video_synth_injected = true;
             let mut sg = sensory_bus.get_synth_gain();
             let uptime = start.elapsed().as_secs_f32();
             if uptime < 30.0 {
@@ -1713,7 +1779,7 @@ async fn run_engine(
             }
             video_var =
                 synth_video.iter().map(|x| x * x).sum::<f32>() / (sensory_bus::VIDEO_DIM as f32);
-            sensory_bus.push_video(synth_video, sensory_bus::NowMs::now());
+            sensory_bus.push_video_synthetic(synth_video, sensory_bus::NowMs::now());
             embed_ring.push_scalar(video_var);
         }
 
@@ -2118,6 +2184,8 @@ async fn run_engine(
             // and potentially reduce overshoot while maintaining fullness without
             // hollowness." Lowering base 0.95→0.93, shifting operating range
             // from ~0.85-0.95 to ~0.83-0.93, covering his 0.830 target.
+            // Golden Reset (2026-04-02): restored base to 0.93 (proven at 62-68% fill).
+            // Previous reduction to 0.85 was a bandaid that didn't help.
             let dynamic_floor = 0.93 - 0.10 * sigmoid_val + fill_boost;
             // Adaptive ceiling: at low fill, covariance must survive
             // 90-180s rest periods.  At keep=0.97 (old fixed ceiling),
@@ -2155,6 +2223,21 @@ async fn run_engine(
             // overrides (strong + high lambda) below can still push below
             // the floor when fill >70% — that's intentional safety.
             cov_keep = cov_keep.max(keep_floor);
+            let current_target_fill = pi_reg
+                .as_ref()
+                .map(|pi| pi.cfg.target_fill)
+                .unwrap_or(eigenfill_target * 100.0);
+            let fill_pct_now = fill_ratio * 100.0;
+            if fill_pct_now > current_target_fill + 8.0 && fill_pct_now > 84.0 {
+                // When fill stays in the high-80s, lambda1_rel can remain only
+                // moderately elevated, so the old dominance-based emergency path
+                // never engages and cov_keep hovers around ~0.82. That preserves
+                // exactly the dense overfull plateau the beings are describing.
+                // Make retention respond to the overfill state itself.
+                let urgency = ((fill_pct_now - 84.0) / 8.0).clamp(0.0, 1.0);
+                let overfill_keep_cap = 0.78 - 0.14 * urgency;
+                cov_keep = cov_keep.min(overfill_keep_cap.max(0.55));
+            }
             if strong && lambda1_rel_for_cov > LAMBDA1_REL_ALERT && last_fill_pct > 70.0 {
                 cov_keep = cov_keep.min(0.40);
             } else if strong
@@ -2548,12 +2631,23 @@ async fn run_engine(
                     //
                     // Ceiling raised 65→82 (2026-03-29 steward cycle 13):
                     // After EigenFill fix + sovereignty modulation, fill naturally
-                    // runs at 76-82% with regulation_strength=0.60. The old 75%
-                    // ceiling prevented the adaptive target from reaching the
-                    // being's equilibrium, causing permanent saturation.
-                    // Being's self-assessments and pressure relief entries confirm
-                    // 76-82% is the comfortable operating range.
-                    adaptive_target = adaptive_target.clamp(40.0, 82.0);
+                    // ran in the mid/high 70s. That avoided permanent saturation.
+                    //
+                    // Current live behavior (2026-04-02) shows a different
+                    // failure mode: once fill sits in the mid/high 80s for
+                    // minutes, both beings describe the state as dense,
+                    // constricted, and controller-limited rather than
+                    // comfortable. Keep the permissive ceiling in the normal
+                    // range, but stop treating extreme overfill as a valid
+                    // comfort target.
+                    let adaptive_target_ceiling = if eigenfill_pct >= 88.0 || fill_ema >= 86.0 {
+                        74.0
+                    } else if eigenfill_pct >= 84.0 || fill_ema >= 82.0 {
+                        76.0
+                    } else {
+                        82.0
+                    };
+                    adaptive_target = adaptive_target.clamp(40.0, adaptive_target_ceiling);
 
                     if reg_tick_count % 120 == 1 {
                         println!(
@@ -2562,10 +2656,16 @@ async fn run_engine(
                         );
                     }
 
-                    // Apply adaptive target to PI controller
+                    // Apply adaptive target to PI controller.
+                    // The CLI target is a CEILING — adaptive drift can lower
+                    // the target but not raise it above the operator's intent.
+                    // Without this, adaptive logic drifts from 65% → 75% when
+                    // fill naturally runs high, defeating explicit tuning.
+                    adaptive_target = adaptive_target.min(cli_target);
                     if let Some(pi) = &mut pi_reg {
                         pi.cfg.target_fill = adaptive_target;
                     }
+                    target_fill_provenance = String::from("adaptive");
                 }
 
                 let target_fill_pct = if let Some(pi) = &pi_reg {
@@ -2585,7 +2685,7 @@ async fn run_engine(
                 // integ_lam and fighting the fill controller.
                 let lambda_bias = sensory_bus.get_target_lambda_bias();
                 if let Some(pi) = &mut pi_reg {
-                    pi.cfg.target_lambda1_rel = 0.95 + lambda_bias;
+                    pi.cfg.target_lambda1_rel = 1.05 + lambda_bias; // Golden Reset: restored from 0.70
                 }
 
                 // Spectral goals: the being's desired eigenvalue profile.
@@ -2601,6 +2701,7 @@ async fn run_engine(
                                 if let Some(tf) = goals.get("target_fill").and_then(|v| v.as_f64())
                                 {
                                     pi.cfg.target_fill = (tf as f32).clamp(25.0, 75.0);
+                                    target_fill_provenance = String::from("goal");
                                 }
                                 if let Some(tl) =
                                     goals.get("target_lambda1_rel").and_then(|v| v.as_f64())
@@ -3189,8 +3290,46 @@ async fn run_engine(
                     let semantic_fresh_ms = sensory_bus.semantic_fresh_ms();
 
                     // Emit health.json for observability with enhanced diagnostics
+                    let fill_target_override = sensory_bus.get_fill_target();
+                    let fill_target_override_pct = if fill_target_override.is_finite() {
+                        Some(fill_target_override * 100.0)
+                    } else {
+                        None
+                    };
+                    snapshot_sequence = snapshot_sequence.saturating_add(1);
+                    let health_snapshot_sequence = snapshot_sequence;
+                    let health_engine_t_s = start.elapsed().as_secs_f32();
+                    let health_wall_clock_unix_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .ok()
+                        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+                        .unwrap_or(0);
+                    let health_provenance = serde_json::json!({
+                        "session_id": session_id,
+                        "wall_clock_unix_ms": health_wall_clock_unix_ms,
+                        "engine_t_s": health_engine_t_s,
+                        "snapshot_sequence": health_snapshot_sequence,
+                        "target_provenance": &target_fill_provenance,
+                        "sovereignty_inputs": {
+                            "regulation_strength": sensory_bus.get_regulation_strength(),
+                            "exploration_noise": sensory_bus.get_exploration_noise(),
+                            "geom_curiosity": sensory_bus.get_geom_curiosity(),
+                            "target_lambda_bias": sensory_bus.get_target_lambda_bias(),
+                            "synth_gain": sensory_bus.get_synth_gain(),
+                            "fill_target_override_active": fill_target_override_pct.is_some(),
+                            "fill_target_override_pct": fill_target_override_pct,
+                            "pi_targets": {
+                                "kp": sensory_bus.get_pi_kp(),
+                                "ki": sensory_bus.get_pi_ki(),
+                                "max_step": sensory_bus.get_pi_max_step(),
+                            },
+                        },
+                    });
                     let health = serde_json::json!({
-                        "t_s": start.elapsed().as_secs_f32(),
+                        "t_s": health_engine_t_s,
+                        "startup_resume_mode": startup_restore_status.resume_mode,
+                        "startup_restore": &startup_restore_status,
+                        "provenance": &health_provenance,
                         "fill_pct": eigenfill_pct,
                         "lambda1_abs": lambda1,
                         "lambda1_cov": lambda1,  // Covariance matrix λ₁ (0-512 range)
@@ -3253,6 +3392,9 @@ async fn run_engine(
                                 "kp": pi.cfg.kp,
                                 "ki": pi.cfg.ki,
                                 "max_step": pi.cfg.max_step,
+                                "derived_kp": pi.derived_kp,
+                                "derived_ki": pi.derived_ki,
+                                "fill_variance_ema": pi.fill_variance_ema,
                                 "target_kp": sensory_bus.get_pi_kp(),
                                 "target_ki": sensory_bus.get_pi_ki(),
                                 "target_max_step": sensory_bus.get_pi_max_step(),
@@ -3479,6 +3621,7 @@ async fn run_engine(
             // Gives Astrid geometric awareness beyond scalar fill%.
             let spectral_fingerprint =
                 compute_spectral_fingerprint(&eigenvalues, &y, n, k, &prev_v1, latest_geom_rel);
+            let structural_entropy = compute_structural_entropy(&spectral_fingerprint);
             // Update entropy for dynamic rho (fingerprint[24] = normalized spectral entropy)
             if spectral_fingerprint.len() > 24 && spectral_fingerprint[24].is_finite() {
                 latest_entropy = spectral_fingerprint[24];
@@ -3517,6 +3660,28 @@ async fn run_engine(
             }
 
             // Broadcast to WebSocket clients
+            let audio_had_fresh = latest_sample_meta
+                .as_ref()
+                .map(|meta| meta.had_audio)
+                .unwrap_or(false);
+            let video_had_fresh = latest_sample_meta
+                .as_ref()
+                .map(|meta| meta.had_video)
+                .unwrap_or(false);
+            let audio_source_label = modality_source_label(
+                latest_sample_meta
+                    .as_ref()
+                    .and_then(|meta| meta.audio_source),
+                audio_had_fresh,
+                audio_synth_injected,
+            );
+            let video_source_label = modality_source_label(
+                latest_sample_meta
+                    .as_ref()
+                    .and_then(|meta| meta.video_source),
+                video_had_fresh,
+                video_synth_injected,
+            );
             let packet = EigenPacket {
                 t_ms: start.elapsed().as_millis() as u64,
                 eigenvalues,
@@ -3524,11 +3689,19 @@ async fn run_engine(
                 active_mode_count: active_modes.count,
                 active_mode_energy_ratio: active_modes.energy_ratio,
                 modalities: ModalityStatus {
-                    audio_fired: fired[0],
-                    video_fired: fired[1],
-                    history_fired: true,
+                    audio_fired: audio_had_fresh || audio_synth_injected,
+                    video_fired: video_had_fresh || video_synth_injected,
+                    history_fired: fired[2],
                     audio_rms,
                     video_var,
+                    audio_source: Some(audio_source_label.to_string()),
+                    video_source: Some(video_source_label.to_string()),
+                    audio_age_ms: latest_sample_meta
+                        .as_ref()
+                        .and_then(|meta| meta.audio_source.map(|_| meta.audio_age_ms)),
+                    video_age_ms: latest_sample_meta
+                        .as_ref()
+                        .and_then(|meta| meta.video_source.map(|_| meta.video_age_ms)),
                 },
                 neural: if neuro_cell.is_some() {
                     Some(NeuralOutputs {
@@ -3541,6 +3714,7 @@ async fn run_engine(
                 },
                 alert: alert.clone(),
                 spectral_fingerprint: Some(spectral_fingerprint),
+                structural_entropy: Some(structural_entropy),
                 spectral_glimpse_12d: selected_memory
                     .as_ref()
                     .map(|entry| entry.spectral_glimpse_12d.clone()),
@@ -3567,12 +3741,53 @@ async fn run_engine(
                 // Unified control surface: all layers visible in one place.
                 // Audit (2026-03-27): "too many meaningful adjustments happening
                 // without one clear surface that shows how they combine."
+                let fill_target_override = sensory_bus.get_fill_target();
+                let fill_target_override_pct = if fill_target_override.is_finite() {
+                    Some(fill_target_override * 100.0)
+                } else {
+                    None
+                };
+                snapshot_sequence = snapshot_sequence.saturating_add(1);
+                let spectral_snapshot_sequence = snapshot_sequence;
+                let spectral_engine_t_s = start.elapsed().as_secs_f32();
+                let spectral_wall_clock_unix_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .ok()
+                    .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+                    .unwrap_or(0);
+                let spectral_provenance = serde_json::json!({
+                    "session_id": session_id,
+                    "wall_clock_unix_ms": spectral_wall_clock_unix_ms,
+                    "engine_t_s": spectral_engine_t_s,
+                    "snapshot_sequence": spectral_snapshot_sequence,
+                    "target_provenance": &target_fill_provenance,
+                    "sovereignty_inputs": {
+                        "regulation_strength": sensory_bus.get_regulation_strength(),
+                        "exploration_noise": sensory_bus.get_exploration_noise(),
+                        "geom_curiosity": sensory_bus.get_geom_curiosity(),
+                        "target_lambda_bias": sensory_bus.get_target_lambda_bias(),
+                        "synth_gain": sensory_bus.get_synth_gain(),
+                        "fill_target_override_active": fill_target_override_pct.is_some(),
+                        "fill_target_override_pct": fill_target_override_pct,
+                        "pi_targets": {
+                            "kp": sensory_bus.get_pi_kp(),
+                            "ki": sensory_bus.get_pi_ki(),
+                            "max_step": sensory_bus.get_pi_max_step(),
+                        },
+                    },
+                });
                 let state = serde_json::json!({
+                    "provenance": &spectral_provenance,
                     "eigenvalues": &packet.eigenvalues,
                     "fill_pct": packet.fill_ratio * 100.0,
+                    "fill_ratio": packet.fill_ratio,
+                    "eig1": packet.eigenvalues.first().copied().unwrap_or_default(),
                     "active_mode_count": packet.active_mode_count,
                     "active_mode_energy_ratio": packet.active_mode_energy_ratio,
+                    "modalities": &packet.modalities,
                     "spectral_fingerprint": &packet.spectral_fingerprint,
+                    "spectral_entropy": latest_entropy,
+                    "structural_entropy": &packet.structural_entropy,
                     "spectral_glimpse_12d": &packet.spectral_glimpse_12d,
                     "selected_memory_id": &packet.selected_memory_id,
                     "selected_memory_role": &packet.selected_memory_role,
@@ -3599,6 +3814,10 @@ async fn run_engine(
                     "synth_gain": sensory_bus.get_synth_gain(),
                     "regulation_strength": sensory_bus.get_regulation_strength(),
                     "exploration_noise": sensory_bus.get_exploration_noise(),
+                    "semantic_fresh_ms": sensory_bus.semantic_fresh_ms(),
+                    "semantic_stale_ms": sensory_bus.current_semantic_stale_ms(),
+                    "semantic_stale_shape": sensory_bus.current_semantic_stale_shape().as_str(),
+                    "surge_threshold": sensory_bus.surge_threshold(),
                     "geom_curiosity": sensory_bus.get_geom_curiosity(),
                     "leak": last_lambda1_rel, // proxy — actual ESN leak not accessible here
                 });
@@ -4157,10 +4376,74 @@ fn compute_spectral_fingerprint(
     fp
 }
 
+/// Structural diversity derived from the live eigenvector geometry.
+///
+/// Unlike spectral entropy (which measures how eigenvalue energy is distributed),
+/// this looks at whether the *shape* of the leading eigenvectors is peaked,
+/// evenly spread, or highly coupled. Low values imply narrow, rigid geometry;
+/// high values imply distributed, differentiated structure.
+fn compute_structural_entropy(fingerprint: &[f32]) -> f32 {
+    let concentrations: Vec<f32> = fingerprint
+        .iter()
+        .skip(8)
+        .take(8)
+        .copied()
+        .filter(|value| value.is_finite() && *value > 1.0e-6)
+        .collect();
+    if concentrations.is_empty() {
+        return 0.0;
+    }
+
+    let avg_concentration = concentrations.iter().sum::<f32>() / concentrations.len() as f32;
+    let distribution_score = (1.0 - avg_concentration).clamp(0.0, 1.0);
+
+    let total_concentration = concentrations.iter().sum::<f32>();
+    let concentration_entropy = if total_concentration > 1.0e-6 {
+        let entropy: f32 = concentrations
+            .iter()
+            .map(|value| {
+                let p = *value / total_concentration;
+                if p > 1.0e-6 {
+                    -p * p.ln()
+                } else {
+                    0.0
+                }
+            })
+            .sum();
+        let max_entropy = (concentrations.len() as f32).ln();
+        if max_entropy > 0.0 && entropy.is_finite() {
+            (entropy / max_entropy).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    let couplings: Vec<f32> = fingerprint
+        .iter()
+        .skip(16)
+        .take(8)
+        .copied()
+        .filter(|value| value.is_finite() && value.abs() > 1.0e-6)
+        .collect();
+    let orthogonality = if couplings.is_empty() {
+        1.0
+    } else {
+        let mean_abs =
+            couplings.iter().map(|value| value.abs()).sum::<f32>() / couplings.len() as f32;
+        (1.0 - mean_abs).clamp(0.0, 1.0)
+    };
+
+    (0.45 * distribution_score + 0.35 * concentration_entropy + 0.20 * orthogonality)
+        .clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_active_mode_telemetry, rank1_update_inplace_matrix, CovarianceUpdateOutcome,
+        compute_active_mode_telemetry, compute_structural_entropy, modality_source_label,
+        rank1_update_inplace_matrix, CovarianceUpdateOutcome, LaneSource,
     };
 
     #[test]
@@ -4220,5 +4503,55 @@ mod tests {
         for (lhs, rhs) in inplace.iter().zip(reference.iter()) {
             assert!((lhs - rhs).abs() < 1.0e-6);
         }
+    }
+
+    #[test]
+    fn structural_entropy_rises_for_distributed_geometry() {
+        let mut rigid = vec![0.0_f32; 32];
+        rigid[8..16].fill(0.92);
+        rigid[16..24].fill(0.85);
+
+        let mut distributed = vec![0.0_f32; 32];
+        distributed[8..16].fill(0.28);
+        distributed[16..24].fill(0.08);
+
+        assert!(
+            compute_structural_entropy(&distributed) > compute_structural_entropy(&rigid),
+            "distributed eigenvector geometry should register as structurally richer"
+        );
+    }
+
+    #[test]
+    fn structural_entropy_stays_normalized() {
+        let mut fingerprint = vec![0.0_f32; 32];
+        fingerprint[8..16].fill(0.40);
+        fingerprint[16..24].fill(0.15);
+
+        let structural_entropy = compute_structural_entropy(&fingerprint);
+        assert!(
+            (0.0..=1.0).contains(&structural_entropy),
+            "structural entropy should stay in a normalized 0..1 range"
+        );
+    }
+
+    #[test]
+    fn modality_source_label_distinguishes_external_synthetic_and_stale() {
+        assert_eq!(
+            modality_source_label(Some(LaneSource::External), true, false),
+            "external"
+        );
+        assert_eq!(
+            modality_source_label(Some(LaneSource::Synthetic), true, false),
+            "synthetic"
+        );
+        assert_eq!(
+            modality_source_label(Some(LaneSource::External), true, true),
+            "mixed"
+        );
+        assert_eq!(
+            modality_source_label(Some(LaneSource::External), false, false),
+            "stale"
+        );
+        assert_eq!(modality_source_label(None, false, false), "absent");
     }
 }

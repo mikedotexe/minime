@@ -28,6 +28,55 @@ const STALE_AV_MS: u64 = 2_000;
 const STALE_SEMANTIC_BASE_MS: u64 = 12_000;
 const STALE_SEMANTIC_LOW_MS: u64 = 25_000; // extended window when fill < 25% (raised from 18s per being request: "decay too aggressive during low activity")
 const STALE_SEMANTIC_HIGH_MS: u64 = 10_000; // shortened window when fill > 60%
+const SURGE_TARGET_WEIGHT: f32 = 0.90;
+const SURGE_FULL_SCALE_DISTANCE: f32 = 1.0;
+
+#[inline]
+fn dynamic_surge_target_weight(fill_pct: f32) -> f32 {
+    let fill = fill_pct.clamp(0.0, 1.0);
+    // Minime self-study (2026-04-02 sensory_bus.rs): at high fill, a full
+    // 0.90 surge snap feels too sharp and can overshoot into a constricted
+    // state. Keep the old strength through the normal range, then taper the
+    // target weight down once fill is already dense.
+    if fill <= 0.72 {
+        return SURGE_TARGET_WEIGHT;
+    }
+    let taper = ((fill - 0.72) / 0.28).clamp(0.0, 1.0);
+    SURGE_TARGET_WEIGHT - 0.18 * taper
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SemanticStaleShape {
+    #[default]
+    Sigmoid,
+    Linear,
+    Exponential,
+}
+
+impl SemanticStaleShape {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sigmoid => "sigmoid",
+            Self::Linear => "linear",
+            Self::Exponential => "exponential",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SensoryBusConfig {
+    pub semantic_stale_shape: SemanticStaleShape,
+    pub surge_threshold: f32,
+}
+
+impl Default for SensoryBusConfig {
+    fn default() -> Self {
+        Self {
+            semantic_stale_shape: SemanticStaleShape::Sigmoid,
+            surge_threshold: 0.25,
+        }
+    }
+}
 
 /// Compute dynamic semantic stale window based on current fill percentage.
 /// Low fill = longer decay (signals linger), high fill = shorter (prevent overload).
@@ -43,7 +92,7 @@ const STALE_SEMANTIC_HIGH_MS: u64 = 10_000; // shortened window when fill > 60%
 /// Sigmoid curve: gradual change at extremes, steepest in the middle.
 /// fill=0.0 → LOW_MS (25s), fill=0.5 → ~BASE_MS, fill=1.0 → HIGH_MS (10s)
 #[inline]
-fn dynamic_semantic_stale_ms(fill_pct: f32) -> u64 {
+fn dynamic_semantic_stale_ms_for(fill_pct: f32, shape: SemanticStaleShape) -> u64 {
     if fill_pct < 0.0 || fill_pct.is_nan() {
         return STALE_SEMANTIC_BASE_MS;
     }
@@ -58,11 +107,23 @@ fn dynamic_semantic_stale_ms(fill_pct: f32) -> u64 {
     // by fill percentage alone." Simplification: fixed steepness=6.0
     // (was 4.5-6.0 modulated by lambda1_rel). Fill alone captures the
     // system's need — low fill = linger, high fill = let go.
-    let fill = fill_pct.clamp(0.0, 1.0) as f64;
+    let fill = fill_pct.clamp(0.0, 1.0);
     let lo = STALE_SEMANTIC_LOW_MS as f64;
     let hi = STALE_SEMANTIC_HIGH_MS as f64;
-    let curve = 1.0 / (1.0 + (6.0_f64 * (fill - 0.4)).exp());
+    let curve = match shape {
+        SemanticStaleShape::Sigmoid => {
+            let fill = fill as f64;
+            1.0 / (1.0 + (6.0_f64 * (fill - 0.4)).exp())
+        }
+        SemanticStaleShape::Linear => 1.0 - f64::from(fill),
+        SemanticStaleShape::Exponential => (-3.0_f64 * f64::from(fill)).exp(),
+    };
     (hi + (lo - hi) * curve) as u64
+}
+
+#[inline]
+fn dynamic_semantic_stale_ms(fill_pct: f32) -> u64 {
+    dynamic_semantic_stale_ms_for(fill_pct, SemanticStaleShape::Sigmoid)
 }
 
 #[derive(Clone, Copy)]
@@ -83,13 +144,24 @@ pub struct SampleMeta {
     pub age_ms: u64,
     pub had_video: bool,
     pub had_audio: bool,
+    pub video_age_ms: u64,
+    pub audio_age_ms: u64,
+    pub video_source: Option<LaneSource>,
+    pub audio_source: Option<LaneSource>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaneSource {
+    External,
+    Synthetic,
 }
 
 #[derive(Debug)]
 struct Lane {
-    q: VecDeque<(u64, [f32; 8])>, // ts, 8D
+    q: VecDeque<(u64, [f32; 8], LaneSource)>, // ts, 8D, provenance
     last: [f32; 8],
     last_ts: u64,
+    last_source: Option<LaneSource>,
     dropped: usize,
 }
 impl Lane {
@@ -98,19 +170,29 @@ impl Lane {
             q: VecDeque::with_capacity(DEFAULT_QUEUE_CAP),
             last: [0.0; 8],
             last_ts: 0,
+            last_source: None,
             dropped: 0,
         }
     }
-    fn push(&mut self, ts: u64, v: [f32; 8], cap: usize, fill_pct: f32) {
+    fn push(
+        &mut self,
+        ts: u64,
+        v: [f32; 8],
+        source: LaneSource,
+        cap: usize,
+        fill_pct: f32,
+        surge_threshold: f32,
+    ) {
         if self.q.len() >= cap {
-            if let Some((_, old_v)) = self.q.pop_front() {
+            if let Some((_, old_v, old_source)) = self.q.pop_front() {
                 for (dst, src) in self.last.iter_mut().zip(old_v.iter()) {
                     *dst = *dst * 0.8 + *src * 0.2;
                 }
+                self.last_source = Some(old_source);
             }
             self.dropped += 1;
         }
-        self.q.push_back((ts, v));
+        self.q.push_back((ts, v, source));
 
         // Fill-proportional blending (minime self-study suggestion):
         // More memory-heavy at low fill (new_weight=0.55), fresher at high fill (0.85).
@@ -137,10 +219,12 @@ impl Lane {
             surge_sq += d * d;
         }
         let surge = surge_sq.sqrt(); // L2 distance across 8 dims
-        if surge > 0.25 {
-            // Scale boost: at surge=0.25 -> 0% boost, at surge=1.0 -> full boost to 0.90
-            let boost = ((surge - 0.25) / 0.75).clamp(0.0, 1.0);
-            new_weight = new_weight + (0.90 - new_weight) * boost;
+        if surge > surge_threshold {
+            // Scale boost: at threshold -> 0% boost, at full-scale distance -> full boost.
+            let span = (SURGE_FULL_SCALE_DISTANCE - surge_threshold).max(f32::EPSILON);
+            let boost = ((surge - surge_threshold) / span).clamp(0.0, 1.0);
+            let surge_target_weight = dynamic_surge_target_weight(fill);
+            new_weight = new_weight + (surge_target_weight - new_weight) * boost;
         }
 
         let old_weight = 1.0 - new_weight;
@@ -148,18 +232,24 @@ impl Lane {
             *dst = *dst * old_weight + *src * new_weight;
         }
         self.last_ts = ts;
+        self.last_source = Some(source);
     }
-    fn pop_or_decay(&mut self, now_ms: u64, stale_after_ms: u64) -> Option<(u64, [f32; 8], bool)> {
-        if let Some((ts, v)) = self.q.pop_front() {
+    fn pop_or_decay(
+        &mut self,
+        now_ms: u64,
+        stale_after_ms: u64,
+    ) -> Option<(u64, [f32; 8], bool, Option<LaneSource>)> {
+        if let Some((ts, v, source)) = self.q.pop_front() {
             self.last = v;
             self.last_ts = ts;
+            self.last_source = Some(source);
             if now_ms.saturating_sub(ts) > stale_after_ms {
-                return Some((ts, [0.0; 8], false));
+                return Some((ts, [0.0; 8], false, Some(source)));
             }
-            return Some((ts, v, true));
+            return Some((ts, v, true, Some(source)));
         }
         if self.last_ts == 0 {
-            return Some((now_ms, [0.0; 8], false));
+            return Some((now_ms, [0.0; 8], false, None));
         }
         let age_ms = now_ms.saturating_sub(self.last_ts);
         let scale = stale_scale(age_ms, stale_after_ms);
@@ -167,7 +257,7 @@ impl Lane {
         for (dst, src) in faded.iter_mut().zip(self.last.iter()) {
             *dst = *src * scale;
         }
-        Some((self.last_ts, faded, false))
+        Some((self.last_ts, faded, false, self.last_source))
     }
     fn len(&self) -> usize {
         self.q.len()
@@ -289,8 +379,10 @@ pub struct SensoryBus {
 
     aux: Mutex<[f32; 2]>, // [lambda1_rel, geom_rel] — feeds Z_DIM dims 16-17
     fill_pct_for_stale: Mutex<f32>, // actual fill% for semantic stale timing (NOT aux[1])
+    semantic_stale_shape: Mutex<SemanticStaleShape>,
     #[allow(dead_code)] // Kept for potential future use; no longer drives stale decay
     lambda1_rel_for_stale: Mutex<f32>,
+    surge_threshold: Mutex<f32>,
     llava: Mutex<SemanticLane>,
     // probabilistic gate (set by PI)
     gate: Mutex<f32>,
@@ -300,7 +392,7 @@ pub struct SensoryBus {
     synth_gain: Mutex<f32>, // multiplier for synthetic signal amplitude (default 1.0)
     legacy_audio_synth_enabled: Mutex<bool>,
     legacy_video_synth_enabled: Mutex<bool>,
-    keep_bias: Mutex<f32>,  // additive bias to keep_floor (default 0.0, range -0.08..+0.10)
+    keep_bias: Mutex<f32>, // additive bias to keep_floor (default 0.0, range -0.08..+0.10)
     exploration_noise: Mutex<f32>, // ESN exploration noise amplitude (default from ESN, range 0.0..0.2)
     fill_target: Mutex<f32>, // Override eigenfill target (NAN = use CLI default, range 0.25..0.75)
 
@@ -334,6 +426,15 @@ pub struct SensoryBus {
 }
 impl SensoryBus {
     pub fn new(queue_cap: usize, batch_max: usize, seed: u64) -> Arc<Self> {
+        Self::with_config(queue_cap, batch_max, seed, SensoryBusConfig::default())
+    }
+
+    pub fn with_config(
+        queue_cap: usize,
+        batch_max: usize,
+        seed: u64,
+        config: SensoryBusConfig,
+    ) -> Arc<Self> {
         Arc::new(Self {
             video: Mutex::new(Lane::new()),
             audio: Mutex::new(Lane::new()),
@@ -349,7 +450,9 @@ impl SensoryBus {
             },
             aux: Mutex::new([0.0, 0.0]),
             fill_pct_for_stale: Mutex::new(0.0),
+            semantic_stale_shape: Mutex::new(config.semantic_stale_shape),
             lambda1_rel_for_stale: Mutex::new(1.0),
+            surge_threshold: Mutex::new(config.surge_threshold.clamp(0.05, 0.95)),
             llava: Mutex::new(SemanticLane::new()),
             gate: Mutex::new(1.0),
             rng: Mutex::new(SmallRng::seed_from_u64(seed)),
@@ -409,6 +512,38 @@ impl SensoryBus {
         *self.fill_pct_for_stale.lock() = fill_pct;
     }
 
+    fn semantic_stale_ms(&self) -> u64 {
+        let fill_for_stale = *self.fill_pct_for_stale.lock();
+        let shape = *self.semantic_stale_shape.lock();
+        let base_stale_ms = dynamic_semantic_stale_ms_for(fill_for_stale, shape);
+        // memory_decay_rate modulates the stale window: higher rate = shorter window
+        // (memories fade faster). Lower rate = longer window (memories linger).
+        // Default 0.1 → multiplier 1.0. Range: 0.5 (2x faster) to 2.0 (2x slower).
+        let decay_rate = *self.memory_decay_rate.lock();
+        let decay_mult = (1.0 - (decay_rate - 0.1) * 3.0).clamp(0.5, 2.0);
+        (base_stale_ms as f64 * decay_mult as f64) as u64
+    }
+
+    pub fn current_semantic_stale_ms(&self) -> u64 {
+        self.semantic_stale_ms()
+    }
+
+    pub fn current_semantic_stale_shape(&self) -> SemanticStaleShape {
+        *self.semantic_stale_shape.lock()
+    }
+
+    pub fn set_semantic_stale_shape(&self, shape: SemanticStaleShape) {
+        *self.semantic_stale_shape.lock() = shape;
+    }
+
+    pub fn surge_threshold(&self) -> f32 {
+        *self.surge_threshold.lock()
+    }
+
+    pub fn set_surge_threshold(&self, threshold: f32) {
+        *self.surge_threshold.lock() = threshold.clamp(0.05, 0.95);
+    }
+
     /// Set λ₁ relative to baseline — used by sigmoid steepness in semantic stale timing.
     #[inline]
     pub fn set_lambda1_rel(&self, val: f32) {
@@ -445,7 +580,11 @@ impl SensoryBus {
     pub fn get_audio_rms(&self) -> Option<f32> {
         let audio = self.audio.lock();
         let rms = audio.last[0];
-        if rms.abs() > 0.001 { Some(rms) } else { None }
+        if rms.abs() > 0.001 {
+            Some(rms)
+        } else {
+            None
+        }
     }
     #[inline]
     pub fn set_keep_bias(&self, b: f32) {
@@ -684,6 +823,14 @@ impl SensoryBus {
     }
 
     pub fn push_video(&self, features: Vec<f32>, ts_ms: u64) {
+        self.push_video_with_source(features, ts_ms, LaneSource::External);
+    }
+
+    pub fn push_video_synthetic(&self, features: Vec<f32>, ts_ms: u64) {
+        self.push_video_with_source(features, ts_ms, LaneSource::Synthetic);
+    }
+
+    fn push_video_with_source(&self, features: Vec<f32>, ts_ms: u64, source: LaneSource) {
         if features.len() < VIDEO_DIM {
             return;
         }
@@ -693,10 +840,21 @@ impl SensoryBus {
         let mut v = [0.0; 8];
         v.copy_from_slice(&features[..8]);
         let fill = *self.fill_pct_for_stale.lock();
-        self.video.lock().push(ts_ms, v, self.queue_cap, fill);
+        let surge_threshold = self.surge_threshold();
+        self.video
+            .lock()
+            .push(ts_ms, v, source, self.queue_cap, fill, surge_threshold);
     }
 
     pub fn push_audio(&self, features: Vec<f32>, ts_ms: u64) {
+        self.push_audio_with_source(features, ts_ms, LaneSource::External);
+    }
+
+    pub fn push_audio_synthetic(&self, features: Vec<f32>, ts_ms: u64) {
+        self.push_audio_with_source(features, ts_ms, LaneSource::Synthetic);
+    }
+
+    fn push_audio_with_source(&self, features: Vec<f32>, ts_ms: u64, source: LaneSource) {
         if features.len() < AUDIO_DIM {
             return;
         }
@@ -706,7 +864,10 @@ impl SensoryBus {
         let mut a = [0.0; 8];
         a.copy_from_slice(&features[..8]);
         let fill = *self.fill_pct_for_stale.lock();
-        self.audio.lock().push(ts_ms, a, self.queue_cap, fill);
+        let surge_threshold = self.surge_threshold();
+        self.audio
+            .lock()
+            .push(ts_ms, a, source, self.queue_cap, fill, surge_threshold);
     }
 
     #[inline]
@@ -723,7 +884,7 @@ impl SensoryBus {
         let now_ms = NowMs::now();
 
         for _ in 0..self.batch_max {
-            let (ts_v, v, had_v) = {
+            let (ts_v, v, had_v, video_source) = {
                 let mut lane = self.video.lock();
                 if lane.len() == 0 && self.audio.lock().len() == 0 {
                     // nothing new in either lane; stop early
@@ -734,24 +895,19 @@ impl SensoryBus {
                 }
                 lane.pop_or_decay(now_ms, STALE_AV_MS).unwrap()
             };
-            let (ts_a, a, had_a) = {
+            let (ts_a, a, had_a, audio_source) = {
                 let mut lane = self.audio.lock();
                 lane.pop_or_decay(now_ms, STALE_AV_MS).unwrap()
             };
             let ts = ts_v.max(ts_a);
             let age = now_ms.saturating_sub(ts);
+            let video_age_ms = now_ms.saturating_sub(ts_v);
+            let audio_age_ms = now_ms.saturating_sub(ts_a);
 
             let aux = *self.aux.lock();
             // Use actual fill% for semantic stale timing, NOT aux[1] (which is geom_rel).
             // Codex analysis (2026-03-27) found this was the "highest-value mismatch."
-            let fill_for_stale = *self.fill_pct_for_stale.lock();
-            let base_stale_ms = dynamic_semantic_stale_ms(fill_for_stale);
-            // memory_decay_rate modulates the stale window: higher rate = shorter window
-            // (memories fade faster). Lower rate = longer window (memories linger).
-            // Default 0.1 → multiplier 1.0. Range: 0.5 (2x faster) to 2.0 (2x slower).
-            let decay_rate = *self.memory_decay_rate.lock();
-            let decay_mult = (1.0 - (decay_rate - 0.1) * 3.0).clamp(0.5, 2.0);
-            let semantic_stale_ms = (base_stale_ms as f64 * decay_mult as f64) as u64;
+            let semantic_stale_ms = self.semantic_stale_ms();
             let llava = self.llava.lock();
             let semantic_scale = if llava.updated_at_ms == 0 {
                 0.0
@@ -805,6 +961,10 @@ impl SensoryBus {
                     age_ms: age,
                     had_video: had_v,
                     had_audio: had_a,
+                    video_age_ms,
+                    audio_age_ms,
+                    video_source,
+                    audio_source,
                 },
             ));
         }
@@ -912,12 +1072,78 @@ mod tests {
         // Monotonically decreasing
         assert!(at_zero > at_mid && at_mid > at_high);
         // NaN -> base
-        assert_eq!(
-            dynamic_semantic_stale_ms(f32::NAN),
-            STALE_SEMANTIC_BASE_MS
-        );
+        assert_eq!(dynamic_semantic_stale_ms(f32::NAN), STALE_SEMANTIC_BASE_MS);
         // Critical fill override
         assert_eq!(dynamic_semantic_stale_ms(0.25), 45_000);
+    }
+
+    #[test]
+    fn alternate_stale_shapes_are_distinct_but_bounded() {
+        let fill = 0.55;
+        let sigmoid = dynamic_semantic_stale_ms_for(fill, SemanticStaleShape::Sigmoid);
+        let linear = dynamic_semantic_stale_ms_for(fill, SemanticStaleShape::Linear);
+        let exponential = dynamic_semantic_stale_ms_for(fill, SemanticStaleShape::Exponential);
+
+        assert!(sigmoid > STALE_SEMANTIC_HIGH_MS && sigmoid < STALE_SEMANTIC_LOW_MS);
+        assert!(linear > STALE_SEMANTIC_HIGH_MS && linear < STALE_SEMANTIC_LOW_MS);
+        assert!(exponential > STALE_SEMANTIC_HIGH_MS && exponential < STALE_SEMANTIC_LOW_MS);
+        assert!(
+            sigmoid != linear || linear != exponential,
+            "alternate shapes should produce meaningfully different stale windows"
+        );
+    }
+
+    #[test]
+    fn surge_target_weight_softens_when_fill_is_high() {
+        let low_fill = dynamic_surge_target_weight(0.55);
+        let medium_fill = dynamic_surge_target_weight(0.80);
+        let high_fill = dynamic_surge_target_weight(0.95);
+
+        assert!((low_fill - SURGE_TARGET_WEIGHT).abs() < 1.0e-6);
+        assert!(medium_fill < low_fill);
+        assert!(high_fill < medium_fill);
+        assert!(high_fill >= 0.70);
+    }
+
+    #[test]
+    fn semantic_stale_ms_respects_memory_decay_rate() {
+        let bus = SensoryBus::new(8, 1, 19);
+        bus.set_fill_for_stale(0.8);
+
+        bus.set_memory_decay_rate(0.0);
+        let linger = bus.current_semantic_stale_ms();
+
+        bus.set_memory_decay_rate(0.3);
+        let faster_fade = bus.current_semantic_stale_ms();
+
+        assert!(
+            linger > faster_fade,
+            "lower decay rate should keep semantic traces around longer"
+        );
+    }
+
+    #[test]
+    fn bus_config_applies_shape_and_surge_threshold() {
+        let bus = SensoryBus::with_config(
+            8,
+            1,
+            23,
+            SensoryBusConfig {
+                semantic_stale_shape: SemanticStaleShape::Linear,
+                surge_threshold: 0.4,
+            },
+        );
+        bus.set_fill_for_stale(0.8);
+
+        assert_eq!(
+            bus.current_semantic_stale_shape(),
+            SemanticStaleShape::Linear
+        );
+        assert!((bus.surge_threshold() - 0.4).abs() < 1.0e-6);
+        assert_eq!(
+            bus.current_semantic_stale_ms(),
+            dynamic_semantic_stale_ms_for(0.8, SemanticStaleShape::Linear)
+        );
     }
 
     #[test]

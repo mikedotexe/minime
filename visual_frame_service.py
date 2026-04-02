@@ -31,11 +31,14 @@ RESPONSES_DIR = WORKSPACE_DIR / "visual_responses"
 CAPTURES_DIR = WORKSPACE_DIR / "visual_captures"
 RUNTIME_DIR = WORKSPACE_DIR / "runtime"
 HOST_FRAME_PATH = RUNTIME_DIR / "host_frame.jpg"
+HOST_TELEMETRY_PATH = RUNTIME_DIR / "host_telemetry.json"
 SENSORY_SOURCE_PATH = RUNTIME_DIR / "sensory_source.json"
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 LLAVA_MODEL = "llava-llama3"
 WS_URI = "ws://127.0.0.1:7879"
+SOURCE_STATE_MAX_AGE_MS = 10_000
+HOST_FRAME_MAX_AGE_S = 15.0
 
 
 class VisualFrameService:
@@ -49,14 +52,54 @@ class VisualFrameService:
                   REQUESTS_DIR / "processed", RESPONSES_DIR / "processed"]:
             d.mkdir(parents=True, exist_ok=True)
 
-    def _active_source(self) -> str:
-        if self.source in ("physical", "host"):
-            return self.source
+    def _load_fresh_source_state(self) -> Dict[str, Any]:
         try:
             data = json.loads(SENSORY_SOURCE_PATH.read_text())
-            return data.get("video", {}).get("source", "physical")
         except Exception:
+            return {}
+
+        updated_at_ms = int(data.get("updated_at_ms", 0) or 0)
+        if updated_at_ms <= 0:
+            return {}
+
+        age_ms = int(time.time() * 1000) - updated_at_ms
+        if age_ms > SOURCE_STATE_MAX_AGE_MS:
+            return {}
+
+        return data
+
+    def _host_source_available(self) -> bool:
+        try:
+            telemetry = json.loads(HOST_TELEMETRY_PATH.read_text())
+        except Exception:
+            return False
+
+        updated_at_ms = int(telemetry.get("updated_at_ms", 0) or 0)
+        if updated_at_ms <= 0:
+            return False
+
+        age_ms = int(time.time() * 1000) - updated_at_ms
+        if age_ms > SOURCE_STATE_MAX_AGE_MS:
+            return False
+
+        try:
+            frame_age_s = time.time() - HOST_FRAME_PATH.stat().st_mtime
+        except OSError:
+            return False
+
+        return frame_age_s <= HOST_FRAME_MAX_AGE_S
+
+    def _active_source(self) -> str:
+        if self.source == "physical":
             return "physical"
+        if self.source == "host":
+            return "host" if self._host_source_available() else "physical"
+
+        data = self._load_fresh_source_state()
+        source = str(data.get("video", {}).get("source", "physical")).strip().lower()
+        if source == "host" and self._host_source_available():
+            return "host"
+        return "physical"
 
     def capture_frame(self) -> tuple[Optional[np.ndarray], str]:
         source = self._active_source()

@@ -18,3 +18,4 @@ pub mod regulator;
 pub mod sensory_bus;
 pub mod sensory_ws;
 pub mod spectral;
+pub mod startup_restore;
