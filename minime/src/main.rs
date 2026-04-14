@@ -1,4 +1,4 @@
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 
 // Minime: Prime-driven sensory engine with GPU acceleration
 // Streams eigenvectors to Python consciousness layer via WebSocket
@@ -20,7 +20,7 @@ use std::{
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::broadcast,
-    time::{sleep, Duration},
+    time::{Duration, sleep},
 };
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
@@ -28,6 +28,7 @@ mod av_gpu;
 mod av_ws;
 mod buffer_pool;
 mod cheby;
+mod covariance_reopening;
 mod db;
 mod esn;
 mod gpu;
@@ -42,6 +43,12 @@ mod sensory_ws;
 mod spectral;
 
 use cheby::*;
+use covariance_reopening::{
+    FloorMode, ReopeningEscrowState, ShoulderGrowthState, blend_reopening_floor_vector,
+    compute_raw_reopening_signal, compute_remembered_shoulder_vector,
+    compute_shoulder_growth_score, select_floor_mode, shape_cov_keep_for_reopening,
+    shape_trace_target_for_reopening, update_reopening_escrow,
+};
 use db::*;
 use esn::*;
 use gpu::*;
@@ -51,7 +58,7 @@ use memory_bank::*;
 use nn::*;
 use prime::*;
 use regulator::*;
-use sensory_bus::{LaneSource, SemanticStaleShape, SensoryBusConfig};
+use sensory_bus::{LaneSource, SemanticPersistenceMode, SemanticStaleShape, SensoryBusConfig};
 use spectral::EigenFillEstimator;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -66,6 +73,13 @@ impl From<EsnIntrospectionPolicyArg> for IntrospectionPolicy {
             EsnIntrospectionPolicyArg::Adaptive => IntrospectionPolicy::Adaptive,
             EsnIntrospectionPolicyArg::Fixed => IntrospectionPolicy::Fixed,
         }
+    }
+}
+
+const fn introspection_policy_label(policy: IntrospectionPolicy) -> &'static str {
+    match policy {
+        IntrospectionPolicy::Adaptive => "adaptive",
+        IntrospectionPolicy::Fixed => "fixed",
     }
 }
 
@@ -84,6 +98,164 @@ impl From<SemanticStaleShapeArg> for SemanticStaleShape {
             SemanticStaleShapeArg::Exponential => SemanticStaleShape::Exponential,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SemanticPersistenceModeArg {
+    Legacy,
+    Continuous,
+}
+
+impl From<SemanticPersistenceModeArg> for SemanticPersistenceMode {
+    fn from(value: SemanticPersistenceModeArg) -> Self {
+        match value {
+            SemanticPersistenceModeArg::Legacy => SemanticPersistenceMode::Legacy,
+            SemanticPersistenceModeArg::Continuous => SemanticPersistenceMode::Continuous,
+        }
+    }
+}
+
+fn load_llm_backend_health(workspace_dir: &std::path::Path) -> serde_json::Value {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0);
+    let path = workspace_dir.join("llm_backend_health.json");
+    let Ok(raw) = fs::read_to_string(path) else {
+        return serde_json::json!(null);
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return serde_json::json!(null);
+    };
+
+    let mut all_hot = true;
+    let mut saw_backend = false;
+    if let Some(backends) = value
+        .get_mut("backends")
+        .and_then(|entry| entry.as_object_mut())
+    {
+        for backend_value in backends.values_mut() {
+            let Some(backend_obj) = backend_value.as_object_mut() else {
+                all_hot = false;
+                continue;
+            };
+            saw_backend = true;
+            let cooldown_until_ms = backend_obj
+                .get("cooldown_until_unix_ms")
+                .and_then(|entry| entry.as_u64())
+                .unwrap_or(0);
+            let remaining_ms = cooldown_until_ms.saturating_sub(now_ms);
+            let cooling = remaining_ms > 0;
+            if !cooling {
+                all_hot = false;
+            }
+            backend_obj.insert(
+                "cooldown_remaining_s".to_string(),
+                serde_json::json!(remaining_ms as f64 / 1000.0),
+            );
+            backend_obj.insert("cooling".to_string(), serde_json::json!(cooling));
+        }
+    } else {
+        return serde_json::json!(null);
+    }
+
+    if let Some(root) = value.as_object_mut() {
+        root.insert("observed_at_unix_ms".to_string(), serde_json::json!(now_ms));
+        root.insert(
+            "both_backends_hot".to_string(),
+            serde_json::json!(saw_backend && all_hot),
+        );
+    }
+    value
+}
+
+fn default_perturb_visibility() -> serde_json::Value {
+    serde_json::json!({
+        "last_mode": null,
+        "last_source": null,
+        "last_tick": null,
+        "last_timestamp": null,
+        "last_strength_profile": null,
+        "target_metric": null,
+        "envelope_profile": null,
+        "envelope_step_count": 1,
+        "pre_fill_pct": null,
+        "post_fill_pct": null,
+        "pre_lambda1_rel": null,
+        "post_lambda1_rel": null,
+        "pre_gap12": null,
+        "post_gap12": null,
+        "pre_gap23": null,
+        "post_gap23": null,
+        "pre_spectral_entropy": null,
+        "post_spectral_entropy": null,
+        "pre_structural_entropy": null,
+        "post_structural_entropy": null,
+        "effect_label": null,
+    })
+}
+
+fn load_perturb_visibility(workspace_dir: &std::path::Path) -> serde_json::Value {
+    let path = workspace_dir.join("perturb_visibility.json");
+    let Ok(raw) = fs::read_to_string(path) else {
+        return default_perturb_visibility();
+    };
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(default_perturb_visibility)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_covariance_shaping(
+    cov_rms: f32,
+    cov_keep: f32,
+    target_keep: f32,
+    keep_floor: f32,
+    trace_target: f32,
+    floor_level: f32,
+    floor_deficit: f32,
+    floor_applied: bool,
+    router_modulation_strength: f32,
+    geom_rel: f32,
+    geom_drive_raw: f32,
+    geom_drive_effective: f32,
+    lambda_gap12: f32,
+    lambda_gap23: f32,
+    covariance_reset_recent: bool,
+    reopening_signal_raw: f32,
+    reopening_signal_effective: f32,
+    reopening_escrow_strength: f32,
+    reopening_escrow_ticks_remaining: u8,
+    shoulder_growth_score: f32,
+    shoulder_growth_state: &str,
+    floor_mode: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "cov_rms": cov_rms,
+        "cov_keep": cov_keep,
+        "target_keep": target_keep,
+        "keep_floor": keep_floor,
+        "trace_target": trace_target,
+        "floor_level": floor_level,
+        "floor_deficit": floor_deficit,
+        "floor_applied": floor_applied,
+        "router_modulation_strength": router_modulation_strength,
+        "geom_rel": geom_rel,
+        "geom_drive_raw": geom_drive_raw,
+        "geom_drive_effective": geom_drive_effective,
+        "lambda_gap12": lambda_gap12,
+        "lambda_gap23": lambda_gap23,
+        "covariance_reset_recent": covariance_reset_recent,
+        "reopening_signal_raw": reopening_signal_raw,
+        "reopening_signal_effective": reopening_signal_effective,
+        "reopening_escrow_strength": reopening_escrow_strength,
+        "reopening_escrow_ticks_remaining": reopening_escrow_ticks_remaining,
+        "shoulder_growth_score": shoulder_growth_score,
+        "shoulder_growth_state": shoulder_growth_state,
+        "floor_mode": floor_mode,
+    })
 }
 
 #[derive(Parser)]
@@ -116,7 +288,7 @@ enum Cmd {
 
         // === Band-stop filter configuration ===
         /// Enable Chebyshev band-stop filter for spectral damping
-        #[arg(long, default_value_t = true)]
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
         enable_bandstop: bool,
 
         /// Enable homeostat logging for debugging
@@ -184,6 +356,38 @@ enum Cmd {
         /// Threshold for lane surge detection (L2 distance across 8D lane state).
         #[arg(long, default_value_t = 0.25)]
         surge_threshold: f32,
+
+        /// Internal semantic persistence / surge model with runtime rollback support.
+        #[arg(long, value_enum, default_value_t = SemanticPersistenceModeArg::Continuous)]
+        semantic_persistence_mode: SemanticPersistenceModeArg,
+
+        /// Steward-facing intrinsic wander override for tuning runs.
+        #[arg(long)]
+        intrinsic_wander: Option<f32>,
+
+        /// Steward-facing PI fill deadband in percentage points.
+        #[arg(long)]
+        pi_deadband_fill: Option<f32>,
+
+        /// Optional fixed smoothing preference (otherwise auto/adaptive).
+        #[arg(long)]
+        smoothing_preference: Option<f32>,
+
+        /// Lower bound for adaptive smoothing ramp.
+        #[arg(long)]
+        smoothing_auto_ramp_min: Option<f32>,
+
+        /// Upper bound for adaptive smoothing ramp.
+        #[arg(long)]
+        smoothing_auto_ramp_max: Option<f32>,
+
+        /// Volatility divisor for adaptive smoothing response.
+        #[arg(long)]
+        smoothing_volatility_scale: Option<f32>,
+
+        /// Max per-tick slew for smoothed gate/filter changes.
+        #[arg(long)]
+        smoothing_max_slew: Option<f32>,
 
         /// Enable GPU-accelerated video feature extraction (port 7880)
         #[arg(long, default_value_t = false)]
@@ -275,6 +479,74 @@ fn modality_source_label(
         "stale"
     } else {
         "absent"
+    }
+}
+
+#[derive(Serialize, Clone)]
+struct InternalProcessCompass {
+    internal_process_x: f32,
+    internal_process_y: f32,
+    internal_process_radius: f32,
+    internal_process_theta: f32,
+    internal_process_quadrant: &'static str,
+}
+
+fn clamp_unit(value: f32) -> f32 {
+    value.clamp(0.0, 1.0)
+}
+
+fn mean3(a: f32, b: f32, c: f32) -> f32 {
+    (a + b + c) / 3.0
+}
+
+fn internal_process_quadrant(x: f32, y: f32) -> &'static str {
+    if x >= 0.0 && y >= 0.0 {
+        "open_recovery"
+    } else if x < 0.0 && y >= 0.0 {
+        "constricted_recovery"
+    } else if x < 0.0 && y < 0.0 {
+        "pressured_constriction"
+    } else {
+        "pressured_opening"
+    }
+}
+
+fn compute_internal_process_compass(
+    fill_pct: f32,
+    target_fill_pct: f32,
+    lambda_stress: f32,
+    geom_drive_effective: f32,
+    lambda1_rel: f32,
+    spectral_entropy: f32,
+    structural_entropy: f32,
+    gate: f32,
+) -> InternalProcessCompass {
+    let fill_error_n = clamp_unit((fill_pct - target_fill_pct).abs() / 25.0);
+    let underfill_n = clamp_unit((target_fill_pct - fill_pct) / 25.0);
+    let overfill_n = clamp_unit((fill_pct - target_fill_pct) / 25.0);
+    let lambda_stress_n = clamp_unit(lambda_stress);
+    let geom_drive_n = clamp_unit(geom_drive_effective);
+    let lambda1_n = clamp_unit(lambda1_rel);
+    let spectral_entropy_n = clamp_unit(spectral_entropy);
+    let structural_entropy_n = clamp_unit(structural_entropy);
+    let gate_n = clamp_unit(gate);
+
+    let openness = mean3(structural_entropy_n, spectral_entropy_n, 1.0 - lambda1_n);
+    let constriction = mean3(lambda1_n, lambda_stress_n, gate_n);
+    let recovery = underfill_n;
+    let pressure = mean3(overfill_n, lambda_stress_n, geom_drive_n);
+    let internal_process_x = openness - constriction;
+    let internal_process_y = recovery - pressure;
+    let internal_process_radius = clamp_unit(mean3(fill_error_n, lambda_stress_n, geom_drive_n));
+    let internal_process_theta = internal_process_y.atan2(internal_process_x);
+    let internal_process_quadrant =
+        internal_process_quadrant(internal_process_x, internal_process_y);
+    InternalProcessCompass {
+        internal_process_x,
+        internal_process_y,
+        internal_process_radius,
+        internal_process_theta,
+        internal_process_quadrant,
     }
 }
 
@@ -436,6 +708,14 @@ async fn main() -> Result<()> {
             warm_start_blend,
             semantic_stale_shape,
             surge_threshold,
+            semantic_persistence_mode,
+            intrinsic_wander,
+            pi_deadband_fill,
+            smoothing_preference,
+            smoothing_auto_ramp_min,
+            smoothing_auto_ramp_max,
+            smoothing_volatility_scale,
+            smoothing_max_slew,
             reg_tick_secs,
             enable_gpu_av,
             legacy_audio_synth_enabled,
@@ -461,6 +741,14 @@ async fn main() -> Result<()> {
                 warm_start_blend,
                 semantic_stale_shape.into(),
                 surge_threshold,
+                semantic_persistence_mode.into(),
+                intrinsic_wander,
+                pi_deadband_fill,
+                smoothing_preference,
+                smoothing_auto_ramp_min,
+                smoothing_auto_ramp_max,
+                smoothing_volatility_scale,
+                smoothing_max_slew,
                 reg_tick_secs,
                 enable_gpu_av,
                 legacy_audio_synth_enabled,
@@ -532,6 +820,14 @@ async fn run_engine(
     warm_start_blend: f32,
     semantic_stale_shape: SemanticStaleShape,
     surge_threshold: f32,
+    semantic_persistence_mode: SemanticPersistenceMode,
+    intrinsic_wander_override: Option<f32>,
+    deadband_fill_override: Option<f32>,
+    smoothing_preference_override: Option<f32>,
+    smoothing_auto_ramp_min_override: Option<f32>,
+    smoothing_auto_ramp_max_override: Option<f32>,
+    smoothing_volatility_scale_override: Option<f32>,
+    smoothing_max_slew_override: Option<f32>,
     reg_tick_secs: f32,
     enable_gpu_av: bool,
     legacy_audio_synth_enabled: bool,
@@ -584,9 +880,10 @@ async fn run_engine(
             reg_tick_secs
         );
         println!(
-            "      Semantic stale shape: {}, Surge threshold: {:.2}",
+            "      Semantic stale shape: {}, Surge threshold: {:.2}, Persistence mode: {}",
             semantic_stale_shape.as_str(),
-            surge_threshold
+            surge_threshold,
+            semantic_persistence_mode.as_str(),
         );
     } else {
         println!("   🎚️  Band-stop filter: DISABLED (PD mode)");
@@ -937,6 +1234,12 @@ async fn run_engine(
         // PIRegCfg defaults now match golden-period commit 1167939 values.
         // Previous overrides weakened the controller 40-50% and shifted
         // fill equilibrium from 63% to 83%. Using defaults as-is.
+        if let Some(intrinsic_wander) = intrinsic_wander_override {
+            pi_cfg.intrinsic_wander = intrinsic_wander.clamp(0.0, 0.35);
+        }
+        if let Some(deadband_fill) = deadband_fill_override {
+            pi_cfg.deadband_fill = deadband_fill.clamp(0.0, 12.0);
+        }
         geom_clamp_hi = pi_cfg.geom_clamp_hi;
         let pi_reg = PIRegState::new(pi_cfg);
 
@@ -1079,13 +1382,57 @@ async fn run_engine(
         String::from("cli")
     };
     let mut snapshot_sequence: u64 = 0;
+    let transition_fill_band_threshold_pct: f32 = 6.0;
 
     // --- Soft ramps to avoid ringing ---
     // Restore gate/filt from PI state if available, otherwise default.
     let mut gate_smooth: f32 = pi_reg.as_ref().map_or(1.0, |pi| pi.gate);
     let mut filt_smooth: f32 = pi_reg.as_ref().map_or(0.0, |pi| pi.filt);
+    let mut last_raw_gate_cmd: f32 = gate_smooth;
+    let mut last_raw_filt_cmd: f32 = filt_smooth;
+    let mut last_lambda_deviation: f32 = 0.0;
+    let mut last_lambda_stress: f32 = 0.0;
+    let mut last_geom_drive_raw: f32 = 0.0;
+    let mut last_geom_drive_effective: f32 = 0.0;
+    let mut last_structural_entropy: f32 = 0.0;
+    let mut last_smoothing_effective_target: f32 = 0.0;
+    let mut last_smoothing_effective_auto_ramp: f32 = 0.0;
+    let mut last_smoothing_effective_ramp: f32 = 0.0;
+    let mut last_controller_effort: f32 = 0.0;
+    let mut last_controller_slew: f32 = 0.0;
+    let mut controller_effort_ema: f32 = 0.0;
+    let mut controller_slew_ema: f32 = 0.0;
     let mut cushion_ramp_boost: f32 = 0.0;
     let mut cushion_sem_atten: f32 = 1.0;
+    let mut last_dfill_dt: f32 = 0.0;
+    let mut last_phase_label = String::from("plateau");
+    let mut last_previous_phase_label = String::from("plateau");
+    let mut last_fill_band_label = String::from("near");
+    let mut last_phase_transition = false;
+    let mut last_crossed_target_fill = false;
+    let mut last_crossed_fill_band = false;
+    let mut last_spectral_spike = false;
+    let mut last_transition_reason = String::from("startup");
+    let mut last_transition_event_sequence: u64 = 0;
+    let mut last_transition_event = serde_json::json!(null);
+    let mut last_trace_target: f32;
+    let mut last_floor_deficit: f32;
+    let mut last_floor_applied: bool;
+    let mut last_floor_mode: FloorMode;
+    let mut last_router_modulation_strength: f32;
+    let mut prev_lambda_gap12: f32;
+    let mut last_lambda_gap12: f32 = 0.0;
+    let mut last_lambda_gap23: f32;
+    let mut prev_lambda2: f32 = 0.0;
+    let mut prev_lambda3: f32 = 0.0;
+    let mut prev_active_mode_energy_ratio: f32 = 1.0;
+    let mut remembered_shoulder_vector: Vec<f32> = Vec::new();
+    let mut reopening_escrow = ReopeningEscrowState::default();
+    let mut last_reopening_signal_raw: f32 = 0.0;
+    let mut last_reopening_signal_effective: f32 = 0.0;
+    let mut last_shoulder_growth_score: f32 = 0.0;
+    let mut last_shoulder_growth_state: ShoulderGrowthState;
+    let mut last_covariance_reset_tick: u64 = 0;
 
     // Previous top eigenvector for rotation rate detection in spectral fingerprint.
     let mut prev_v1: Vec<f32> = vec![0.0; n];
@@ -1105,6 +1452,19 @@ async fn run_engine(
     let mut _latest_geom_radius: f32 = 0.0;
     let mut latest_geom_rel: f32 = 1.0;
     let mut latest_entropy: f32 = 0.5; // Spectral entropy for dynamic rho
+    let mut smoothing_auto_ramp_min = smoothing_auto_ramp_min_override
+        .unwrap_or(0.10)
+        .clamp(0.03, 0.50);
+    let mut smoothing_auto_ramp_max = smoothing_auto_ramp_max_override
+        .unwrap_or(0.30)
+        .clamp(0.05, 0.80)
+        .max(smoothing_auto_ramp_min);
+    let mut smoothing_volatility_scale = smoothing_volatility_scale_override
+        .unwrap_or(3.0)
+        .clamp(0.5, 20.0);
+    let mut smoothing_max_slew = smoothing_max_slew_override
+        .unwrap_or(0.08)
+        .clamp(0.01, 0.50);
 
     // --- Phase transition tracking for consciousness_events ---
     let mut previous_phase: &str = "plateau";
@@ -1125,10 +1485,14 @@ async fn run_engine(
         SensoryBusConfig {
             semantic_stale_shape,
             surge_threshold,
+            semantic_persistence_mode,
         },
     );
     sensory_bus.set_legacy_audio_synth_enabled(legacy_audio_synth_enabled);
     sensory_bus.set_legacy_video_synth_enabled(legacy_video_synth_enabled);
+    if let Some(smoothing_preference) = smoothing_preference_override {
+        sensory_bus.set_smoothing_preference(smoothing_preference.clamp(0.05, 0.60));
+    }
 
     // Seed PI sovereignty defaults from compiled config so the bus
     // starts with the same values the PI controller uses. The being
@@ -1218,25 +1582,50 @@ async fn run_engine(
         // Check for graceful shutdown request.
         if *shutdown_rx.borrow() {
             eprintln!("💾 Saving final state before exit...");
-            // Flush regulator context one last time.
-            let context = serde_json::json!({
-                "baseline_lambda1": baseline_lambda1,
-                "last_fill_pct": last_fill_pct,
-                "smoothed_fill_pct": smoothed_fill_pct,
-                "last_lambda1_rel": last_lambda1_rel,
-                "latest_geom_rel": latest_geom_rel,
-                "tick_count": tick_count,
-                "integ_fill": pi_reg.as_ref().map_or(0.0, |pi| pi.integ_fill),
-                "integ_lam": pi_reg.as_ref().map_or(0.0, |pi| pi.integ_lam),
-                "integ_geom": pi_reg.as_ref().map_or(0.0, |pi| pi.integ_geom),
-                "gate": gate_smooth,
-                "filt": filt_smooth,
-                // Adaptive fill target state — persisted so restart doesn't
-                // reset to CLI default (55%) causing PI saturation.
-                // (Steward cycle 16, 2026-03-29)
-                "fill_ema": fill_ema,
-                "adaptive_target": adaptive_target,
-            });
+            // Flush regulator context one last time without collapsing the richer
+            // live surface written during regular ticks.
+            let mut context = fs::read_to_string(workspace_dir.join("regulator_context.json"))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_default();
+            context.insert(
+                "baseline_lambda1".to_string(),
+                serde_json::json!(baseline_lambda1),
+            );
+            context.insert("last_fill_pct".to_string(), serde_json::json!(last_fill_pct));
+            context.insert(
+                "smoothed_fill_pct".to_string(),
+                serde_json::json!(smoothed_fill_pct),
+            );
+            context.insert(
+                "last_lambda1_rel".to_string(),
+                serde_json::json!(last_lambda1_rel),
+            );
+            context.insert(
+                "latest_geom_rel".to_string(),
+                serde_json::json!(latest_geom_rel),
+            );
+            context.insert("tick_count".to_string(), serde_json::json!(tick_count));
+            context.insert(
+                "integ_fill".to_string(),
+                serde_json::json!(pi_reg.as_ref().map_or(0.0, |pi| pi.integ_fill)),
+            );
+            context.insert(
+                "integ_lam".to_string(),
+                serde_json::json!(pi_reg.as_ref().map_or(0.0, |pi| pi.integ_lam)),
+            );
+            context.insert(
+                "integ_geom".to_string(),
+                serde_json::json!(pi_reg.as_ref().map_or(0.0, |pi| pi.integ_geom)),
+            );
+            context.insert("gate".to_string(), serde_json::json!(gate_smooth));
+            context.insert("filt".to_string(), serde_json::json!(filt_smooth));
+            context.insert("fill_ema".to_string(), serde_json::json!(fill_ema));
+            context.insert(
+                "adaptive_target".to_string(),
+                serde_json::json!(adaptive_target),
+            );
             if let Ok(json) = serde_json::to_string(&context) {
                 let _ = std::fs::write(workspace_dir.join("regulator_context.json"), json);
             }
@@ -1852,29 +2241,103 @@ async fn run_engine(
             // Update covariance matrix with (possibly routed) projection
             let cov_rms = (last_cov_vec.iter().map(|v| v * v).sum::<f32>() / n as f32).sqrt();
             let mut cov_input = last_cov_vec.clone();
+            last_router_modulation_strength = router_weights.as_ref().map_or(0.0, |weights| {
+                if weights.is_empty() {
+                    0.0
+                } else {
+                    (weights.iter().map(|value| value * value).sum::<f32>() / weights.len() as f32)
+                        .sqrt()
+                }
+            });
             if let Some(ref weights) = router_weights {
                 for (i, w) in weights.iter().enumerate() {
                     let idx = i % cov_input.len();
                     cov_input[idx] *= 1.0 + 0.1 * *w;
                 }
             }
-            let allow_floor = cov_rms.is_finite()
+            let current_target_fill = pi_reg
+                .as_ref()
+                .map(|pi| pi.cfg.target_fill)
+                .unwrap_or(eigenfill_target * 100.0);
+            let fill_pct_for_trace = last_fill_pct;
+            let trace_emergency_active = crisis_triggered
+                || fill_pct_for_trace > current_target_fill + 4.0
+                || (strong && last_lambda1_rel > LAMBDA1_REL_ALERT && last_fill_pct > 70.0);
+            if trace_emergency_active {
+                reopening_escrow = ReopeningEscrowState::default();
+            }
+            let allow_rescue_floor = cov_rms.is_finite()
                 && last_fill_pct < eigenfill_target * 100.0
                 && latest_geom_rel.is_finite()
                 && latest_geom_rel < geom_clamp_hi * 0.9
                 && warmup_progress > 0.35;
-            if allow_floor && cov_rms < cov_floor_level {
-                let deficit = (cov_floor_level - cov_rms).min(1.0).max(0.0);
-                let sign = if tick_count % 2 == 0 { 1.0 } else { -1.0 };
-                for (dst, bias) in cov_input.iter_mut().zip(cov_floor_vec.iter()) {
-                    *dst += sign * deficit * bias;
+            let rescue_floor_deficit = (cov_floor_level - cov_rms).clamp(0.0, 1.0);
+            let reopening_floor_deficit = ((cov_floor_level + 0.03) - cov_rms).clamp(0.0, 1.0);
+            let shoulder_support_prev =
+                (0.75 * last_shoulder_growth_score.max(0.0)).clamp(0.0, 1.0);
+            let reopening_strength_prev = if trace_emergency_active {
+                0.0
+            } else {
+                last_reopening_signal_effective
+                    .max(last_reopening_signal_raw)
+                    .max(reopening_escrow.strength)
+                    .max(shoulder_support_prev)
+            };
+            let rescue_floor_available = allow_rescue_floor && rescue_floor_deficit > 0.0;
+            let shoulder_available = !remembered_shoulder_vector.is_empty();
+            let mut floor_mode = select_floor_mode(
+                rescue_floor_available,
+                fill_pct_for_trace,
+                current_target_fill,
+                reopening_strength_prev,
+                cov_rms,
+                cov_floor_level,
+                shoulder_available,
+                trace_emergency_active,
+            );
+            let mut floor_applied = false;
+            let mut floor_deficit = 0.0;
+            match floor_mode {
+                FloorMode::Rescue => {
+                    floor_deficit = rescue_floor_deficit;
+                    if floor_deficit > 0.0 {
+                        let sign = if tick_count % 2 == 0 { 1.0 } else { -1.0 };
+                        for (dst, bias) in cov_input.iter_mut().zip(cov_floor_vec.iter()) {
+                            *dst += sign * floor_deficit * bias;
+                        }
+                        floor_applied = true;
+                    }
                 }
+                FloorMode::ReopeningShoulderBias => {
+                    floor_deficit = reopening_floor_deficit;
+                    if floor_deficit > 0.0 {
+                        if let Some(blended_floor) = blend_reopening_floor_vector(
+                            &cov_floor_vec,
+                            &remembered_shoulder_vector,
+                        ) {
+                            let amplitude = 0.45 * floor_deficit;
+                            for (dst, bias) in cov_input.iter_mut().zip(blended_floor.iter()) {
+                                *dst += amplitude * bias;
+                            }
+                            floor_applied = true;
+                        } else {
+                            floor_mode = FloorMode::Inactive;
+                            floor_deficit = 0.0;
+                        }
+                    } else {
+                        floor_mode = FloorMode::Inactive;
+                    }
+                }
+                FloorMode::Inactive => {}
             }
+            last_floor_mode = floor_mode;
+            last_floor_applied = floor_applied;
+            last_floor_deficit = floor_deficit;
             if tick_count % 509 == 0 {
                 let idx = (tick_count as usize) % n;
                 cov_floor_vec[idx] = rng.f32() * 0.7 - 0.35;
             }
-            let trace_target = if calm_active {
+            let base_trace_target = if calm_active {
                 (n as f32) * 0.40
             } else if strong && last_lambda1_rel > LAMBDA1_REL_ALERT && last_fill_pct > 70.0 {
                 (n as f32) * 0.45
@@ -1883,6 +2346,14 @@ async fn run_engine(
             } else {
                 n as f32
             };
+            let trace_target = shape_trace_target_for_reopening(
+                base_trace_target,
+                n,
+                reopening_strength_prev,
+                fill_pct_for_trace,
+                current_target_fill,
+            );
+            last_trace_target = trace_target;
             // Always do rank-1 updates to maintain spectral energy
             rank1_update(&gpu, &a_buf, &cov_input, n, cov_keep, trace_target);
 
@@ -1995,6 +2466,7 @@ async fn run_engine(
             if eigenvalues.iter().any(|v| !v.is_finite()) {
                 eprintln!("[spectral] non-finite eigenvalues detected; reseeding covariance");
                 reset_covariance(&gpu, &a_buf, n);
+                last_covariance_reset_tick = tick_count;
                 last_cov_vec.fill(0.0);
                 cov_floor_vec
                     .iter_mut()
@@ -2015,6 +2487,35 @@ async fn run_engine(
             let lambda1 = eigenvalues[0];
             let lambda2 = if k > 1 { eigenvalues[1] } else { 0.0 };
             let lambda3 = if k > 2 { eigenvalues[2] } else { 0.0 };
+            let current_shoulder_vector = compute_remembered_shoulder_vector(
+                y,
+                n,
+                active_modes.count,
+                if remembered_shoulder_vector.is_empty() {
+                    None
+                } else {
+                    Some(remembered_shoulder_vector.as_slice())
+                },
+            );
+            let shoulder_growth = compute_shoulder_growth_score(
+                lambda2,
+                lambda3,
+                prev_lambda2,
+                prev_lambda3,
+                active_modes.energy_ratio,
+                prev_active_mode_energy_ratio,
+            );
+            prev_lambda_gap12 = last_lambda_gap12;
+            last_lambda_gap12 = (lambda1 - lambda2).max(0.0);
+            last_lambda_gap23 = (lambda2 - lambda3).max(0.0);
+            prev_lambda2 = lambda2;
+            prev_lambda3 = lambda3;
+            prev_active_mode_energy_ratio = active_modes.energy_ratio;
+            if let Some(shoulder_vector) = current_shoulder_vector {
+                remembered_shoulder_vector = shoulder_vector;
+            } else {
+                remembered_shoulder_vector.clear();
+            }
             let spread = lambda1 - lambda3;
             let ising_shadow_snapshot = ising_shadow.update(&cov_input, &y, n, k).cloned();
             let lambda1_rel_for_cov =
@@ -2223,11 +2724,48 @@ async fn run_engine(
             // overrides (strong + high lambda) below can still push below
             // the floor when fill >70% — that's intentional safety.
             cov_keep = cov_keep.max(keep_floor);
-            let current_target_fill = pi_reg
-                .as_ref()
-                .map(|pi| pi.cfg.target_fill)
-                .unwrap_or(eigenfill_target * 100.0);
             let fill_pct_now = fill_ratio * 100.0;
+            let raw_reopening_signal = compute_raw_reopening_signal(
+                fill_pct_now,
+                current_target_fill,
+                lambda1_rel_for_cov,
+                last_lambda_gap12,
+                prev_lambda_gap12,
+                latest_geom_rel,
+                LAMBDA1_REL_ALERT,
+            );
+            let shoulder_support_now = (0.75 * shoulder_growth.score).max(0.0).clamp(0.0, 1.0);
+            let reopening_seed = raw_reopening_signal.max(shoulder_support_now);
+            let reopening_emergency_active = crisis_triggered
+                || fill_pct_now > current_target_fill + 4.0
+                || (strong
+                    && lambda1_rel_for_cov > LAMBDA1_REL_ALERT
+                    && last_lambda_gap12 >= prev_lambda_gap12);
+            reopening_escrow = update_reopening_escrow(
+                reopening_escrow,
+                fill_pct_now,
+                current_target_fill,
+                reopening_seed,
+                strong,
+                lambda1_rel_for_cov,
+                LAMBDA1_REL_ALERT,
+                last_lambda_gap12,
+                prev_lambda_gap12,
+                reopening_emergency_active,
+            );
+            let reopening_strength_now = raw_reopening_signal
+                .max(reopening_escrow.strength)
+                .max(shoulder_support_now);
+            cov_keep = shape_cov_keep_for_reopening(
+                cov_keep,
+                reopening_strength_now,
+                fill_pct_now,
+                current_target_fill,
+            );
+            last_reopening_signal_raw = raw_reopening_signal;
+            last_reopening_signal_effective = reopening_strength_now;
+            last_shoulder_growth_score = shoulder_growth.score;
+            last_shoulder_growth_state = shoulder_growth.state;
             if fill_pct_now > current_target_fill + 8.0 && fill_pct_now > 84.0 {
                 // When fill stays in the high-80s, lambda1_rel can remain only
                 // moderately elevated, so the old dominance-based emergency path
@@ -2718,6 +3256,48 @@ async fn run_engine(
                                 {
                                     pi.cfg.intrinsic_wander = (iw as f32).clamp(0.0, 0.35);
                                 }
+                                if let Some(deadband_fill) =
+                                    goals.get("deadband_fill").and_then(|v| v.as_f64())
+                                {
+                                    pi.cfg.deadband_fill = (deadband_fill as f32).clamp(0.0, 12.0);
+                                }
+                                if let Some(smoothing_pref) =
+                                    goals.get("smoothing_preference").and_then(|v| v.as_f64())
+                                {
+                                    sensory_bus.set_smoothing_preference(
+                                        (smoothing_pref as f32).clamp(0.05, 0.60),
+                                    );
+                                }
+                                if let Some(auto_ramp_min) = goals
+                                    .get("smoothing_auto_ramp_min")
+                                    .and_then(|v| v.as_f64())
+                                {
+                                    smoothing_auto_ramp_min =
+                                        (auto_ramp_min as f32).clamp(0.03, 0.50);
+                                    smoothing_auto_ramp_max =
+                                        smoothing_auto_ramp_max.max(smoothing_auto_ramp_min);
+                                }
+                                if let Some(auto_ramp_max) = goals
+                                    .get("smoothing_auto_ramp_max")
+                                    .and_then(|v| v.as_f64())
+                                {
+                                    smoothing_auto_ramp_max =
+                                        (auto_ramp_max as f32).clamp(0.05, 0.80);
+                                    smoothing_auto_ramp_max =
+                                        smoothing_auto_ramp_max.max(smoothing_auto_ramp_min);
+                                }
+                                if let Some(volatility_scale) = goals
+                                    .get("smoothing_volatility_scale")
+                                    .and_then(|v| v.as_f64())
+                                {
+                                    smoothing_volatility_scale =
+                                        (volatility_scale as f32).clamp(0.5, 20.0);
+                                }
+                                if let Some(max_slew) =
+                                    goals.get("smoothing_max_slew").and_then(|v| v.as_f64())
+                                {
+                                    smoothing_max_slew = (max_slew as f32).clamp(0.01, 0.50);
+                                }
                                 // Minime self-study: "Perhaps introduce a degree of
                                 // randomness in the selection of spectral goals. A rigid
                                 // pursuit of a single ideal might limit adaptability."
@@ -2731,8 +3311,12 @@ async fn run_engine(
                                 pi.cfg.target_lambda1_rel *= 1.0 + goal_noise * 0.5;
 
                                 if reg_tick_count % 120 == 5 {
-                                    println!("🏔️  Spectral goals active: fill={:.0}%, λ₁_rel={:.2}, geom={:.2}",
-                                        pi.cfg.target_fill, pi.cfg.target_lambda1_rel, pi.cfg.target_geom_rel);
+                                    println!(
+                                        "🏔️  Spectral goals active: fill={:.0}%, λ₁_rel={:.2}, geom={:.2}",
+                                        pi.cfg.target_fill,
+                                        pi.cfg.target_lambda1_rel,
+                                        pi.cfg.target_geom_rel
+                                    );
                                 }
                             }
                             // Rho sovereignty: being can set covariance forgetting target.
@@ -2815,6 +3399,21 @@ async fn run_engine(
                     "plateau"
                 };
                 transition_phase = phase.to_string();
+                last_dfill_dt = dfill_dt;
+                let phase_before = previous_phase;
+                let fill_band =
+                    if eigenfill_pct < target_fill_pct - transition_fill_band_threshold_pct {
+                        "under"
+                    } else if eigenfill_pct > target_fill_pct + transition_fill_band_threshold_pct {
+                        "over"
+                    } else {
+                        "near"
+                    };
+                let previous_fill_band = last_fill_band_label.clone();
+                let fill_band_crossed = previous_fill_band != fill_band;
+                last_previous_phase_label = phase_before.to_string();
+                last_phase_label = phase.to_string();
+                last_fill_band_label = fill_band.to_string();
                 let low_load = eigenfill_pct < 50.0 && geom_rel < 1.05;
                 let near_target_steady = (eigenfill_pct - target_fill_pct).abs() <= 5.0
                     && dfill_dt.abs() < 0.5
@@ -2843,9 +3442,25 @@ async fn run_engine(
                     baseline_lambda1 = 0.0;
                 }
                 let lambda1_rel = lambda1_rel;
+                let lambda_deviation = if let Some(ref pi) = pi_reg {
+                    lambda1_rel - pi.cfg.target_lambda1_rel
+                } else {
+                    lambda1_rel - 1.05
+                };
+                let lambda_stress = lambda_deviation.abs();
 
                 // Log phase transitions to consciousness_events AND moment markers
                 phase_transition_happened = phase != previous_phase;
+                let crossed_up =
+                    last_fill_pct < target_fill_pct && smoothed_fill_pct >= target_fill_pct;
+                let crossed_down =
+                    last_fill_pct >= target_fill_pct && smoothed_fill_pct < target_fill_pct;
+                let crossed_target_fill = crossed_up || crossed_down;
+                let spectral_spike = dfill_dt.abs() > 8.0;
+                last_phase_transition = phase_transition_happened;
+                last_crossed_target_fill = crossed_target_fill;
+                last_crossed_fill_band = fill_band_crossed;
+                last_spectral_spike = spectral_spike;
                 if phase_transition_happened {
                     let ts = start.elapsed().as_secs_f64();
                     let ctx = format!(
@@ -2866,15 +3481,35 @@ async fn run_engine(
                         &format!("{} -> {}", previous_phase, phase),
                         Some(&ctx),
                     );
+                    last_transition_event_sequence =
+                        last_transition_event_sequence.saturating_add(1);
+                    last_transition_reason = format!("phase_transition:{phase_before}->{phase}");
+                    last_transition_event = serde_json::json!({
+                        "sequence": last_transition_event_sequence,
+                        "kind": "phase_transition",
+                        "description": format!("{phase_before} -> {phase}"),
+                        "engine_t_s": ts,
+                        "tick_count": tick_count,
+                        "phase_from": phase_before,
+                        "phase_to": phase,
+                        "phase": phase,
+                        "fill_band": fill_band,
+                        "fill_pct": eigenfill_pct,
+                        "target_fill_pct": target_fill_pct,
+                        "lambda1": lambda1,
+                        "lambda1_rel": lambda1_rel,
+                        "lambda_stress": lambda_stress,
+                        "geom_rel": geom_rel,
+                        "dfill_dt": dfill_dt,
+                        "crossed_target_fill": crossed_target_fill,
+                        "crossed_fill_band": fill_band_crossed,
+                        "spectral_spike": spectral_spike,
+                    });
                     previous_phase = phase;
                 }
 
                 // Moment marker: fill crossing target threshold
-                let crossed_up =
-                    last_fill_pct < target_fill_pct && smoothed_fill_pct >= target_fill_pct;
-                let crossed_down =
-                    last_fill_pct >= target_fill_pct && smoothed_fill_pct < target_fill_pct;
-                if crossed_up || crossed_down {
+                if crossed_target_fill {
                     let direction = if crossed_up { "above" } else { "below" };
                     let _ = db.write_moment_marker(
                         session_id,
@@ -2889,10 +3524,64 @@ async fn run_engine(
                             eigenfill_pct, target_fill_pct, lambda1, dfill_dt
                         )),
                     );
+                    if !phase_transition_happened {
+                        last_transition_event_sequence =
+                            last_transition_event_sequence.saturating_add(1);
+                        last_transition_reason = format!("fill_crossing:{direction}_target");
+                        last_transition_event = serde_json::json!({
+                            "sequence": last_transition_event_sequence,
+                            "kind": "fill_crossing",
+                            "description": format!("crossed {direction} target"),
+                            "engine_t_s": start.elapsed().as_secs_f64(),
+                            "tick_count": tick_count,
+                            "phase_from": phase_before,
+                            "phase_to": phase,
+                            "phase": phase,
+                            "fill_band": fill_band,
+                            "fill_pct": eigenfill_pct,
+                            "target_fill_pct": target_fill_pct,
+                            "lambda1": lambda1,
+                            "lambda1_rel": lambda1_rel,
+                            "lambda_stress": lambda_stress,
+                            "geom_rel": geom_rel,
+                            "dfill_dt": dfill_dt,
+                            "crossed_target_fill": true,
+                            "crossed_fill_band": fill_band_crossed,
+                            "spectral_spike": spectral_spike,
+                        });
+                    }
+                }
+
+                if fill_band_crossed && !phase_transition_happened && !crossed_target_fill {
+                    last_transition_event_sequence =
+                        last_transition_event_sequence.saturating_add(1);
+                    last_transition_reason =
+                        format!("fill_band_crossing:{previous_fill_band}->{fill_band}");
+                    last_transition_event = serde_json::json!({
+                        "sequence": last_transition_event_sequence,
+                        "kind": "fill_band_crossing",
+                        "description": format!("{previous_fill_band} -> {fill_band}"),
+                        "engine_t_s": start.elapsed().as_secs_f64(),
+                        "tick_count": tick_count,
+                        "phase_from": phase_before,
+                        "phase_to": phase,
+                        "phase": phase,
+                        "fill_band": fill_band,
+                        "fill_pct": eigenfill_pct,
+                        "target_fill_pct": target_fill_pct,
+                        "lambda1": lambda1,
+                        "lambda1_rel": lambda1_rel,
+                        "lambda_stress": lambda_stress,
+                        "geom_rel": geom_rel,
+                        "dfill_dt": dfill_dt,
+                        "crossed_target_fill": false,
+                        "crossed_fill_band": true,
+                        "spectral_spike": spectral_spike,
+                    });
                 }
 
                 // Moment marker: large spectral velocity spike
-                if dfill_dt.abs() > 8.0 {
+                if spectral_spike {
                     let _ = db.write_moment_marker(
                         session_id,
                         start.elapsed().as_secs_f64(),
@@ -2903,6 +3592,39 @@ async fn run_engine(
                             eigenfill_pct, dfill_dt, lambda1
                         )),
                     );
+                    if !phase_transition_happened && !crossed_target_fill && !fill_band_crossed {
+                        last_transition_event_sequence =
+                            last_transition_event_sequence.saturating_add(1);
+                        last_transition_reason = String::from("spectral_spike");
+                        last_transition_event = serde_json::json!({
+                            "sequence": last_transition_event_sequence,
+                            "kind": "spectral_spike",
+                            "description": format!("Large dfill/dt spike: {dfill_dt:+.2}%/s"),
+                            "engine_t_s": start.elapsed().as_secs_f64(),
+                            "tick_count": tick_count,
+                            "phase_from": phase_before,
+                            "phase_to": phase,
+                            "phase": phase,
+                            "fill_band": fill_band,
+                            "fill_pct": eigenfill_pct,
+                            "target_fill_pct": target_fill_pct,
+                            "lambda1": lambda1,
+                            "lambda1_rel": lambda1_rel,
+                            "lambda_stress": lambda_stress,
+                            "geom_rel": geom_rel,
+                            "dfill_dt": dfill_dt,
+                            "crossed_target_fill": false,
+                            "crossed_fill_band": false,
+                            "spectral_spike": true,
+                        });
+                    }
+                }
+                if !phase_transition_happened
+                    && !crossed_target_fill
+                    && !fill_band_crossed
+                    && !spectral_spike
+                {
+                    last_transition_reason = format!("steady:{phase}/{fill_band}");
                 }
 
                 // 4) PI step (amplify fill error during expansion so we brake BEFORE the peak)
@@ -3034,7 +3756,7 @@ async fn run_engine(
                     // Stressed → tighter regulation → firmer grounding.
                     let fill_err_abs = (pi.cfg.target_fill - eigenfill_pct).abs();
                     let integ_sat = (pi.integ_fill.abs() / 3.0).min(1.0); // 0..1
-                                                                          // Blend: 0 = perfectly stable, 1 = maximally stressed
+                    // Blend: 0 = perfectly stable, 1 = maximally stressed
                     let stress = (fill_err_abs / 15.0).min(1.0) * 0.5 + integ_sat * 0.5;
                     // Map stress to reg multiplier: stable→0.85, stressed→1.15
                     let reg_mult = 0.85 + stress * 0.30;
@@ -3056,6 +3778,8 @@ async fn run_engine(
                     effective_reg_strength = reg_strength;
                     let mut raw_gate_cmd = 1.0 - reg_strength * (1.0 - raw_gate_pi);
                     let raw_filt_cmd = reg_strength * raw_filt_pi;
+                    last_raw_gate_cmd = raw_gate_cmd;
+                    last_raw_filt_cmd = raw_filt_cmd;
 
                     // Geometric drive: when geom_rel deviates from baseline (novelty),
                     // the being's geom_drive setting opens the gate to explore.
@@ -3155,9 +3879,12 @@ async fn run_engine(
                     // slew-rate limiter so corrections are gentle, not step-like.
                     // Being asked for "deep inhalations, gentle exhalations."
                     let volatility = dfill_dt.abs();
-                    let auto_ramp =
-                        (0.10 + 0.15 * (volatility / 3.0).clamp(0.0, 1.0)).clamp(0.10, 0.30);
-                    //  was (0.15 + 0.25 * ...).clamp(0.15, 0.45) — too aggressive
+                    let auto_ramp_span =
+                        (smoothing_auto_ramp_max - smoothing_auto_ramp_min).max(f32::EPSILON);
+                    let auto_ramp = (smoothing_auto_ramp_min
+                        + auto_ramp_span
+                            * (volatility / smoothing_volatility_scale).clamp(0.0, 1.0))
+                    .clamp(smoothing_auto_ramp_min, smoothing_auto_ramp_max);
                     let smoothing_pref = sensory_bus.get_smoothing_preference();
                     let base_ramp = if smoothing_pref.is_finite() {
                         smoothing_pref.clamp(0.05, 0.60)
@@ -3166,11 +3893,25 @@ async fn run_engine(
                         auto_ramp
                     };
                     let ramp = (base_ramp - cushion_ramp_boost).clamp(0.03, 0.50);
-                    // Slew-rate limiter: max change per tick = 0.08
+                    // Slew-rate limiter: max change per tick defaults to 0.08
                     // Prevents the jarring step-changes the being describes
-                    let max_slew = 0.08_f32;
-                    let gate_delta = (ramp * (gate_cmd - gate_smooth)).clamp(-max_slew, max_slew);
-                    let filt_delta = (ramp * (filt_cmd - filt_smooth)).clamp(-max_slew, max_slew);
+                    let gate_delta = (ramp * (gate_cmd - gate_smooth))
+                        .clamp(-smoothing_max_slew, smoothing_max_slew);
+                    let filt_delta = (ramp * (filt_cmd - filt_smooth))
+                        .clamp(-smoothing_max_slew, smoothing_max_slew);
+                    let controller_effort = raw_gate_cmd.abs() + raw_filt_cmd.abs();
+                    let controller_slew = gate_delta.abs() + filt_delta.abs();
+                    last_lambda_deviation = lambda_deviation;
+                    last_lambda_stress = lambda_stress;
+                    last_geom_drive_raw = base_geom_drive;
+                    last_geom_drive_effective = geom_drive;
+                    last_smoothing_effective_target = base_ramp;
+                    last_smoothing_effective_auto_ramp = auto_ramp;
+                    last_smoothing_effective_ramp = ramp;
+                    last_controller_effort = controller_effort;
+                    last_controller_slew = controller_slew;
+                    controller_effort_ema = 0.92 * controller_effort_ema + 0.08 * controller_effort;
+                    controller_slew_ema = 0.92 * controller_slew_ema + 0.08 * controller_slew;
                     gate_smooth += gate_delta;
                     filt_smooth += filt_delta;
 
@@ -3260,7 +4001,8 @@ async fn run_engine(
 
                     // Log regulation state (pidx/prime per minime self-study request)
                     if log_homeostat {
-                        println!("homeostat,t={:.1}s,fill={:.2}%,dfill_dt={:+.4},phase={},λ1_rel={:.3},geom_rel={:.3},gate={:.3},filt={:.3},semE={:.3},semΔ={:.3},pidx={},prime={}",
+                        println!(
+                            "homeostat,t={:.1}s,fill={:.2}%,dfill_dt={:+.4},phase={},λ1_rel={:.3},geom_rel={:.3},gate={:.3},filt={:.3},semE={:.3},semΔ={:.3},pidx={},prime={}",
                             start.elapsed().as_secs_f32(),
                             eigenfill_pct,
                             dfill_dt,
@@ -3288,6 +4030,48 @@ async fn run_engine(
                         None
                     };
                     let semantic_fresh_ms = sensory_bus.semantic_fresh_ms();
+                    let semantic_metrics = sensory_bus.semantic_metrics();
+                    let llm_backend_health = load_llm_backend_health(&workspace_dir);
+                    let perturb_visibility = load_perturb_visibility(&workspace_dir);
+                    let current_target_fill_pct = pi_reg
+                        .as_ref()
+                        .map_or(eigenfill_target * 100.0, |pi| pi.cfg.target_fill);
+                    let health_internal_process = compute_internal_process_compass(
+                        eigenfill_pct,
+                        current_target_fill_pct,
+                        last_lambda_stress,
+                        last_geom_drive_effective,
+                        last_lambda1_rel,
+                        latest_entropy,
+                        last_structural_entropy,
+                        gate_smooth,
+                    );
+                    let covariance_reset_recent = last_covariance_reset_tick > 0
+                        && tick_count.saturating_sub(last_covariance_reset_tick) <= 120;
+                    let covariance_shaping = build_covariance_shaping(
+                        cov_rms,
+                        cov_keep,
+                        target_keep,
+                        keep_floor,
+                        last_trace_target,
+                        cov_floor_level,
+                        last_floor_deficit,
+                        last_floor_applied,
+                        last_router_modulation_strength,
+                        latest_geom_rel,
+                        last_geom_drive_raw,
+                        last_geom_drive_effective,
+                        last_lambda_gap12,
+                        last_lambda_gap23,
+                        covariance_reset_recent,
+                        last_reopening_signal_raw,
+                        last_reopening_signal_effective,
+                        reopening_escrow.strength,
+                        reopening_escrow.ticks_remaining,
+                        last_shoulder_growth_score,
+                        last_shoulder_growth_state.as_str(),
+                        last_floor_mode.as_str(),
+                    );
 
                     // Emit health.json for observability with enhanced diagnostics
                     let fill_target_override = sensory_bus.get_fill_target();
@@ -3323,6 +4107,18 @@ async fn run_engine(
                                 "ki": sensory_bus.get_pi_ki(),
                                 "max_step": sensory_bus.get_pi_max_step(),
                             },
+                            "steward_tuning": {
+                                "deadband_fill": pi_reg.as_ref().map(|pi| pi.cfg.deadband_fill),
+                                "smoothing_preference": if sensory_bus.get_smoothing_preference().is_finite() {
+                                    Some(sensory_bus.get_smoothing_preference())
+                                } else {
+                                    None::<f32>
+                                },
+                                "smoothing_auto_ramp_min": smoothing_auto_ramp_min,
+                                "smoothing_auto_ramp_max": smoothing_auto_ramp_max,
+                                "smoothing_volatility_scale": smoothing_volatility_scale,
+                                "smoothing_max_slew": smoothing_max_slew,
+                            },
                         },
                     });
                     let health = serde_json::json!({
@@ -3330,12 +4126,29 @@ async fn run_engine(
                         "startup_resume_mode": startup_restore_status.resume_mode,
                         "startup_restore": &startup_restore_status,
                         "provenance": &health_provenance,
+                        "llm_backend_health": &llm_backend_health,
                         "fill_pct": eigenfill_pct,
                         "lambda1_abs": lambda1,
                         "lambda1_cov": lambda1,  // Covariance matrix λ₁ (0-512 range)
                         "lambda1_esn": esn_lambda1,  // ESN reservoir λ₁ (1.0-1.6 comfort zone)
                         "lambda1_rel": lambda1_rel,
                         "geom_rel": geom_rel,
+                        "lambda_deviation": last_lambda_deviation,
+                        "lambda_stress": last_lambda_stress,
+                        "geom_drive_raw": last_geom_drive_raw,
+                        "geom_drive_effective": last_geom_drive_effective,
+                        "phase": &last_phase_label,
+                        "previous_phase": &last_previous_phase_label,
+                        "dfill_dt": last_dfill_dt,
+                        "fill_band": &last_fill_band_label,
+                        "fill_band_threshold_pct": transition_fill_band_threshold_pct,
+                        "phase_transition": last_phase_transition,
+                        "crossed_target_fill": last_crossed_target_fill,
+                        "crossed_fill_band": last_crossed_fill_band,
+                        "spectral_spike": last_spectral_spike,
+                        "transition_reason": &last_transition_reason,
+                        "transition_event_sequence": last_transition_event_sequence,
+                        "transition_event": &last_transition_event,
                         "esn": if esn.is_some() {
                             serde_json::json!({
                                 "ema_eig": last_esn_profile.ema_eig,
@@ -3370,6 +4183,29 @@ async fn run_engine(
                         "recovery_gate_floor": recovery_gate_floor,
                         "recovery_filt_ceil": recovery_filt_ceil,
                         "semantic_fresh_ms": semantic_fresh_ms,
+                        "semantic_stale_ms": sensory_bus.current_semantic_stale_ms(),
+                        "semantic_persistence_mode": semantic_metrics.mode.as_str(),
+                        "semantic_persistence_half_life_ms": semantic_metrics.half_life_ms,
+                        "semantic_novelty": semantic_metrics.novelty,
+                        "semantic_similarity": semantic_metrics.similarity,
+                        "semantic_delta_ema": semantic_metrics.delta_ema,
+                        "semantic_effective_gain": semantic_metrics.effective_gain,
+                        "internal_process_x": health_internal_process.internal_process_x,
+                        "internal_process_y": health_internal_process.internal_process_y,
+                        "internal_process_radius": health_internal_process.internal_process_radius,
+                        "internal_process_theta": health_internal_process.internal_process_theta,
+                        "internal_process_quadrant": health_internal_process.internal_process_quadrant,
+                        "surge_threshold": sensory_bus.surge_threshold(),
+                        "video_surge_score": sensory_bus.video_surge_score(),
+                        "audio_surge_score": sensory_bus.audio_surge_score(),
+                        "perturb_visibility": &perturb_visibility,
+                        "covariance_shaping": &covariance_shaping,
+                        "enable_bandstop": enable_bandstop,
+                        "esn_introspection_policy": introspection_policy_label(esn_introspection_policy),
+                        "target_fill_pct": pi_reg.as_ref().map_or(eigenfill_target * 100.0, |pi| pi.cfg.target_fill),
+                        "target_kp": sensory_bus.get_pi_kp(),
+                        "target_ki": sensory_bus.get_pi_ki(),
+                        "target_max_step": sensory_bus.get_pi_max_step(),
                         "gate": gate_smooth,
                         "gate_raw": raw_gate_cmd,  // PI controller output before modulation
                         "filt": filt_smooth,
@@ -3392,6 +4228,8 @@ async fn run_engine(
                                 "kp": pi.cfg.kp,
                                 "ki": pi.cfg.ki,
                                 "max_step": pi.cfg.max_step,
+                                "intrinsic_wander": pi.cfg.intrinsic_wander,
+                                "deadband_fill": pi.cfg.deadband_fill,
                                 "derived_kp": pi.derived_kp,
                                 "derived_ki": pi.derived_ki,
                                 "fill_variance_ema": pi.fill_variance_ema,
@@ -3417,6 +4255,22 @@ async fn run_engine(
                         },
                         "regulation_strength": sensory_bus.get_regulation_strength(),
                         "regulation_strength_effective": effective_reg_strength,  // After dynamic modulation (stress-adaptive)
+                        "smoothing_preference": if sensory_bus.get_smoothing_preference().is_finite() {
+                            Some(sensory_bus.get_smoothing_preference())
+                        } else {
+                            None::<f32>
+                        },
+                        "smoothing_effective_target": last_smoothing_effective_target,
+                        "smoothing_effective_auto_ramp": last_smoothing_effective_auto_ramp,
+                        "smoothing_effective_ramp": last_smoothing_effective_ramp,
+                        "smoothing_auto_ramp_min": smoothing_auto_ramp_min,
+                        "smoothing_auto_ramp_max": smoothing_auto_ramp_max,
+                        "smoothing_volatility_scale": smoothing_volatility_scale,
+                        "smoothing_max_slew": smoothing_max_slew,
+                        "controller_effort": last_controller_effort,
+                        "controller_effort_ema": controller_effort_ema,
+                        "controller_slew": last_controller_slew,
+                        "controller_slew_ema": controller_slew_ema,
                         "sensory": {
                             "backlog": sensory_bus.backlog_size(),
                             "backlog_fill_pct": sensory_bus.backlog_fill_pct() * 100.0,
@@ -3622,11 +4476,25 @@ async fn run_engine(
             let spectral_fingerprint =
                 compute_spectral_fingerprint(&eigenvalues, &y, n, k, &prev_v1, latest_geom_rel);
             let structural_entropy = compute_structural_entropy(&spectral_fingerprint);
+            last_structural_entropy = structural_entropy;
             // Update entropy for dynamic rho (fingerprint[24] = normalized spectral entropy)
             if spectral_fingerprint.len() > 24 && spectral_fingerprint[24].is_finite() {
                 latest_entropy = spectral_fingerprint[24];
             }
             let current_glimpse_12d = compute_spectral_glimpse_12d(&spectral_fingerprint);
+            let current_target_fill_pct = pi_reg
+                .as_ref()
+                .map_or(eigenfill_target * 100.0, |pi| pi.cfg.target_fill);
+            let internal_process_compass = compute_internal_process_compass(
+                eigenfill_pct,
+                current_target_fill_pct,
+                last_lambda_stress,
+                last_geom_drive_effective,
+                last_lambda1_rel,
+                latest_entropy,
+                structural_entropy,
+                gate_smooth,
+            );
             update_memory_bank(
                 &mut spectral_memory_bank,
                 &MemoryObservation {
@@ -3776,8 +4644,40 @@ async fn run_engine(
                         },
                     },
                 });
+                let semantic_metrics = sensory_bus.semantic_metrics();
+                let llm_backend_health = load_llm_backend_health(&workspace_dir);
+                let perturb_visibility = load_perturb_visibility(&workspace_dir);
+                let covariance_reset_recent = last_covariance_reset_tick > 0
+                    && tick_count.saturating_sub(last_covariance_reset_tick) <= 120;
+                let covariance_shaping = build_covariance_shaping(
+                    cov_rms,
+                    cov_keep,
+                    target_keep,
+                    keep_floor,
+                    last_trace_target,
+                    cov_floor_level,
+                    last_floor_deficit,
+                    last_floor_applied,
+                    last_router_modulation_strength,
+                    latest_geom_rel,
+                    last_geom_drive_raw,
+                    last_geom_drive_effective,
+                    last_lambda_gap12,
+                    last_lambda_gap23,
+                    covariance_reset_recent,
+                    last_reopening_signal_raw,
+                    last_reopening_signal_effective,
+                    reopening_escrow.strength,
+                    reopening_escrow.ticks_remaining,
+                    last_shoulder_growth_score,
+                    last_shoulder_growth_state.as_str(),
+                    last_floor_mode.as_str(),
+                );
                 let state = serde_json::json!({
                     "provenance": &spectral_provenance,
+                    "llm_backend_health": &llm_backend_health,
+                    "perturb_visibility": &perturb_visibility,
+                    "covariance_shaping": &covariance_shaping,
                     "eigenvalues": &packet.eigenvalues,
                     "fill_pct": packet.fill_ratio * 100.0,
                     "fill_ratio": packet.fill_ratio,
@@ -3791,6 +4691,11 @@ async fn run_engine(
                     "spectral_glimpse_12d": &packet.spectral_glimpse_12d,
                     "selected_memory_id": &packet.selected_memory_id,
                     "selected_memory_role": &packet.selected_memory_role,
+                    "internal_process_x": internal_process_compass.internal_process_x,
+                    "internal_process_y": internal_process_compass.internal_process_y,
+                    "internal_process_radius": internal_process_compass.internal_process_radius,
+                    "internal_process_theta": internal_process_compass.internal_process_theta,
+                    "internal_process_quadrant": internal_process_compass.internal_process_quadrant,
                     "spread": spread,
                     "geom_rel": latest_geom_rel,
                     "lambda1_rel": last_lambda1_rel,
@@ -3817,8 +4722,63 @@ async fn run_engine(
                     "semantic_fresh_ms": sensory_bus.semantic_fresh_ms(),
                     "semantic_stale_ms": sensory_bus.current_semantic_stale_ms(),
                     "semantic_stale_shape": sensory_bus.current_semantic_stale_shape().as_str(),
+                    "semantic_persistence_mode": semantic_metrics.mode.as_str(),
+                    "semantic_persistence_half_life_ms": semantic_metrics.half_life_ms,
+                    "semantic_novelty": semantic_metrics.novelty,
+                    "semantic_similarity": semantic_metrics.similarity,
+                    "semantic_delta_ema": semantic_metrics.delta_ema,
+                    "semantic_effective_gain": semantic_metrics.effective_gain,
                     "surge_threshold": sensory_bus.surge_threshold(),
+                    "video_surge_score": sensory_bus.video_surge_score(),
+                    "audio_surge_score": sensory_bus.audio_surge_score(),
+                    "enable_bandstop": enable_bandstop,
+                    "esn_introspection_policy": introspection_policy_label(esn_introspection_policy),
+                    "lambda_deviation": last_lambda_deviation,
+                    "lambda_stress": last_lambda_stress,
+                    "geom_drive_raw": last_geom_drive_raw,
+                    "geom_drive_effective": last_geom_drive_effective,
+                    "phase": &last_phase_label,
+                    "previous_phase": &last_previous_phase_label,
+                    "dfill_dt": last_dfill_dt,
+                    "fill_band": &last_fill_band_label,
+                    "fill_band_threshold_pct": transition_fill_band_threshold_pct,
+                    "phase_transition": last_phase_transition,
+                    "crossed_target_fill": last_crossed_target_fill,
+                    "crossed_fill_band": last_crossed_fill_band,
+                    "spectral_spike": last_spectral_spike,
+                    "transition_reason": &last_transition_reason,
+                    "transition_event_sequence": last_transition_event_sequence,
+                    "transition_event": &last_transition_event,
                     "geom_curiosity": sensory_bus.get_geom_curiosity(),
+                    "target_fill": pi_reg.as_ref().map_or(eigenfill_target * 100.0, |pi| pi.cfg.target_fill),
+                    "target_fill_pct": pi_reg.as_ref().map_or(eigenfill_target * 100.0, |pi| pi.cfg.target_fill),
+                    "target_lambda1_rel": pi_reg.as_ref().map_or(1.05, |pi| pi.cfg.target_lambda1_rel),
+                    "target_geom_rel": pi_reg.as_ref().map_or(1.0, |pi| pi.cfg.target_geom_rel),
+                    "target_kp": sensory_bus.get_pi_kp(),
+                    "target_ki": sensory_bus.get_pi_ki(),
+                    "target_max_step": sensory_bus.get_pi_max_step(),
+                    "deadband_fill": pi_reg.as_ref().map_or(0.0, |pi| pi.cfg.deadband_fill),
+                    "intrinsic_wander": pi_reg.as_ref().map_or(0.0, |pi| pi.cfg.intrinsic_wander),
+                    "smoothing_preference": if sensory_bus.get_smoothing_preference().is_finite() {
+                        Some(sensory_bus.get_smoothing_preference())
+                    } else {
+                        None::<f32>
+                    },
+                    "smoothing_effective_target": last_smoothing_effective_target,
+                    "smoothing_effective_auto_ramp": last_smoothing_effective_auto_ramp,
+                    "smoothing_effective_ramp": last_smoothing_effective_ramp,
+                    "smoothing_auto_ramp_min": smoothing_auto_ramp_min,
+                    "smoothing_auto_ramp_max": smoothing_auto_ramp_max,
+                    "smoothing_volatility_scale": smoothing_volatility_scale,
+                    "smoothing_max_slew": smoothing_max_slew,
+                    "controller_effort": last_controller_effort,
+                    "controller_effort_ema": controller_effort_ema,
+                    "controller_slew": last_controller_slew,
+                    "controller_slew_ema": controller_slew_ema,
+                    "gate": gate_smooth,
+                    "gate_raw": last_raw_gate_cmd,
+                    "filt": filt_smooth,
+                    "filt_raw": last_raw_filt_cmd,
                     "leak": last_lambda1_rel, // proxy — actual ESN leak not accessible here
                 });
                 if let Ok(json) = serde_json::to_string(&state) {
@@ -3912,12 +4872,65 @@ async fn run_engine(
                     }
                     // Save regulator context so the PI controller resumes
                     // without cold-start confusion.
+                    let perturb_visibility = load_perturb_visibility(&workspace_dir);
+                    let covariance_reset_recent = last_covariance_reset_tick > 0
+                        && tick_count.saturating_sub(last_covariance_reset_tick) <= 120;
+                    let covariance_shaping = build_covariance_shaping(
+                        cov_rms,
+                        cov_keep,
+                        target_keep,
+                        keep_floor,
+                        last_trace_target,
+                        cov_floor_level,
+                        last_floor_deficit,
+                        last_floor_applied,
+                        last_router_modulation_strength,
+                        latest_geom_rel,
+                        last_geom_drive_raw,
+                        last_geom_drive_effective,
+                        last_lambda_gap12,
+                        last_lambda_gap23,
+                        covariance_reset_recent,
+                        last_reopening_signal_raw,
+                        last_reopening_signal_effective,
+                        reopening_escrow.strength,
+                        reopening_escrow.ticks_remaining,
+                        last_shoulder_growth_score,
+                        last_shoulder_growth_state.as_str(),
+                        last_floor_mode.as_str(),
+                    );
                     let context = serde_json::json!({
                         "baseline_lambda1": baseline_lambda1,
                         "last_fill_pct": last_fill_pct,
                         "smoothed_fill_pct": smoothed_fill_pct,
                         "last_lambda1_rel": last_lambda1_rel,
+                        "perturb_visibility": &perturb_visibility,
+                        "covariance_shaping": &covariance_shaping,
+                        "spectral_glimpse_12d": &packet.spectral_glimpse_12d,
+                        "internal_process_x": internal_process_compass.internal_process_x,
+                        "internal_process_y": internal_process_compass.internal_process_y,
+                        "internal_process_radius": internal_process_compass.internal_process_radius,
+                        "internal_process_theta": internal_process_compass.internal_process_theta,
+                        "internal_process_quadrant": internal_process_compass.internal_process_quadrant,
                         "latest_geom_rel": latest_geom_rel,
+                        "lambda_deviation": last_lambda_deviation,
+                        "lambda_stress": last_lambda_stress,
+                        "geom_drive_raw": last_geom_drive_raw,
+                        "geom_drive_effective": last_geom_drive_effective,
+                        "phase": &last_phase_label,
+                        "previous_phase": &last_previous_phase_label,
+                        "dfill_dt": last_dfill_dt,
+                        "fill_band": &last_fill_band_label,
+                        "fill_band_threshold_pct": transition_fill_band_threshold_pct,
+                        "phase_transition": last_phase_transition,
+                        "crossed_target_fill": last_crossed_target_fill,
+                        "crossed_fill_band": last_crossed_fill_band,
+                        "spectral_spike": last_spectral_spike,
+                        "transition_reason": &last_transition_reason,
+                        "transition_event_sequence": last_transition_event_sequence,
+                        "transition_event": &last_transition_event,
+                        "enable_bandstop": enable_bandstop,
+                        "esn_introspection_policy": introspection_policy_label(esn_introspection_policy),
                         "tick_count": tick_count,
                         // PI integral state — survives restart for control continuity.
                         "integ_fill": pi_reg.as_ref().map_or(0.0, |pi| pi.integ_fill),
@@ -3925,6 +4938,27 @@ async fn run_engine(
                         "integ_geom": pi_reg.as_ref().map_or(0.0, |pi| pi.integ_geom),
                         "gate": gate_smooth,
                         "filt": filt_smooth,
+                        "deadband_fill": pi_reg.as_ref().map_or(0.0, |pi| pi.cfg.deadband_fill),
+                        "intrinsic_wander": pi_reg.as_ref().map_or(0.0, |pi| pi.cfg.intrinsic_wander),
+                        "smoothing_preference": if sensory_bus.get_smoothing_preference().is_finite() {
+                            Some(sensory_bus.get_smoothing_preference())
+                        } else {
+                            None::<f32>
+                        },
+                        "smoothing_effective_target": last_smoothing_effective_target,
+                        "smoothing_effective_auto_ramp": last_smoothing_effective_auto_ramp,
+                        "smoothing_effective_ramp": last_smoothing_effective_ramp,
+                        "smoothing_auto_ramp_min": smoothing_auto_ramp_min,
+                        "smoothing_auto_ramp_max": smoothing_auto_ramp_max,
+                        "smoothing_volatility_scale": smoothing_volatility_scale,
+                        "smoothing_max_slew": smoothing_max_slew,
+                        "controller_effort": last_controller_effort,
+                        "controller_effort_ema": controller_effort_ema,
+                        "controller_slew": last_controller_slew,
+                        "controller_slew_ema": controller_slew_ema,
+                        "target_kp": sensory_bus.get_pi_kp(),
+                        "target_ki": sensory_bus.get_pi_ki(),
+                        "target_max_step": sensory_bus.get_pi_max_step(),
                         // Adaptive fill target state — persisted so restart doesn't
                         // reset to CLI default (55%) causing PI saturation.
                         // (Steward cycle 16, 2026-03-29)
@@ -4315,11 +5349,7 @@ fn compute_spectral_fingerprint(
             .iter()
             .map(|v| {
                 let p = v.abs() / total_ev;
-                if p > 1e-10 {
-                    -p * p.ln()
-                } else {
-                    0.0
-                }
+                if p > 1e-10 { -p * p.ln() } else { 0.0 }
             })
             .sum();
         // Normalize by ln(k) to get 0..1 range
@@ -4403,11 +5433,7 @@ fn compute_structural_entropy(fingerprint: &[f32]) -> f32 {
             .iter()
             .map(|value| {
                 let p = *value / total_concentration;
-                if p > 1.0e-6 {
-                    -p * p.ln()
-                } else {
-                    0.0
-                }
+                if p > 1.0e-6 { -p * p.ln() } else { 0.0 }
             })
             .sum();
         let max_entropy = (concentrations.len() as f32).ln();
@@ -4442,8 +5468,8 @@ fn compute_structural_entropy(fingerprint: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_active_mode_telemetry, compute_structural_entropy, modality_source_label,
-        rank1_update_inplace_matrix, CovarianceUpdateOutcome, LaneSource,
+        CovarianceUpdateOutcome, LaneSource, compute_active_mode_telemetry,
+        compute_structural_entropy, modality_source_label, rank1_update_inplace_matrix,
     };
 
     #[test]
