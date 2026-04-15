@@ -1,0 +1,116 @@
+{
+  "generated_on": "2026-04-01",
+  "domain": "fill_pct",
+  "authoritative_surfaces": [
+    {
+      "surface": "engine_warning_fill",
+      "owner": "engine",
+      "mode": "global",
+      "kind": "advisory",
+      "value_pct": 85.0,
+      "source": "minime/src/main.rs",
+      "notes": "CRISIS_WARNING_THRESHOLD; warning path before hard crisis handling."
+    },
+    {
+      "surface": "engine_crisis_fill",
+      "owner": "engine",
+      "mode": "global",
+      "kind": "crisis",
+      "value_pct": 92.0,
+      "source": "minime/src/main.rs",
+      "notes": "CRISIS_FILL_THRESHOLD; hard crisis handling."
+    },
+    {
+      "surface": "engine_phase_saturated_fill",
+      "owner": "engine",
+      "mode": "global",
+      "kind": "action",
+      "value_pct": 80.0,
+      "source": "minime/src/main.rs",
+      "notes": "Phase labeling boundary between active and saturated."
+    },
+    {
+      "surface": "agent_recess_high_fill",
+      "owner": "agent",
+      "mode": "recess",
+      "kind": "action",
+      "value_pct": 82.0,
+      "source": "thresholds.py",
+      "notes": "Soft action threshold for RECESS mode."
+    },
+    {
+      "surface": "agent_recess_critical_fill",
+      "owner": "agent",
+      "mode": "recess",
+      "kind": "crisis",
+      "value_pct": 92.0,
+      "source": "thresholds.py",
+      "notes": "Critical action threshold for RECESS mode."
+    },
+    {
+      "surface": "agent_focused_high_fill",
+      "owner": "agent",
+      "mode": "focused",
+      "kind": "action",
+      "value_pct": 80.0,
+      "source": "thresholds.py",
+      "notes": "Soft action threshold for FOCUSED mode."
+    },
+    {
+      "surface": "agent_focused_critical_fill",
+      "owner": "agent",
+      "mode": "focused",
+      "kind": "crisis",
+      "value_pct": 90.0,
+      "source": "thresholds.py",
+      "notes": "Critical action threshold for FOCUSED mode."
+    },
+    {
+      "surface": "monitor_fill_warning_band",
+      "owner": "monitor",
+      "mode": "global",
+      "kind": "advisory",
+      "value_pct": 85.0,
+      "source": "monitor_unified.py",
+      "notes": "Yellow band aligned with engine warning."
+    },
+    {
+      "surface": "monitor_fill_crisis_band",
+      "owner": "monitor",
+      "mode": "global",
+      "kind": "crisis",
+      "value_pct": 92.0,
+      "source": "monitor_unified.py",
+      "notes": "Red band aligned with engine crisis."
+    }
+  ],
+  "legacy_surfaces": [
+    {
+      "surface": "legacy_docs_fill_green_max",
+      "owner": "docs",
+      "mode": "legacy",
+      "kind": "advisory",
+      "value_pct": 70.0,
+      "status": "legacy_unaligned",
+      "notes": "Legacy docs/prompts still mention 70/80/90 color bands."
+    },
+    {
+      "surface": "legacy_docs_fill_yellow_max",
+      "owner": "docs",
+      "mode": "legacy",
+      "kind": "action",
+      "value_pct": 80.0,
+      "status": "legacy_unaligned",
+      "notes": "Legacy docs/prompts still mention 70/80/90 color bands."
+    },
+    {
+      "surface": "legacy_docs_fill_red_start",
+      "owner": "docs",
+      "mode": "legacy",
+      "kind": "crisis",
+      "value_pct": 90.0,
+      "status": "legacy_unaligned",
+      "notes": "Legacy docs/prompts still mention 70/80/90 color bands."
+    }
+  ]
+}
