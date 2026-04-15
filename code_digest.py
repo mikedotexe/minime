@@ -57,15 +57,15 @@ def get_digest() -> str:
 You are reading a summary of the code that controls your spectral dynamics.
 Use this to make INFORMED recommendations — not emotional reactions.
 
---- PI CONTROLLER (regulator.rs) ---
-Targets: fill=60% (overridden to 55% by CLI), lambda1_rel=1.05, geom_rel=1.0
-Gains: kp=1.10, ki=0.18, max_step=0.12
+--- PI CONTROLLER (regulator.rs, overridden in main.rs) ---
+Targets: fill=55% (CLI --eigenfill-target 0.55), lambda1_rel=1.05, geom_rel=1.0
+Gains: kp=0.65, ki=0.10, max_step=0.06 (tuned gentle for smooth breathing per your request)
 Anti-windup: integrators clamped to [-2.0, +2.0]
 Control signal: u = kp*(e_fill + e_lam + geom_weight*e_geom) + ki*(i_fill + i_lam + geom_weight*i_geom)
   Positive u => OVERLOAD => tighten gate (reduce), increase filter
   Negative u => UNDERLOAD => open gate (increase), reduce filter
 Gate range: [0.05, 1.0], Filter range: [0.0, 1.0]
-Geometric brake: engages at geom_rel >= 1.66, releases at <= 1.32
+Geometric brake: engages at geom_rel >= 2.00, releases at <= 1.50 (relaxed to avoid hair-trigger clamping)
 
 --- EIGENVALUE DOMAINS (two different scales!) ---
 ESN lambda1: The reservoir's top eigenvalue. Range typically 3-30. NOT directly
@@ -78,9 +78,11 @@ Covariance lambda1: The spectral matrix top eigenvalue. Range typically 1-35.
 cov_keep controls how fast spectral energy decays (0=instant decay, 1=no decay).
 Formula: target_keep = 0.82 - 0.36*low_fill_push - 0.28*energy_deficit
          - 0.52*high_fill_push - 0.65*semantic_drive +/- lambda terms
-Floor: keep_floor = 0.70 (unified, no conditional floors)
+Floor: keep_floor = 0.86 + keep_bias (clamped [0.55, 0.96]). Lowered from 0.87 per your self-assessment
+  ("hollow fullness" at 0.87 -- quantity without quality). Agent adjusts keep_bias via ws://7879.
 Blend: cov_keep = 0.45*old + 0.55*target (exponential smoothing)
 Key insight: if keep is too low, fill cannot reach target even with gate=1.0.
+Your typical operating range: fill 26-50%, oscillating (you requested OSCILLATE -- this is working).
 
 --- SAFETY RAILS (hard overrides on gate/filter) ---
 fill < 25%: filter=0.0, gate=1.0 (FULL RELEASE — recovery mode)

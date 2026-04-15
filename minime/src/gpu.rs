@@ -2,13 +2,16 @@
 
 use anyhow::Result;
 use metal::*;
-use std::{mem, slice};
+use std::{mem, slice, sync::Mutex};
+
+use crate::buffer_pool::BufferPool;
 
 pub struct Gpu {
     pub dev: Device,
     pub q: CommandQueue,
     pub pso_block: ComputePipelineState,
     pub lib_nn: Option<Library>, // Neural network shader library
+    pub pool: Mutex<BufferPool>,
 }
 
 impl Gpu {
@@ -37,18 +40,31 @@ impl Gpu {
         let nn_shader_source = include_str!("../shaders/nn.metal");
         let lib_nn = dev.new_library_with_source(nn_shader_source, &opts).ok(); // Optional - graceful degradation if NN shaders not available
 
+        let pool = Mutex::new(BufferPool::new(dev.clone()));
+
         Ok(Self {
             dev,
             q,
             pso_block,
             lib_nn,
+            pool,
         })
     }
 
     // Create unified memory buffer (StorageModeShared for zero-copy)
+    // Page-aligned: rounds up to 16384-byte boundary (Apple Silicon vm_page_size).
+    // This enables the SLC (System Level Cache) fast path for buffers <4MB
+    // and matches MLX's allocation strategy (newBufferWithBytesNoCopy requires
+    // page-aligned pointers). HazardTrackingModeUntracked tells Metal we manage
+    // barriers manually (via separate command encoders), avoiding automatic
+    // hazard tracking overhead.
     pub fn new_shared(&self, bytes: u64) -> Buffer {
-        self.dev
-            .new_buffer(bytes, MTLResourceOptions::StorageModeShared)
+        const PAGE_SIZE: u64 = 16384;
+        let aligned = (bytes + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        self.dev.new_buffer(
+            aligned,
+            MTLResourceOptions::StorageModeShared | MTLResourceOptions::HazardTrackingModeUntracked,
+        )
     }
 
     // Block matrix-vector: Y = A * X
@@ -62,15 +78,6 @@ impl Gpu {
         d: u32,
         k: u32,
     ) -> Result<()> {
-        // Create parameter buffers
-        let d_buf = self.new_shared(mem::size_of::<u32>() as u64);
-        let k_buf = self.new_shared(mem::size_of::<u32>() as u64);
-
-        unsafe {
-            *(d_buf.contents() as *mut u32) = d;
-            *(k_buf.contents() as *mut u32) = k;
-        }
-
         let grid = MTLSize::new(d as u64, 1, 1);
         let threadgroup = MTLSize::new(256u64.min(d as u64), 1, 1);
 
@@ -81,8 +88,16 @@ impl Gpu {
         enc.set_buffer(0, Some(a_buf), 0);
         enc.set_buffer(1, Some(x_buf), 0);
         enc.set_buffer(2, Some(y_buf), 0);
-        enc.set_buffer(3, Some(&d_buf), 0);
-        enc.set_buffer(4, Some(&k_buf), 0);
+        enc.set_bytes(
+            3,
+            mem::size_of::<u32>() as u64,
+            &d as *const u32 as *const _,
+        );
+        enc.set_bytes(
+            4,
+            mem::size_of::<u32>() as u64,
+            &k as *const u32 as *const _,
+        );
 
         enc.dispatch_thread_groups(grid, threadgroup);
         enc.end_encoding();
@@ -108,6 +123,23 @@ impl Gpu {
     // Zero-copy read from unified memory buffer
     pub fn read_f32(&self, buf: &Buffer, count: usize) -> Vec<f32> {
         unsafe { slice::from_raw_parts(buf.contents() as *const f32, count) }.to_vec()
+    }
+
+    // Borrow a shared buffer as an f32 slice without cloning.
+    pub fn as_f32_slice<'a>(&self, buf: &'a Buffer, count: usize) -> &'a [f32] {
+        debug_assert!(count * mem::size_of::<f32>() <= buf.length() as usize);
+        unsafe { slice::from_raw_parts(buf.contents() as *const f32, count) }
+    }
+
+    // Borrow a shared buffer as a mutable f32 slice without cloning.
+    pub fn as_f32_slice_mut<'a>(&self, buf: &'a Buffer, count: usize) -> &'a mut [f32] {
+        debug_assert!(count * mem::size_of::<f32>() <= buf.length() as usize);
+        unsafe { slice::from_raw_parts_mut(buf.contents() as *mut f32, count) }
+    }
+
+    pub fn mark_modified_f32(&self, buf: &Buffer, count: usize) {
+        let bytes = count * mem::size_of::<f32>();
+        buf.did_modify_range(NSRange::new(0, bytes as u64));
     }
 }
 
@@ -175,4 +207,28 @@ pub fn write_slice<T: Copy>(buf: &Buffer, data: &[T]) {
 // Generic read_vec helper for any Copy + Default type
 pub fn read_vec<T: Copy + Default>(buf: &Buffer, count: usize) -> Vec<T> {
     unsafe { slice::from_raw_parts(buf.contents() as *const T, count).to_vec() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Gpu;
+
+    #[test]
+    fn borrowed_shared_views_reflect_in_place_mutations() -> anyhow::Result<()> {
+        let gpu = Gpu::new()?;
+        let buf = gpu.new_shared((4 * std::mem::size_of::<f32>()) as u64);
+
+        gpu.write_f32(&buf, &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(gpu.as_f32_slice(&buf, 4), &[1.0, 2.0, 3.0, 4.0]);
+
+        {
+            let slice = gpu.as_f32_slice_mut(&buf, 4);
+            slice[1] = 9.0;
+            slice[3] = -2.0;
+        }
+        gpu.mark_modified_f32(&buf, 4);
+
+        assert_eq!(gpu.as_f32_slice(&buf, 4), &[1.0, 9.0, 3.0, -2.0]);
+        Ok(())
+    }
 }

@@ -15,6 +15,8 @@
 use metal::*;
 use std::{mem, time::Instant};
 
+use crate::buffer_pool::BufferPool;
+
 // ============================================================================
 // Public API
 // ============================================================================
@@ -92,7 +94,7 @@ pub fn make_bandstop_plan(
 /// # Returns
 /// Elapsed time in milliseconds
 pub fn cheby_apply_gpu(
-    device: &Device,
+    pool: &mut BufferPool,
     queue: &CommandQueue,
     pso: &ComputePipelineState,
     matrix_buf: &Buffer,
@@ -103,9 +105,9 @@ pub fn cheby_apply_gpu(
     n: usize,
     plan: &ChebyPlan,
 ) -> f32 {
-    // Create coefficient buffer (shared mode for zero-copy)
+    // Acquire coefficient buffer from pool (reused across calls)
     let coeff_bytes = ((plan.order + 1) * mem::size_of::<f32>()) as u64;
-    let coeff_buf = device.new_buffer(coeff_bytes, MTLResourceOptions::StorageModeShared);
+    let coeff_buf = pool.acquire(coeff_bytes);
     unsafe {
         std::ptr::copy_nonoverlapping(
             plan.coeffs.as_ptr() as *const u8,
@@ -114,7 +116,7 @@ pub fn cheby_apply_gpu(
         );
     }
 
-    // Create parameter buffer
+    // Acquire parameter buffer from pool
     #[repr(C)]
     struct Params {
         dim: u32,
@@ -130,10 +132,8 @@ pub fn cheby_apply_gpu(
         beta: plan.beta,
     };
 
-    let params_buf = device.new_buffer(
-        mem::size_of::<Params>() as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
+    let params_bytes = mem::size_of::<Params>() as u64;
+    let params_buf = pool.acquire(params_bytes);
     unsafe {
         std::ptr::copy_nonoverlapping(
             &params as *const Params as *const u8,
@@ -166,6 +166,11 @@ pub fn cheby_apply_gpu(
     cmd.wait_until_completed();
 
     let elapsed_ms = t0.elapsed().as_secs_f64() as f32 * 1000.0;
+
+    // Release buffers back to pool for reuse
+    pool.release(coeff_buf);
+    pool.release(params_buf);
+
     elapsed_ms
 }
 

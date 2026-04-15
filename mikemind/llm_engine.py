@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -13,29 +14,41 @@ from mikemind.config import CORPUS_DIR, OLLAMA_API_URL, OLLAMA_MODEL
 class LLMEngine:
     """Handles LLM-powered natural language generation with corpus knowledge."""
 
-    def __init__(self, model: str = OLLAMA_MODEL):
+    def __init__(self, model: str = OLLAMA_MODEL, backend: str = "auto"):
         self.model = model
+        self.backend = backend  # "auto", "mlx", "ollama"
         self.api_url = OLLAMA_API_URL
-        self.available = self._check_availability()
+
+        # MLX configuration
+        self.mlx_port = int(os.getenv("MLX_CHAT_PORT", "8090"))
+        self.mlx_url = f"http://localhost:{self.mlx_port}/v1/chat/completions"
+        self.mlx_available = self._check_mlx() if backend != "ollama" else False
+
+        self.available = self.mlx_available or self._check_availability()
         self.corpus_knowledge = self._load_corpus()
 
-        if self.available:
+        if self.mlx_available:
+            logging.info(f"LLM Engine initialized with MLX backend (port {self.mlx_port})")
+        elif self.available:
             logging.info(f"LLM Engine initialized with {model}")
         else:
             logging.warning("LLM Engine unavailable - falling back to simple responses")
 
-    def _check_availability(self) -> bool:
-        """Check if Ollama is running and model is available."""
+    def _check_mlx(self) -> bool:
+        """Check if MLX server is running."""
         try:
-            response = requests.post(
-                self.api_url,
-                json={
-                    "model": self.model,
-                    "messages": [{"role": "user", "content": "test"}],
-                    "stream": False,
-                    "keep_alive": "1h",
-                },
-                timeout=30,
+            response = requests.get(f"http://localhost:{self.mlx_port}/v1/models", timeout=5)
+            return response.status_code == 200
+        except Exception:
+            return False
+
+    def _check_availability(self) -> bool:
+        """Check if Ollama is running. Uses lightweight /api/tags instead of
+        sending a real generation request (which pins the model for keep_alive)."""
+        try:
+            response = requests.get(
+                "http://localhost:11434/api/tags",
+                timeout=5,
             )
             return response.status_code == 200
         except Exception as e:
@@ -134,12 +147,74 @@ Be authentic. Be courageous. Be present."""
         messages.append({"role": "user", "content": enhanced_user_input})
         return messages
 
+    def _generate_mlx(self, messages: list) -> Optional[str]:
+        """Generate using MLX server (OpenAI-compatible API)."""
+        try:
+            response = requests.post(
+                self.mlx_url,
+                json={
+                    "model": "default",
+                    "messages": messages,
+                    "max_tokens": 512,
+                    "temperature": 1.0,
+                    "top_p": 0.95,
+                },
+                timeout=120,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            else:
+                logging.error(f"MLX API returned {response.status_code}")
+                return None
+        except Exception as e:
+            logging.error(f"MLX generation failed: {e}")
+            return None
+
+    async def _generate_mlx_streaming(self, messages: list):
+        """Generate streaming response using MLX server SSE."""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: requests.post(
+                    self.mlx_url,
+                    json={
+                        "model": "default",
+                        "messages": messages,
+                        "max_tokens": 4096,
+                        "temperature": 1.0,
+                        "top_p": 0.95,
+                        "stream": True,
+                    },
+                    timeout=60,
+                    stream=True,
+                ),
+            )
+            if response.status_code == 200:
+                for line in response.iter_lines(decode_unicode=True):
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]  # strip "data: "
+                    if data_str.strip() == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                        if delta:
+                            yield delta
+                    except json.JSONDecodeError:
+                        continue
+        except Exception as e:
+            logging.error(f"MLX streaming failed: {e}")
+
     def generate(self, user_input: str, context: Dict[str, Any]) -> Optional[str]:
         """Generate a response using the LLM with full context."""
         if not self.available:
             logging.warning("LLM unavailable, attempting reconnect...")
             print(f"LLM ({self.model}) unavailable - attempting reconnect...")
-            self.available = self._check_availability()
+            self.mlx_available = self._check_mlx() if self.backend != "ollama" else False
+            self.available = self.mlx_available or self._check_availability()
             if not self.available:
                 print(f"LLM ({self.model}) still unavailable - is Ollama running?")
                 print("   Check: http://localhost:11434/api/tags")
@@ -150,6 +225,14 @@ Be authentic. Be courageous. Be present."""
 
         messages = self._build_chat_messages(user_input, context)
 
+        # Try MLX first if available
+        if self.mlx_available and self.backend != "ollama":
+            result = self._generate_mlx(messages)
+            if result:
+                return result
+            logging.warning("MLX generation failed, falling back to Ollama")
+
+        # Existing Ollama path
         try:
             response = requests.post(
                 self.api_url,
@@ -157,7 +240,7 @@ Be authentic. Be courageous. Be present."""
                     "model": self.model,
                     "messages": messages,
                     "stream": False,
-                    "keep_alive": "1h",
+                    "keep_alive": "5m",
                     "options": {
                         "temperature": 1.0,
                         "top_p": 0.95,
@@ -193,6 +276,19 @@ Be authentic. Be courageous. Be present."""
 
         messages = self._build_chat_messages(user_input, context)
 
+        # Try MLX streaming first if available
+        if self.mlx_available and self.backend != "ollama":
+            yielded = False
+            try:
+                async for chunk in self._generate_mlx_streaming(messages):
+                    yielded = True
+                    yield chunk
+                if yielded:
+                    return
+            except Exception:
+                logging.warning("MLX streaming failed, falling back to Ollama")
+
+        # Existing Ollama streaming path
         try:
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(
@@ -203,7 +299,7 @@ Be authentic. Be courageous. Be present."""
                         "model": self.model,
                         "messages": messages,
                         "stream": True,
-                        "keep_alive": "1h",
+                        "keep_alive": "5m",
                         "options": {
                             "temperature": 1.0,
                             "top_p": 0.95,

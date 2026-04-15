@@ -14,6 +14,7 @@ import json
 import sys
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 import signal
 
@@ -63,6 +64,23 @@ class UnifiedMonitor:
         self.holo_connected = False
         self.running = True
         self.update_count = 0
+        self.fill_warning_band, self.fill_crisis_band = self._load_fill_thresholds()
+
+    @staticmethod
+    def _load_fill_thresholds() -> tuple[float, float]:
+        path = Path(__file__).resolve().parent / "docs" / "threshold_surfaces.json"
+        try:
+            payload = json.loads(path.read_text())
+            by_surface = {
+                entry.get("surface"): entry
+                for entry in payload.get("authoritative_surfaces", [])
+                if isinstance(entry, dict)
+            }
+            warning = float(by_surface["monitor_fill_warning_band"]["value_pct"])
+            crisis = float(by_surface["monitor_fill_crisis_band"]["value_pct"])
+            return warning, crisis
+        except Exception:
+            return (85.0, 92.0)
 
     async def subscribe_esn(self):
         """Subscribe to ESN eigenvalue stream on port 7878"""
@@ -174,7 +192,10 @@ class UnifiedMonitor:
         conn_status = f"{'🟢' if self.esn_connected else '🔴'} ESN  {'🟢' if self.holo_connected else '🔴'} Holo"
 
         # ESN section
-        fill_indicator = self.get_health_indicator(self.esn.fill, (70.0, 90.0))
+        fill_indicator = self.get_health_indicator(
+            self.esn.fill,
+            (self.fill_warning_band, self.fill_crisis_band),
+        )
         lambda_indicator = self.get_health_indicator(
             self.esn.lambda1 / 512.0 if self.esn.lambda1 > 0 else 0,
             (1.2, 1.5)

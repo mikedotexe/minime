@@ -1,4 +1,8 @@
 #!/bin/bash
+# LEGACY — only starts engine + monitor, missing agent/camera/mic/vision.
+# Use /Users/v/other/astrid/scripts/start_all.sh for canonical full-stack startup,
+# or /Users/v/other/minime/scripts/start.sh for minime-only startup.
+#
 # Consciousness System Launcher
 # Starts minime (Rust ESN engine) and monitoring dashboard
 

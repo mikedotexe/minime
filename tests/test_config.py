@@ -1,6 +1,8 @@
 """Smoke tests for the mikemind package -- no Ollama or Rust engine required."""
 
 import unittest
+import json
+from pathlib import Path
 import importlib
 from pathlib import Path
 
@@ -121,15 +123,40 @@ class TestEmbeddingHelper(unittest.TestCase):
 class TestSafetyThresholds(unittest.TestCase):
     """Verify safety threshold layering is consistent."""
 
-    def test_python_critical_below_rust_crisis(self):
-        """Python agent must act before the Rust crisis threshold."""
+    @staticmethod
+    def _threshold_map():
+        path = Path(__file__).resolve().parents[1] / "docs" / "threshold_surfaces.json"
+        return json.loads(path.read_text())
+
+    def test_python_thresholds_do_not_exceed_engine_crisis(self):
+        """Python action thresholds must not exceed the engine crisis boundary."""
         from thresholds import RECESS, FOCUSED
-        # Rust CRISIS_FILL_THRESHOLD is 87% (0.87 as fraction)
-        RUST_CRISIS = 0.87
-        self.assertLess(RECESS.critical_fill, RUST_CRISIS,
-                        "RECESS critical_fill must be below Rust crisis threshold")
-        self.assertLess(FOCUSED.critical_fill, RUST_CRISIS,
-                        "FOCUSED critical_fill must be below Rust crisis threshold")
+        surfaces = {
+            entry["surface"]: entry
+            for entry in self._threshold_map()["authoritative_surfaces"]
+        }
+        engine_crisis = surfaces["engine_crisis_fill"]["value_pct"] / 100.0
+        self.assertLessEqual(
+            RECESS.critical_fill,
+            engine_crisis,
+            "RECESS critical_fill must stay at or below the engine crisis threshold",
+        )
+        self.assertLessEqual(
+            FOCUSED.critical_fill,
+            engine_crisis,
+            "FOCUSED critical_fill must stay at or below the engine crisis threshold",
+        )
+
+    def test_python_high_fill_below_engine_warning(self):
+        """Python action thresholds should trigger before the engine warning band."""
+        from thresholds import RECESS, FOCUSED
+        surfaces = {
+            entry["surface"]: entry
+            for entry in self._threshold_map()["authoritative_surfaces"]
+        }
+        engine_warning = surfaces["engine_warning_fill"]["value_pct"] / 100.0
+        self.assertLess(RECESS.high_fill, engine_warning)
+        self.assertLess(FOCUSED.high_fill, engine_warning)
 
     def test_high_below_critical(self):
         from thresholds import RECESS, FOCUSED

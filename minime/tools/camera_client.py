@@ -14,11 +14,13 @@ Usage:
 """
 
 import asyncio
+import json
 import logging
 import time
 import numpy as np
 import cv2
 import websockets
+from pathlib import Path
 from typing import Optional
 import argparse
 
@@ -28,6 +30,19 @@ logger = logging.getLogger(__name__)
 # GPU server expects 128×128 grayscale frames
 FRAME_WIDTH = 128
 FRAME_HEIGHT = 128
+WORKSPACE_DIR = Path(__file__).resolve().parents[2] / "workspace"
+RUNTIME_DIR = WORKSPACE_DIR / "runtime"
+CAMERA_STATUS_PATH = RUNTIME_DIR / "camera_status.json"
+
+
+def write_camera_status(status: dict):
+    try:
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        temp = CAMERA_STATUS_PATH.with_suffix(".tmp")
+        temp.write_text(json.dumps(status, indent=2))
+        temp.replace(CAMERA_STATUS_PATH)
+    except Exception:
+        pass
 
 class GpuCameraClient:
     def __init__(self, camera_index: int = 0, ws_uri: str = "ws://127.0.0.1:7880", fps: float = 1.0):
@@ -118,6 +133,11 @@ class GpuCameraClient:
 
                     # Send binary frame to GPU server
                     await websocket.send(frame_bytes)
+                    write_camera_status({
+                        "ts_ms": int(time.time() * 1000),
+                        "frame_count": frame_count + 1,
+                        "healthy": True,
+                    })
 
                     frame_count += 1
                     if frame_count % 30 == 0:
@@ -135,6 +155,11 @@ class GpuCameraClient:
         except Exception as e:
             logger.error(f"❌ Error: {e}")
         finally:
+            write_camera_status({
+                "ts_ms": int(time.time() * 1000),
+                "frame_count": frame_count,
+                "healthy": False,
+            })
             if hasattr(self.camera, 'stop'):
                 self.camera.stop()
             else:

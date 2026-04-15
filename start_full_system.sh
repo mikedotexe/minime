@@ -1,4 +1,8 @@
 #!/bin/bash
+# LEGACY — holographic-engine stack, not the current canonical stack.
+# Use /Users/v/other/astrid/scripts/start_all.sh for canonical full-stack startup.
+# Uses kill -9 (SIGKILL) for cleanup — prefer SIGTERM via stop_all.sh.
+#
 # Unified Consciousness System Startup Orchestrator
 # Starts: minime (Rust), holographic-engine (Swift), monitor (Python)
 # With proper health checks and graceful startup sequencing

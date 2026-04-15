@@ -4,6 +4,8 @@ from mikemind.config import (
     ProcessingMode,
     ModelConfig,
     get_ollama_embedding,
+    get_mlx_embedding,
+    get_embedding,
     DEBUG,
 )
 from mikemind.llm_engine import LLMEngine
@@ -15,6 +17,8 @@ __all__ = [
     "ProcessingMode",
     "ModelConfig",
     "get_ollama_embedding",
+    "get_mlx_embedding",
+    "get_embedding",
     "LLMEngine",
     "LLaVAVisionEngine",
     "MikesSpatialMind",

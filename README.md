@@ -149,6 +149,20 @@ The Rust engine logs homeostasis state continuously:
 
 Never run the Rust engine without `--eigenfill-target 0.55 --reg-tick-secs 0.5`.
 
+### Ollama / MLX Contention Benchmark
+
+To measure the four local-stack contention scenarios from the April 2026
+assessment, run:
+
+```bash
+python3 tools/ollama_mlx_contention_bench.py --iterations 5
+```
+
+The tool writes `report.json` and `report.md` into
+`workspace/investigations/ollama_mlx_contention_bench_<timestamp>/`. See
+`docs/ollama_mlx_contention_benchmark.md` for the scenario mapping and usage
+details.
+
 ---
 
 ## WebSocket Ports
