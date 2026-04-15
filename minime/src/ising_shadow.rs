@@ -218,11 +218,7 @@ impl IsingShadowCore {
             let prev = self.s_bin[i];
             let next = if field_norm < quiet_threshold {
                 if local.abs() >= quiet_threshold * 2.0 {
-                    if local >= 0.0 {
-                        1.0
-                    } else {
-                        -1.0
-                    }
+                    if local >= 0.0 { 1.0 } else { -1.0 }
                 } else {
                     prev
                 }
@@ -230,11 +226,7 @@ impl IsingShadowCore {
                 prev
             } else {
                 let prob_pos = sigmoid(2.0 * local / temp);
-                if self.rng.f32() < prob_pos {
-                    1.0
-                } else {
-                    -1.0
-                }
+                if self.rng.f32() < prob_pos { 1.0 } else { -1.0 }
             };
             if (next - prev).abs() > f32::EPSILON {
                 flips += 1;

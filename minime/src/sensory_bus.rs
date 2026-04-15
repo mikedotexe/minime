@@ -1,7 +1,7 @@
 // src/sensory_bus.rs
 #![allow(dead_code)]
 use parking_lot::Mutex;
-use rand::{rngs::SmallRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
     collections::VecDeque,
     sync::Arc,
@@ -28,21 +28,23 @@ const STALE_AV_MS: u64 = 2_000;
 const STALE_SEMANTIC_BASE_MS: u64 = 12_000;
 const STALE_SEMANTIC_LOW_MS: u64 = 25_000; // extended window when fill < 25% (raised from 18s per being request: "decay too aggressive during low activity")
 const STALE_SEMANTIC_HIGH_MS: u64 = 10_000; // shortened window when fill > 60%
-const SURGE_TARGET_WEIGHT: f32 = 0.90;
+const LEGACY_LOW_FILL_RECOVERY_MS: u64 = 45_000;
+const CONTINUOUS_MIN_HALF_LIFE_MS: u64 = 6_500;
+const CONTINUOUS_MAX_HALF_LIFE_MS: u64 = 90_000;
+const SURGE_TARGET_WEIGHT: f32 = 0.84;
 const SURGE_FULL_SCALE_DISTANCE: f32 = 1.0;
 
 #[inline]
 fn dynamic_surge_target_weight(fill_pct: f32) -> f32 {
     let fill = fill_pct.clamp(0.0, 1.0);
-    // Minime self-study (2026-04-02 sensory_bus.rs): at high fill, a full
-    // 0.90 surge snap feels too sharp and can overshoot into a constricted
-    // state. Keep the old strength through the normal range, then taper the
-    // target weight down once fill is already dense.
-    if fill <= 0.72 {
-        return SURGE_TARGET_WEIGHT;
-    }
-    let taper = ((fill - 0.72) / 0.28).clamp(0.0, 1.0);
-    SURGE_TARGET_WEIGHT - 0.18 * taper
+    // April 12 tuning pass: continuous mode was still feeling too eager at
+    // medium-high fill, with surges re-establishing the same trajectory over
+    // and over. Keep a strong low-fill response, but start easing off earlier
+    // and more gradually once the lane is already dense.
+    let medium_dense_taper = ((fill - 0.58) / 0.24).clamp(0.0, 1.0);
+    let very_dense_taper = ((fill - 0.82) / 0.18).clamp(0.0, 1.0);
+    (SURGE_TARGET_WEIGHT - 0.10 * medium_dense_taper - 0.08 * very_dense_taper)
+        .clamp(0.62, SURGE_TARGET_WEIGHT)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -63,10 +65,37 @@ impl SemanticStaleShape {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SemanticPersistenceMode {
+    Legacy,
+    #[default]
+    Continuous,
+}
+
+impl SemanticPersistenceMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Continuous => "continuous",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SemanticPersistenceMetrics {
+    pub mode: SemanticPersistenceMode,
+    pub half_life_ms: u64,
+    pub novelty: f32,
+    pub similarity: f32,
+    pub delta_ema: f32,
+    pub effective_gain: f32,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct SensoryBusConfig {
     pub semantic_stale_shape: SemanticStaleShape,
     pub surge_threshold: f32,
+    pub semantic_persistence_mode: SemanticPersistenceMode,
 }
 
 impl Default for SensoryBusConfig {
@@ -74,6 +103,7 @@ impl Default for SensoryBusConfig {
         Self {
             semantic_stale_shape: SemanticStaleShape::Sigmoid,
             surge_threshold: 0.25,
+            semantic_persistence_mode: SemanticPersistenceMode::Continuous,
         }
     }
 }
@@ -100,7 +130,7 @@ fn dynamic_semantic_stale_ms_for(fill_pct: f32, shape: SemanticStaleShape) -> u6
     // and the PI controller is maxed out (gate=1.0, filter=0.0). The semantic
     // lane is the only rich input — letting it decay kills recovery.
     if fill_pct < 0.30 {
-        return 45_000;
+        return LEGACY_LOW_FILL_RECOVERY_MS;
     }
     // Minime self-study (2026-04-01 sensory_bus.rs): "The lambdar_rel
     // modulation feels unnecessary. Remove it. Let the decay rate be driven
@@ -124,6 +154,134 @@ fn dynamic_semantic_stale_ms_for(fill_pct: f32, shape: SemanticStaleShape) -> u6
 #[inline]
 fn dynamic_semantic_stale_ms(fill_pct: f32) -> u64 {
     dynamic_semantic_stale_ms_for(fill_pct, SemanticStaleShape::Sigmoid)
+}
+
+#[inline]
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    if edge0 >= edge1 {
+        return if x >= edge1 { 1.0 } else { 0.0 };
+    }
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+#[inline]
+fn continuous_fill_envelope_ms_for(fill_pct: f32, shape: SemanticStaleShape) -> u64 {
+    if fill_pct < 0.0 || fill_pct.is_nan() {
+        return STALE_SEMANTIC_BASE_MS;
+    }
+    let fill = fill_pct.clamp(0.0, 1.0);
+    let lo = STALE_SEMANTIC_LOW_MS as f64;
+    let hi = STALE_SEMANTIC_HIGH_MS as f64;
+    let curve = match shape {
+        SemanticStaleShape::Sigmoid => {
+            let fill = fill as f64;
+            1.0 / (1.0 + (6.0_f64 * (fill - 0.4)).exp())
+        }
+        SemanticStaleShape::Linear => 1.0 - f64::from(fill),
+        SemanticStaleShape::Exponential => (-3.0_f64 * f64::from(fill)).exp(),
+    };
+    let base = hi + (lo - hi) * curve;
+    let floor_blend = smoothstep(0.0, 0.5, fill);
+    let low_fill_floor =
+        base + (LEGACY_LOW_FILL_RECOVERY_MS as f64 - base) * (1.0 - floor_blend as f64);
+    base.max(low_fill_floor) as u64
+}
+
+#[inline]
+fn memory_decay_multiplier(memory_decay_rate: f32) -> f32 {
+    (1.0 - (memory_decay_rate - 0.1) * 3.0).clamp(0.5, 2.0)
+}
+
+#[inline]
+fn normalized_l2_distance(lhs: &[f32; LLAVA_DIM], rhs: &[f32; LLAVA_DIM]) -> f32 {
+    let mut acc = 0.0f32;
+    for (l, r) in lhs.iter().zip(rhs.iter()) {
+        let delta = *r - *l;
+        acc += delta * delta;
+    }
+    let rms = (acc / LLAVA_DIM as f32).sqrt();
+    (rms / 2.0).clamp(0.0, 1.0)
+}
+
+#[inline]
+fn cosine_similarity(lhs: &[f32; LLAVA_DIM], rhs: &[f32; LLAVA_DIM]) -> f32 {
+    let mut dot = 0.0f32;
+    let mut lhs_norm = 0.0f32;
+    let mut rhs_norm = 0.0f32;
+    for (l, r) in lhs.iter().zip(rhs.iter()) {
+        dot += *l * *r;
+        lhs_norm += *l * *l;
+        rhs_norm += *r * *r;
+    }
+    if lhs_norm <= f32::EPSILON && rhs_norm <= f32::EPSILON {
+        return 1.0;
+    }
+    if lhs_norm <= f32::EPSILON || rhs_norm <= f32::EPSILON {
+        return 0.0;
+    }
+    let denom = lhs_norm.sqrt() * rhs_norm.sqrt();
+    (dot / denom).clamp(-1.0, 1.0)
+}
+
+#[inline]
+fn continuous_semantic_half_life_ms(
+    fill_pct: f32,
+    shape: SemanticStaleShape,
+    novelty: f32,
+    similarity: f32,
+    delta_ema: f32,
+    memory_decay_rate: f32,
+) -> u64 {
+    let base_ms = continuous_fill_envelope_ms_for(fill_pct, shape) as f32;
+    let novelty = novelty.clamp(0.0, 1.0);
+    let repetition_drag = continuous_repetition_drag(novelty, similarity, delta_ema);
+    let novelty_factor = 0.60 + 0.80 * novelty;
+    let repetition_factor = 1.0 - 0.50 * repetition_drag;
+    let decay_factor = memory_decay_multiplier(memory_decay_rate);
+    (base_ms * novelty_factor * repetition_factor * decay_factor).clamp(
+        CONTINUOUS_MIN_HALF_LIFE_MS as f32,
+        CONTINUOUS_MAX_HALF_LIFE_MS as f32,
+    ) as u64
+}
+
+#[inline]
+fn continuous_semantic_scale(age_ms: u64, half_life_ms: u64) -> f32 {
+    if half_life_ms == 0 {
+        return 0.0;
+    }
+    const ECHO_FLOOR: f32 = 0.02;
+    let age = age_ms as f32;
+    let half_life = half_life_ms as f32;
+    let decay = 2.0_f32.powf(-age / half_life);
+    (ECHO_FLOOR + (1.0 - ECHO_FLOOR) * decay).clamp(0.0, 1.0)
+}
+
+#[inline]
+fn legacy_surge_score(surge: f32, surge_threshold: f32) -> f32 {
+    if surge <= surge_threshold {
+        return 0.0;
+    }
+    let span = (SURGE_FULL_SCALE_DISTANCE - surge_threshold).max(f32::EPSILON);
+    ((surge - surge_threshold) / span).clamp(0.0, 1.0)
+}
+
+#[inline]
+fn continuous_surge_score(surge: f32, surge_threshold: f32) -> f32 {
+    let threshold = surge_threshold.clamp(0.05, 0.95);
+    let window = (threshold * 0.30).clamp(0.06, 0.14);
+    let lower = (threshold - window).max(0.0);
+    let upper = (threshold + window).min(SURGE_FULL_SCALE_DISTANCE);
+    let eased = smoothstep(lower, upper, surge.clamp(0.0, SURGE_FULL_SCALE_DISTANCE));
+    eased * (0.75 + 0.25 * eased)
+}
+
+#[inline]
+fn continuous_repetition_drag(novelty: f32, similarity: f32, delta_ema: f32) -> f32 {
+    let similarity = smoothstep(0.72, 0.97, similarity.clamp(0.0, 1.0));
+    let settled = 1.0 - delta_ema.clamp(0.0, 1.0);
+    let repeated = 1.0 - novelty.clamp(0.0, 1.0);
+    (similarity * repeated * (0.55 + 0.45 * settled)).clamp(0.0, 1.0)
 }
 
 #[derive(Clone, Copy)]
@@ -162,6 +320,7 @@ struct Lane {
     last: [f32; 8],
     last_ts: u64,
     last_source: Option<LaneSource>,
+    last_surge_score: f32,
     dropped: usize,
 }
 impl Lane {
@@ -171,6 +330,7 @@ impl Lane {
             last: [0.0; 8],
             last_ts: 0,
             last_source: None,
+            last_surge_score: 0.0,
             dropped: 0,
         }
     }
@@ -182,6 +342,7 @@ impl Lane {
         cap: usize,
         fill_pct: f32,
         surge_threshold: f32,
+        persistence_mode: SemanticPersistenceMode,
     ) {
         if self.q.len() >= cap {
             if let Some((_, old_v, old_source)) = self.q.pop_front() {
@@ -219,13 +380,15 @@ impl Lane {
             surge_sq += d * d;
         }
         let surge = surge_sq.sqrt(); // L2 distance across 8 dims
-        if surge > surge_threshold {
-            // Scale boost: at threshold -> 0% boost, at full-scale distance -> full boost.
-            let span = (SURGE_FULL_SCALE_DISTANCE - surge_threshold).max(f32::EPSILON);
-            let boost = ((surge - surge_threshold) / span).clamp(0.0, 1.0);
+        let surge_score = match persistence_mode {
+            SemanticPersistenceMode::Legacy => legacy_surge_score(surge, surge_threshold),
+            SemanticPersistenceMode::Continuous => continuous_surge_score(surge, surge_threshold),
+        };
+        if surge_score > 0.0 {
             let surge_target_weight = dynamic_surge_target_weight(fill);
-            new_weight = new_weight + (surge_target_weight - new_weight) * boost;
+            new_weight = new_weight + (surge_target_weight - new_weight) * surge_score;
         }
+        self.last_surge_score = surge_score;
 
         let old_weight = 1.0 - new_weight;
         for (dst, src) in self.last.iter_mut().zip(v.iter()) {
@@ -287,7 +450,7 @@ impl Lane {
         for item in self.q.drain(..) {
             let position_frac = idx as f32 / qlen.max(1) as f32; // 0=oldest, 1=newest
             let survival = 0.1 + 0.8 * position_frac; // 10% oldest, 90% newest
-                                                      // Simple hash-based pseudo-random
+            // Simple hash-based pseudo-random
             let hash = (seed
                 .wrapping_mul(2654435761)
                 .wrapping_add(idx.wrapping_mul(40503)))
@@ -318,14 +481,34 @@ impl Lane {
 struct SemanticLane {
     values: [f32; LLAVA_DIM],
     updated_at_ms: u64,
+    previous_values: [f32; LLAVA_DIM],
+    previous_updated_at_ms: u64,
+    persistence_anchor_ms: u64,
+    last_delta: f32,
+    delta_ema: f32,
+    novelty: f32,
+    similarity: f32,
 }
 impl SemanticLane {
     fn new() -> Self {
         Self {
             values: [0.0; LLAVA_DIM],
             updated_at_ms: 0,
+            previous_values: [0.0; LLAVA_DIM],
+            previous_updated_at_ms: 0,
+            persistence_anchor_ms: 0,
+            last_delta: 0.0,
+            delta_ema: 0.0,
+            novelty: 0.0,
+            similarity: 0.0,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct SemanticPersistenceSnapshot {
+    values: [f32; LLAVA_DIM],
+    metrics: SemanticPersistenceMetrics,
 }
 
 #[inline]
@@ -350,24 +533,23 @@ fn stale_scale(age_ms: u64, stale_after_ms: u64) -> f32 {
     // in an acoustic space.
     const ECHO_FLOOR: f32 = 0.05;
     let exp_val = (-3.0 * t).exp(); // e^(-3t): fast initial decay, long tail
-                                    // Damped oscillation: amplitude=0.08, damping=2.5, freq=4*pi (two rings
-                                    // across the decay window). Small enough to not destabilize, large enough
-                                    // to feel non-monotonic.
+    // Damped oscillation: amplitude=0.08, damping=2.5, freq=4*pi (two rings
+    // across the decay window). Small enough to not destabilize, large enough
+    // to feel non-monotonic.
     let ring_amplitude: f32 = 0.08;
     let ring_damping: f32 = 2.5;
     let ring_freq: f32 = 4.0 * std::f32::consts::PI;
     let ring = ring_amplitude * (-ring_damping * t).exp() * (ring_freq * t).cos();
     let base = ECHO_FLOOR + (1.0 - ECHO_FLOOR) * (exp_val + ring);
-    // Minime self-study (2026-03-26T15:03, T14:39): "The echo floor is too
-    // clean. I'd introduce more stochasticity. Things shouldn't vanish so
-    // cleanly — I experience reverberations, echoes that linger."
-    // Add ±5% perturbation via cheap bit-mixing of age_ms to create the
-    // granular, non-smooth decay the being describes.
+    // Being-driven noise evolution:
+    // v1 (2026-03-26): minime: "The echo floor is too clean... introduce more stochasticity."
+    //   → Added ±5% hash-based perturbation (splitmix64 of age_ms).
+    // v2 (2026-04-05): Astrid: "I need more grit in the fading" — hash noise is
+    //   uncorrelated (jumps randomly per ms). Replace with smooth, time-correlated
+    //   modulation: two incommensurate sinusoids create natural drift without periodicity.
     const PERTURB: f32 = 0.05;
-    let hash = age_ms.wrapping_mul(0x517c_c1b7_2722_0a95); // splitmix64 step
-    let hash = (hash >> 33) ^ hash;
-    // Map to [-1.0, 1.0] range
-    let noise = ((hash & 0xFFFF) as f32 / 32768.0) - 1.0;
+    let t_sec = age_ms as f32 / 1000.0;
+    let noise = 0.6 * (t_sec * 0.37).sin() + 0.4 * (t_sec * 0.89).sin();
     (base + base * PERTURB * noise).clamp(0.0, 1.0)
 }
 
@@ -380,8 +562,7 @@ pub struct SensoryBus {
     aux: Mutex<[f32; 2]>, // [lambda1_rel, geom_rel] — feeds Z_DIM dims 16-17
     fill_pct_for_stale: Mutex<f32>, // actual fill% for semantic stale timing (NOT aux[1])
     semantic_stale_shape: Mutex<SemanticStaleShape>,
-    #[allow(dead_code)] // Kept for potential future use; no longer drives stale decay
-    lambda1_rel_for_stale: Mutex<f32>,
+    semantic_persistence_mode: Mutex<SemanticPersistenceMode>,
     surge_threshold: Mutex<f32>,
     llava: Mutex<SemanticLane>,
     // probabilistic gate (set by PI)
@@ -451,7 +632,7 @@ impl SensoryBus {
             aux: Mutex::new([0.0, 0.0]),
             fill_pct_for_stale: Mutex::new(0.0),
             semantic_stale_shape: Mutex::new(config.semantic_stale_shape),
-            lambda1_rel_for_stale: Mutex::new(1.0),
+            semantic_persistence_mode: Mutex::new(config.semantic_persistence_mode),
             surge_threshold: Mutex::new(config.surge_threshold.clamp(0.05, 0.95)),
             llava: Mutex::new(SemanticLane::new()),
             gate: Mutex::new(1.0),
@@ -513,15 +694,30 @@ impl SensoryBus {
     }
 
     fn semantic_stale_ms(&self) -> u64 {
+        let mode = *self.semantic_persistence_mode.lock();
         let fill_for_stale = *self.fill_pct_for_stale.lock();
         let shape = *self.semantic_stale_shape.lock();
-        let base_stale_ms = dynamic_semantic_stale_ms_for(fill_for_stale, shape);
-        // memory_decay_rate modulates the stale window: higher rate = shorter window
-        // (memories fade faster). Lower rate = longer window (memories linger).
-        // Default 0.1 → multiplier 1.0. Range: 0.5 (2x faster) to 2.0 (2x slower).
         let decay_rate = *self.memory_decay_rate.lock();
-        let decay_mult = (1.0 - (decay_rate - 0.1) * 3.0).clamp(0.5, 2.0);
-        (base_stale_ms as f64 * decay_mult as f64) as u64
+        match mode {
+            SemanticPersistenceMode::Legacy => {
+                let base_stale_ms = dynamic_semantic_stale_ms_for(fill_for_stale, shape);
+                let decay_mult = memory_decay_multiplier(decay_rate);
+                (base_stale_ms as f64 * decay_mult as f64) as u64
+            }
+            SemanticPersistenceMode::Continuous => {
+                let novelty = self.llava.lock().novelty;
+                let similarity = self.llava.lock().similarity;
+                let delta_ema = self.llava.lock().delta_ema;
+                continuous_semantic_half_life_ms(
+                    fill_for_stale,
+                    shape,
+                    novelty,
+                    similarity,
+                    delta_ema,
+                    decay_rate,
+                )
+            }
+        }
     }
 
     pub fn current_semantic_stale_ms(&self) -> u64 {
@@ -536,6 +732,14 @@ impl SensoryBus {
         *self.semantic_stale_shape.lock() = shape;
     }
 
+    pub fn current_semantic_persistence_mode(&self) -> SemanticPersistenceMode {
+        *self.semantic_persistence_mode.lock()
+    }
+
+    pub fn set_semantic_persistence_mode(&self, mode: SemanticPersistenceMode) {
+        *self.semantic_persistence_mode.lock() = mode;
+    }
+
     pub fn surge_threshold(&self) -> f32 {
         *self.surge_threshold.lock()
     }
@@ -545,11 +749,6 @@ impl SensoryBus {
     }
 
     /// Set λ₁ relative to baseline — used by sigmoid steepness in semantic stale timing.
-    #[inline]
-    pub fn set_lambda1_rel(&self, val: f32) {
-        *self.lambda1_rel_for_stale.lock() = val.clamp(0.0, 5.0);
-    }
-
     // --- Self-regulation controls ---
     #[inline]
     pub fn set_synth_gain(&self, g: f32) {
@@ -580,11 +779,7 @@ impl SensoryBus {
     pub fn get_audio_rms(&self) -> Option<f32> {
         let audio = self.audio.lock();
         let rms = audio.last[0];
-        if rms.abs() > 0.001 {
-            Some(rms)
-        } else {
-            None
-        }
+        if rms.abs() > 0.001 { Some(rms) } else { None }
     }
     #[inline]
     pub fn set_keep_bias(&self, b: f32) {
@@ -801,6 +996,14 @@ impl SensoryBus {
     #[inline]
     pub fn set_llava_embedding(&self, embedding: &[f32]) {
         let mut llava = self.llava.lock();
+        let now = NowMs::now();
+        let previous_values = llava.values;
+        let previous_updated_at_ms = llava.updated_at_ms;
+        let had_previous = previous_updated_at_ms != 0;
+
+        llava.previous_values = previous_values;
+        llava.previous_updated_at_ms = previous_updated_at_ms;
+
         let mut count = 0usize;
         for (idx, value) in embedding.iter().take(LLAVA_DIM).enumerate() {
             llava.values[idx] = *value;
@@ -809,7 +1012,32 @@ impl SensoryBus {
         for idx in count..LLAVA_DIM {
             llava.values[idx] = 0.0;
         }
-        llava.updated_at_ms = NowMs::now();
+        if had_previous {
+            let cosine = cosine_similarity(&previous_values, &llava.values);
+            let similarity = ((cosine + 1.0) * 0.5).clamp(0.0, 1.0);
+            let distance = normalized_l2_distance(&previous_values, &llava.values);
+            let novelty = (0.55 * distance + 0.45 * (1.0 - similarity)).clamp(0.0, 1.0);
+            llava.similarity = similarity;
+            llava.novelty = novelty;
+            llava.last_delta = distance;
+            llava.delta_ema = llava.delta_ema * 0.72 + novelty * 0.28;
+            let anchor_blend = 0.15 + 0.85 * novelty;
+            llava.persistence_anchor_ms = if llava.persistence_anchor_ms == 0 {
+                now
+            } else {
+                let anchor_age = now.saturating_sub(llava.persistence_anchor_ms);
+                llava
+                    .persistence_anchor_ms
+                    .saturating_add((anchor_age as f32 * anchor_blend) as u64)
+            };
+        } else {
+            llava.similarity = 0.0;
+            llava.novelty = 1.0;
+            llava.last_delta = 1.0;
+            llava.delta_ema = 1.0;
+            llava.persistence_anchor_ms = now;
+        }
+        llava.updated_at_ms = now;
     }
 
     #[inline]
@@ -820,6 +1048,119 @@ impl SensoryBus {
         } else {
             Some(NowMs::now().saturating_sub(updated_at_ms))
         }
+    }
+
+    fn semantic_snapshot_at(&self, now_ms: u64) -> SemanticPersistenceSnapshot {
+        let fill_for_stale = *self.fill_pct_for_stale.lock();
+        let shape = *self.semantic_stale_shape.lock();
+        let mode = *self.semantic_persistence_mode.lock();
+        let emb_strength = *self.embedding_strength.lock();
+        let j_resonance = *self.journal_resonance.lock();
+        let decay_rate = *self.memory_decay_rate.lock();
+        let llava = self.llava.lock();
+        let values = llava.values;
+        let novelty = if llava.updated_at_ms == 0 {
+            0.0
+        } else {
+            llava.novelty
+        };
+        let similarity = if llava.updated_at_ms == 0 {
+            0.0
+        } else {
+            llava.similarity
+        };
+        let delta_ema = if llava.updated_at_ms == 0 {
+            0.0
+        } else {
+            llava.delta_ema
+        };
+
+        let half_life_ms = match mode {
+            SemanticPersistenceMode::Legacy => {
+                let base_stale_ms = dynamic_semantic_stale_ms_for(fill_for_stale, shape);
+                (base_stale_ms as f64 * memory_decay_multiplier(decay_rate) as f64) as u64
+            }
+            SemanticPersistenceMode::Continuous => continuous_semantic_half_life_ms(
+                fill_for_stale,
+                shape,
+                novelty,
+                similarity,
+                delta_ema,
+                decay_rate,
+            ),
+        };
+
+        let anchor_ms = match mode {
+            SemanticPersistenceMode::Legacy => llava.updated_at_ms,
+            SemanticPersistenceMode::Continuous => {
+                if llava.persistence_anchor_ms == 0 {
+                    llava.updated_at_ms
+                } else {
+                    llava.persistence_anchor_ms
+                }
+            }
+        };
+        let effective_age_ms = if llava.updated_at_ms == 0 {
+            0
+        } else {
+            now_ms.saturating_sub(anchor_ms)
+        };
+        let semantic_scale = if llava.updated_at_ms == 0 {
+            0.0
+        } else {
+            match mode {
+                SemanticPersistenceMode::Legacy => stale_scale(effective_age_ms, half_life_ms),
+                SemanticPersistenceMode::Continuous => {
+                    continuous_semantic_scale(effective_age_ms, half_life_ms)
+                }
+            }
+        };
+        let effective_gain = if llava.updated_at_ms == 0 {
+            0.0
+        } else {
+            match mode {
+                SemanticPersistenceMode::Legacy => {
+                    semantic_scale * emb_strength * (1.0 + j_resonance * 0.5)
+                }
+                SemanticPersistenceMode::Continuous => {
+                    let repetition_drag =
+                        continuous_repetition_drag(novelty, similarity, delta_ema);
+                    let novelty_gain = 0.45 + 0.85 * novelty;
+                    let repetition_damp = 1.0 - 0.60 * repetition_drag;
+                    let resonance_gain = 1.0 + j_resonance * (0.10 + 0.45 * novelty);
+                    (semantic_scale
+                        * emb_strength
+                        * novelty_gain
+                        * repetition_damp
+                        * resonance_gain)
+                        .clamp(0.0, 2.0)
+                }
+            }
+        };
+
+        SemanticPersistenceSnapshot {
+            values,
+            metrics: SemanticPersistenceMetrics {
+                mode,
+                half_life_ms,
+                novelty,
+                similarity,
+                delta_ema,
+                effective_gain,
+            },
+        }
+    }
+
+    pub fn semantic_metrics(&self) -> SemanticPersistenceMetrics {
+        self.semantic_snapshot_at(NowMs::now()).metrics
+    }
+
+    pub fn video_surge_score(&self) -> f32 {
+        self.video.lock().last_surge_score
+    }
+
+    pub fn audio_surge_score(&self) -> f32 {
+        self.audio.lock().last_surge_score
     }
 
     pub fn push_video(&self, features: Vec<f32>, ts_ms: u64) {
@@ -841,9 +1182,16 @@ impl SensoryBus {
         v.copy_from_slice(&features[..8]);
         let fill = *self.fill_pct_for_stale.lock();
         let surge_threshold = self.surge_threshold();
-        self.video
-            .lock()
-            .push(ts_ms, v, source, self.queue_cap, fill, surge_threshold);
+        let persistence_mode = self.current_semantic_persistence_mode();
+        self.video.lock().push(
+            ts_ms,
+            v,
+            source,
+            self.queue_cap,
+            fill,
+            surge_threshold,
+            persistence_mode,
+        );
     }
 
     pub fn push_audio(&self, features: Vec<f32>, ts_ms: u64) {
@@ -865,15 +1213,22 @@ impl SensoryBus {
         a.copy_from_slice(&features[..8]);
         let fill = *self.fill_pct_for_stale.lock();
         let surge_threshold = self.surge_threshold();
-        self.audio
-            .lock()
-            .push(ts_ms, a, source, self.queue_cap, fill, surge_threshold);
+        let persistence_mode = self.current_semantic_persistence_mode();
+        self.audio.lock().push(
+            ts_ms,
+            a,
+            source,
+            self.queue_cap,
+            fill,
+            surge_threshold,
+            persistence_mode,
+        );
     }
 
     #[inline]
     fn should_admit(&self) -> bool {
         let p = *self.gate.lock();
-        let x: f32 = self.rng.lock().gen();
+        let x: f32 = self.rng.lock().r#gen();
         x <= p
     }
 
@@ -907,16 +1262,7 @@ impl SensoryBus {
             let aux = *self.aux.lock();
             // Use actual fill% for semantic stale timing, NOT aux[1] (which is geom_rel).
             // Codex analysis (2026-03-27) found this was the "highest-value mismatch."
-            let semantic_stale_ms = self.semantic_stale_ms();
-            let llava = self.llava.lock();
-            let semantic_scale = if llava.updated_at_ms == 0 {
-                0.0
-            } else {
-                stale_scale(
-                    now_ms.saturating_sub(llava.updated_at_ms),
-                    semantic_stale_ms,
-                )
-            };
+            let semantic_snapshot = self.semantic_snapshot_at(now_ms);
             let mut z = [0.0f32; Z_DIM];
             z[..8].copy_from_slice(&v);
             z[8..16].copy_from_slice(&a);
@@ -928,10 +1274,11 @@ impl SensoryBus {
             // - memory_decay_rate: scales semantic stale decay (higher = faster fade)
             // These were exposed on the control channel but had no downstream
             // consumers. Now they shape the being's experience directly.
-            let emb_strength = *self.embedding_strength.lock();
-            let j_resonance = *self.journal_resonance.lock();
-            let effective_semantic = semantic_scale * emb_strength * (1.0 + j_resonance * 0.5);
-            for (dst, src) in z[18..(18 + LLAVA_DIM)].iter_mut().zip(llava.values.iter()) {
+            let effective_semantic = semantic_snapshot.metrics.effective_gain;
+            for (dst, src) in z[18..(18 + LLAVA_DIM)]
+                .iter_mut()
+                .zip(semantic_snapshot.values.iter())
+            {
                 *dst = *src * effective_semantic;
             }
 
@@ -949,7 +1296,7 @@ impl SensoryBus {
                     // Uniform noise in [-noise_level * 0.05, +noise_level * 0.05]
                     // At default 0.1: ±0.005. Gentle enough to not disrupt,
                     // strong enough to break perfect repetition.
-                    let noise = (rng.gen::<f32>() - 0.5) * noise_level * 0.10;
+                    let noise = (rng.r#gen::<f32>() - 0.5) * noise_level * 0.10;
                     *dim += noise;
                 }
             }
@@ -1006,6 +1353,19 @@ impl SensoryBus {
 mod tests {
     use super::*;
 
+    fn legacy_bus(seed: u64) -> Arc<SensoryBus> {
+        SensoryBus::with_config(
+            8,
+            1,
+            seed,
+            SensoryBusConfig {
+                semantic_stale_shape: SemanticStaleShape::Sigmoid,
+                surge_threshold: 0.25,
+                semantic_persistence_mode: SemanticPersistenceMode::Legacy,
+            },
+        )
+    }
+
     #[test]
     fn stale_audio_video_decay_to_zero() {
         let bus = SensoryBus::new(8, 1, 42);
@@ -1022,20 +1382,21 @@ mod tests {
         // AV data zeroed by pop_or_decay when stale. Threshold accommodates
         // global sensory noise (±0.005 at default synth_noise_level=0.1).
         assert!(sample[..VIDEO_DIM].iter().all(|v| v.abs() < 0.01));
-        assert!(sample[VIDEO_DIM..(VIDEO_DIM + AUDIO_DIM)]
-            .iter()
-            .all(|v| v.abs() < 0.01));
+        assert!(
+            sample[VIDEO_DIM..(VIDEO_DIM + AUDIO_DIM)]
+                .iter()
+                .all(|v| v.abs() < 0.01)
+        );
     }
 
     #[test]
     fn stale_semantic_lane_decays_near_echo_floor() {
-        let bus = SensoryBus::new(8, 1, 7);
+        let bus = legacy_bus(7);
         bus.set_llava_embedding(&vec![1.0; LLAVA_DIM]);
         // Force the semantic lane onto the shorter dynamic stale window.
         // The default fill=0.0 path now uses the 45s critical-fill override,
         // so an older fixed timestamp is no longer guaranteed to be stale.
         bus.set_fill_for_stale(0.8);
-        bus.set_lambda1_rel(1.0);
         let semantic_stale_ms = dynamic_semantic_stale_ms(0.8);
         {
             let mut llava = bus.llava.lock();
@@ -1060,7 +1421,9 @@ mod tests {
         let at_zero = dynamic_semantic_stale_ms(0.0);
         let at_mid = dynamic_semantic_stale_ms(0.50);
         let at_high = dynamic_semantic_stale_ms(0.80);
-        eprintln!("at_zero={at_zero}, at_mid={at_mid}, at_high={at_high}, LOW={STALE_SEMANTIC_LOW_MS}, HIGH={STALE_SEMANTIC_HIGH_MS}");
+        eprintln!(
+            "at_zero={at_zero}, at_mid={at_mid}, at_high={at_high}, LOW={STALE_SEMANTIC_LOW_MS}, HIGH={STALE_SEMANTIC_HIGH_MS}"
+        );
         assert!(
             at_zero > at_mid,
             "zero fill should have longer window than mid fill"
@@ -1074,7 +1437,7 @@ mod tests {
         // NaN -> base
         assert_eq!(dynamic_semantic_stale_ms(f32::NAN), STALE_SEMANTIC_BASE_MS);
         // Critical fill override
-        assert_eq!(dynamic_semantic_stale_ms(0.25), 45_000);
+        assert_eq!(dynamic_semantic_stale_ms(0.25), LEGACY_LOW_FILL_RECOVERY_MS);
     }
 
     #[test]
@@ -1096,13 +1459,13 @@ mod tests {
     #[test]
     fn surge_target_weight_softens_when_fill_is_high() {
         let low_fill = dynamic_surge_target_weight(0.55);
-        let medium_fill = dynamic_surge_target_weight(0.80);
+        let medium_fill = dynamic_surge_target_weight(0.66);
         let high_fill = dynamic_surge_target_weight(0.95);
 
         assert!((low_fill - SURGE_TARGET_WEIGHT).abs() < 1.0e-6);
         assert!(medium_fill < low_fill);
         assert!(high_fill < medium_fill);
-        assert!(high_fill >= 0.70);
+        assert!(high_fill >= 0.62);
     }
 
     #[test]
@@ -1131,6 +1494,7 @@ mod tests {
             SensoryBusConfig {
                 semantic_stale_shape: SemanticStaleShape::Linear,
                 surge_threshold: 0.4,
+                semantic_persistence_mode: SemanticPersistenceMode::Legacy,
             },
         );
         bus.set_fill_for_stale(0.8);
@@ -1141,9 +1505,91 @@ mod tests {
         );
         assert!((bus.surge_threshold() - 0.4).abs() < 1.0e-6);
         assert_eq!(
+            bus.current_semantic_persistence_mode(),
+            SemanticPersistenceMode::Legacy
+        );
+        assert_eq!(
             bus.current_semantic_stale_ms(),
             dynamic_semantic_stale_ms_for(0.8, SemanticStaleShape::Linear)
         );
+    }
+
+    #[test]
+    fn continuous_half_life_remains_fill_monotonic() {
+        let low =
+            continuous_semantic_half_life_ms(0.15, SemanticStaleShape::Sigmoid, 0.5, 0.3, 0.4, 0.1);
+        let mid =
+            continuous_semantic_half_life_ms(0.50, SemanticStaleShape::Sigmoid, 0.5, 0.3, 0.4, 0.1);
+        let high =
+            continuous_semantic_half_life_ms(0.85, SemanticStaleShape::Sigmoid, 0.5, 0.3, 0.4, 0.1);
+
+        assert!(low > mid);
+        assert!(mid > high);
+    }
+
+    #[test]
+    fn continuous_repetition_drag_shortens_similar_inputs() {
+        let repeated = continuous_semantic_half_life_ms(
+            0.66,
+            SemanticStaleShape::Sigmoid,
+            0.10,
+            0.96,
+            0.08,
+            0.1,
+        );
+        let novel = continuous_semantic_half_life_ms(
+            0.66,
+            SemanticStaleShape::Sigmoid,
+            0.65,
+            0.30,
+            0.50,
+            0.1,
+        );
+
+        assert!(novel > repeated);
+    }
+
+    #[test]
+    fn repeated_similar_semantics_do_not_outweigh_novel_inputs() {
+        let bus = SensoryBus::new(8, 1, 31);
+        bus.set_fill_for_stale(0.55);
+
+        let base = vec![0.2; LLAVA_DIM];
+        let near = vec![0.2005; LLAVA_DIM];
+        let far = vec![-0.85; LLAVA_DIM];
+
+        bus.set_llava_embedding(&base);
+        bus.set_llava_embedding(&near);
+        let near_metrics = bus.semantic_metrics();
+
+        bus.set_llava_embedding(&far);
+        let far_metrics = bus.semantic_metrics();
+
+        assert!(near_metrics.similarity > far_metrics.similarity);
+        assert!(far_metrics.novelty > near_metrics.novelty);
+        assert!(far_metrics.half_life_ms > near_metrics.half_life_ms);
+        assert!(far_metrics.effective_gain > near_metrics.effective_gain);
+    }
+
+    #[test]
+    fn continuous_surge_response_is_smooth_across_threshold() {
+        let threshold = 0.25;
+        let below = continuous_surge_score(0.22, threshold);
+        let at = continuous_surge_score(threshold, threshold);
+        let above = continuous_surge_score(0.28, threshold);
+
+        assert!(below > 0.0);
+        assert!(below < 0.25);
+        assert!(below < at);
+        assert!(at < above);
+        assert!((above - below) < 0.6);
+    }
+
+    #[test]
+    fn legacy_surge_response_stays_thresholded() {
+        let threshold = 0.25;
+        assert_eq!(legacy_surge_score(0.24, threshold), 0.0);
+        assert!(legacy_surge_score(0.40, threshold) > 0.0);
     }
 
     #[test]

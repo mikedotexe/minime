@@ -50,7 +50,7 @@ pub async fn spawn_av_gpu_server(
     tokio::spawn(async move {
         // Initialize GPU once
         let mut av = match crate::av_gpu::AvGpu::new(
-            "shaders/av_features.metal",
+            include_str!("../shaders/av_features.metal"),
             crate::av_gpu::MemMode::Shared
         ) {
             Ok(mut gpu) => {
@@ -138,69 +138,65 @@ async fn handle_av_client(
     let mut ws = accept_async(stream).await?;
     let mut frame_count = 0u64;
 
-    // Keepalive: periodic ping and pong timeout watchdog
-    let mut ping_timer = tokio::time::interval(std::time::Duration::from_secs(10));
-    let mut last_pong = std::time::Instant::now();
+    // Keepalive: treat any received message (Binary frame or Pong) as proof
+    // of liveness. The camera client on loopback may not reliably respond to
+    // server-sent Pings (Python websockets library limitation), so we use a
+    // generous activity timeout instead of strict pong tracking.
+    let activity_timeout = std::time::Duration::from_secs(120);
 
     loop {
-        tokio::select! {
-            // Periodic server ping (keeps connection alive, detects dead clients)
-            _ = ping_timer.tick() => {
-                if ws.send(Message::Ping(Vec::new())).await.is_err() {
-                    eprintln!("Failed to send ping to GPU client, closing");
-                    break;
-                }
-                // Check pong timeout (30 seconds without response = dead connection)
-                if last_pong.elapsed() > std::time::Duration::from_secs(30) {
-                    eprintln!("Pong timeout from GPU client, closing");
-                    break;
-                }
+        // Wait for a message OR timeout
+        let msg_result = tokio::time::timeout(activity_timeout, ws.next()).await;
+
+        match msg_result {
+            Err(_) => {
+                // No message received within timeout — client is dead
+                eprintln!(
+                    "Activity timeout from GPU client ({}s), closing",
+                    activity_timeout.as_secs()
+                );
+                break;
             }
-            // Handle incoming messages
-            msg_result = ws.next() => {
-                let Some(msg_result) = msg_result else { break };
-                match msg_result {
-                    Ok(msg) => match msg {
-                        Message::Binary(data) => {
-                            if data.len() != expected_bytes {
-                                eprintln!(
-                                    "⚠️  Frame size mismatch: got {} bytes, want {}",
-                                    data.len(), expected_bytes
-                                );
-                                continue;
-                            }
+            Ok(None) => break, // Stream ended
+            Ok(Some(Err(e))) => {
+                eprintln!("❌ WebSocket error: {}", e);
+                break;
+            }
+            Ok(Some(Ok(msg))) => {
+                match msg {
+                    Message::Binary(data) => {
+                        if data.len() != expected_bytes {
+                            eprintln!(
+                                "⚠️  Frame size mismatch: got {} bytes, want {}",
+                                data.len(),
+                                expected_bytes
+                            );
+                            continue;
+                        }
 
-                            // Forward frame to GPU processor
-                            if let Err(_) = frame_tx.send(data).await {
-                                eprintln!("⚠️  GPU processor channel closed");
-                                break;
-                            }
-
-                            frame_count += 1;
-                        }
-                        Message::Ping(payload) => {
-                            // Reply to client ping with pong
-                            if let Err(e) = ws.send(Message::Pong(payload)).await {
-                                eprintln!("❌ Pong send error: {}", e);
-                                break;
-                            }
-                        }
-                        Message::Pong(_) => {
-                            // Client replied to our ping, update watchdog
-                            last_pong = std::time::Instant::now();
-                        }
-                        Message::Close(_) => {
-                            println!("🛑 GPU A/V client disconnected (close frame)");
+                        // Forward frame to GPU processor
+                        if let Err(_) = frame_tx.send(data).await {
+                            eprintln!("⚠️  GPU processor channel closed");
                             break;
                         }
-                        _ => {
-                            // Ignore text, etc.
+
+                        frame_count += 1;
+                    }
+                    Message::Ping(payload) => {
+                        // Reply to client ping with pong
+                        if let Err(e) = ws.send(Message::Pong(payload)).await {
+                            eprintln!("❌ Pong send error: {}", e);
+                            break;
                         }
-                    },
-                    Err(e) => {
-                        eprintln!("❌ WebSocket error: {}", e);
+                    }
+                    Message::Pong(_) => {
+                        // Client replied to a ping
+                    }
+                    Message::Close(_) => {
+                        println!("🛑 GPU A/V client disconnected (close frame)");
                         break;
                     }
+                    _ => {}
                 }
             }
         }
@@ -228,7 +224,7 @@ pub async fn spawn_av_gpu_server_v2(
     tokio::spawn(async move {
         // Initialize GPU once
         let mut av = match crate::av_gpu::AvGpu::new(
-            "shaders/av_features.metal",
+            include_str!("../shaders/av_features.metal"),
             crate::av_gpu::MemMode::Shared,
         ) {
             Ok(mut gpu) => {

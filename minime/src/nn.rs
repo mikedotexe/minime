@@ -141,7 +141,7 @@ impl MLP {
         let w1_ptr = self.w1.contents() as *mut f32;
         unsafe {
             for i in 0..(self.din * self.hidden) {
-                *w1_ptr.add(i) = rng.gen::<f32>() * 2.0 * scale1 - scale1;
+                *w1_ptr.add(i) = rng.r#gen::<f32>() * 2.0 * scale1 - scale1;
             }
         }
 
@@ -158,7 +158,7 @@ impl MLP {
         let w2_ptr = self.w2.contents() as *mut f32;
         unsafe {
             for i in 0..(self.hidden * self.dout) {
-                *w2_ptr.add(i) = rng.gen::<f32>() * 2.0 * scale2 - scale2;
+                *w2_ptr.add(i) = rng.r#gen::<f32>() * 2.0 * scale2 - scale2;
             }
         }
 
