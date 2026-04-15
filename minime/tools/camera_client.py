@@ -111,10 +111,14 @@ class GpuCameraClient:
         frame_interval = 1.0 / self.target_fps
 
         try:
-            # Connect to GPU A/V server (binary protocol)
+            # Connect to GPU A/V server (binary protocol).
+            # Disable client-side keepalive: this is a send-only client that
+            # never calls recv(), so the websockets library can't process
+            # pong responses. The server uses an activity timeout instead.
             async with websockets.connect(
                 self.ws_uri,
-                ping_interval=None  # Server handles keepalive
+                ping_interval=None,
+                ping_timeout=None,
             ) as websocket:
                 logger.info(f"✅ Connected to GPU A/V server at {self.ws_uri}")
                 logger.info(f"📹 Sending {FRAME_WIDTH}×{FRAME_HEIGHT} grayscale frames at {self.target_fps} FPS")

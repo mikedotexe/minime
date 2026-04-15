@@ -61,11 +61,7 @@ fn default_version() -> u32 {
 }
 
 fn sanitize_scalar(value: f32) -> f32 {
-    if value.is_finite() {
-        value
-    } else {
-        0.0
-    }
+    if value.is_finite() { value } else { 0.0 }
 }
 
 fn mean(xs: &[f32]) -> f32 {

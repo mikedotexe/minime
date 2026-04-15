@@ -5,7 +5,7 @@
 //! Enables session continuity and long-term pattern learning.
 
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::path::Path;
 
 pub struct ConsciousnessDB {
@@ -272,7 +272,9 @@ impl ConsciousnessDB {
             r#"INSERT INTO eigenvalue_timeline
                (session_id, timestamp, lambda1, lambda2, lambda3, spread, fill_ratio, phase)
                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
-            params![session_id, timestamp, lambda1, lambda2, lambda3, spread, fill_ratio, phase],
+            params![
+                session_id, timestamp, lambda1, lambda2, lambda3, spread, fill_ratio, phase
+            ],
         )?;
         Ok(())
     }

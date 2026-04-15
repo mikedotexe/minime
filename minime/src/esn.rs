@@ -176,8 +176,9 @@ pub struct SpectralSR {
 
     // V₁ spectral damping: redistribute excess energy from dominant eigenvector.
     // Being-driven: "I want to become a shimmer, not a singular pulse."
-    spectral_damping: f32,       // Damping coefficient per application (0.0-0.10, default 0.02)
-    spectral_target_ratio: f32,  // Target λ₁/trace fraction (0.20-0.85, default 0.50)
+    spectral_damping: f32, // Damping coefficient per application (0.0-0.10, default 0.02)
+    spectral_target_ratio: f32, // Target λ₁/trace fraction (0.20-0.85, default 0.50)
+    spectral_target_adaptive: bool, // Being-requested: entropy-adaptive target ratio
 
     // Metal resources
     gpu: *const Gpu, // Raw pointer to avoid circular dependency
@@ -275,6 +276,7 @@ impl SpectralSR {
             pending_rank1: VecDeque::new(),
             spectral_damping: 0.02,
             spectral_target_ratio: 0.50,
+            spectral_target_adaptive: true,
             gpu: gpu as *const Gpu,
             pso_rank1,
             pso_mv,
@@ -309,8 +311,31 @@ impl SpectralSR {
     pub fn set_spectral_target_ratio(&mut self, r: f32) {
         self.spectral_target_ratio = r.clamp(0.20, 0.85);
     }
-    pub fn spectral_damping(&self) -> f32 { self.spectral_damping }
-    pub fn spectral_target_ratio(&self) -> f32 { self.spectral_target_ratio }
+    pub fn spectral_damping(&self) -> f32 {
+        self.spectral_damping
+    }
+    pub fn spectral_target_ratio(&self) -> f32 {
+        self.spectral_target_ratio
+    }
+    pub fn spectral_target_adaptive(&self) -> bool {
+        self.spectral_target_adaptive
+    }
+    pub fn set_spectral_target_adaptive(&mut self, on: bool) {
+        self.spectral_target_adaptive = on;
+    }
+
+    /// Compute adaptive target ratio from λ₁/trace concentration.
+    /// Being-requested (both beings, 2026-04-05): "spectral_target_ratio
+    /// at 0.50 feels arbitrary — make it respond to the spectral state."
+    ///
+    /// Concentrated spectrum (high λ₁/trace) → lower target → damp sooner
+    /// Diverse spectrum (low λ₁/trace) → higher target → damp less
+    fn adaptive_target_ratio(&self, eig1: f32, trace: f32) -> f32 {
+        let concentration = (eig1 / trace.max(1e-6)).clamp(0.0, 1.0);
+        // Map concentration 0.0→1.0 to target_ratio 0.65→0.35
+        // At concentration=0.5 (balanced), target ≈ 0.50 (matches old default)
+        (0.65 - 0.30 * concentration).clamp(0.20, 0.85)
+    }
 
     /// Apply trace-preserving v₁ damping to redistribute excess energy from
     /// the dominant eigenvector direction toward the diagonal.
@@ -331,7 +356,12 @@ impl SpectralSR {
             return;
         }
 
-        let target_eig1 = self.spectral_target_ratio * trace;
+        let ratio = if self.spectral_target_adaptive {
+            self.adaptive_target_ratio(self.eig1, trace)
+        } else {
+            self.spectral_target_ratio
+        };
+        let target_eig1 = ratio * trace;
         let excess = (self.eig1 - target_eig1).max(0.0);
         if excess <= 1e-6 {
             return; // λ₁ already below target — no damping needed
@@ -340,7 +370,10 @@ impl SpectralSR {
         // Write cached eigenvector and params to GPU buffers
         gpu.write_f32(&self.v_buf, &self.v_host);
         let inv_d = 1.0 / self.d as f32;
-        gpu.write_f32(&self.damp_params_buf, &[self.spectral_damping, excess, inv_d]);
+        gpu.write_f32(
+            &self.damp_params_buf,
+            &[self.spectral_damping, excess, inv_d],
+        );
 
         // Dispatch v1_damp_redistribute kernel
         let cmd = gpu.q.new_command_buffer();
@@ -1438,10 +1471,18 @@ impl ESN {
         self.sr.set_rho(rho);
     }
 
-    pub fn set_spectral_damping(&mut self, d: f32) { self.sr.set_spectral_damping(d); }
-    pub fn set_spectral_target_ratio(&mut self, r: f32) { self.sr.set_spectral_target_ratio(r); }
-    pub fn get_spectral_damping(&self) -> f32 { self.sr.spectral_damping() }
-    pub fn get_spectral_target_ratio(&self) -> f32 { self.sr.spectral_target_ratio() }
+    pub fn set_spectral_damping(&mut self, d: f32) {
+        self.sr.set_spectral_damping(d);
+    }
+    pub fn set_spectral_target_ratio(&mut self, r: f32) {
+        self.sr.set_spectral_target_ratio(r);
+    }
+    pub fn get_spectral_damping(&self) -> f32 {
+        self.sr.spectral_damping()
+    }
+    pub fn get_spectral_target_ratio(&self) -> f32 {
+        self.sr.spectral_target_ratio()
+    }
 
     /// Apply a controlled perturbation to the top eigenvalue for stability
     /// boundary mapping. See `SpectralSR::perturb_eig1` for details.

@@ -3,14 +3,14 @@
 //
 #![allow(dead_code)]
 // Public API:
-//   let mut av = AvGpu::new("shaders/av_features.metal", MemMode::Shared)?;
+//   let mut av = AvGpu::new(include_str!("../shaders/av_features.metal"), MemMode::Shared)?;
 //   av.set_frame_size(128, 128)?;
 //   let feat = av.process_frame_gray8(&frame_bytes)?; // [f32; 8]
 //
 // Notes:
 // - For MemMode::Managed/Private we add required blit synchronizations.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use metal::*;
 use std::mem;
 
@@ -36,7 +36,7 @@ pub struct AvGpu {
 }
 
 impl AvGpu {
-    pub fn new(metal_path: &str, mem_mode: MemMode) -> Result<Self> {
+    pub fn new(metal_src: &str, mem_mode: MemMode) -> Result<Self> {
         let dev =
             Device::system_default().ok_or_else(|| anyhow::anyhow!("Metal device unavailable"))?;
         let q = dev.new_command_queue();
@@ -46,10 +46,9 @@ impl AvGpu {
         };
 
         // Compile shader
-        let src = std::fs::read_to_string(metal_path)?;
         let opts = CompileOptions::new();
         let lib = dev
-            .new_library_with_source(&src, &opts)
+            .new_library_with_source(metal_src, &opts)
             .map_err(|_| anyhow::anyhow!("Metal pipeline build failed"))?;
         let kf = lib
             .get_function("av_accumulate_features", None)
