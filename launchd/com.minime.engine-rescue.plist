@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.minime.engine-rescue</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/v/other/minime/scripts/launchd_minime_engine_rescue.sh</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>EIGENFILL_TARGET</key>
+		<string>0.55</string>
+		<key>REG_TICK_SECS</key>
+		<string>0.5</string>
+		<key>ENABLE_GPU_AV</key>
+		<string>true</string>
+		<key>MINIME_RESCUE_WORKTREE</key>
+		<string>/Users/v/other/worktrees/minime-rescue-b8823ad</string>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>/Users/v/other/minime</string>
+	<key>KeepAlive</key>
+	<true/>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>StandardOutPath</key>
+	<string>/Users/v/other/minime/logs/minime-engine-rescue.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/v/other/minime/logs/minime-engine-rescue.log</string>
+</dict>
+</plist>

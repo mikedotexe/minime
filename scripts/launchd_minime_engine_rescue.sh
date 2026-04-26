@@ -1,0 +1,47 @@
+#!/bin/bash
+set -euo pipefail
+
+PROJECT_DIR="/Users/v/other/minime"
+INVESTIGATION_SCRIPT="$PROJECT_DIR/scripts/minime_rescue_investigation.py"
+PYTHON_BIN="${MINIME_PYTHON_BIN:-/opt/homebrew/bin/python3}"
+RESCUE_WORKTREE="${MINIME_RESCUE_WORKTREE:-/Users/v/other/worktrees/minime-rescue-b8823ad}"
+ENGINE_BIN="$RESCUE_WORKTREE/minime/target/release/minime"
+EIGENFILL_TARGET="${EIGENFILL_TARGET:-0.55}"
+REG_TICK_SECS="${REG_TICK_SECS:-0.5}"
+ENABLE_GPU_AV="${ENABLE_GPU_AV:-true}"
+RUNTIME_ROOT="${RUNTIME_ROOT:-$PROJECT_DIR}"
+
+if [ -f "$INVESTIGATION_SCRIPT" ] && [ -x "$PYTHON_BIN" ]; then
+    eval "$("$PYTHON_BIN" "$INVESTIGATION_SCRIPT" emit-launch-env)"
+    RESCUE_WORKTREE="${MINIME_RESCUE_WORKTREE:-$RESCUE_WORKTREE}"
+    ENGINE_BIN="${MINIME_RESCUE_BINARY:-$ENGINE_BIN}"
+fi
+
+cd "$RUNTIME_ROOT"
+unset MINIME_HARD_RECOVERY_RESET
+export MINIME_RESCUE_PROFILE="${MINIME_RESCUE_PROFILE:-rescue_b8823ad}"
+export MINIME_RESCUE_STATE_VARIANT="${MINIME_RESCUE_STATE_VARIANT:-current_live_workspace}"
+export MINIME_RESCUE_LIVE_AUDIO_DIVISOR="${MINIME_RESCUE_LIVE_AUDIO_DIVISOR:-0}"
+export MINIME_RESCUE_LIVE_VIDEO_DIVISOR="${MINIME_RESCUE_LIVE_VIDEO_DIVISOR:-0}"
+export MINIME_RESCUE_LIVE_INTAKE_STAGES="${MINIME_RESCUE_LIVE_INTAKE_STAGES:-}"
+export MINIME_RESCUE_PHYSIOLOGICAL_FALLBACK="${MINIME_RESCUE_PHYSIOLOGICAL_FALLBACK:-1}"
+export MINIME_RESCUE_DISABLE_NN_CHECKPOINTS="${MINIME_RESCUE_DISABLE_NN_CHECKPOINTS:-1}"
+export MINIME_RESCUE_DISABLE_NEURAL_BUNDLE="${MINIME_RESCUE_DISABLE_NEURAL_BUNDLE:-1}"
+
+if [ ! -x "$ENGINE_BIN" ]; then
+    echo "minime rescue engine binary missing or not executable: $ENGINE_BIN" >&2
+    exit 1
+fi
+
+args=(
+    run
+    --log-homeostat
+    --eigenfill-target "$EIGENFILL_TARGET"
+    --reg-tick-secs "$REG_TICK_SECS"
+)
+
+if [ "$ENABLE_GPU_AV" = "true" ]; then
+    args+=(--enable-gpu-av)
+fi
+
+exec "$ENGINE_BIN" "${args[@]}"

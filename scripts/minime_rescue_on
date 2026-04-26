@@ -1,0 +1,107 @@
+#!/bin/bash
+set -euo pipefail
+
+PROJECT_DIR="/Users/v/other/minime"
+RESCUE_WORKTREE="/Users/v/other/worktrees/minime-rescue-b8823ad"
+RESCUE_BIN="$RESCUE_WORKTREE/minime/target/release/minime"
+LEGACY_RESCUE_BIN="/Users/v/other/worktrees/minime-pre-btsp-b8823ad/minime/target/release/minime"
+STATUS_SCRIPT="$PROJECT_DIR/scripts/minime_rescue_status.py"
+INVESTIGATION_SCRIPT="$PROJECT_DIR/scripts/minime_rescue_investigation.py"
+PYTHON_BIN="${MINIME_PYTHON_BIN:-/opt/homebrew/bin/python3}"
+ENGINE_PLIST="$PROJECT_DIR/launchd/com.minime.engine.plist"
+AGENT_PLIST="$PROJECT_DIR/launchd/com.minime.autonomous-agent.plist"
+RESCUE_PLIST="$PROJECT_DIR/launchd/com.minime.engine-rescue.plist"
+WATCHDOG_PLIST="$PROJECT_DIR/launchd/com.minime.engine-rescue-watchdog.plist"
+DOMAIN="gui/$(id -u)"
+
+if [ ! -d "$RESCUE_WORKTREE/.git" ] && [ ! -f "$RESCUE_WORKTREE/.git" ]; then
+    echo "rescue worktree missing: $RESCUE_WORKTREE" >&2
+    exit 1
+fi
+
+if [ ! -x "$PYTHON_BIN" ]; then
+    echo "python binary missing or not executable: $PYTHON_BIN" >&2
+    exit 1
+fi
+
+if [ ! -f "$INVESTIGATION_SCRIPT" ]; then
+    echo "investigation helper missing: $INVESTIGATION_SCRIPT" >&2
+    exit 1
+fi
+
+branch_name="$(git -C "$RESCUE_WORKTREE" branch --show-current)"
+if [ "$branch_name" != "codex/rescue-b8823ad" ]; then
+    echo "unexpected rescue branch in $RESCUE_WORKTREE: $branch_name" >&2
+    exit 1
+fi
+
+if [ ! -x "$RESCUE_BIN" ]; then
+    cargo build --release --manifest-path "$RESCUE_WORKTREE/minime/Cargo.toml"
+fi
+
+mkdir -p "$PROJECT_DIR/logs" "$PROJECT_DIR/workspace"
+"$PYTHON_BIN" "$INVESTIGATION_SCRIPT" ensure-active-profile >/dev/null
+"$PYTHON_BIN" "$INVESTIGATION_SCRIPT" quiesce-optional-services >/dev/null
+
+launchctl bootout "$DOMAIN/com.minime.engine-rescue-watchdog" >/dev/null 2>&1 || true
+launchctl bootout "$DOMAIN/com.minime.engine-rescue" >/dev/null 2>&1 || true
+launchctl bootout "$DOMAIN/com.minime.autonomous-agent" >/dev/null 2>&1 || true
+launchctl bootout "$DOMAIN/com.minime.engine" >/dev/null 2>&1 || true
+launchctl bootout "$DOMAIN" "$AGENT_PLIST" >/dev/null 2>&1 || true
+launchctl bootout "$DOMAIN" "$ENGINE_PLIST" >/dev/null 2>&1 || true
+
+pkill -f "$RESCUE_BIN" >/dev/null 2>&1 || true
+pkill -f "$LEGACY_RESCUE_BIN" >/dev/null 2>&1 || true
+pkill -f "/Users/v/other/minime/minime/target/release/minime run" >/dev/null 2>&1 || true
+pkill -f "/Users/v/other/minime/autonomous_agent.py" >/dev/null 2>&1 || true
+sleep 2
+
+started_at="$("$PYTHON_BIN" - <<'PY'
+from datetime import datetime, timezone
+print(datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"))
+PY
+)"
+last_restart_at="$started_at"
+"$PYTHON_BIN" "$STATUS_SCRIPT" write-active \
+  --watchdog-state starting \
+  --binary-path "$RESCUE_BIN" \
+  --started-at "$started_at" \
+  --last-restart-at "$last_restart_at"
+
+launchctl bootstrap "$DOMAIN" "$RESCUE_PLIST"
+launchctl bootstrap "$DOMAIN" "$WATCHDOG_PLIST"
+launchctl kickstart -k "$DOMAIN/com.minime.engine-rescue"
+launchctl kickstart -k "$DOMAIN/com.minime.engine-rescue-watchdog"
+"$PYTHON_BIN" "$INVESTIGATION_SCRIPT" apply-profile-services >/dev/null
+
+profile_json="$("$PYTHON_BIN" "$INVESTIGATION_SCRIPT" ensure-active-profile)"
+runtime_root="$("$PYTHON_BIN" - "$profile_json" <<'PY'
+import json
+import sys
+payload = json.loads(sys.argv[1])
+print(payload.get("runtime_root", ""))
+PY
+)"
+profile_name="$("$PYTHON_BIN" - "$profile_json" <<'PY'
+import json
+import sys
+payload = json.loads(sys.argv[1])
+print(payload.get("profile", ""))
+PY
+)"
+state_variant="$("$PYTHON_BIN" - "$profile_json" <<'PY'
+import json
+import sys
+payload = json.loads(sys.argv[1])
+print(payload.get("state_variant", ""))
+PY
+)"
+
+echo "Minime rescue mode activated."
+echo "  engine label: com.minime.engine-rescue"
+echo "  watchdog label: com.minime.engine-rescue-watchdog"
+echo "  binary: $RESCUE_BIN"
+echo "  agent: disabled"
+echo "  profile: $profile_name"
+echo "  state variant: $state_variant"
+echo "  runtime root: $runtime_root"

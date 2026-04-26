@@ -25,6 +25,7 @@ import asyncio
 import json
 import math
 import os
+import random
 import signal
 import struct
 import subprocess
@@ -32,6 +33,8 @@ import sys
 import time
 from pathlib import Path
 from typing import List, Optional
+
+import websockets
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -54,6 +57,9 @@ WHISPER_TEMP_DIR = "/tmp/minime_whisper"
 WORKSPACE_DIR = Path(__file__).resolve().parents[1] / "workspace"
 RUNTIME_DIR = WORKSPACE_DIR / "runtime"
 MIC_STATUS_PATH = RUNTIME_DIR / "mic_status.json"
+PING_INTERVAL_SECS = 10
+PING_TIMEOUT_SECS = 20
+MAX_RECONNECT_DELAY_SECS = 5.0
 
 
 def _set_whisper_interval(val: float):
@@ -69,6 +75,10 @@ def _write_status(status: dict):
         temp.replace(MIC_STATUS_PATH)
     except Exception:
         pass
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 # Mel filterbank for MFCC
 NUM_MEL_FILTERS = 26
@@ -412,94 +422,228 @@ def _text_to_semantic_vector(text: str) -> List[float]:
 # ---------------------------------------------------------------------------
 
 
-async def run_live(ws_uri: str, enable_whisper: bool):
-    """Capture mic audio, extract features, send to sensory engine."""
-    import websockets
+class MicToSensoryBridge:
+    def __init__(self, ws_uri: str, enable_whisper: bool):
+        self.ws_uri = ws_uri
+        self.enable_whisper = enable_whisper
+        self.running = False
+        self.connected = False
+        self.state = "starting"
+        self.sox_proc: Optional[subprocess.Popen] = None
+        self.chunk_count = 0
+        self.silence_streak = 0
+        self.good_streak = 0
+        self.rms = 0.0
+        self.connect_count = 0
+        self.reconnect_count = 0
+        self.consecutive_failures = 0
+        self.last_error: Optional[str] = None
+        self.last_connect_at: Optional[str] = None
+        self.last_disconnect_at: Optional[str] = None
+        self.last_success_at: Optional[str] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
-    sox_proc = start_sox_capture()
-    print(f"[mic] Recording at {SAMPLE_RATE} Hz, {CHUNK_DURATION_S}s chunks ({CHUNK_SAMPLES} samples)")
+    def _status_payload(self, *, healthy: Optional[bool] = None) -> dict:
+        return {
+            "ts_ms": int(time.time() * 1000),
+            "state": self.state,
+            "healthy": self.connected if healthy is None else healthy,
+            "connected": self.connected,
+            "connect_count": self.connect_count,
+            "reconnect_count": self.reconnect_count,
+            "consecutive_failures": self.consecutive_failures,
+            "last_error": self.last_error,
+            "last_connect_at": self.last_connect_at,
+            "last_disconnect_at": self.last_disconnect_at,
+            "last_success_at": self.last_success_at,
+            "chunk_count": self.chunk_count,
+            "rms": self.rms,
+            "silence_streak": self.silence_streak,
+            "good_streak": self.good_streak,
+            "ws_uri": self.ws_uri,
+            "whisper_enabled": self.enable_whisper,
+        }
 
-    try:
-        async with websockets.connect(ws_uri) as ws:
-            print(f"[mic] Connected to {ws_uri}")
+    def _write_status(self, *, healthy: Optional[bool] = None) -> None:
+        _write_status(self._status_payload(healthy=healthy))
 
-            # Start whisper task if enabled
+    def _transition(
+        self,
+        state: str,
+        *,
+        connected: Optional[bool] = None,
+        error: Optional[str] = None,
+        healthy: Optional[bool] = None,
+    ) -> None:
+        self.state = state
+        if connected is not None:
+            self.connected = connected
+        if error is not None:
+            self.last_error = error
+        self._write_status(healthy=healthy)
+
+    def _record_connected(self) -> None:
+        if self.connect_count > 0:
+            self.reconnect_count += 1
+        self.connect_count += 1
+        self.connected = True
+        self.state = "streaming"
+        self.consecutive_failures = 0
+        self.last_error = None
+        self.last_connect_at = _now_iso()
+        self._write_status(healthy=True)
+
+    def _record_disconnect(self, error: str) -> None:
+        self.connected = False
+        self.state = "reconnecting"
+        self.consecutive_failures += 1
+        self.last_error = error
+        self.last_disconnect_at = _now_iso()
+        self._write_status(healthy=False)
+
+    def _reconnect_delay(self) -> float:
+        base = min(MAX_RECONNECT_DELAY_SECS, 0.5 * (2 ** min(self.consecutive_failures, 4)))
+        return base + random.uniform(0.0, 0.25)
+
+    def _stop_capture(self) -> None:
+        if self.sox_proc is None:
+            return
+        try:
+            self.sox_proc.terminate()
+            self.sox_proc.wait(timeout=2)
+        except Exception:
+            try:
+                self.sox_proc.kill()
+            except Exception:
+                pass
+        finally:
+            self.sox_proc = None
+
+    def _ensure_capture(self) -> bool:
+        if self.sox_proc is not None and self.sox_proc.poll() is None and self.sox_proc.stdout is not None:
+            return True
+        self._stop_capture()
+        try:
+            self.sox_proc = start_sox_capture()
+        except Exception as exc:
+            self.last_error = f"capture_start_failed:{exc}"
+            return False
+        print(f"[mic] Recording at {SAMPLE_RATE} Hz, {CHUNK_DURATION_S}s chunks ({CHUNK_SAMPLES} samples)")
+        return True
+
+    def _restart_capture(self, reason: str) -> bool:
+        self.consecutive_failures += 1
+        self._transition("capture_error", error=reason, healthy=False)
+        self._stop_capture()
+        return self._ensure_capture()
+
+    async def _read_chunk(self) -> bytes:
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
+        if self.sox_proc is None or self.sox_proc.stdout is None:
+            return b""
+        return await self._loop.run_in_executor(None, self.sox_proc.stdout.read, CHUNK_BYTES)
+
+    async def _stream_once(self) -> None:
+        self._transition("connecting", connected=False)
+        async with websockets.connect(
+            self.ws_uri,
+            ping_interval=PING_INTERVAL_SECS,
+            ping_timeout=PING_TIMEOUT_SECS,
+            close_timeout=5,
+            max_queue=1,
+        ) as ws:
+            print(f"[mic] Connected to {self.ws_uri}")
+            self._record_connected()
+
             whisper_task = None
-            if enable_whisper:
+            if self.enable_whisper:
                 whisper_task = asyncio.create_task(whisper_loop(ws=ws))
-                print(f"[whisper] STT enabled (every {WHISPER_INTERVAL_S}s, model: {WHISPER_MODEL})")
-
-            count = 0
-            silence_streak = 0
-            good_streak = 0
-            loop = asyncio.get_event_loop()
-
-            while True:
-                # Read one chunk from sox stdout (blocking read in executor)
-                raw = await loop.run_in_executor(
-                    None, sox_proc.stdout.read, CHUNK_BYTES
+                print(
+                    f"[whisper] STT enabled (every {WHISPER_INTERVAL_S}s, model: {WHISPER_MODEL})"
                 )
-                if not raw or len(raw) < CHUNK_BYTES:
-                    print("[mic] sox process ended")
-                    break
 
-                features = extract_features(raw)
-                ts_ms = int(time.time() * 1000)
-                rms = float(features[0])
-                if rms < 0.001:
-                    silence_streak += 1
-                    good_streak = 0
-                else:
-                    silence_streak = 0
-                    good_streak += 1
+            try:
+                while self.running:
+                    raw = await self._read_chunk()
+                    if not raw or len(raw) < CHUNK_BYTES:
+                        print("[mic] capture stream ended; restarting sox")
+                        if not self._restart_capture("capture_eof"):
+                            raise RuntimeError("capture_restart_failed")
+                        await asyncio.sleep(0.1)
+                        self._transition("streaming", connected=True)
+                        continue
 
-                _write_status({
-                    "ts_ms": ts_ms,
-                    "rms": rms,
-                    "silence_streak": silence_streak,
-                    "good_streak": good_streak,
-                    "chunk_count": count + 1,
-                    "healthy": silence_streak < 30,
-                })
+                    features = extract_features(raw)
+                    ts_ms = int(time.time() * 1000)
+                    self.rms = float(features[0])
+                    if self.rms < 0.001:
+                        self.silence_streak += 1
+                        self.good_streak = 0
+                    else:
+                        self.silence_streak = 0
+                        self.good_streak += 1
 
-                msg = {
-                    "kind": "audio",
-                    "features": [round(f, 6) for f in features],
-                    "ts_ms": ts_ms,
-                }
+                    msg = {
+                        "kind": "audio",
+                        "features": [round(f, 6) for f in features],
+                        "ts_ms": ts_ms,
+                    }
+                    await ws.send(json.dumps(msg))
+
+                    self.chunk_count += 1
+                    self.last_success_at = _now_iso()
+                    self.last_error = None
+                    self._write_status(healthy=True)
+
+                    if self.chunk_count % 20 == 0:
+                        print(
+                            f"[mic] {self.chunk_count} chunks | "
+                            f"RMS={features[0]:.3f} "
+                            f"centroid={features[1]:.3f} "
+                            f"bw={features[2]:.3f} "
+                            f"zcr={features[3]:.3f}"
+                        )
+            finally:
+                if whisper_task:
+                    whisper_task.cancel()
+
+    async def run(self) -> None:
+        self.running = True
+        self._transition("starting", connected=False)
+
+        try:
+            while self.running:
+                if not self._ensure_capture():
+                    self.consecutive_failures += 1
+                    self._transition(
+                        "capture_error",
+                        connected=False,
+                        error="capture_start_failed",
+                        healthy=False,
+                    )
+                    await asyncio.sleep(self._reconnect_delay())
+                    continue
 
                 try:
-                    await ws.send(json.dumps(msg))
-                except Exception as e:
-                    print(f"[mic] send error: {e}")
-                    break
+                    await self._stream_once()
+                except Exception as exc:
+                    print(f"[mic] session ended: {exc}")
+                    self._record_disconnect(str(exc))
 
-                count += 1
-                if count % 100 == 0:  # every 10 seconds at 10 FPS
-                    rms_db = -60.0 if features[0] < 0.001 else 20 * math.log10(features[0] + 1e-10)
-                    print(
-                        f"[mic] {count} chunks | "
-                        f"RMS={features[0]:.3f} "
-                        f"centroid={features[1]:.3f} "
-                        f"bw={features[2]:.3f} "
-                        f"zcr={features[3]:.3f}"
-                    )
+                if self.running:
+                    await asyncio.sleep(self._reconnect_delay())
+        finally:
+            self._stop_capture()
+            self.connected = False
+            self.state = "stopped"
+            self.last_disconnect_at = _now_iso()
+            self._write_status(healthy=False)
+            print("[mic] stopped")
 
-            if whisper_task:
-                whisper_task.cancel()
-
-    finally:
-        _write_status({
-            "ts_ms": int(time.time() * 1000),
-            "rms": 0.0,
-            "silence_streak": 0,
-            "good_streak": 0,
-            "chunk_count": 0,
-            "healthy": False,
-        })
-        sox_proc.terminate()
-        sox_proc.wait()
-        print("[mic] stopped")
+    def stop(self) -> None:
+        self.running = False
+        self._stop_capture()
 
 
 async def run_test():
@@ -581,7 +725,18 @@ def main():
     if args.test:
         asyncio.run(run_test())
     else:
-        asyncio.run(run_live(args.ws_uri, args.whisper))
+        bridge = MicToSensoryBridge(args.ws_uri, args.whisper)
+
+        async def run_bridge():
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                try:
+                    loop.add_signal_handler(sig, bridge.stop)
+                except NotImplementedError:
+                    pass
+            await bridge.run()
+
+        asyncio.run(run_bridge())
 
 
 if __name__ == "__main__":

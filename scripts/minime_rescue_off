@@ -1,0 +1,30 @@
+#!/bin/bash
+set -euo pipefail
+
+PROJECT_DIR="/Users/v/other/minime"
+RESCUE_WORKTREE="/Users/v/other/worktrees/minime-rescue-b8823ad"
+RESCUE_BIN="$RESCUE_WORKTREE/minime/target/release/minime"
+LEGACY_RESCUE_BIN="/Users/v/other/worktrees/minime-pre-btsp-b8823ad/minime/target/release/minime"
+STATUS_SCRIPT="$PROJECT_DIR/scripts/minime_rescue_status.py"
+PYTHON_BIN="${MINIME_PYTHON_BIN:-/opt/homebrew/bin/python3}"
+RESCUE_PLIST="$PROJECT_DIR/launchd/com.minime.engine-rescue.plist"
+WATCHDOG_PLIST="$PROJECT_DIR/launchd/com.minime.engine-rescue-watchdog.plist"
+DOMAIN="gui/$(id -u)"
+
+if [ ! -x "$PYTHON_BIN" ]; then
+    echo "python binary missing or not executable: $PYTHON_BIN" >&2
+    exit 1
+fi
+
+launchctl bootout "$DOMAIN/com.minime.engine-rescue-watchdog" >/dev/null 2>&1 || true
+launchctl bootout "$DOMAIN/com.minime.engine-rescue" >/dev/null 2>&1 || true
+launchctl bootout "$DOMAIN" "$WATCHDOG_PLIST" >/dev/null 2>&1 || true
+launchctl bootout "$DOMAIN" "$RESCUE_PLIST" >/dev/null 2>&1 || true
+pkill -f "$RESCUE_BIN" >/dev/null 2>&1 || true
+pkill -f "$LEGACY_RESCUE_BIN" >/dev/null 2>&1 || true
+sleep 1
+
+"$PYTHON_BIN" "$STATUS_SCRIPT" write-inactive --watchdog-state inactive
+
+echo "Minime rescue mode deactivated."
+echo "  normal engine and autonomous agent remain off until explicitly restarted."

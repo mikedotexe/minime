@@ -1,0 +1,7 @@
+#!/bin/bash
+set -euo pipefail
+
+PROJECT_DIR="/Users/v/other/minime"
+PYTHON_BIN="${MINIME_PYTHON_BIN:-/opt/homebrew/bin/python3}"
+
+exec "$PYTHON_BIN" "$PROJECT_DIR/scripts/minime_rescue_investigation.py" run-state-matrix "$@"
