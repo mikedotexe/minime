@@ -15,6 +15,7 @@ pub const LLAVA_DIM: usize = 32;
 pub const Z_DIM: usize = VIDEO_DIM + AUDIO_DIM + AUX_DIM + LLAVA_DIM;
 pub const DEFAULT_QUEUE_CAP: usize = 1024;
 pub const DEFAULT_BATCH_MAX: usize = 16;
+pub const SEMANTIC_EXPIRY_MS: u64 = 5_000;
 
 #[derive(Clone, Copy)]
 pub struct NowMs;
@@ -34,6 +35,19 @@ pub struct SampleMeta {
     pub age_ms: u64,
     pub had_video: bool,
     pub had_audio: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SemanticStatus {
+    pub active: bool,
+    pub last_update_age_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SemanticSnapshot {
+    pub values: [f32; LLAVA_DIM],
+    pub active: bool,
+    pub last_update_age_ms: u64,
 }
 
 #[derive(Debug)]
@@ -83,6 +97,60 @@ impl Lane {
     }
 }
 
+#[derive(Debug)]
+struct SemanticLane {
+    values: [f32; LLAVA_DIM],
+    last_update_ms: u64,
+}
+
+impl SemanticLane {
+    fn new() -> Self {
+        Self {
+            values: [0.0; LLAVA_DIM],
+            last_update_ms: 0,
+        }
+    }
+
+    fn set(&mut self, embedding: &[f32], ts_ms: u64) {
+        let mut count = 0usize;
+        for (idx, value) in embedding.iter().take(LLAVA_DIM).enumerate() {
+            self.values[idx] = *value;
+            count = idx + 1;
+        }
+        for idx in count..LLAVA_DIM {
+            self.values[idx] = 0.0;
+        }
+        self.last_update_ms = ts_ms;
+    }
+
+    fn clear(&mut self) {
+        self.values = [0.0; LLAVA_DIM];
+        self.last_update_ms = 0;
+    }
+
+    fn snapshot(&mut self, expiry_ms: u64) -> SemanticSnapshot {
+        let now = NowMs::now();
+        let age_ms = if self.last_update_ms == 0 {
+            0
+        } else {
+            now.saturating_sub(self.last_update_ms)
+        };
+        let active = self.last_update_ms != 0 && age_ms <= expiry_ms;
+        if !active {
+            self.values = [0.0; LLAVA_DIM];
+        }
+        SemanticSnapshot {
+            values: if active {
+                self.values
+            } else {
+                [0.0; LLAVA_DIM]
+            },
+            active,
+            last_update_age_ms: age_ms,
+        }
+    }
+}
+
 pub struct SensoryBus {
     video: Mutex<Lane>,
     audio: Mutex<Lane>,
@@ -90,10 +158,14 @@ pub struct SensoryBus {
     batch_max: usize,
 
     aux: Mutex<[f32; 2]>, // [lambda1, fill%]
-    llava: Mutex<[f32; LLAVA_DIM]>,
+    llava: Mutex<SemanticLane>,
     // probabilistic gate (set by PI)
     gate: Mutex<f32>,
     rng: Mutex<SmallRng>,
+    video_divisor: Mutex<u32>,
+    audio_divisor: Mutex<u32>,
+    video_counter: Mutex<u64>,
+    audio_counter: Mutex<u64>,
 }
 impl SensoryBus {
     pub fn new(queue_cap: usize, batch_max: usize, seed: u64) -> Arc<Self> {
@@ -111,16 +183,20 @@ impl SensoryBus {
                 batch_max
             },
             aux: Mutex::new([0.0, 0.0]),
-            llava: Mutex::new([0.0; LLAVA_DIM]),
+            llava: Mutex::new(SemanticLane::new()),
             gate: Mutex::new(1.0),
             rng: Mutex::new(SmallRng::seed_from_u64(seed)),
+            video_divisor: Mutex::new(1),
+            audio_divisor: Mutex::new(1),
+            video_counter: Mutex::new(0),
+            audio_counter: Mutex::new(0),
         })
     }
 
     #[inline]
     pub fn set_admit_fraction(&self, f: f32) {
         let mut g = self.gate.lock();
-        *g = f.clamp(0.05, 1.0);
+        *g = f.clamp(0.0, 1.0);
     }
 
     #[inline]
@@ -129,25 +205,45 @@ impl SensoryBus {
     }
 
     #[inline]
+    pub fn set_live_intake_divisors(&self, audio_divisor: u32, video_divisor: u32) {
+        *self.audio_divisor.lock() = audio_divisor;
+        *self.video_divisor.lock() = video_divisor;
+    }
+
+    #[inline]
+    pub fn live_intake_divisors(&self) -> (u32, u32) {
+        (*self.audio_divisor.lock(), *self.video_divisor.lock())
+    }
+
+    #[inline]
     pub fn set_aux(&self, aux: [f32; 2]) {
         *self.aux.lock() = aux;
     }
 
     #[inline]
-    pub fn set_llava_embedding(&self, embedding: &[f32]) {
-        let mut llava = self.llava.lock();
-        let mut count = 0usize;
-        for (idx, value) in embedding.iter().take(LLAVA_DIM).enumerate() {
-            llava[idx] = *value;
-            count = idx + 1;
-        }
-        for idx in count..LLAVA_DIM {
-            llava[idx] = 0.0;
+    pub fn set_llava_embedding(&self, embedding: &[f32], ts_ms: u64) {
+        self.llava.lock().set(embedding, ts_ms);
+    }
+
+    #[inline]
+    pub fn clear_llava_embedding(&self) {
+        self.llava.lock().clear();
+    }
+
+    #[inline]
+    pub fn semantic_status(&self, expiry_ms: u64) -> SemanticStatus {
+        let snapshot = self.llava.lock().snapshot(expiry_ms);
+        SemanticStatus {
+            active: snapshot.active,
+            last_update_age_ms: snapshot.last_update_age_ms,
         }
     }
 
     pub fn push_video(&self, features: Vec<f32>, ts_ms: u64) {
         if features.len() < VIDEO_DIM {
+            return;
+        }
+        if !self.should_accept_live_lane(&self.video_divisor, &self.video_counter) {
             return;
         }
         if !self.should_admit() {
@@ -160,6 +256,9 @@ impl SensoryBus {
 
     pub fn push_audio(&self, features: Vec<f32>, ts_ms: u64) {
         if features.len() < AUDIO_DIM {
+            return;
+        }
+        if !self.should_accept_live_lane(&self.audio_divisor, &self.audio_counter) {
             return;
         }
         if !self.should_admit() {
@@ -177,10 +276,31 @@ impl SensoryBus {
         x <= p
     }
 
+    fn should_accept_live_lane(
+        &self,
+        divisor_lock: &Mutex<u32>,
+        counter_lock: &Mutex<u64>,
+    ) -> bool {
+        let divisor = *divisor_lock.lock();
+        if divisor == 0 {
+            return false;
+        }
+        if divisor == 1 {
+            let mut counter = counter_lock.lock();
+            *counter = counter.wrapping_add(1);
+            return true;
+        }
+        let mut counter = counter_lock.lock();
+        let admit = (*counter % u64::from(divisor)) == 0;
+        *counter = counter.wrapping_add(1);
+        admit
+    }
+
     /// Drain up to batch_max samples. Each output is an 18D vector: [video8 | audio8 | aux2].
     /// If a lane has no fresh item, we reuse the last value (zero-padded initially).
     pub fn drain_sensory_batch(&self) -> Vec<([f32; Z_DIM], SampleMeta)> {
         let mut out = Vec::with_capacity(self.batch_max);
+        let semantic = self.llava.lock().snapshot(SEMANTIC_EXPIRY_MS);
 
         for _ in 0..self.batch_max {
             let (ts_v, v, had_v) = {
@@ -202,13 +322,12 @@ impl SensoryBus {
             let age = NowMs::now().saturating_sub(ts);
 
             let aux = *self.aux.lock();
-            let llava = self.llava.lock();
             let mut z = [0.0f32; Z_DIM];
             z[..8].copy_from_slice(&v);
             z[8..16].copy_from_slice(&a);
             z[16] = aux[0];
             z[17] = aux[1];
-            z[18..(18 + LLAVA_DIM)].copy_from_slice(&llava[..]);
+            z[18..(18 + LLAVA_DIM)].copy_from_slice(&semantic.values[..]);
 
             out.push((
                 z,
@@ -251,5 +370,84 @@ impl SensoryBus {
             removed += audio.drop_oldest(drop);
         }
         removed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semantic_embedding_expires_after_timeout() {
+        let bus = SensoryBus::new(DEFAULT_QUEUE_CAP, DEFAULT_BATCH_MAX, 123);
+        let stale_ts = NowMs::now().saturating_sub(SEMANTIC_EXPIRY_MS + 10);
+        bus.set_llava_embedding(&[1.0; LLAVA_DIM], stale_ts);
+
+        let sample = bus.drain_sensory_batch();
+        assert!(!sample.is_empty());
+        let semantic_slice = &sample[0].0[18..(18 + LLAVA_DIM)];
+        assert!(semantic_slice
+            .iter()
+            .all(|value| (*value - 0.0).abs() < f32::EPSILON));
+
+        let status = bus.semantic_status(SEMANTIC_EXPIRY_MS);
+        assert!(!status.active);
+        assert!(status.last_update_age_ms >= SEMANTIC_EXPIRY_MS);
+    }
+
+    #[test]
+    fn clearing_semantic_embedding_marks_lane_inactive() {
+        let bus = SensoryBus::new(DEFAULT_QUEUE_CAP, DEFAULT_BATCH_MAX, 456);
+        bus.set_llava_embedding(&[0.5; LLAVA_DIM], NowMs::now());
+        bus.clear_llava_embedding();
+
+        let status = bus.semantic_status(SEMANTIC_EXPIRY_MS);
+        assert!(!status.active);
+        assert_eq!(status.last_update_age_ms, 0);
+    }
+
+    #[test]
+    fn live_intake_divisors_decimate_audio_and_video() {
+        let bus = SensoryBus::new(DEFAULT_QUEUE_CAP, DEFAULT_BATCH_MAX, 789);
+        bus.set_admit_fraction(1.0);
+        bus.set_live_intake_divisors(2, 4);
+
+        for idx in 0..8_u64 {
+            bus.push_audio(vec![1.0; AUDIO_DIM], idx);
+            bus.push_video(vec![1.0; VIDEO_DIM], idx);
+        }
+
+        assert_eq!(bus.backlog_size(), 6);
+        assert_eq!(bus.live_intake_divisors(), (2, 4));
+    }
+
+    #[test]
+    fn live_intake_divisor_zero_blocks_live_input_without_killing_lane_state() {
+        let bus = SensoryBus::new(DEFAULT_QUEUE_CAP, DEFAULT_BATCH_MAX, 101);
+        bus.set_admit_fraction(1.0);
+        bus.set_live_intake_divisors(0, 0);
+
+        for idx in 0..4_u64 {
+            bus.push_audio(vec![1.0; AUDIO_DIM], idx);
+            bus.push_video(vec![1.0; VIDEO_DIM], idx);
+        }
+
+        assert_eq!(bus.backlog_size(), 0);
+        assert_eq!(bus.live_intake_divisors(), (0, 0));
+    }
+
+    #[test]
+    fn shed_backlog_can_clear_queued_live_audio_and_video() {
+        let bus = SensoryBus::new(DEFAULT_QUEUE_CAP, DEFAULT_BATCH_MAX, 202);
+        bus.set_admit_fraction(1.0);
+
+        for idx in 0..6_u64 {
+            bus.push_audio(vec![1.0; AUDIO_DIM], idx);
+            bus.push_video(vec![1.0; VIDEO_DIM], idx);
+        }
+
+        assert_eq!(bus.backlog_size(), 12);
+        assert_eq!(bus.shed_backlog(1.0), 12);
+        assert_eq!(bus.backlog_size(), 0);
     }
 }

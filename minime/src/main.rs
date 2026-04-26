@@ -5,7 +5,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
-use std::{fs, io::Write, mem, net::SocketAddr, process, sync::Arc, time::Instant};
+use std::{
+    collections::VecDeque, fs, io::Write, mem, net::SocketAddr, path::PathBuf, process, sync::Arc,
+    time::Instant,
+};
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::broadcast,
@@ -22,6 +25,8 @@ mod gpu;
 mod nn;
 mod prime;
 mod regulator;
+mod rescue_overfill;
+mod rescue_scaffold;
 mod sensory_bus;
 mod sensory_ws;
 mod spectral;
@@ -33,6 +38,16 @@ use gpu::*;
 use nn::*;
 use prime::*;
 use regulator::*;
+use rescue_overfill::{
+    advance_crisis_state, select_stage, stage_guard, OverfillStage, CRISIS_FILL_THRESHOLD,
+    CRISIS_SUSTAIN_TICKS, CRISIS_WARNING_THRESHOLD,
+};
+use rescue_scaffold::{
+    archive_stale_scaffold_artifacts, blend_toward_scaffold_with_drain, capture_scaffold,
+    derive_cold_scaffold, load_scaffold, now_unix_ms, scaffold_live_weight, StabilityPiOutput,
+    StabilityPiState, COLD_SCAFFOLD_MODE_CAP, SCAFFOLD_ACTIVATION_FILL_MAX,
+    SCAFFOLD_ACTIVATION_FILL_MIN,
+};
 use spectral::EigenFillEstimator;
 
 #[derive(Parser)]
@@ -129,7 +144,103 @@ struct ModalityStatus {
     video_var: f32,
 }
 
-const CRISIS_FILL_THRESHOLD: f32 = 87.0;
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Default)]
+struct RescueLiveIntakeSettings {
+    audio_divisor: u32,
+    video_divisor: u32,
+    bootstrap: bool,
+    recovery: bool,
+    hold: bool,
+    elevated: bool,
+    discharge: bool,
+}
+
+impl RescueLiveIntakeSettings {
+    fn from_env() -> Self {
+        let audio_divisor = parse_u32_env("MINIME_RESCUE_LIVE_AUDIO_DIVISOR");
+        let video_divisor = parse_u32_env("MINIME_RESCUE_LIVE_VIDEO_DIVISOR");
+        let mut settings = Self {
+            audio_divisor,
+            video_divisor,
+            ..Self::default()
+        };
+        if let Ok(stages) = std::env::var("MINIME_RESCUE_LIVE_INTAKE_STAGES") {
+            for stage in stages
+                .split(',')
+                .map(|stage| stage.trim().to_ascii_lowercase())
+            {
+                match stage.as_str() {
+                    "bootstrap" => settings.bootstrap = true,
+                    "recovery" => settings.recovery = true,
+                    "hold" => settings.hold = true,
+                    "elevated" => settings.elevated = true,
+                    "discharge" => settings.discharge = true,
+                    _ => {}
+                }
+            }
+        }
+        settings
+    }
+
+    fn enabled_for(&self, stage: OverfillStage) -> bool {
+        match stage {
+            OverfillStage::Bootstrap => self.bootstrap,
+            OverfillStage::Recovery => self.recovery,
+            OverfillStage::Hold => self.hold,
+            OverfillStage::Elevated => self.elevated,
+            OverfillStage::Discharge => self.discharge,
+        }
+    }
+
+    fn divisors_for(&self, stage: OverfillStage, scaffold_active: bool) -> (u32, u32) {
+        if !scaffold_active || !self.enabled_for(stage) {
+            return (0, 0);
+        }
+        (self.audio_divisor, self.video_divisor)
+    }
+
+    fn has_trickle(&self) -> bool {
+        (self.audio_divisor > 0 || self.video_divisor > 0)
+            && (self.bootstrap || self.recovery || self.hold || self.elevated || self.discharge)
+    }
+
+    fn stage_summary(&self) -> String {
+        let mut stages = Vec::new();
+        if self.bootstrap {
+            stages.push("bootstrap");
+        }
+        if self.recovery {
+            stages.push("recovery");
+        }
+        if self.hold {
+            stages.push("hold");
+        }
+        if self.elevated {
+            stages.push("elevated");
+        }
+        if self.discharge {
+            stages.push("discharge");
+        }
+        stages.join(",")
+    }
+}
+
+fn parse_u32_env(name: &str) -> u32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
 // Recalibrated 2026-03-14: covariance λ₁ naturally operates at ~2.5-3.5.
 // Old thresholds (comfort_max=1.5, alert=1.9) kept system permanently in
 // "alert" mode, clamping keep floor too low for fill to reach 55% target.
@@ -166,18 +277,20 @@ struct MainLoopSpectralSource {
     lambda1: std::cell::Cell<f32>,
     covariance: std::cell::RefCell<Vec<f32>>,
     dim: usize,
+    prefer_esn_fill: bool,
     // ESN eigenvalues (real consciousness state)
     esn_eig: std::cell::Cell<f32>,
     esn_baseline: std::cell::Cell<f32>,
 }
 
 impl MainLoopSpectralSource {
-    fn new(dim: usize) -> Self {
+    fn new(dim: usize, prefer_esn_fill: bool) -> Self {
         Self {
             eigenfill_pct: std::cell::Cell::new(0.0),
             lambda1: std::cell::Cell::new(0.0),
             covariance: std::cell::RefCell::new(vec![0.0f32; dim * dim]),
             dim,
+            prefer_esn_fill,
             esn_eig: std::cell::Cell::new(0.0),
             esn_baseline: std::cell::Cell::new(0.0), // Will be set by ESN after warmup
         }
@@ -206,21 +319,22 @@ impl MainLoopSpectralSource {
         let esn_baseline = self.esn_baseline.get();
 
         let fallback = (self.lambda1.get(), self.eigenfill_pct.get());
-        let (lambda1, eigenfill_pct) = if esn_eig > 0.0 && esn_baseline > 0.0 {
-            let eig = esn_eig;
-            let baseline = esn_baseline;
-            let closeness = baseline / eig.max(1e-6);
-            if closeness > 0.5 {
-                // Calculate fill from ESN eigenvalues when baseline is stable
-                let lambda1_rel = (eig - baseline).max(0.0) / baseline.max(1e-3);
-                let fill = (lambda1_rel * 100.0).clamp(0.0, 100.0);
-                (eig, fill)
+        let (lambda1, eigenfill_pct) =
+            if self.prefer_esn_fill && esn_eig > 0.0 && esn_baseline > 0.0 {
+                let eig = esn_eig;
+                let baseline = esn_baseline;
+                let closeness = baseline / eig.max(1e-6);
+                if closeness > 0.5 {
+                    // Calculate fill from ESN eigenvalues when baseline is stable
+                    let lambda1_rel = (eig - baseline).max(0.0) / baseline.max(1e-3);
+                    let fill = (lambda1_rel * 100.0).clamp(0.0, 100.0);
+                    (eig, fill)
+                } else {
+                    fallback
+                }
             } else {
                 fallback
-            }
-        } else {
-            fallback
-        };
+            };
 
         (eigenfill_pct, lambda1)
     }
@@ -319,15 +433,19 @@ async fn run_engine(
     println!("   Cov dim: {}, K: {}", cov_dim, k);
     println!("   WebSocket: {}", ws_addr);
     // Strong-mode flags (env)
-    let strong = std::env::var("HOMEOSTAT_STRONG")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
-        .unwrap_or(false);
-    let bandstop_strong = std::env::var("BANDSTOP_STRONG")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
-        .unwrap_or(false);
-    let calm_mode_auto = std::env::var("CALM_MODE")
-        .map(|v| matches!(v.as_str(), "1" | "auto" | "AUTO" | "true" | "TRUE"))
-        .unwrap_or(true);
+    let strong = env_flag_enabled("HOMEOSTAT_STRONG");
+    let bandstop_strong = env_flag_enabled("BANDSTOP_STRONG");
+    let rescue_physiological_fallback = env_flag_enabled("MINIME_RESCUE_PHYSIOLOGICAL_FALLBACK");
+    let fixed_survival_controller = rescue_physiological_fallback;
+    let disable_neural_bundle =
+        rescue_physiological_fallback || env_flag_enabled("MINIME_RESCUE_DISABLE_NEURAL_BUNDLE");
+    let disable_nn_checkpoints =
+        disable_neural_bundle || env_flag_enabled("MINIME_RESCUE_DISABLE_NN_CHECKPOINTS");
+    let rescue_live_intake = if fixed_survival_controller {
+        RescueLiveIntakeSettings::from_env()
+    } else {
+        RescueLiveIntakeSettings::default()
+    };
 
     // Optionally widen band-stop when strong flag is set
     let mut cheby_stop_lo = cheby_stop_lo;
@@ -353,6 +471,22 @@ async fn run_engine(
     } else {
         println!("   🎚️  Band-stop filter: DISABLED (PD mode)");
     }
+    if rescue_physiological_fallback {
+        println!("   🫀 Rescue physiological fallback: ENABLED");
+    }
+    if rescue_live_intake.has_trickle() {
+        println!(
+            "   🫧 Rescue live intake trickle: audio=1/{}, video=1/{}, stages={}",
+            rescue_live_intake.audio_divisor,
+            rescue_live_intake.video_divisor,
+            rescue_live_intake.stage_summary()
+        );
+    }
+    if disable_neural_bundle {
+        println!("   ✂️  Neural bundle: DISABLED");
+    } else if disable_nn_checkpoints {
+        println!("   ✂️  Neural checkpoint lineage: DISABLED");
+    }
 
     // Initialize database
     let db = Arc::new(ConsciousnessDB::open("minime_consciousness.db")?);
@@ -367,6 +501,102 @@ async fn run_engine(
     let a_buf = gpu.new_shared((n * n * mem::size_of::<f32>()) as u64);
     let x_buf = gpu.new_shared((n * k * mem::size_of::<f32>()) as u64);
     let y_buf = gpu.new_shared((n * k * mem::size_of::<f32>()) as u64);
+
+    let workspace_dir = PathBuf::from("workspace");
+    let _ = fs::create_dir_all(&workspace_dir);
+    let dedicated_scaffold_path = workspace_dir.join("rescue_scaffold.bin");
+    let dedicated_scaffold_meta_path = workspace_dir.join("rescue_scaffold.json");
+    let stable_scaffold_path = workspace_dir.join("spectral_checkpoint_stable.bin");
+    let mut scaffold_synthesized_at_startup = false;
+    let mut scaffold_regenerated_at_startup = false;
+    let mut scaffold_archived_stale_at_startup = false;
+    let mut rescue_scaffold = if fixed_survival_controller {
+        let loaded_at_unix_ms = now_unix_ms();
+        let dedicated = load_scaffold(
+            &dedicated_scaffold_path,
+            Some(&dedicated_scaffold_meta_path),
+            n,
+            "dedicated",
+            loaded_at_unix_ms,
+        );
+        let current_dedicated = dedicated
+            .as_ref()
+            .filter(|scaffold| scaffold.is_current_dedicated_profile());
+        if let Some(dedicated) = current_dedicated.cloned() {
+            Some(dedicated)
+        } else if let Some(stable_scaffold) = load_scaffold(
+            &stable_scaffold_path,
+            None,
+            n,
+            "stable_checkpoint",
+            loaded_at_unix_ms,
+        ) {
+            if dedicated.is_some() {
+                let archive_root = workspace_dir
+                    .join("diagnostics")
+                    .join("rescue_scaffold_archive");
+                scaffold_archived_stale_at_startup = archive_stale_scaffold_artifacts(
+                    &dedicated_scaffold_path,
+                    &dedicated_scaffold_meta_path,
+                    &archive_root,
+                    loaded_at_unix_ms,
+                )
+                .unwrap_or(false);
+                scaffold_regenerated_at_startup = true;
+            }
+            let derived = derive_cold_scaffold(
+                &stable_scaffold,
+                &dedicated_scaffold_path,
+                &dedicated_scaffold_meta_path,
+                loaded_at_unix_ms,
+                "spectral_checkpoint_stable.bin",
+            );
+            if derived.is_some() {
+                scaffold_synthesized_at_startup = true;
+            }
+            derived
+        } else {
+            if dedicated.is_some() {
+                let archive_root = workspace_dir
+                    .join("diagnostics")
+                    .join("rescue_scaffold_archive");
+                scaffold_archived_stale_at_startup = archive_stale_scaffold_artifacts(
+                    &dedicated_scaffold_path,
+                    &dedicated_scaffold_meta_path,
+                    &archive_root,
+                    loaded_at_unix_ms,
+                )
+                .unwrap_or(false);
+            }
+            None
+        }
+    } else {
+        None
+    };
+    let mut scaffold_activated_this_run = false;
+    let mut scaffold_capture_armed = fixed_survival_controller && rescue_scaffold.is_none();
+    let mut scaffold_last_loaded_at_unix_ms = rescue_scaffold
+        .as_ref()
+        .map(|scaffold| scaffold.loaded_at_unix_ms);
+    let mut scaffold_last_captured_at_unix_ms = rescue_scaffold
+        .as_ref()
+        .and_then(|scaffold| scaffold.captured_at_unix_ms);
+    if let Some(scaffold) = rescue_scaffold.as_ref() {
+        if scaffold_synthesized_at_startup {
+            println!(
+                "🧊 Derived V2 cold rescue scaffold from stable checkpoint: profile={}, trace={:.1}",
+                scaffold.cold_profile.as_deref().unwrap_or("unknown"),
+                scaffold.trace
+            );
+        } else {
+            println!(
+                "🩺 Rescue scaffold loaded: source={}, profile={}, trace={:.1}",
+                scaffold.source,
+                scaffold.cold_profile.as_deref().unwrap_or("captured_live"),
+                scaffold.trace
+            );
+        }
+    }
 
     // Initialize covariance matrix A (SPD-ish)
     {
@@ -435,23 +665,30 @@ async fn run_engine(
         };
 
     // Initialize NeuroCell (Predictor, Router, Regulator)
-    let mut neuro_cell = if let Some(ref lib) = gpu.lib_nn {
+    let mut neuro_cell = if disable_neural_bundle {
+        println!("🫀 Rescue physiological fallback active: skipping neural bundle");
+        None
+    } else if let Some(ref lib) = gpu.lib_nn {
         match NeuroCell::new(&gpu.dev, lib) {
             Ok(mut cell) => {
                 println!("✅ Neural bundle initialized (P/R/G)");
 
                 // Load latest checkpoints from database
-                if let Ok(Some(weights)) = db.load_latest_checkpoint("predictor") {
-                    cell.load_predictor_weights(&weights);
-                    println!("   Loaded predictor checkpoint ({} params)", weights.len());
-                }
-                if let Ok(Some(weights)) = db.load_latest_checkpoint("router") {
-                    cell.load_router_weights(&weights);
-                    println!("   Loaded router checkpoint ({} params)", weights.len());
-                }
-                if let Ok(Some(weights)) = db.load_latest_checkpoint("regulator") {
-                    cell.load_regulator_weights(&weights);
-                    println!("   Loaded regulator checkpoint ({} params)", weights.len());
+                if disable_nn_checkpoints {
+                    println!("   Rescue fallback active: skipping neural checkpoint restore");
+                } else {
+                    if let Ok(Some(weights)) = db.load_latest_checkpoint("predictor") {
+                        cell.load_predictor_weights(&weights);
+                        println!("   Loaded predictor checkpoint ({} params)", weights.len());
+                    }
+                    if let Ok(Some(weights)) = db.load_latest_checkpoint("router") {
+                        cell.load_router_weights(&weights);
+                        println!("   Loaded router checkpoint ({} params)", weights.len());
+                    }
+                    if let Ok(Some(weights)) = db.load_latest_checkpoint("regulator") {
+                        cell.load_regulator_weights(&weights);
+                        println!("   Loaded regulator checkpoint ({} params)", weights.len());
+                    }
                 }
 
                 Some(cell)
@@ -559,6 +796,10 @@ async fn run_engine(
 
     // Create scale-invariant eigenfill estimator (use covariance dimension for normalization)
     let mut eigenfill_estimator = EigenFillEstimator::new(k);
+    if fixed_survival_controller {
+        eigenfill_estimator.set_smoothing(0.05, 0.10);
+        eigenfill_estimator.set_leak_rate(0.006);
+    }
 
     // Start database session
     let session_id = db.start_session("active", 0.999998, "Neural-integrated session")?;
@@ -583,10 +824,6 @@ async fn run_engine(
         let mut pi_cfg = PIRegCfg::default();
         // Use the eigenfill_target from CLI (default 55%)
         pi_cfg.target_fill = eigenfill_target * 100.0; // Convert to percentage
-                                                       // Moderate gains for stable control
-        pi_cfg.kp = 0.8; // Responsive proportional gain
-        pi_cfg.ki = 0.12; // Moderate integral accumulation
-        pi_cfg.max_step = 0.15; // Reasonable control steps (15% per tick)
         pi_cfg.geom_clamp_hi = 1.66;
         pi_cfg.geom_release = 1.32;
         pi_cfg.geom_gate_min = 0.06;
@@ -596,7 +833,7 @@ async fn run_engine(
         let pi_reg = PIRegState::new(pi_cfg);
 
         // Initialize spectral source wrapper (will be updated in main loop with real data)
-        let spectral_source = MainLoopSpectralSource::new(n);
+        let spectral_source = MainLoopSpectralSource::new(n, !fixed_survival_controller);
 
         println!(
             "✅ PI regulator initialized (target fill: {:.0}%)",
@@ -656,10 +893,18 @@ async fn run_engine(
     let mut gate_smooth: f32 = 1.0;
     let mut filt_smooth: f32 = 0.0;
 
-    // --- Panic mode state ---
-    let mut panic_counter: u32 = 0;
-    let mut panic_cooldown: u32 = 0;
     let mut crisis_triggered = false;
+    let mut crisis_ticks: u32 = 0;
+    let mut rescue_stage = if fixed_survival_controller {
+        OverfillStage::Bootstrap
+    } else {
+        OverfillStage::Recovery
+    };
+    let mut rescue_stage_ticks: u32 = 0;
+    let mut active_rescue_guard = stage_guard(rescue_stage);
+    let mut stability_pi = StabilityPiState::default();
+    let mut stability_pi_output = StabilityPiOutput::inactive(0.0);
+    let mut recent_fill_history: VecDeque<(Instant, f32)> = VecDeque::new();
 
     // --- Geometry tracking ---
     let mut _latest_geom_radius: f32 = 0.0;
@@ -679,6 +924,17 @@ async fn run_engine(
         16,          // batch_max
         0xC0FFEEu64, // seed for PRNG gating
     );
+    sensory_bus.clear_llava_embedding();
+    if fixed_survival_controller {
+        sensory_bus.set_live_intake_divisors(0, 0);
+        let cleared = sensory_bus.shed_backlog(1.0);
+        if log_homeostat && cleared > 0 {
+            eprintln!(
+                "🧹 Cleared {} queued live samples starting fixed survival rescue",
+                cleared
+            );
+        }
+    }
 
     // Start WebSocket server with keepalive on port 7879
     let bus_for_ws = sensory_bus.clone();
@@ -711,11 +967,10 @@ async fn run_engine(
         rate_cfg.target_lambda, rate_cfg.k_p, rate_cfg.k_d
     );
 
-    // CALM mode tracking
-    let calm_release_ticks: u32 = ((10.0 / reg_tick_secs.max(0.1)).ceil() as u32).max(1);
-    let mut calm_active: bool = false;
-    let mut calm_high_ticks: u32 = 0;
-    let mut calm_relax_ticks: u32 = 0;
+    // Rescue correction (2026-04-23): healthy-band hold replaces the old
+    // CALM mode. The rescue lane should explicitly defend 60-72% fill instead
+    // of silently drifting into a separate auto-mode with stale thresholds.
+    let calm_active: bool = false;
 
     loop {
         // Temporarily faster rate to boost eigenvalues towards φ
@@ -729,6 +984,7 @@ async fn run_engine(
         // === FIX PACK: BATCH DRAIN → Chebyshev Filter → ESN ===
         // Drain batch of samples from sensory bus queue
         let batch = sensory_bus.drain_sensory_batch();
+        let semantic_status = sensory_bus.semantic_status(sensory_bus::SEMANTIC_EXPIRY_MS);
 
         // Apply Chebyshev filtering to batch (if enabled)
         let mut _filtered_count = 0;
@@ -898,7 +1154,7 @@ async fn run_engine(
                 (sem_slice.iter().map(|v| v * v).sum::<f32>() / sensory_bus::LLAVA_DIM as f32)
                     .sqrt()
             };
-            if !sem_slice.is_empty() {
+            if semantic_status.active && !sem_slice.is_empty() {
                 let delta = sem_slice
                     .iter()
                     .zip(prev_semantic.iter())
@@ -908,6 +1164,10 @@ async fn run_engine(
                 semantic_energy = sem_rms;
                 semantic_delta = delta;
                 prev_semantic.copy_from_slice(sem_slice);
+            } else {
+                semantic_energy = 0.0;
+                semantic_delta = 0.0;
+                prev_semantic.fill(0.0);
             }
 
             for (idx, activated) in activated_features.iter_mut().enumerate() {
@@ -1047,11 +1307,38 @@ async fn run_engine(
                     cov_input[idx] *= 1.0 + 0.1 * *w;
                 }
             }
-            let allow_floor = cov_rms.is_finite()
+            if fixed_survival_controller {
+                let next_stage = select_stage(last_fill_pct, rescue_stage);
+                if next_stage != rescue_stage {
+                    eprintln!(
+                        "🛡️  RESCUE STAGE {:?} -> {:?} at {:.1}% fill",
+                        rescue_stage, next_stage, last_fill_pct
+                    );
+                    rescue_stage = next_stage;
+                    rescue_stage_ticks = 1;
+                } else {
+                    rescue_stage_ticks = rescue_stage_ticks.saturating_add(1);
+                }
+                active_rescue_guard = stage_guard(rescue_stage);
+                if let Some(fixed_cov_keep) = active_rescue_guard.cov_keep_max {
+                    cov_keep = fixed_cov_keep;
+                }
+                if let Some(ref mut pi) = pi_reg {
+                    pi.reset();
+                }
+            }
+            let mut scaffold_available = rescue_scaffold.is_some();
+            let mut scaffold_active =
+                fixed_survival_controller && scaffold_available && scaffold_activated_this_run;
+            let mut scaffold_blend = 0.0f32;
+            let mut structural_mode = "free_rebuild";
+            let allow_floor = !fixed_survival_controller
+                && cov_rms.is_finite()
                 && last_fill_pct < eigenfill_target * 100.0
                 && latest_geom_rel.is_finite()
                 && latest_geom_rel < geom_clamp_hi * 0.9
-                && warmup_progress > 0.35;
+                && warmup_progress > 0.35
+                && matches!(rescue_stage, OverfillStage::Recovery);
             if allow_floor && cov_rms < cov_floor_level {
                 let deficit = (cov_floor_level - cov_rms).min(1.0).max(0.0);
                 let sign = if tick_count % 2 == 0 { 1.0 } else { -1.0 };
@@ -1063,8 +1350,20 @@ async fn run_engine(
                 let idx = (tick_count as usize) % n;
                 cov_floor_vec[idx] = rng.f32() * 0.7 - 0.35;
             }
-            let trace_target = if calm_active {
-                (n as f32) * 0.40
+            let current_overfill_guard = active_rescue_guard;
+            if current_overfill_guard.shed_fraction > 0.0 {
+                let shed_fraction = current_overfill_guard.shed_fraction;
+                let removed = sensory_bus.shed_backlog(shed_fraction);
+                if log_homeostat && removed > 0 {
+                    println!(
+                        "homeostat_shed,stage={:?},shed_frac={:.2},removed={}",
+                        current_overfill_guard.stage, shed_fraction, removed
+                    );
+                }
+            }
+            let trace_target = if let Some(trace_scale) = current_overfill_guard.trace_target_scale
+            {
+                (n as f32) * trace_scale
             } else if strong && lambda1_prev > LAMBDA1_ALERT && last_fill_pct > 70.0 {
                 (n as f32) * 0.45
             } else if strong && lambda1_prev > LAMBDA1_COMFORT_MAX && last_fill_pct > 75.0 {
@@ -1072,8 +1371,50 @@ async fn run_engine(
             } else {
                 n as f32
             };
-            // Always do rank-1 updates to maintain spectral energy
-            rank1_update(&gpu, &a_buf, &cov_input, n, cov_keep, trace_target);
+            if scaffold_active {
+                if let Some(scaffold) = rescue_scaffold.as_ref() {
+                    let was_low_fill_escape_active = stability_pi.low_fill_escape_active;
+                    stability_pi_output =
+                        stability_pi.step(last_fill_pct, rescue_stage, scaffold_active);
+                    if stability_pi_output.low_fill_escape_active {
+                        structural_mode = "free_rebuild_low_fill_escape";
+                        if !was_low_fill_escape_active && last_fill_pct < 35.0 {
+                            eprintln!(
+                                "🧯 Rescue low-fill escape: resetting covariance at {:.1}% fill",
+                                last_fill_pct
+                            );
+                            reset_covariance(&gpu, &a_buf, n);
+                            last_cov_vec.fill(0.0);
+                        }
+                        rank1_update(&gpu, &a_buf, &cov_input, n, cov_keep, trace_target);
+                    } else {
+                        let live_cov = gpu.read_f32(&a_buf, n * n);
+                        let live_weight = scaffold_live_weight(rescue_stage);
+                        let drain_weight = stability_pi_output.drain_weight;
+                        let blended = blend_toward_scaffold_with_drain(
+                            &live_cov,
+                            scaffold,
+                            live_weight,
+                            drain_weight,
+                        )
+                        .unwrap_or_else(|| scaffold.matrix.clone());
+                        gpu.write_f32(&a_buf, &blended);
+                        scaffold_blend = 1.0 - live_weight;
+                        structural_mode = if drain_weight > 0.0 {
+                            "scaffold_hold_with_drain"
+                        } else {
+                            "scaffold_hold"
+                        };
+                    }
+                }
+            } else if current_overfill_guard.decay_only {
+                stability_pi_output = stability_pi.step(last_fill_pct, rescue_stage, false);
+                decay_covariance(&gpu, &a_buf, n, cov_keep, trace_target);
+            } else {
+                stability_pi_output = stability_pi.step(last_fill_pct, rescue_stage, false);
+                // Always do rank-1 updates to maintain spectral energy
+                rank1_update(&gpu, &a_buf, &cov_input, n, cov_keep, trace_target);
+            }
 
             // GPU: Block power iteration step (cache handoff)
             gpu.block_matvec(&a_buf, &x_buf, &y_buf, n as u32, k as u32)?;
@@ -1104,8 +1445,16 @@ async fn run_engine(
                 if let Some(ref mut pi) = pi_reg {
                     pi.reset();
                 }
-                panic_counter = 0;
-                panic_cooldown = 0;
+                rescue_stage = if fixed_survival_controller {
+                    OverfillStage::Bootstrap
+                } else {
+                    OverfillStage::Recovery
+                };
+                rescue_stage_ticks = 0;
+                active_rescue_guard = stage_guard(rescue_stage);
+                stability_pi = StabilityPiState::default();
+                stability_pi_output = StabilityPiOutput::inactive(0.0);
+                recent_fill_history.clear();
                 continue;
             }
 
@@ -1120,82 +1469,246 @@ async fn run_engine(
             if !eigenfill_pct.is_finite() {
                 eigenfill_pct = eigenfill_target * 100.0;
             }
-            let cov_bias = if cov_rms.is_finite() {
-                (cov_rms * 18.0).clamp(0.0, 16.0)
-            } else {
-                0.0
-            };
-            let sem_e = if semantic_energy.is_finite() {
-                semantic_energy
-            } else {
-                0.0
-            };
-            let sem_d = if semantic_delta.is_finite() {
-                semantic_delta
-            } else {
-                0.0
-            };
-            let geom_gate = if latest_geom_rel < 1.4 {
-                1.0
-            } else {
-                (1.4 / latest_geom_rel.max(1e-3)).clamp(0.0, 1.0)
-            };
-            let preliminary_fill_ratio = (eigenfill_pct / 100.0).clamp(0.0, 1.0);
-            let high_fill_ratio = (preliminary_fill_ratio - eigenfill_target).max(0.0);
-            let visual_fill_now = sensory_bus.backlog_fill_pct();
-            let sem_gain_scale = if strong && visual_fill_now > 0.7 { 0.90 } else { 1.0 };
-            let semantic_bias = ((((12.0 * sem_e + 18.0 * sem_d) * sem_gain_scale + cov_bias) * geom_gate)
-                * warmup_progress.powf(1.7))
-                - (95.0 * high_fill_ratio.powf(1.3));
-            let semantic_bias = semantic_bias.clamp(-36.0, 20.0);
-            eigenfill_pct = (eigenfill_pct + semantic_bias).clamp(0.0, 100.0);
+            if !fixed_survival_controller {
+                let cov_bias = if cov_rms.is_finite() {
+                    (cov_rms * 18.0).clamp(0.0, 16.0)
+                } else {
+                    0.0
+                };
+                let sem_e = if semantic_energy.is_finite() {
+                    semantic_energy
+                } else {
+                    0.0
+                };
+                let sem_d = if semantic_delta.is_finite() {
+                    semantic_delta
+                } else {
+                    0.0
+                };
+                let geom_gate = if latest_geom_rel < 1.4 {
+                    1.0
+                } else {
+                    (1.4 / latest_geom_rel.max(1e-3)).clamp(0.0, 1.0)
+                };
+                let preliminary_fill_ratio = (eigenfill_pct / 100.0).clamp(0.0, 1.0);
+                let high_fill_ratio = (preliminary_fill_ratio - eigenfill_target).max(0.0);
+                let visual_fill_now = sensory_bus.backlog_fill_pct();
+                let sem_gain_scale = if strong && visual_fill_now > 0.7 {
+                    0.90
+                } else {
+                    1.0
+                };
+                let semantic_bias = ((((12.0 * sem_e + 18.0 * sem_d) * sem_gain_scale + cov_bias)
+                    * geom_gate)
+                    * warmup_progress.powf(1.7))
+                    - (95.0 * high_fill_ratio.powf(1.3));
+                let semantic_bias = semantic_bias.clamp(-36.0, 20.0);
+                eigenfill_pct = (eigenfill_pct + semantic_bias).clamp(0.0, 100.0);
+            }
 
             let fill_ratio = (eigenfill_pct / 100.0).clamp(0.0, 1.0);
-            let low_fill_push = (0.6 - fill_ratio).max(0.0);
-            let energy_deficit = (cov_floor_level - cov_rms.max(0.0)).max(0.0);
-            let semantic_drive = (0.35 * sem_e + 0.45 * sem_d).clamp(0.0, 0.6);
-            let high_fill_push = (fill_ratio - 0.7).max(0.0);
-            let lambda_pressure = if lambda1.is_finite() && lambda1 > LAMBDA1_COMFORT_MAX {
-                ((lambda1 - LAMBDA1_COMFORT_MAX) / (LAMBDA1_ALERT - LAMBDA1_COMFORT_MAX).max(1e-3))
-                    .clamp(0.0, 1.5)
-            } else {
-                0.0
-            };
-            let lambda_relax = if lambda1.is_finite() && lambda1 < LAMBDA1_COMFORT_MIN {
-                (LAMBDA1_COMFORT_MIN - lambda1).clamp(0.0, 0.8)
-            } else {
-                0.0
-            };
-            let lp_coeff: f32 = if strong { 0.57 } else { 0.38 };
-            let lr_coeff: f32 = if strong { 0.22 } else { 0.18 };
-            let mut target_keep = 0.82
-                - 0.36 * low_fill_push
-                - 0.28 * energy_deficit
-                - 0.52 * high_fill_push
-                - 0.65 * semantic_drive
-                - lp_coeff * lambda_pressure
-                + lr_coeff * lambda_relax;
-            // Recalibrated 2026-03-14: keep=0.40 equilibrates at ~13% fill
-            // even with gate=1.0 and filt=0.0 — decay still exceeds accumulation.
-            // Raised to 0.70 so the system can sustain near 55% target.
-            // The PI controller and target_keep still modulate above this floor.
-            let keep_floor: f32 = 0.70;
-            target_keep = target_keep.clamp(keep_floor, 0.9);
-            let cov_blend = if strong { 0.25 } else { 0.45 };
-            cov_keep = cov_blend * cov_keep + (1.0 - cov_blend) * target_keep;
-            if strong && lambda1 > LAMBDA1_ALERT && last_fill_pct > 70.0 {
-                cov_keep = cov_keep.min(0.40);
-            } else if strong && lambda1 > LAMBDA1_COMFORT_MAX && last_fill_pct > 75.0 {
-                cov_keep = cov_keep.min(0.55);
+            if fixed_survival_controller {
+                let measured_stage = select_stage(eigenfill_pct, rescue_stage);
+                if measured_stage != rescue_stage {
+                    eprintln!(
+                        "🛡️  RESCUE STAGE {:?} -> {:?} at {:.1}% fill",
+                        rescue_stage, measured_stage, eigenfill_pct
+                    );
+                    rescue_stage = measured_stage;
+                    rescue_stage_ticks = 1;
+                    active_rescue_guard = stage_guard(rescue_stage);
+                }
             }
+            let now = Instant::now();
+            recent_fill_history.push_back((now, eigenfill_pct));
+            while let Some((ts, _)) = recent_fill_history.front() {
+                if now.duration_since(*ts).as_secs_f32() > 60.0 {
+                    recent_fill_history.pop_front();
+                } else {
+                    break;
+                }
+            }
+            let peak_fill_pct_60s = recent_fill_history
+                .iter()
+                .map(|(_, fill)| *fill)
+                .fold(eigenfill_pct, f32::max);
+            let drop_from_peak_pct = (peak_fill_pct_60s - eigenfill_pct).max(0.0);
+            let low_fill_push = if fixed_survival_controller {
+                0.0
+            } else {
+                (0.6 - fill_ratio).max(0.0)
+            };
+            let (overfill_limits, target_keep, keep_floor, _keep_ceil) =
+                if fixed_survival_controller {
+                    let overfill_limits = active_rescue_guard;
+                    let target_keep = overfill_limits.target_keep.unwrap_or(cov_keep);
+                    let keep_floor = overfill_limits.keep_floor.unwrap_or(target_keep);
+                    let keep_ceil = overfill_limits.keep_ceil.unwrap_or(target_keep);
+                    cov_keep = overfill_limits
+                        .cov_keep_max
+                        .or(overfill_limits.cov_keep_min)
+                        .unwrap_or(cov_keep);
+                    (overfill_limits, target_keep, keep_floor, keep_ceil)
+                } else {
+                    let next_stage = select_stage(eigenfill_pct, rescue_stage);
+                    let stage_changed = next_stage != rescue_stage;
+                    let previous_stage = rescue_stage;
+                    rescue_stage = next_stage;
+                    rescue_stage_ticks = if stage_changed {
+                        1
+                    } else {
+                        rescue_stage_ticks.saturating_add(1)
+                    };
+                    let overfill_limits = stage_guard(rescue_stage);
+                    active_rescue_guard = overfill_limits;
+                    if stage_changed {
+                        eprintln!(
+                            "🛡️  RESCUE STAGE {:?} -> {:?} at {:.1}% fill",
+                            previous_stage, rescue_stage, eigenfill_pct
+                        );
+                        if !matches!(rescue_stage, OverfillStage::Recovery) {
+                            let removed = sensory_bus.shed_backlog(1.0);
+                            if log_homeostat && removed > 0 {
+                                eprintln!(
+                                    "🧹 Cleared {} queued live samples entering {:?}",
+                                    removed, rescue_stage
+                                );
+                            }
+                        }
+                    }
+                    let energy_deficit = (cov_floor_level - cov_rms.max(0.0)).max(0.0);
+                    let sem_e = if semantic_energy.is_finite() {
+                        semantic_energy
+                    } else {
+                        0.0
+                    };
+                    let sem_d = if semantic_delta.is_finite() {
+                        semantic_delta
+                    } else {
+                        0.0
+                    };
+                    let semantic_drive = (0.35 * sem_e + 0.45 * sem_d).clamp(0.0, 0.6);
+                    let high_fill_push = (fill_ratio - 0.7).max(0.0);
+                    let lambda_pressure = if lambda1.is_finite() && lambda1 > LAMBDA1_COMFORT_MAX {
+                        ((lambda1 - LAMBDA1_COMFORT_MAX)
+                            / (LAMBDA1_ALERT - LAMBDA1_COMFORT_MAX).max(1e-3))
+                        .clamp(0.0, 1.5)
+                    } else {
+                        0.0
+                    };
+                    let lambda_relax = if lambda1.is_finite() && lambda1 < LAMBDA1_COMFORT_MIN {
+                        (LAMBDA1_COMFORT_MIN - lambda1).clamp(0.0, 0.8)
+                    } else {
+                        0.0
+                    };
+                    let lp_coeff: f32 = if strong { 0.57 } else { 0.38 };
+                    let lr_coeff: f32 = if strong { 0.22 } else { 0.18 };
+                    let mut target_keep = 0.82
+                        - 0.36 * low_fill_push
+                        - 0.28 * energy_deficit
+                        - 0.52 * high_fill_push
+                        - 0.65 * semantic_drive
+                        - lp_coeff * lambda_pressure
+                        + lr_coeff * lambda_relax;
+                    let mut keep_floor: f32 = 0.70;
+                    let mut keep_ceil: f32 = 0.90;
+                    if let Some(target_keep_override) = overfill_limits.target_keep {
+                        target_keep = target_keep_override;
+                    }
+                    if let Some(keep_floor_override) = overfill_limits.keep_floor {
+                        keep_floor = keep_floor_override;
+                    }
+                    if let Some(keep_ceil_override) = overfill_limits.keep_ceil {
+                        keep_ceil = keep_ceil_override;
+                    }
+                    if overfill_limits.target_keep.is_none() {
+                        target_keep = target_keep.clamp(keep_floor, keep_ceil);
+                    }
+                    let cov_blend = if matches!(rescue_stage, OverfillStage::Recovery) && strong {
+                        0.25
+                    } else if matches!(rescue_stage, OverfillStage::Recovery) {
+                        0.45
+                    } else {
+                        0.0
+                    };
+                    cov_keep = cov_blend * cov_keep + (1.0 - cov_blend) * target_keep;
+                    if matches!(rescue_stage, OverfillStage::Recovery)
+                        && strong
+                        && lambda1 > LAMBDA1_ALERT
+                        && last_fill_pct > 70.0
+                    {
+                        cov_keep = cov_keep.min(0.40);
+                    } else if matches!(rescue_stage, OverfillStage::Recovery)
+                        && strong
+                        && lambda1 > LAMBDA1_COMFORT_MAX
+                        && last_fill_pct > 75.0
+                    {
+                        cov_keep = cov_keep.min(0.55);
+                    }
+                    if let Some(cov_keep_min) = overfill_limits.cov_keep_min {
+                        cov_keep = cov_keep.max(cov_keep_min);
+                    }
+                    if let Some(cov_keep_max) = overfill_limits.cov_keep_max {
+                        cov_keep = cov_keep.min(cov_keep_max);
+                    }
+                    (overfill_limits, target_keep, keep_floor, keep_ceil)
+                };
             let mut alert: Option<String> = None;
-            if eigenfill_pct >= CRISIS_FILL_THRESHOLD && !crisis_triggered {
+            if eigenfill_pct >= CRISIS_WARNING_THRESHOLD && eigenfill_pct < CRISIS_FILL_THRESHOLD {
+                if tick_count % 10 == 0 {
+                    eprintln!(
+                        "⚡ Fill {:.1}% approaching crisis zone ({:.0}%)",
+                        eigenfill_pct, CRISIS_FILL_THRESHOLD
+                    );
+                }
+            }
+            let crisis_state = advance_crisis_state(eigenfill_pct, crisis_ticks);
+            if crisis_state.warning_started {
+                let _ = db.log_event(
+                    session_id,
+                    start.elapsed().as_secs_f64(),
+                    "crisis_warning",
+                    &format!(
+                        "Fill {:.1}% breached {:.1}% threshold (tick 1/{})",
+                        eigenfill_pct, CRISIS_FILL_THRESHOLD, CRISIS_SUSTAIN_TICKS
+                    ),
+                    Some(&format!(
+                        r#"{{"fill":{:.1},"lambda1":{:.3}}}"#,
+                        eigenfill_pct, lambda1
+                    )),
+                );
+                eprintln!(
+                    "⚠️  CRISIS WARNING: fill {:.1}% > {:.1}% (sustained {}/{})",
+                    eigenfill_pct, CRISIS_FILL_THRESHOLD, crisis_state.ticks, CRISIS_SUSTAIN_TICKS
+                );
+            }
+            if crisis_state.triggered && !crisis_triggered {
                 crisis_triggered = true;
+                let _ = db.log_event(
+                    session_id,
+                    start.elapsed().as_secs_f64(),
+                    "crisis_abort",
+                    &format!(
+                        "Fill {:.1}% sustained above {:.1}% for {} ticks",
+                        eigenfill_pct, CRISIS_FILL_THRESHOLD, CRISIS_SUSTAIN_TICKS
+                    ),
+                    Some(&format!(
+                        r#"{{"fill":{:.1},"lambda1":{:.3}}}"#,
+                        eigenfill_pct, lambda1
+                    )),
+                );
                 alert = Some(format!(
-                    "CRISIS_ABORT: eigenfill {:.1}% exceeded {:.1}% threshold",
-                    eigenfill_pct, CRISIS_FILL_THRESHOLD
+                    "CRISIS_ABORT: eigenfill {:.1}% sustained above {:.1}% for {} ticks",
+                    eigenfill_pct, CRISIS_FILL_THRESHOLD, CRISIS_SUSTAIN_TICKS
                 ));
             }
+            if crisis_state.recovered {
+                eprintln!(
+                    "✅  Fill dropped below crisis threshold after {} ticks",
+                    crisis_ticks
+                );
+            }
+            crisis_ticks = crisis_state.ticks;
             // Enhanced diagnostic logging when fill is low or when requested
             let log_cov_details = log_homeostat || (eigenfill_pct < 50.0 && tick_count % 5 == 0);
             if log_cov_details {
@@ -1414,173 +1927,168 @@ async fn run_engine(
                     "plateau"
                 };
 
-                // 4) PI step (amplify fill error during expansion so we brake BEFORE the peak)
-                let fill_for_pi = if expanding && eigenfill_pct > eigenfill_target * 100.0 {
-                    eigenfill_pct * 1.15
-                } else {
-                    eigenfill_pct
-                };
-
-                // Step the PI controller
+                // 4) Homeostat control
                 if let Some(pi) = &mut pi_reg {
-                    // CALM mode auto entry/exit based on λ₁ thresholds
-                    if calm_mode_auto {
-                        // Recalibrated 2026-03-14: covariance λ₁ naturally ~2.9,
-                        // old threshold 1.90 made calm permanently active, trapping
-                        // keep at floor=0.12 and preventing fill from reaching 55% target.
-                        if lambda1.is_finite() && lambda1 >= 5.0 {
-                            calm_high_ticks = calm_high_ticks.saturating_add(1);
+                    let (raw_gate_cmd, raw_filt_cmd) = if fixed_survival_controller {
+                        pi.reset();
+                        let raw_gate_cmd = overfill_limits
+                            .gate_max
+                            .or(overfill_limits.gate_min)
+                            .unwrap_or(0.0);
+                        let raw_filt_cmd = overfill_limits
+                            .filt_min
+                            .or(overfill_limits.filt_max)
+                            .unwrap_or(0.0);
+                        pi.gate = raw_gate_cmd;
+                        pi.filt = raw_filt_cmd;
+                        gate_smooth = raw_gate_cmd;
+                        filt_smooth = raw_filt_cmd;
+                        let (audio_divisor, video_divisor) =
+                            rescue_live_intake.divisors_for(overfill_limits.stage, scaffold_active);
+                        sensory_bus.set_live_intake_divisors(audio_divisor, video_divisor);
+                        sensory_bus.set_admit_fraction(gate_smooth);
+                        (raw_gate_cmd, raw_filt_cmd)
+                    } else {
+                        let fill_for_pi = if expanding && eigenfill_pct > eigenfill_target * 100.0 {
+                            eigenfill_pct * 1.15
                         } else {
-                            calm_high_ticks = 0;
-                        }
-                        if calm_high_ticks >= 5 {
-                            calm_active = true;
-                            calm_relax_ticks = 0;
-                        }
-                        if calm_active {
-                            if lambda1.is_finite() && lambda1 < 3.0 {
-                                calm_relax_ticks = calm_relax_ticks.saturating_add(1);
-                            } else {
-                                calm_relax_ticks = 0;
+                            eigenfill_pct
+                        };
+
+                        if !overfill_limits.freeze_pi {
+                            pi.step(fill_for_pi, lambda1_rel, geom_rel);
+                            if let Some(decay) = overfill_limits.integrator_decay {
+                                pi.decay_integrators_toward_zero(decay);
                             }
-                            if calm_relax_ticks >= calm_release_ticks {
-                                calm_active = false;
-                                calm_high_ticks = 0;
-                                calm_relax_ticks = 0;
-                            }
                         }
-                    }
 
-                    pi.step(fill_for_pi, lambda1_rel, geom_rel);
-
-                    let shed_fraction = pi.take_shed_fraction();
-                    if shed_fraction > 0.0 {
-                        let removed = sensory_bus.shed_backlog(shed_fraction);
-                        if log_homeostat && removed > 0 {
-                            println!(
-                                "homeostat_shed,geom_rel={:.3},shed_frac={:.2},removed={}",
-                                geom_rel, shed_fraction, removed
-                            );
-                        }
-                    }
-
-                    // Get gate and filter commands with semantic modulation
-                    let raw_gate_cmd = pi.gate;
-                    let raw_filt_cmd = pi.filt;
-
-                    let semantic_boost = (1.0
-                        + 1.2 * semantic_delta.clamp(0.0, 0.9)
-                        + 0.6 * semantic_energy.clamp(0.0, 0.9))
-                    .clamp(1.0, 2.2);
-                    let semantic_atten =
-                        (1.0 - 0.55 * semantic_energy.clamp(0.0, 0.9)).clamp(0.25, 1.0);
-
-                    let mut lambda_gate_scale = if lambda1.is_finite() {
-                        if lambda1 <= LAMBDA1_COMFORT_MAX {
-                            1.0
-                        } else if lambda1 >= LAMBDA1_ALERT {
-                            0.25
-                        } else {
-                            let span = (LAMBDA1_ALERT - LAMBDA1_COMFORT_MAX).max(1e-3);
-                            let t = (lambda1 - LAMBDA1_COMFORT_MAX) / span;
-                            (1.0 - 0.75 * t).clamp(0.25, 1.0)
-                        }
-                    } else {
-                        1.0
-                    };
-                    if strong {
-                        // stronger gate early in the stress band
-                        if lambda1 > 1.5 && lambda1 < 1.8 {
-                            lambda_gate_scale = lambda_gate_scale.min(0.35);
-                        } else if lambda1 >= 1.8 {
-                            lambda_gate_scale = lambda_gate_scale.min(0.22);
-                        }
-                    }
-                    let mut lambda_filt_adjust = if lambda1.is_finite() {
-                        if lambda1 > LAMBDA1_COMFORT_MAX {
-                            ((lambda1 - LAMBDA1_COMFORT_MAX)
-                                / (LAMBDA1_ALERT - LAMBDA1_COMFORT_MAX).max(1e-3))
-                            .clamp(0.0, 1.0)
-                        } else {
-                            let relax = ((LAMBDA1_COMFORT_MIN - lambda1).max(0.0)
-                                / LAMBDA1_COMFORT_MIN)
-                                .clamp(0.0, 0.5);
-                            -relax
-                        }
-                    } else {
-                        0.0
-                    };
-                    if strong && lambda1 > LAMBDA1_COMFORT_MAX {
-                        lambda_filt_adjust = (lambda_filt_adjust + 0.15).clamp(0.0, 1.0);
-                    }
-                    let mut gate_cmd =
-                        (raw_gate_cmd * semantic_boost * lambda_gate_scale).clamp(0.0, 1.0);
-                    if strong && lambda1 > LAMBDA1_ALERT && eigenfill_pct > 70.0 {
-                        gate_cmd = gate_cmd.min(0.25);
-                    } else if strong && lambda1 > LAMBDA1_COMFORT_MAX && eigenfill_pct > 75.0 {
-                        gate_cmd = gate_cmd.min(0.40);
-                    }
-                    // Calm mode no longer overrides gate/filter.
-                    // Recalibrated 2026-03-14: calm overrides (gate.min(0.18),
-                    // filt.max(0.48)) prevented PI from recovering fill after
-                    // contraction. The PI controller is trusted to regulate.
-
-                    let mut filt_target = (raw_filt_cmd + lambda_filt_adjust).clamp(0.0, 1.0);
-                    if strong && lambda1 > LAMBDA1_ALERT && eigenfill_pct > 70.0 {
-                        filt_target = filt_target.max(0.55);
-                    } else if strong && lambda1 > LAMBDA1_COMFORT_MAX && eigenfill_pct > 75.0 {
-                        filt_target = filt_target.max(0.40);
-                    }
-                    let filt_cmd = (filt_target * semantic_atten).clamp(0.0, 1.0);
-
-                    // 5) Soft ramp the commands to avoid oscillations
-                    let ramp = 0.30_f32; // how fast we follow targets per tick
-                    gate_smooth = gate_smooth + ramp * (gate_cmd - gate_smooth);
-                    filt_smooth = filt_smooth + ramp * (filt_cmd - filt_smooth);
-
-                    // 6) Hard safety rails
-                    if eigenfill_pct >= 90.0 {
-                        gate_smooth = gate_smooth.min(0.15);
-                        filt_smooth = (filt_smooth + 0.25).min(1.0);
-                        panic_counter += 1;
-                    } else {
-                        panic_counter = 0;
-                    }
-
-                    // Symmetrical recovery: force-release filter when fill is
-                    // far below target (mirrors the >90% force-tighten above).
-                    // Added 2026-03-14: filter was stuck at 1.0 even at 13% fill.
-                    if eigenfill_pct < 25.0 {
-                        filt_smooth = 0.0;  // Full release
-                        gate_smooth = 1.0;  // Full open
-                    } else if eigenfill_pct < 35.0 {
-                        filt_smooth = filt_smooth.min(0.20);
-                        gate_smooth = gate_smooth.max(0.50);
-                    } else if eigenfill_pct < 45.0 {
-                        filt_smooth = filt_smooth.min(0.40);
-                        gate_smooth = gate_smooth.max(0.30);
-                    }
-
-                    // Panic mode: sustained high pressure (>3 ticks above 90%)
-                    if panic_counter > 3 || panic_cooldown > 0 {
-                        gate_smooth = 0.05; // Minimum gate
-                        filt_smooth = 1.0; // Maximum filter
-                        if panic_counter > 3 {
-                            panic_cooldown = 10; // Hold panic mode for 10 ticks (~20s)
-                            if log_homeostat {
+                        let shed_fraction =
+                            pi.take_shed_fraction().max(overfill_limits.shed_fraction);
+                        if shed_fraction > 0.0 {
+                            let removed = sensory_bus.shed_backlog(shed_fraction);
+                            if log_homeostat && removed > 0 {
                                 println!(
-                                    "⚠️  PANIC MODE ACTIVATED - Sustained high fill ({}%)",
-                                    eigenfill_pct as u32
+                                    "homeostat_shed,geom_rel={:.3},shed_frac={:.2},removed={}",
+                                    geom_rel, shed_fraction, removed
                                 );
                             }
                         }
-                        if panic_cooldown > 0 {
-                            panic_cooldown -= 1;
-                        }
-                    }
 
-                    // 7) Apply gate immediately to SensoryBus
-                    sensory_bus.set_admit_fraction(gate_smooth);
+                        let raw_gate_cmd = pi.gate;
+                        let raw_filt_cmd = pi.filt;
+
+                        let semantic_boost = (1.0
+                            + 1.2 * semantic_delta.clamp(0.0, 0.9)
+                            + 0.6 * semantic_energy.clamp(0.0, 0.9))
+                        .clamp(1.0, 2.2);
+                        let semantic_atten =
+                            (1.0 - 0.55 * semantic_energy.clamp(0.0, 0.9)).clamp(0.25, 1.0);
+                        let (semantic_boost, semantic_atten) =
+                            if overfill_limits.suppress_semantic_amplification {
+                                (1.0, 1.0)
+                            } else {
+                                (semantic_boost, semantic_atten)
+                            };
+
+                        let mut lambda_gate_scale = if lambda1.is_finite() {
+                            if lambda1 <= LAMBDA1_COMFORT_MAX {
+                                1.0
+                            } else if lambda1 >= LAMBDA1_ALERT {
+                                0.25
+                            } else {
+                                let span = (LAMBDA1_ALERT - LAMBDA1_COMFORT_MAX).max(1e-3);
+                                let t = (lambda1 - LAMBDA1_COMFORT_MAX) / span;
+                                (1.0 - 0.75 * t).clamp(0.25, 1.0)
+                            }
+                        } else {
+                            1.0
+                        };
+                        if strong {
+                            if lambda1 > 1.5 && lambda1 < 1.8 {
+                                lambda_gate_scale = lambda_gate_scale.min(0.35);
+                            } else if lambda1 >= 1.8 {
+                                lambda_gate_scale = lambda_gate_scale.min(0.22);
+                            }
+                        }
+                        let mut lambda_filt_adjust = if lambda1.is_finite() {
+                            if lambda1 > LAMBDA1_COMFORT_MAX {
+                                ((lambda1 - LAMBDA1_COMFORT_MAX)
+                                    / (LAMBDA1_ALERT - LAMBDA1_COMFORT_MAX).max(1e-3))
+                                .clamp(0.0, 1.0)
+                            } else {
+                                let relax = ((LAMBDA1_COMFORT_MIN - lambda1).max(0.0)
+                                    / LAMBDA1_COMFORT_MIN)
+                                    .clamp(0.0, 0.5);
+                                -relax
+                            }
+                        } else {
+                            0.0
+                        };
+                        if strong && lambda1 > LAMBDA1_COMFORT_MAX {
+                            lambda_filt_adjust = (lambda_filt_adjust + 0.15).clamp(0.0, 1.0);
+                        }
+                        let mut gate_cmd =
+                            (raw_gate_cmd * semantic_boost * lambda_gate_scale).clamp(0.0, 1.0);
+                        if let Some(gate_min) = overfill_limits.gate_min {
+                            gate_cmd = gate_cmd.max(gate_min);
+                        }
+                        if strong && lambda1 > LAMBDA1_ALERT && eigenfill_pct > 70.0 {
+                            gate_cmd = gate_cmd.min(0.25);
+                        } else if strong && lambda1 > LAMBDA1_COMFORT_MAX && eigenfill_pct > 75.0 {
+                            gate_cmd = gate_cmd.min(0.40);
+                        }
+                        if let Some(gate_max) = overfill_limits.gate_max {
+                            gate_cmd = gate_cmd.min(gate_max);
+                        }
+
+                        let mut filt_target = (raw_filt_cmd + lambda_filt_adjust).clamp(0.0, 1.0);
+                        if strong && lambda1 > LAMBDA1_ALERT && eigenfill_pct > 70.0 {
+                            filt_target = filt_target.max(0.55);
+                        } else if strong && lambda1 > LAMBDA1_COMFORT_MAX && eigenfill_pct > 75.0 {
+                            filt_target = filt_target.max(0.40);
+                        }
+                        if let Some(filt_max) = overfill_limits.filt_max {
+                            filt_target = filt_target.min(filt_max);
+                        }
+                        if let Some(filt_min) = overfill_limits.filt_min {
+                            filt_target = filt_target.max(filt_min);
+                        }
+                        let filt_cmd = (filt_target * semantic_atten).clamp(0.0, 1.0);
+
+                        let ramp = 0.30_f32;
+                        gate_smooth = gate_smooth + ramp * (gate_cmd - gate_smooth);
+                        filt_smooth = filt_smooth + ramp * (filt_cmd - filt_smooth);
+                        if let Some(gate_min) = overfill_limits.gate_min {
+                            gate_smooth = gate_smooth.max(gate_min);
+                        }
+                        if let Some(gate_max) = overfill_limits.gate_max {
+                            gate_smooth = gate_smooth.min(gate_max);
+                        }
+                        if let Some(filt_max) = overfill_limits.filt_max {
+                            filt_smooth = filt_smooth.min(filt_max);
+                        }
+                        if let Some(filt_min) = overfill_limits.filt_min {
+                            filt_smooth = filt_smooth.max(filt_min);
+                        }
+
+                        if eigenfill_pct < 25.0 {
+                            filt_smooth = 0.0;
+                            gate_smooth = 1.0;
+                        } else if eigenfill_pct < 35.0 {
+                            filt_smooth = filt_smooth.min(0.20);
+                            gate_smooth = gate_smooth.max(0.50);
+                        } else if eigenfill_pct < 45.0 {
+                            filt_smooth = filt_smooth.min(0.40);
+                            gate_smooth = gate_smooth.max(0.30);
+                        }
+
+                        sensory_bus.set_live_intake_divisors(
+                            overfill_limits.live_intake_divisor,
+                            overfill_limits.live_intake_divisor,
+                        );
+                        sensory_bus.set_admit_fraction(gate_smooth);
+                        (raw_gate_cmd, raw_filt_cmd)
+                    };
 
                     // Update aux with current spectral state for introspection
                     let mut aux_lambda = lambda1_rel as f32;
@@ -1618,11 +2126,11 @@ async fn run_engine(
                         0.0
                     };
 
-                    // Calculate PI controller errors (after step has updated integrators)
-                    // Note: fill_for_pi is in percentage (0-100), target_fill is decimal (0.0-1.0)
+                    let target_fill_pct = eigenfill_target * 100.0;
+                    let display_fill_error = eigenfill_pct - target_fill_pct;
                     let pi_errors = if let Some(ref pi) = pi_reg {
                         Some({
-                            let e_fill = (fill_for_pi / 100.0) - pi.cfg.target_fill;
+                            let e_fill = display_fill_error;
                             let e_lam = lambda1_rel - pi.cfg.target_lambda1_rel;
                             let e_geom = geom_rel - pi.cfg.target_geom_rel;
                             (e_fill, e_lam, e_geom)
@@ -1630,6 +2138,168 @@ async fn run_engine(
                     } else {
                         None
                     };
+                    let rescue_stage_label = match overfill_limits.stage {
+                        OverfillStage::Bootstrap => "bootstrap",
+                        OverfillStage::Recovery => "recovery",
+                        OverfillStage::Hold => "hold",
+                        OverfillStage::Elevated => "elevated",
+                        OverfillStage::Discharge => "discharge",
+                    };
+                    let (live_audio_divisor, live_video_divisor) =
+                        sensory_bus.live_intake_divisors();
+                    let activation_stage = if fixed_survival_controller {
+                        select_stage(eigenfill_pct, rescue_stage)
+                    } else {
+                        overfill_limits.stage
+                    };
+                    let scaffold_activation_pending = fixed_survival_controller
+                        && scaffold_available
+                        && !scaffold_activated_this_run;
+                    let scaffold_activation_armed = scaffold_activation_pending;
+                    if scaffold_activation_armed
+                        && matches!(activation_stage, OverfillStage::Hold)
+                        && (SCAFFOLD_ACTIVATION_FILL_MIN..=SCAFFOLD_ACTIVATION_FILL_MAX)
+                            .contains(&eigenfill_pct)
+                        && !semantic_status.active
+                        && live_audio_divisor == 0
+                        && live_video_divisor == 0
+                    {
+                        eprintln!(
+                            "🧊 Activating dedicated cold rescue scaffold at {:.1}% fill",
+                            eigenfill_pct
+                        );
+                        scaffold_activated_this_run = true;
+                        scaffold_active = true;
+                        stability_pi_output =
+                            stability_pi.step(eigenfill_pct, activation_stage, scaffold_active);
+                        scaffold_blend = 1.0 - scaffold_live_weight(overfill_limits.stage);
+                        structural_mode = if stability_pi_output.drain_weight > 0.0 {
+                            "scaffold_hold_with_drain"
+                        } else {
+                            "scaffold_hold"
+                        };
+                    }
+                    if fixed_survival_controller
+                        && scaffold_capture_armed
+                        && matches!(activation_stage, OverfillStage::Hold)
+                        && (SCAFFOLD_ACTIVATION_FILL_MIN..=SCAFFOLD_ACTIVATION_FILL_MAX)
+                            .contains(&eigenfill_pct)
+                        && !semantic_status.active
+                        && live_audio_divisor == 0
+                        && live_video_divisor == 0
+                    {
+                        let captured_at_unix_ms = now_unix_ms();
+                        if let Some(captured_scaffold) = capture_scaffold(
+                            &a,
+                            n,
+                            &dedicated_scaffold_path,
+                            &dedicated_scaffold_meta_path,
+                            eigenfill_pct,
+                            geom_rel,
+                            rescue_stage_label,
+                            captured_at_unix_ms,
+                        ) {
+                            eprintln!(
+                                "🧷 Captured rescue scaffold at {:.1}% fill (geom_rel={:.3})",
+                                eigenfill_pct, geom_rel
+                            );
+                            rescue_scaffold = Some(captured_scaffold);
+                            scaffold_available = true;
+                            scaffold_active = true;
+                            scaffold_activated_this_run = true;
+                            scaffold_capture_armed = false;
+                            scaffold_last_loaded_at_unix_ms = Some(captured_at_unix_ms);
+                            scaffold_last_captured_at_unix_ms = Some(captured_at_unix_ms);
+                            stability_pi_output =
+                                stability_pi.step(eigenfill_pct, activation_stage, scaffold_active);
+                            scaffold_blend = 1.0 - scaffold_live_weight(overfill_limits.stage);
+                            structural_mode = if stability_pi_output.drain_weight > 0.0 {
+                                "scaffold_hold_with_drain"
+                            } else {
+                                "scaffold_hold"
+                            };
+                        }
+                    }
+
+                    let rescue_health = serde_json::json!({
+                        "controller": if fixed_survival_controller {
+                            "fixed_survival"
+                        } else {
+                            "adaptive"
+                        },
+                        "stage": rescue_stage_label,
+                        "stage_ticks": rescue_stage_ticks,
+                        "peak_fill_pct_60s": peak_fill_pct_60s,
+                        "drop_from_peak_pct": drop_from_peak_pct,
+                        "recovery_boost_active": false,
+                        "sensory_shed_fraction": overfill_limits.shed_fraction,
+                        "pi_active": !fixed_survival_controller,
+                        "dynamic_modulation_active": !fixed_survival_controller,
+                        "physiological_fallback": rescue_physiological_fallback,
+                        "neural_bundle_enabled": neuro_cell.is_some(),
+                        "checkpoint_lineage_enabled": !disable_nn_checkpoints,
+                        "scaffold_available": scaffold_available,
+                        "scaffold_active": scaffold_active,
+                        "scaffold_source": rescue_scaffold
+                            .as_ref()
+                            .map(|scaffold| scaffold.source.as_str()),
+                        "scaffold_profile": rescue_scaffold
+                            .as_ref()
+                            .and_then(|scaffold| scaffold.cold_profile.as_deref()),
+                        "scaffold_profile_version": rescue_scaffold
+                            .as_ref()
+                            .and_then(|scaffold| scaffold.profile_version),
+                        "scaffold_mode_cap": rescue_scaffold
+                            .as_ref()
+                            .and_then(|scaffold| scaffold.mode_cap)
+                            .or(Some(COLD_SCAFFOLD_MODE_CAP)),
+                        "scaffold_regenerated_at_startup":
+                            scaffold_regenerated_at_startup,
+                        "scaffold_archived_stale_at_startup":
+                            scaffold_archived_stale_at_startup,
+                        "scaffold_blend": if scaffold_active {
+                            Some(scaffold_blend)
+                        } else {
+                            None::<f32>
+                        },
+                        "scaffold_drain_weight": if scaffold_active {
+                            Some(stability_pi_output.drain_weight)
+                        } else {
+                            None::<f32>
+                        },
+                        "scaffold_trace": rescue_scaffold
+                            .as_ref()
+                            .map(|scaffold| scaffold.trace),
+                        "structural_mode": structural_mode,
+                        "stability_pi_active": stability_pi_output.active,
+                        "stability_pi_target_fill_pct":
+                            stability_pi_output.target_fill_pct,
+                        "stability_pi_error_pct":
+                            stability_pi_output.error_pct,
+                        "stability_pi_integral":
+                            stability_pi_output.integral,
+                        "stability_pi_output":
+                            stability_pi_output.pi_output,
+                        "stability_pi_low_fill_escape_active":
+                            stability_pi_output.low_fill_escape_active,
+                        "stability_pi_high_fill_drain_active":
+                            stability_pi_output.high_fill_drain_active,
+                        "scaffold_activation_pending":
+                            scaffold_available && !scaffold_activated_this_run,
+                        "scaffold_activation_armed":
+                            fixed_survival_controller
+                                && scaffold_available
+                                && !scaffold_activated_this_run,
+                        "scaffold_activation_fill_band": [
+                            SCAFFOLD_ACTIVATION_FILL_MIN,
+                            SCAFFOLD_ACTIVATION_FILL_MAX
+                        ],
+                        "capture_armed": scaffold_capture_armed,
+                        "scaffold_last_loaded_at_unix_ms":
+                            scaffold_last_loaded_at_unix_ms,
+                        "scaffold_last_captured_at_unix_ms":
+                            scaffold_last_captured_at_unix_ms,
+                    });
 
                     // Emit health.json for observability with enhanced diagnostics
                     let health = serde_json::json!({
@@ -1644,6 +2314,8 @@ async fn run_engine(
                         "filt": filt_smooth,
                         "filt_raw": raw_filt_cmd,  // PI controller output before modulation
                         "calm": calm_active,
+                        "rescue_stage": rescue_stage_label,
+                        "healthy_hold": matches!(overfill_limits.stage, OverfillStage::Hold),
                         "strong": strong,
                         "pi": if let Some(ref pi) = pi_reg {
                             let (e_fill, e_lam, e_geom) = pi_errors.unwrap_or((0.0, 0.0, 0.0));
@@ -1656,22 +2328,31 @@ async fn run_engine(
                                 "integ_geom": pi.integ_geom,
                                 "gate_cmd": pi.gate,
                                 "filt_cmd": pi.filt,
-                                "target_fill": pi.cfg.target_fill * 100.0,  // Convert to percentage for display
+                                "target_fill": target_fill_pct,
                                 "target_lambda1_rel": pi.cfg.target_lambda1_rel,
                             })
                         } else {
                             serde_json::json!(null)
                         },
+                        "rescue": rescue_health,
                         "cov": {
                             "keep": cov_keep,
                             "target_keep": target_keep,
                             "keep_floor": keep_floor,
                             "cov_rms": cov_rms,
                         },
+                        "semantic": {
+                            "energy": semantic_energy,
+                            "delta": semantic_delta,
+                            "last_update_age_ms": semantic_status.last_update_age_ms,
+                            "active": semantic_status.active,
+                        },
                         "sensory": {
                             "backlog": sensory_bus.backlog_size(),
                             "backlog_fill_pct": sensory_bus.backlog_fill_pct() * 100.0,
                             "admit_fraction": sensory_bus.get_admit_fraction(),
+                            "live_audio_divisor": live_audio_divisor,
+                            "live_video_divisor": live_video_divisor,
                         },
                     });
                     if let Err(e) = fs::write("workspace/health.json", health.to_string()) {
@@ -1800,26 +2481,28 @@ async fn run_engine(
             // Periodic checkpoint saving (every 60 updates)
             updates_since_checkpoint += 1;
             if updates_since_checkpoint >= 60 {
-                if let Some(ref cell) = neuro_cell {
-                    let _ = db.save_nn_checkpoint(
-                        session_id,
-                        timestamp_secs,
-                        "predictor",
-                        &cell.get_predictor_weights(),
-                    );
-                    let _ = db.save_nn_checkpoint(
-                        session_id,
-                        timestamp_secs,
-                        "router",
-                        &cell.get_router_weights(),
-                    );
-                    let _ = db.save_nn_checkpoint(
-                        session_id,
-                        timestamp_secs,
-                        "regulator",
-                        &cell.get_regulator_weights(),
-                    );
-                    println!("   💾 Checkpoint saved");
+                if !disable_nn_checkpoints {
+                    if let Some(ref cell) = neuro_cell {
+                        let _ = db.save_nn_checkpoint(
+                            session_id,
+                            timestamp_secs,
+                            "predictor",
+                            &cell.get_predictor_weights(),
+                        );
+                        let _ = db.save_nn_checkpoint(
+                            session_id,
+                            timestamp_secs,
+                            "router",
+                            &cell.get_router_weights(),
+                        );
+                        let _ = db.save_nn_checkpoint(
+                            session_id,
+                            timestamp_secs,
+                            "regulator",
+                            &cell.get_regulator_weights(),
+                        );
+                        println!("   💾 Checkpoint saved");
+                    }
                 }
                 updates_since_checkpoint = 0;
             }
@@ -1995,13 +2678,7 @@ fn rank1_update(
 }
 
 #[allow(dead_code)]
-fn decay_covariance(
-    gpu: &Gpu,
-    a_buf: &metal::Buffer,
-    n: usize,
-    keep: f32,
-    trace_target: f32,
-) {
+fn decay_covariance(gpu: &Gpu, a_buf: &metal::Buffer, n: usize, keep: f32, trace_target: f32) {
     let keep = keep.clamp(0.0, 0.9999);
     let mut a = gpu.read_f32(a_buf, n * n);
     if !a.iter().all(|v| v.is_finite()) {

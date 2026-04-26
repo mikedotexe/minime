@@ -243,18 +243,18 @@ impl Default for PIRegCfg {
             .unwrap_or(false);
 
         let mut cfg = Self {
-            target_fill: 0.60,        // 60% EigenFill target (healthy operating range)
+            target_fill: 0.55,        // Rescue target aligns to the pinned March lane
             target_lambda1_rel: 1.05, // Keep λ₁ close to baseline (1.0-1.6 comfort zone)
             target_geom_rel: 1.00,    // Stay near geometric baseline
-            geom_weight: 1.80,        // Prioritize λ₁ control over fill
+            geom_weight: 0.70,        // Golden rescue default: calmer geometry weighting
             geom_clamp_hi: 1.66,      // ≈ +66% expansion triggers hard clamp
             geom_release: 1.32,       // Release clamp once relaxed below this
             geom_gate_min: 0.06,      // Hard gate limit during clamp
             geom_filter_boost: 0.35,  // Extra filter push when clamped
             geom_shed_fraction: 0.45, // Shed ~45% of backlog when clamped
-            kp: 1.10,                 // Strong proportional response to λ₁ excess
-            ki: 0.18,                 // Faster integral correction
-            max_step: 0.12,           // Allow larger steps to catch runaway λ₁
+            kp: 0.85,       // Golden rescue default: strong but calmer proportional response
+            ki: 0.14,       // Golden rescue default: steadier integral correction
+            max_step: 0.08, // Golden rescue default: smaller correction steps
         };
 
         if strong {
@@ -306,7 +306,12 @@ impl PIRegState {
     /// - `self.filt` - Filter blend strength [0.0, 1.0]
     pub fn step(&mut self, fill: f32, lambda1_rel: f32, geom_rel: f32) {
         // Compute error signals
-        let e_fill = fill - self.cfg.target_fill;
+        //
+        // Rescue correction (2026-04-23): fill arrives on a 0-100 scale while
+        // λ₁_rel / geom_rel live near 0-2. Without normalization, fill error
+        // dominates the controller and drives it into permanent bang-bang
+        // behavior. Scale fill so a ±20% miss maps to roughly ±1.0.
+        let e_fill = ((fill - self.cfg.target_fill) / 20.0).clamp(-3.0, 3.0);
         let e_lam = lambda1_rel - self.cfg.target_lambda1_rel;
         let e_geom = geom_rel - self.cfg.target_geom_rel;
 
@@ -358,9 +363,122 @@ impl PIRegState {
         self.shed_fraction = 0.0;
     }
 
+    /// Enter a hard overfill brake without leaving stale PI state latched.
+    pub fn enter_overfill_brake(&mut self) {
+        self.reset();
+        self.gate = 0.03;
+        self.filt = 1.0;
+    }
+
+    /// Enter a healthy-band hold state with tighter intake and stronger filtering.
+    pub fn enter_hold_band(&mut self) {
+        self.reset();
+        self.gate = 0.20;
+        self.filt = 0.55;
+    }
+
+    /// Enter a fixed elevated posture before the hard discharge band.
+    pub fn enter_elevated_band(&mut self) {
+        self.reset();
+        self.gate = 0.08;
+        self.filt = 0.90;
+    }
+
+    /// Pull PI state back toward zero without an abrupt hard reset.
+    pub fn decay_integrators_toward_zero(&mut self, factor: f32) {
+        let factor = factor.clamp(0.0, 1.0);
+        self.integ_fill *= factor;
+        self.integ_lam *= factor;
+        self.integ_geom *= factor;
+    }
+
     pub fn take_shed_fraction(&mut self) -> f32 {
         let frac = self.shed_fraction;
         self.shed_fraction = 0.0;
         frac
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fill_error_is_scaled_before_integrating() {
+        let mut pi = PIRegState::new(PIRegCfg::default());
+        pi.cfg.target_fill = 55.0;
+        pi.step(75.0, 1.05, 1.0);
+
+        assert!((pi.integ_fill - 1.0).abs() < 1e-6);
+        assert!((pi.gate - 0.92).abs() < 1e-6);
+        assert!((pi.filt - 0.08).abs() < 1e-6);
+    }
+
+    #[test]
+    fn enter_overfill_brake_resets_integrators_and_actuators() {
+        let mut pi = PIRegState::new(PIRegCfg::default());
+        pi.integ_fill = 1.5;
+        pi.integ_lam = -0.8;
+        pi.integ_geom = 0.6;
+        pi.gate = 0.42;
+        pi.filt = 0.33;
+
+        pi.enter_overfill_brake();
+
+        assert_eq!(pi.integ_fill, 0.0);
+        assert_eq!(pi.integ_lam, 0.0);
+        assert_eq!(pi.integ_geom, 0.0);
+        assert_eq!(pi.gate, 0.03);
+        assert_eq!(pi.filt, 1.0);
+    }
+
+    #[test]
+    fn enter_hold_band_resets_integrators_and_sets_hold_controls() {
+        let mut pi = PIRegState::new(PIRegCfg::default());
+        pi.integ_fill = 0.9;
+        pi.integ_lam = 0.7;
+        pi.integ_geom = -0.4;
+        pi.gate = 0.88;
+        pi.filt = 0.12;
+
+        pi.enter_hold_band();
+
+        assert_eq!(pi.integ_fill, 0.0);
+        assert_eq!(pi.integ_lam, 0.0);
+        assert_eq!(pi.integ_geom, 0.0);
+        assert_eq!(pi.gate, 0.20);
+        assert_eq!(pi.filt, 0.55);
+    }
+
+    #[test]
+    fn enter_elevated_band_resets_integrators_and_sets_elevated_controls() {
+        let mut pi = PIRegState::new(PIRegCfg::default());
+        pi.integ_fill = -1.1;
+        pi.integ_lam = 0.2;
+        pi.integ_geom = 1.4;
+        pi.gate = 0.05;
+        pi.filt = 1.0;
+
+        pi.enter_elevated_band();
+
+        assert_eq!(pi.integ_fill, 0.0);
+        assert_eq!(pi.integ_lam, 0.0);
+        assert_eq!(pi.integ_geom, 0.0);
+        assert_eq!(pi.gate, 0.08);
+        assert_eq!(pi.filt, 0.90);
+    }
+
+    #[test]
+    fn decay_integrators_toward_zero_scales_existing_state() {
+        let mut pi = PIRegState::new(PIRegCfg::default());
+        pi.integ_fill = 1.0;
+        pi.integ_lam = -0.5;
+        pi.integ_geom = 0.25;
+
+        pi.decay_integrators_toward_zero(0.5);
+
+        assert_eq!(pi.integ_fill, 0.5);
+        assert_eq!(pi.integ_lam, -0.25);
+        assert_eq!(pi.integ_geom, 0.125);
     }
 }

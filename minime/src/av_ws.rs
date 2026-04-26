@@ -11,11 +11,47 @@
 // Usage:
 //   spawn_av_gpu_server(video_tx, AvServerCfg::default()).await?;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use futures_util::{SinkExt, StreamExt};
+use std::{path::PathBuf, time::Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+const AV_SHADER_RELATIVE_PATH: &str = "shaders/av_features.metal";
+const KEEPALIVE_PING_INTERVAL_SECS: u64 = 20;
+const KEEPALIVE_TIMEOUT_SECS: u64 = 60;
+
+fn connection_timed_out(last_rx: Instant, last_pong: Instant, now: Instant) -> bool {
+    now.duration_since(last_rx) > std::time::Duration::from_secs(KEEPALIVE_TIMEOUT_SECS)
+        && now.duration_since(last_pong) > std::time::Duration::from_secs(KEEPALIVE_TIMEOUT_SECS)
+}
+
+fn resolve_av_shader_path() -> Result<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join(AV_SHADER_RELATIVE_PATH));
+        candidates.push(cwd.join("minime").join(AV_SHADER_RELATIVE_PATH));
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        let crate_root = exe
+            .parent()
+            .and_then(|path| path.parent())
+            .and_then(|path| path.parent());
+        if let Some(crate_root) = crate_root {
+            candidates.push(crate_root.join(AV_SHADER_RELATIVE_PATH));
+        }
+    }
+
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(AV_SHADER_RELATIVE_PATH));
+
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| anyhow!("could not locate {}", AV_SHADER_RELATIVE_PATH))
+}
 
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
@@ -138,30 +174,33 @@ async fn handle_av_client(
     let mut ws = accept_async(stream).await?;
     let mut frame_count = 0u64;
 
-    // Keepalive: periodic ping and pong timeout watchdog
-    let mut ping_timer = tokio::time::interval(std::time::Duration::from_secs(10));
-    let mut last_pong = std::time::Instant::now();
+    let mut ping_timer =
+        tokio::time::interval(std::time::Duration::from_secs(KEEPALIVE_PING_INTERVAL_SECS));
+    let mut last_pong = Instant::now();
+    let mut last_rx = last_pong;
+    let mut disconnect_reason = "stream_ended";
 
     loop {
         tokio::select! {
-            // Periodic server ping (keeps connection alive, detects dead clients)
             _ = ping_timer.tick() => {
                 if ws.send(Message::Ping(Vec::new())).await.is_err() {
-                    eprintln!("Failed to send ping to GPU client, closing");
+                    disconnect_reason = "send_ping_failed";
                     break;
                 }
-                // Check pong timeout (30 seconds without response = dead connection)
-                if last_pong.elapsed() > std::time::Duration::from_secs(30) {
-                    eprintln!("Pong timeout from GPU client, closing");
+                if connection_timed_out(last_rx, last_pong, Instant::now()) {
+                    disconnect_reason = "inactivity_timeout";
                     break;
                 }
             }
-            // Handle incoming messages
             msg_result = ws.next() => {
-                let Some(msg_result) = msg_result else { break };
+                let Some(msg_result) = msg_result else {
+                    disconnect_reason = "stream_ended";
+                    break;
+                };
                 match msg_result {
                     Ok(msg) => match msg {
                         Message::Binary(data) => {
+                            last_rx = Instant::now();
                             if data.len() != expected_bytes {
                                 eprintln!(
                                     "⚠️  Frame size mismatch: got {} bytes, want {}",
@@ -179,26 +218,29 @@ async fn handle_av_client(
                             frame_count += 1;
                         }
                         Message::Ping(payload) => {
-                            // Reply to client ping with pong
+                            last_rx = Instant::now();
                             if let Err(e) = ws.send(Message::Pong(payload)).await {
                                 eprintln!("❌ Pong send error: {}", e);
+                                disconnect_reason = "pong_send_failed";
                                 break;
                             }
                         }
                         Message::Pong(_) => {
-                            // Client replied to our ping, update watchdog
-                            last_pong = std::time::Instant::now();
+                            let now = Instant::now();
+                            last_rx = now;
+                            last_pong = now;
                         }
                         Message::Close(_) => {
-                            println!("🛑 GPU A/V client disconnected (close frame)");
+                            disconnect_reason = "close_frame";
                             break;
                         }
                         _ => {
-                            // Ignore text, etc.
+                            last_rx = Instant::now();
                         }
                     },
                     Err(e) => {
                         eprintln!("❌ WebSocket error: {}", e);
+                        disconnect_reason = "receive_error";
                         break;
                     }
                 }
@@ -207,10 +249,25 @@ async fn handle_av_client(
     }
 
     println!(
-        "📹 GPU A/V client handler finished ({} frames received)",
-        frame_count
+        "📹 GPU A/V client handler finished ({} frames received, reason={})",
+        frame_count, disconnect_reason
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_timeout_requires_stale_receive_and_stale_pong() {
+        let now = Instant::now();
+        let stale = now - std::time::Duration::from_secs(KEEPALIVE_TIMEOUT_SECS + 1);
+        let fresh = now - std::time::Duration::from_secs(5);
+
+        assert!(connection_timed_out(stale, stale, now));
+        assert!(!connection_timed_out(fresh, stale, now));
+    }
 }
 
 /// V2: GPU server that pushes directly to the new SensoryBus (fix pack architecture)
@@ -219,6 +276,7 @@ pub async fn spawn_av_gpu_server_v2(
     sensory_bus: std::sync::Arc<crate::sensory_bus::SensoryBus>,
 ) -> Result<()> {
     use crate::sensory_bus::NowMs;
+    let shader_path = resolve_av_shader_path()?;
 
     // Channel for raw frames to GPU processor
     let (frame_tx, mut frame_rx) = tokio_mpsc::channel::<Vec<u8>>(16);
@@ -228,7 +286,9 @@ pub async fn spawn_av_gpu_server_v2(
     tokio::spawn(async move {
         // Initialize GPU once
         let mut av = match crate::av_gpu::AvGpu::new(
-            "shaders/av_features.metal",
+            shader_path
+                .to_str()
+                .expect("resolved shader path is valid UTF-8"),
             crate::av_gpu::MemMode::Shared,
         ) {
             Ok(mut gpu) => {
@@ -244,7 +304,10 @@ pub async fn spawn_av_gpu_server_v2(
             }
         };
 
-        println!("✅ GPU initialized (Metal unified memory)");
+        println!(
+            "✅ GPU initialized (Metal unified memory) using {}",
+            shader_path.display()
+        );
 
         let mut frame_count = 0u64;
         while let Some(frame_bytes) = frame_rx.recv().await {
