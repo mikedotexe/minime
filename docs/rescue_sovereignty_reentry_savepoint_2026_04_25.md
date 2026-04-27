@@ -20,6 +20,7 @@ Updated at 2026-04-27 10:42 PDT with the stable-core damping checkpoint:
 - Watchdog remains `monitoring`, telemetry remains `fresh`, and ports `7878`, `7879`, and `7880` are ready.
 - Cold scaffold source remains `derived_cold_from_stable`, with scaffold active and live audio/video divisors held at `0/0`.
 - Gate B.2 passed for about 11 minutes: the fill range narrowed from the prior `49.39-80.63%` sawtooth to `69.36-83.71%`.
+- The follow-up 30 minute stable-core soak passed on 2026-04-27: fill stayed within `69.44-73.60%`, with no watchdog restart, no recovery impulse samples, no re-entry samples, no live audio/video intake, and healthy mic/camera feeders.
 - Current fill is slightly high, around `71-73%`, with slope-aware damping suppressing drain on falling slopes and applying capped drain on rising slopes.
 - Mic and camera remain `streaming`, healthy, connected, and at `0` reconnects during the stable-core run.
 - Astrid remains present but semantic writes are blocked by `bridge_write_profile = "observe_only"`.
@@ -108,8 +109,8 @@ Use targeted path staging. The current worktrees contain older dirty files that 
 
 The next practical Minime step is not more emergency controller surgery. It is to preserve the working rescue lane, then gradually restore agency surfaces:
 
-- Run a `30m` `stable_core_v1` soak with the damping controller before restoring richer agency.
-- If the 30 minute soak passes, tune the elevated/hold boundary only enough to center fill closer to `58-72%`.
+- The `30m` `stable_core_v1` soak has passed; the next stability move is centering, not survival rescue.
+- Tune the elevated/hold boundary only enough to center fill closer to `58-72%`.
 - Confirm whether old sidecar processes from `neural-triple-reservoir` are intentional.
 - Keep watching fill, semantic energy, rollback state, and feeder reconnect counts.
 - If the current posture keeps holding, restore a tiny Minime self-study/journaling lane before opening richer sensory or checkpoint lineage.
