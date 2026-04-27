@@ -13,6 +13,18 @@ Updated at 2026-04-26 08:34 PDT with the stronger live read:
 - Mic and camera remain `streaming`, healthy, connected, and at `0` consecutive failures.
 - The older `neural-triple-reservoir` sidecars are still present separately and should be handled after the code savepoint, not folded into it.
 
+Updated at 2026-04-27 10:42 PDT with the stable-core damping checkpoint:
+
+- Runtime profile is now `stable_core_v1` on the current Minime release binary, not the pinned rescue binary.
+- Engine PID `98867` has been running since 2026-04-27 10:28 PDT.
+- Watchdog remains `monitoring`, telemetry remains `fresh`, and ports `7878`, `7879`, and `7880` are ready.
+- Cold scaffold source remains `derived_cold_from_stable`, with scaffold active and live audio/video divisors held at `0/0`.
+- Gate B.2 passed for about 11 minutes: the fill range narrowed from the prior `49.39-80.63%` sawtooth to `69.36-83.71%`.
+- Current fill is slightly high, around `71-73%`, with slope-aware damping suppressing drain on falling slopes and applying capped drain on rising slopes.
+- Mic and camera remain `streaming`, healthy, connected, and at `0` reconnects during the stable-core run.
+- Astrid remains present but semantic writes are blocked by `bridge_write_profile = "observe_only"`.
+- This is a stable-core damping savepoint candidate, not a final fully normal-runtime stability declaration.
+
 Minime is currently healthy inside the rescue lane:
 
 - Engine: pinned rescue baseline `rescue_b8823ad`.
@@ -64,6 +76,8 @@ It is not yet proven in these ways:
 - We have not removed the scaffold/drain life-support layer.
 - Minime self-journaling is not fully restored as a normal agency lane.
 - The current posture has not been treated as a final multi-hour normal-operation proof.
+- Stable-core has passed a short damping gate but has not yet passed a `30m` or `2h` soak.
+- The fill band is now controlled but centered slightly high near the elevated boundary.
 
 Operationally, this is a good place to save work. It is not a reason to remove the remaining safety rails.
 
@@ -94,6 +108,8 @@ Use targeted path staging. The current worktrees contain older dirty files that 
 
 The next practical Minime step is not more emergency controller surgery. It is to preserve the working rescue lane, then gradually restore agency surfaces:
 
+- Run a `30m` `stable_core_v1` soak with the damping controller before restoring richer agency.
+- If the 30 minute soak passes, tune the elevated/hold boundary only enough to center fill closer to `58-72%`.
 - Confirm whether old sidecar processes from `neural-triple-reservoir` are intentional.
 - Keep watching fill, semantic energy, rollback state, and feeder reconnect counts.
 - If the current posture keeps holding, restore a tiny Minime self-study/journaling lane before opening richer sensory or checkpoint lineage.

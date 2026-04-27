@@ -40,7 +40,21 @@ if [ ! -x "$RESCUE_BIN" ]; then
 fi
 
 mkdir -p "$PROJECT_DIR/logs" "$PROJECT_DIR/workspace"
-"$PYTHON_BIN" "$INVESTIGATION_SCRIPT" ensure-active-profile >/dev/null
+profile_json="$("$PYTHON_BIN" "$INVESTIGATION_SCRIPT" ensure-active-profile)"
+active_engine_bin="$("$PYTHON_BIN" - "$profile_json" "$RESCUE_BIN" <<'PY'
+import json
+import sys
+payload = json.loads(sys.argv[1])
+print(payload.get("engine_binary") or sys.argv[2])
+PY
+)"
+if [ ! -x "$active_engine_bin" ]; then
+    if [ "$active_engine_bin" = "$PROJECT_DIR/minime/target/release/minime" ]; then
+        cargo build --release --manifest-path "$PROJECT_DIR/minime/Cargo.toml"
+    else
+        cargo build --release --manifest-path "$RESCUE_WORKTREE/minime/Cargo.toml"
+    fi
+fi
 "$PYTHON_BIN" "$INVESTIGATION_SCRIPT" quiesce-optional-services >/dev/null
 
 launchctl bootout "$DOMAIN/com.minime.engine-rescue-watchdog" >/dev/null 2>&1 || true
@@ -64,7 +78,7 @@ PY
 last_restart_at="$started_at"
 "$PYTHON_BIN" "$STATUS_SCRIPT" write-active \
   --watchdog-state starting \
-  --binary-path "$RESCUE_BIN" \
+  --binary-path "$active_engine_bin" \
   --started-at "$started_at" \
   --last-restart-at "$last_restart_at"
 

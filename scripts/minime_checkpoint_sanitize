@@ -1,0 +1,7 @@
+#!/usr/bin/env zsh
+set -euo pipefail
+
+PROJECT_DIR="/Users/v/other/minime"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+exec "$PYTHON_BIN" "$PROJECT_DIR/scripts/stable_core_ops.py" checkpoint-sanitize "$@"

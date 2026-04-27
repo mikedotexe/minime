@@ -56,6 +56,13 @@ ADVISORY_PORT = "7880"
 LSOF_BIN = shutil.which("lsof") or "/usr/sbin/lsof"
 
 
+def refresh_rescue_binary_from_profile() -> dict[str, Any]:
+    global RESCUE_BINARY
+    profile = ensure_active_profile(CONTEXT)
+    RESCUE_BINARY = Path(profile.get("engine_binary") or RESCUE_BINARY)
+    return profile
+
+
 def log(message: str) -> None:
     timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     print(f"[{timestamp}] {message}", flush=True)
@@ -287,7 +294,7 @@ def restart_engine(reason: str, *, status: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> None:
     log("Minime rescue watchdog active")
-    ensure_active_profile(CONTEXT)
+    refresh_rescue_binary_from_profile()
     status = load_status()
     if status.get("mode") != "rescue_b8823ad":
         status = mark_state(

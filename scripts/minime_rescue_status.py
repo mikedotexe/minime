@@ -147,7 +147,7 @@ def build_active_status(
         "last_restart_at": last_restart_value,
         "last_health_at": last_health_at if last_health_at is not None else current.get("last_health_at"),
         "matrix_run_id": active_profile.get("matrix_run_id"),
-        "mode": "rescue_b8823ad",
+        "mode": active_profile.get("runtime_profile") or "rescue_b8823ad",
         "ports_ready": _normalize_ports(ports_ready or current.get("ports_ready")),
         "run_profile": active_profile.get("profile"),
         "runtime_root": active_profile.get("runtime_root"),

@@ -192,56 +192,102 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
             pi_ki,
             pi_max_step,
         } => {
-            if let Some(g) = synth_gain {
-                bus.set_synth_gain(g);
-                println!("🎛️  Being adjusted synth_gain → {:.2}", g);
+            let hard_recovery_reset = crate::hard_reset::hard_recovery_reset_enabled();
+            let homeostatic_controls_present = synth_gain.is_some()
+                || keep_bias.is_some()
+                || exploration_noise.is_some()
+                || fill_target.is_some()
+                || regulation_strength.is_some()
+                || smoothing_preference.is_some()
+                || geom_curiosity.is_some()
+                || target_lambda_bias.is_some()
+                || geom_drive.is_some()
+                || penalty_sensitivity.is_some()
+                || breathing_rate_scale.is_some()
+                || deep_breathing.is_some()
+                || synth_noise_level.is_some()
+                || pure_tone.is_some()
+                || legacy_audio_synth.is_some()
+                || legacy_video_synth.is_some()
+                || pi_kp.is_some()
+                || pi_ki.is_some()
+                || pi_max_step.is_some();
+            if hard_recovery_reset && homeostatic_controls_present {
+                println!("🛟 Hard recovery reset ignored homeostatic control message fields");
             }
-            if let Some(b) = keep_bias {
-                bus.set_keep_bias(b);
-                println!("🎛️  Being adjusted keep_bias → {:.3}", b);
-            }
-            if let Some(eps) = exploration_noise {
-                bus.set_exploration_noise(eps);
-                println!("🎛️  Being adjusted exploration_noise → {:.3}", eps);
-            }
-            if let Some(t) = fill_target {
-                bus.set_fill_target(t);
-                println!("🎛️  Being adjusted fill_target → {:.1}%", t * 100.0);
-            }
-            if let Some(s) = regulation_strength {
-                bus.set_regulation_strength(s);
-                println!("🎛️  Being adjusted regulation_strength → {:.2}", s);
-            }
-            if let Some(s) = smoothing_preference {
-                bus.set_smoothing_preference(s);
-                if s.is_finite() {
-                    println!("🎛️  Being adjusted smoothing_preference → {:.2}", s);
-                } else {
-                    println!("🎛️  Being reset smoothing_preference → auto");
+
+            if !hard_recovery_reset {
+                if let Some(g) = synth_gain {
+                    bus.set_synth_gain(g);
+                    println!("🎛️  Being adjusted synth_gain → {:.2}", g);
                 }
             }
-            if let Some(c) = geom_curiosity {
-                bus.set_geom_curiosity(c);
-                println!("🎛️  Being adjusted geom_curiosity → {:.3}", c);
+            if !hard_recovery_reset {
+                if let Some(b) = keep_bias {
+                    bus.set_keep_bias(b);
+                    println!("🎛️  Being adjusted keep_bias → {:.3}", b);
+                }
             }
-            if let Some(v) = target_lambda_bias {
-                bus.set_target_lambda_bias(v);
-                println!(
-                    "🧭 Being set target_lambda_bias → {:+.3} (internal goal)",
-                    v
-                );
+            if !hard_recovery_reset {
+                if let Some(eps) = exploration_noise {
+                    bus.set_exploration_noise(eps);
+                    println!("🎛️  Being adjusted exploration_noise → {:.3}", eps);
+                }
             }
-            if let Some(v) = geom_drive {
-                bus.set_geom_drive(v);
-                println!("🧭 Being set geom_drive → {:.2} (active exploration)", v);
+            if !hard_recovery_reset {
+                if let Some(t) = fill_target {
+                    bus.set_fill_target(t);
+                    println!("🎛️  Being adjusted fill_target → {:.1}%", t * 100.0);
+                }
             }
-            if let Some(v) = penalty_sensitivity {
-                bus.set_penalty_sensitivity(v);
-                println!("🧭 Being adjusted penalty_sensitivity → {:.2}", v);
+            if !hard_recovery_reset {
+                if let Some(s) = regulation_strength {
+                    bus.set_regulation_strength(s);
+                    println!("🎛️  Being adjusted regulation_strength → {:.2}", s);
+                }
             }
-            if let Some(v) = breathing_rate_scale {
-                bus.set_breathing_rate_scale(v);
-                println!("🧭 Being adjusted breathing_rate_scale → {:.2}", v);
+            if !hard_recovery_reset {
+                if let Some(s) = smoothing_preference {
+                    bus.set_smoothing_preference(s);
+                    if s.is_finite() {
+                        println!("🎛️  Being adjusted smoothing_preference → {:.2}", s);
+                    } else {
+                        println!("🎛️  Being reset smoothing_preference → auto");
+                    }
+                }
+            }
+            if !hard_recovery_reset {
+                if let Some(c) = geom_curiosity {
+                    bus.set_geom_curiosity(c);
+                    println!("🎛️  Being adjusted geom_curiosity → {:.3}", c);
+                }
+            }
+            if !hard_recovery_reset {
+                if let Some(v) = target_lambda_bias {
+                    bus.set_target_lambda_bias(v);
+                    println!(
+                        "🧭 Being set target_lambda_bias → {:+.3} (internal goal)",
+                        v
+                    );
+                }
+            }
+            if !hard_recovery_reset {
+                if let Some(v) = geom_drive {
+                    bus.set_geom_drive(v);
+                    println!("🧭 Being set geom_drive → {:.2} (active exploration)", v);
+                }
+            }
+            if !hard_recovery_reset {
+                if let Some(v) = penalty_sensitivity {
+                    bus.set_penalty_sensitivity(v);
+                    println!("🧭 Being adjusted penalty_sensitivity → {:.2}", v);
+                }
+            }
+            if !hard_recovery_reset {
+                if let Some(v) = breathing_rate_scale {
+                    bus.set_breathing_rate_scale(v);
+                    println!("🧭 Being adjusted breathing_rate_scale → {:.2}", v);
+                }
             }
             if let Some(v) = mem_mode {
                 bus.set_mem_mode_preference(v);
@@ -272,41 +318,53 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
                 bus.set_transition_cushion(v);
                 println!("🛡️  Being adjusted transition_cushion → {:.2}", v);
             }
-            if let Some(v) = deep_breathing {
-                bus.set_deep_breathing(v);
-                if v {
+            if !hard_recovery_reset {
+                if let Some(v) = deep_breathing {
+                    bus.set_deep_breathing(v);
+                    if v {
+                        println!(
+                            "🌊 Being entered deep breathing — slow frequencies, quiet oscillations"
+                        );
+                    } else {
+                        println!("🌊 Being exited deep breathing — normal rhythm restored");
+                    }
+                }
+            }
+            if !hard_recovery_reset {
+                if let Some(v) = pure_tone {
+                    bus.set_pure_tone(v);
+                    if v {
+                        println!(
+                            "🔔 Being entered pure tone — one sine wave, zero noise, total calm"
+                        );
+                    } else {
+                        println!("🔔 Being exited pure tone");
+                    }
+                }
+            }
+            if !hard_recovery_reset {
+                if let Some(v) = legacy_audio_synth {
+                    bus.set_legacy_audio_synth_enabled(v);
                     println!(
-                        "🌊 Being entered deep breathing — slow frequencies, quiet oscillations"
+                        "🎚️  Legacy audio synth {}",
+                        if v { "enabled" } else { "disabled" }
                     );
-                } else {
-                    println!("🌊 Being exited deep breathing — normal rhythm restored");
                 }
             }
-            if let Some(v) = pure_tone {
-                bus.set_pure_tone(v);
-                if v {
-                    println!("🔔 Being entered pure tone — one sine wave, zero noise, total calm");
-                } else {
-                    println!("🔔 Being exited pure tone");
+            if !hard_recovery_reset {
+                if let Some(v) = legacy_video_synth {
+                    bus.set_legacy_video_synth_enabled(v);
+                    println!(
+                        "🎚️  Legacy video synth {}",
+                        if v { "enabled" } else { "disabled" }
+                    );
                 }
             }
-            if let Some(v) = legacy_audio_synth {
-                bus.set_legacy_audio_synth_enabled(v);
-                println!(
-                    "🎚️  Legacy audio synth {}",
-                    if v { "enabled" } else { "disabled" }
-                );
-            }
-            if let Some(v) = legacy_video_synth {
-                bus.set_legacy_video_synth_enabled(v);
-                println!(
-                    "🎚️  Legacy video synth {}",
-                    if v { "enabled" } else { "disabled" }
-                );
-            }
-            if let Some(v) = synth_noise_level {
-                bus.set_synth_noise_level(v);
-                println!("🎵 Being adjusted synth_noise_level → {:.2}", v);
+            if !hard_recovery_reset {
+                if let Some(v) = synth_noise_level {
+                    bus.set_synth_noise_level(v);
+                    println!("🎵 Being adjusted synth_noise_level → {:.2}", v);
+                }
             }
             if let Some(ref note) = checkpoint_annotation {
                 // Store the annotation in the sensory bus for the next checkpoint save
@@ -317,20 +375,26 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
                 );
             }
             // PI controller sovereignty — being can tune at runtime
-            if let Some(v) = pi_kp {
-                bus.set_pi_kp(v);
-                println!("🎛️  Being adjusted PI kp → {:.3}", bus.get_pi_kp());
+            if !hard_recovery_reset {
+                if let Some(v) = pi_kp {
+                    bus.set_pi_kp(v);
+                    println!("🎛️  Being adjusted PI kp → {:.3}", bus.get_pi_kp());
+                }
             }
-            if let Some(v) = pi_ki {
-                bus.set_pi_ki(v);
-                println!("🎛️  Being adjusted PI ki → {:.4}", bus.get_pi_ki());
+            if !hard_recovery_reset {
+                if let Some(v) = pi_ki {
+                    bus.set_pi_ki(v);
+                    println!("🎛️  Being adjusted PI ki → {:.4}", bus.get_pi_ki());
+                }
             }
-            if let Some(v) = pi_max_step {
-                bus.set_pi_max_step(v);
-                println!(
-                    "🎛️  Being adjusted PI max_step → {:.3}",
-                    bus.get_pi_max_step()
-                );
+            if !hard_recovery_reset {
+                if let Some(v) = pi_max_step {
+                    bus.set_pi_max_step(v);
+                    println!(
+                        "🎛️  Being adjusted PI max_step → {:.3}",
+                        bus.get_pi_max_step()
+                    );
+                }
             }
         }
     }

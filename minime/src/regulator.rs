@@ -375,21 +375,21 @@ impl Default for PIRegCfg {
             .unwrap_or(false);
 
         let mut cfg = Self {
-            target_fill: 0.55,        // 55% EigenFill target (matches CLI default)
+            target_fill: 0.55, // 55% EigenFill target (matches CLI default)
             // Golden Reset (2026-04-02): restored to values from commit 1167939
             // which produced 62-68% fill for 4+ hours (326K DB records as evidence).
             // Post-golden "improvements" weakened the controller 40-50% and shifted
             // equilibrium to 78-83%. Restoring proven parameters.
             target_lambda1_rel: 1.05, // Golden: keep λ₁ close to baseline
             target_geom_rel: 1.00,    // Golden: stay near geometric baseline
-            geom_weight: 0.70, // Golden: geometry and fill contribute equally
+            geom_weight: 0.70,        // Golden: geometry and fill contribute equally
             geom_clamp_hi: 1.66,
             geom_release: 1.32,
             geom_gate_min: 0.06,
             geom_filter_boost: 0.35,
             geom_shed_fraction: 0.45,
-            kp: 0.85, // Golden: strong proportional response
-            ki: 0.14, // Golden: meaningful integral accumulation
+            kp: 0.85,       // Golden: strong proportional response
+            ki: 0.14,       // Golden: meaningful integral accumulation
             max_step: 0.08, // Golden: decisive correction steps
             curiosity_gate_boost: 0.05,
             intrinsic_wander: 0.03, // Golden: tight target tracking (±3%)

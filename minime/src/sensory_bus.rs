@@ -387,6 +387,10 @@ pub struct SensoryBus {
     // probabilistic gate (set by PI)
     gate: Mutex<f32>,
     rng: Mutex<SmallRng>,
+    live_audio_divisor: Mutex<u32>,
+    live_video_divisor: Mutex<u32>,
+    live_audio_counter: Mutex<u64>,
+    live_video_counter: Mutex<u64>,
 
     // Self-regulation controls (set by being via WebSocket)
     synth_gain: Mutex<f32>, // multiplier for synthetic signal amplitude (default 1.0)
@@ -456,6 +460,10 @@ impl SensoryBus {
             llava: Mutex::new(SemanticLane::new()),
             gate: Mutex::new(1.0),
             rng: Mutex::new(SmallRng::seed_from_u64(seed)),
+            live_audio_divisor: Mutex::new(1),
+            live_video_divisor: Mutex::new(1),
+            live_audio_counter: Mutex::new(0),
+            live_video_counter: Mutex::new(0),
             synth_gain: Mutex::new(1.0),
             legacy_audio_synth_enabled: Mutex::new(true),
             legacy_video_synth_enabled: Mutex::new(true),
@@ -497,6 +505,22 @@ impl SensoryBus {
     #[inline]
     pub fn get_admit_fraction(&self) -> f32 {
         *self.gate.lock()
+    }
+
+    #[inline]
+    pub fn set_live_intake_divisors(&self, audio_divisor: u32, video_divisor: u32) {
+        *self.live_audio_divisor.lock() = audio_divisor;
+        *self.live_video_divisor.lock() = video_divisor;
+    }
+
+    #[inline]
+    pub fn live_audio_divisor(&self) -> u32 {
+        *self.live_audio_divisor.lock()
+    }
+
+    #[inline]
+    pub fn live_video_divisor(&self) -> u32 {
+        *self.live_video_divisor.lock()
     }
 
     #[inline]
@@ -834,6 +858,9 @@ impl SensoryBus {
         if features.len() < VIDEO_DIM {
             return;
         }
+        if source == LaneSource::External && !self.should_admit_live_video() {
+            return;
+        }
         if !self.should_admit() {
             return;
         }
@@ -858,6 +885,9 @@ impl SensoryBus {
         if features.len() < AUDIO_DIM {
             return;
         }
+        if source == LaneSource::External && !self.should_admit_live_audio() {
+            return;
+        }
         if !self.should_admit() {
             return;
         }
@@ -875,6 +905,29 @@ impl SensoryBus {
         let p = *self.gate.lock();
         let x: f32 = self.rng.lock().gen();
         x <= p
+    }
+
+    #[inline]
+    fn should_admit_live_audio(&self) -> bool {
+        Self::should_admit_by_divisor(&self.live_audio_divisor, &self.live_audio_counter)
+    }
+
+    #[inline]
+    fn should_admit_live_video(&self) -> bool {
+        Self::should_admit_by_divisor(&self.live_video_divisor, &self.live_video_counter)
+    }
+
+    fn should_admit_by_divisor(divisor: &Mutex<u32>, counter: &Mutex<u64>) -> bool {
+        let divisor = *divisor.lock();
+        if divisor == 0 {
+            return false;
+        }
+        if divisor == 1 {
+            return true;
+        }
+        let mut count = counter.lock();
+        *count = count.saturating_add(1);
+        *count % u64::from(divisor) == 0
     }
 
     /// Drain up to batch_max samples. Each output is an 18D vector: [video8 | audio8 | aux2].
@@ -1025,6 +1078,31 @@ mod tests {
         assert!(sample[VIDEO_DIM..(VIDEO_DIM + AUDIO_DIM)]
             .iter()
             .all(|v| v.abs() < 0.01));
+    }
+
+    #[test]
+    fn live_intake_divisors_drop_external_without_killing_synthetic_lanes() {
+        let bus = SensoryBus::new(8, 4, 42);
+        bus.set_live_intake_divisors(0, 0);
+        bus.push_audio(vec![1.0; AUDIO_DIM], NowMs::now());
+        bus.push_video(vec![1.0; VIDEO_DIM], NowMs::now());
+        assert_eq!(bus.backlog_size(), 0);
+
+        bus.push_audio_synthetic(vec![1.0; AUDIO_DIM], NowMs::now());
+        assert_eq!(bus.backlog_size(), 1);
+    }
+
+    #[test]
+    fn live_intake_divisors_admit_every_nth_external_sample() {
+        let bus = SensoryBus::new(16, 8, 42);
+        bus.set_live_intake_divisors(2, 3);
+        for _ in 0..4 {
+            bus.push_audio(vec![1.0; AUDIO_DIM], NowMs::now());
+        }
+        for _ in 0..6 {
+            bus.push_video(vec![1.0; VIDEO_DIM], NowMs::now());
+        }
+        assert_eq!(bus.backlog_size(), 4);
     }
 
     #[test]

@@ -264,6 +264,75 @@ class TestMinimeRescueInvestigation(unittest.TestCase):
             self.assertIn("MINIME_RESCUE_LIVE_AUDIO_DIVISOR=6", env)
             self.assertIn("MINIME_RESCUE_LIVE_VIDEO_DIVISOR=6", env)
 
+    def test_prepare_profile_budgeted_sovereignty_restores_richer_cadence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = build_context(Path(tmp))
+            seed_live_db(context.live_db_path)
+
+            profile = prepare_profile(
+                context,
+                profile_name="bridge_budgeted_sovereignty_v1",
+                state_variant="current_live_workspace",
+                hold_window_secs=1200,
+                matrix_run_id="run-budgeted-sovereignty",
+                notes=None,
+            )
+
+            self.assertEqual(profile["bridge_write_profile"], "budgeted_sovereignty_v1")
+            self.assertEqual(profile["limited_write_cooldown_secs"], 60)
+            self.assertEqual(profile["limited_write_feature_scale"], 0.14)
+            self.assertEqual(profile["limited_write_max_abs"], 0.28)
+            self.assertEqual(profile["limited_write_max_fill_pct"], 76.0)
+            self.assertEqual(profile["limited_write_peak_fill_max_pct"], 78.0)
+            self.assertEqual(profile["limited_write_rollback_fill_pct"], 82.0)
+            self.assertEqual(profile["rescue_live_audio_divisor"], 4)
+            self.assertEqual(profile["rescue_live_video_divisor"], 4)
+            self.assertEqual(profile["rescue_live_intake_stages"], ["hold", "elevated"])
+            self.assertIn("research_note", profile["limited_write_allowed_modes"])
+
+    def test_prepare_profile_stable_core_exports_new_core_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = build_context(Path(tmp))
+            seed_live_db(context.live_db_path)
+
+            profile = prepare_profile(
+                context,
+                profile_name="stable_core_v1",
+                state_variant="fresh_workspace_no_checkpoints",
+                hold_window_secs=1200,
+                matrix_run_id="run-stable-core",
+                notes=None,
+            )
+            env = emit_launch_env(context)
+
+            self.assertTrue(profile["stable_core_enabled"])
+            self.assertEqual(profile["runtime_profile"], "stable_core_v1")
+            self.assertEqual(
+                profile["engine_binary"],
+                str(context.project_dir / "minime" / "target" / "release" / "minime"),
+            )
+            self.assertFalse(profile["bridge_write_enabled"])
+            self.assertFalse(profile["effective_bridge_write_enabled"])
+            self.assertEqual(profile["bridge_write_profile"], "observe_only")
+            self.assertFalse(profile["limited_write_enabled"])
+            self.assertEqual(profile["stable_core_agency_stage"], "self_journal")
+            self.assertEqual(profile["stable_core_agent_budget"], "self_journal_only")
+            self.assertFalse(profile["stable_core_checkpoint_lineage_enabled"])
+            self.assertFalse(profile["stable_core_neural_bundle_enabled"])
+            self.assertEqual(profile["rescue_live_audio_divisor"], 0)
+            self.assertEqual(profile["rescue_live_video_divisor"], 0)
+            self.assertEqual(profile["rescue_live_intake_stages"], [])
+            self.assertEqual(profile["requested_checkpoint_mode"], "disabled")
+            self.assertEqual(profile["checkpoint_mode"], "disabled")
+            self.assertIn("MINIME_RUNTIME_PROFILE=stable_core_v1", env)
+            self.assertIn(
+                f"MINIME_RESCUE_BINARY={profile['engine_binary']}",
+                env,
+            )
+            self.assertIn("MINIME_STABLE_CORE=1", env)
+            self.assertIn("MINIME_STABLE_CORE_AGENCY_STAGE=self_journal", env)
+            self.assertIn("MINIME_STABLE_CORE_ENABLE_CHECKPOINT_LINEAGE=0", env)
+
     def test_prepare_profile_keeps_bridge_online_but_disables_autonomy_for_telemetry_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = build_context(Path(tmp))

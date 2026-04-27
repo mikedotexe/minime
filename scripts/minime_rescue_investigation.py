@@ -35,6 +35,7 @@ MIC_USER_LABEL = "com.minime.mic-to-sensory"
 HOME_LAUNCH_AGENTS = Path.home() / "Library" / "LaunchAgents"
 DEFAULT_OPERATIONAL_PROFILE = "bridge_telemetry_only"
 DEFAULT_OPERATIONAL_STATE_VARIANT = "current_live_workspace"
+STABLE_CORE_PROFILE = "stable_core_v1"
 
 PROFILE_DEFINITIONS: dict[str, dict[str, Any]] = {
     "full_live": {
@@ -299,6 +300,120 @@ PROFILE_DEFINITIONS: dict[str, dict[str, Any]] = {
         "gpu_av_enabled": True,
         "description": "Sovereignty re-entry: broad autonomous expression modes and a faster semantic cadence are allowed while Minime retains hard physiological rollback authority.",
     },
+    "bridge_budgeted_sovereignty_v1": {
+        "bridge_enabled": True,
+        "bridge_write_enabled": True,
+        "bridge_autonomous_enabled": True,
+        "bridge_write_profile": "budgeted_sovereignty_v1",
+        "limited_write_enabled": True,
+        "limited_write_policy_version": 2,
+        "limited_write_cooldown_secs": 60,
+        "limited_write_feature_scale": 0.14,
+        "limited_write_max_abs": 0.28,
+        "limited_write_min_fill_pct": 54.0,
+        "limited_write_max_fill_pct": 76.0,
+        "limited_write_rising_epsilon_pct": 100.0,
+        "limited_write_health_max_age_secs": 5,
+        "limited_write_peak_fill_max_pct": 78.0,
+        "limited_write_allowed_stages": [
+            "hold",
+            "elevated",
+        ],
+        "limited_write_post_send_eval_secs": 120,
+        "limited_write_adverse_fill_rise_pct": 10.0,
+        "limited_write_adverse_cooldown_secs": 600,
+        "limited_write_rollback_target": "bridge_observe_only",
+        "limited_write_rollback_fill_pct": 82.0,
+        "limited_write_rollback_adverse_count": 2,
+        "limited_write_rollback_on_elevated_peak": False,
+        "limited_write_require_zero_live_divisors": False,
+        "limited_write_require_dampen_inquiry_text": False,
+        "limited_write_block_structural_dump_language": False,
+        "rescue_live_audio_divisor": 4,
+        "rescue_live_video_divisor": 4,
+        "rescue_live_intake_stages": [
+            "hold",
+            "elevated",
+        ],
+        "limited_write_allowed_modes": [
+            "dialogue_live",
+            "dialogue",
+            "dialogue_fallback",
+            "witness",
+            "mirror",
+            "daydream",
+            "aspiration",
+            "moment_capture",
+            "creation",
+            "initiate",
+            "introspect",
+            "experiment",
+            "evolve",
+            "self_study",
+            "research_note",
+        ],
+        "mic_enabled": True,
+        "camera_enabled": True,
+        "gpu_av_enabled": True,
+        "description": "Budgeted sovereignty: richer Astrid expression and hold/elevated sensory trickle, still bounded by health-scored rollback.",
+    },
+    "stable_core_v1": {
+        "bridge_enabled": True,
+        "bridge_write_enabled": False,
+        "bridge_autonomous_enabled": True,
+        "bridge_write_profile": "observe_only",
+        "limited_write_enabled": False,
+        "limited_write_policy_version": 2,
+        "limited_write_cooldown_secs": 0,
+        "limited_write_feature_scale": 0.0,
+        "limited_write_max_abs": 0.0,
+        "limited_write_min_fill_pct": 60.0,
+        "limited_write_max_fill_pct": 66.0,
+        "limited_write_rising_epsilon_pct": 0.0,
+        "limited_write_health_max_age_secs": 5,
+        "limited_write_peak_fill_max_pct": 68.0,
+        "limited_write_allowed_stages": [],
+        "limited_write_post_send_eval_secs": 120,
+        "limited_write_adverse_fill_rise_pct": 3.0,
+        "limited_write_adverse_cooldown_secs": 1800,
+        "limited_write_rollback_target": "bridge_observe_only",
+        "limited_write_rollback_fill_pct": 74.0,
+        "limited_write_rollback_adverse_count": 2,
+        "limited_write_rollback_on_elevated_peak": True,
+        "limited_write_require_zero_live_divisors": True,
+        "limited_write_require_dampen_inquiry_text": True,
+        "limited_write_block_structural_dump_language": True,
+        "rescue_live_audio_divisor": 0,
+        "rescue_live_video_divisor": 0,
+        "rescue_live_intake_stages": [],
+        "stable_core_enabled": True,
+        "stable_core_profile": STABLE_CORE_PROFILE,
+        "stable_core_agency_stage": "self_journal",
+        "stable_core_agent_budget": "self_journal_only",
+        "stable_core_checkpoint_lineage_enabled": False,
+        "stable_core_neural_bundle_enabled": False,
+        "limited_write_allowed_modes": [
+            "dialogue_live",
+            "dialogue",
+            "dialogue_fallback",
+            "witness",
+            "mirror",
+            "daydream",
+            "aspiration",
+            "moment_capture",
+            "creation",
+            "initiate",
+            "introspect",
+            "experiment",
+            "evolve",
+            "self_study",
+            "research_note",
+        ],
+        "mic_enabled": True,
+        "camera_enabled": True,
+        "gpu_av_enabled": True,
+        "description": "New Core V1 Gate B: promote the proven rescue physiology as the normal stability kernel with Astrid observe-only and zero live sensory intake until stable-core fill proves itself.",
+    },
     "no_bridge_ingress": {
         "bridge_enabled": False,
         "bridge_write_enabled": False,
@@ -426,6 +541,15 @@ class InvestigationContext:
     @property
     def engine_binary(self) -> Path:
         return self.rescue_worktree / "minime" / "target" / "release" / "minime"
+
+    @property
+    def current_engine_binary(self) -> Path:
+        return self.project_dir / "minime" / "target" / "release" / "minime"
+
+    def engine_binary_for_profile(self, profile_name: str) -> Path:
+        if profile_name == STABLE_CORE_PROFILE:
+            return self.current_engine_binary
+        return self.engine_binary
 
     @property
     def bridge_log_path(self) -> Path:
@@ -562,7 +686,7 @@ def build_default_profile(context: InvestigationContext) -> dict[str, Any]:
         "runtime_root": str(context.project_dir),
         "workspace_path": str(context.workspace_dir),
         "db_path": str(context.live_db_path),
-        "engine_binary": str(context.engine_binary),
+        "engine_binary": str(context.engine_binary_for_profile(DEFAULT_OPERATIONAL_PROFILE)),
         "engine_target_fill": RESCUE_TARGET_FILL,
         "reg_tick_secs": RESCUE_REG_TICK_SECS,
         "bridge_enabled": True,
@@ -799,13 +923,14 @@ def prepare_profile(
     )
     effective_mic_enabled = bool(profile_def["mic_enabled"])
     effective_camera_enabled = bool(profile_def["camera_enabled"])
+    engine_binary = context.engine_binary_for_profile(profile_name)
     payload = {
         "profile": profile_name,
         "state_variant": resolved_state_variant,
         "runtime_root": str(runtime_root),
         "workspace_path": runtime_info["workspace_path"],
         "db_path": runtime_info["db_path"],
-        "engine_binary": str(context.engine_binary),
+        "engine_binary": str(engine_binary),
         "engine_target_fill": RESCUE_TARGET_FILL,
         "reg_tick_secs": RESCUE_REG_TICK_SECS,
         "bridge_enabled": bool(profile_def["bridge_enabled"]),
@@ -870,6 +995,16 @@ def prepare_profile(
         "rescue_live_audio_divisor": int(profile_def.get("rescue_live_audio_divisor", 0)),
         "rescue_live_video_divisor": int(profile_def.get("rescue_live_video_divisor", 0)),
         "rescue_live_intake_stages": list(profile_def.get("rescue_live_intake_stages", [])),
+        "stable_core_enabled": bool(profile_def.get("stable_core_enabled", False)),
+        "stable_core_profile": profile_def.get("stable_core_profile"),
+        "stable_core_agency_stage": profile_def.get("stable_core_agency_stage", "off"),
+        "stable_core_agent_budget": profile_def.get("stable_core_agent_budget", "disabled"),
+        "stable_core_checkpoint_lineage_enabled": bool(
+            profile_def.get("stable_core_checkpoint_lineage_enabled", False)
+        ),
+        "stable_core_neural_bundle_enabled": bool(
+            profile_def.get("stable_core_neural_bundle_enabled", False)
+        ),
         "limited_write_block_terms": list(profile_def.get("limited_write_block_terms", [])),
         "limited_write_allowed_modes": list(profile_def.get("limited_write_allowed_modes", [])),
         "mic_enabled": bool(profile_def["mic_enabled"]),
@@ -881,6 +1016,7 @@ def prepare_profile(
         "matrix_run_id": matrix_run_id,
         "notes": notes,
         "mode": "rescue_stability_investigation",
+        "runtime_profile": profile_def.get("stable_core_profile", RESCUE_MODE),
         "checkpoint_mode": runtime_info["checkpoint_mode"],
         "checkpoint_source": runtime_info["checkpoint_source"],
         "copied_tables": runtime_info.get("copied_tables", {}),
@@ -1046,6 +1182,24 @@ def emit_launch_env(context: InvestigationContext) -> str:
         "MINIME_RESCUE_LIVE_INTAKE_STAGES": ",".join(
             str(stage) for stage in profile.get("rescue_live_intake_stages", [])
         ),
+        "MINIME_RUNTIME_PROFILE": str(profile.get("runtime_profile", RESCUE_MODE)),
+        "MINIME_STABLE_CORE": "1" if profile.get("stable_core_enabled", False) else "0",
+        "MINIME_HARD_RECOVERY_RESET": "0"
+        if profile.get("stable_core_enabled", False)
+        else "1",
+        "MINIME_STABLE_CORE_PROFILE": str(profile.get("stable_core_profile") or ""),
+        "MINIME_STABLE_CORE_AGENCY_STAGE": str(
+            profile.get("stable_core_agency_stage", "off")
+        ),
+        "MINIME_STABLE_CORE_AGENT_BUDGET": str(
+            profile.get("stable_core_agent_budget", "disabled")
+        ),
+        "MINIME_STABLE_CORE_ENABLE_CHECKPOINT_LINEAGE": "1"
+        if profile.get("stable_core_checkpoint_lineage_enabled", False)
+        else "0",
+        "MINIME_STABLE_CORE_ENABLE_NEURAL_BUNDLE": "1"
+        if profile.get("stable_core_neural_bundle_enabled", False)
+        else "0",
         "MINIME_RESCUE_PHYSIOLOGICAL_FALLBACK": "1",
         "MINIME_RESCUE_DISABLE_NN_CHECKPOINTS": "1",
         "MINIME_RESCUE_DISABLE_NEURAL_BUNDLE": "1",
@@ -1106,10 +1260,11 @@ def _pgrep_latest(pattern: str) -> int | None:
 
 def collect_process_state(context: InvestigationContext, profile: dict[str, Any]) -> dict[str, Any]:
     runtime_root = Path(profile["runtime_root"])
+    engine_binary = str(profile.get("engine_binary") or context.engine_binary)
     return {
         "captured_at": now_iso(),
         "runtime_root": str(runtime_root),
-        "engine_pid": _pgrep_latest(str(context.engine_binary)),
+        "engine_pid": _pgrep_latest(engine_binary),
         "bridge_pid": _pgrep_latest("consciousness-bridge-server"),
         "mic_pid": _pgrep_latest("mic_to_sensory.py"),
         "camera_pid": _pgrep_latest("camera_client.py"),

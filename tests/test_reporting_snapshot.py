@@ -103,6 +103,80 @@ class TestReportingSnapshot(unittest.TestCase):
             self.assertIn("guard=", summary)
             self.assertIn("spectral_state.json", summary)
 
+    def test_rescue_spectral_surface_is_accepted_when_fresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base_dir = Path(tmp)
+            workspace_dir = base_dir / "workspace"
+            workspace_dir.mkdir()
+            (workspace_dir / "health.json").write_text(json.dumps({
+                "provenance": {
+                    "session_id": 12,
+                    "engine_t_s": 120.2,
+                    "snapshot_sequence": 4,
+                    "target_provenance": "adaptive",
+                    "sovereignty_inputs": {},
+                },
+                "pi": {"target_fill": 55.0},
+            }))
+            (workspace_dir / "spectral_state.json").write_text(json.dumps({
+                "fill_pct": 67.2,
+                "fill_ratio": 0.672,
+                "eigenvalues": [1.2],
+                "provenance": {
+                    "mode": "rescue_b8823ad",
+                    "baseline_commit": "b8823ad",
+                    "source_surface": "health.json",
+                    "rescue_active": True,
+                    "surface_state": "fresh",
+                },
+            }))
+
+            snapshot = capture_report_snapshot(
+                state={"timestamp": 120.0, "fill_ratio": 0.61, "eig1": 0.9},
+                session_id=12,
+                base_dir=base_dir,
+                workspace_dir=workspace_dir,
+            )
+
+            self.assertTrue(snapshot.spectral.valid_for_state)
+            self.assertEqual(snapshot.state["fill_pct"], 67.2)
+
+    def test_rescue_spectral_surface_is_guarded_when_inactive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base_dir = Path(tmp)
+            workspace_dir = base_dir / "workspace"
+            workspace_dir.mkdir()
+            (workspace_dir / "health.json").write_text(json.dumps({
+                "provenance": {
+                    "session_id": 12,
+                    "engine_t_s": 120.2,
+                    "snapshot_sequence": 4,
+                    "target_provenance": "adaptive",
+                    "sovereignty_inputs": {},
+                },
+                "pi": {"target_fill": 55.0},
+            }))
+            (workspace_dir / "spectral_state.json").write_text(json.dumps({
+                "fill_pct": 67.2,
+                "provenance": {
+                    "mode": "rescue_b8823ad",
+                    "baseline_commit": "b8823ad",
+                    "source_surface": "health.json",
+                    "rescue_active": False,
+                    "surface_state": "inactive",
+                },
+            }))
+
+            snapshot = capture_report_snapshot(
+                state={"timestamp": 120.0, "fill_ratio": 0.61, "eig1": 0.9},
+                session_id=12,
+                base_dir=base_dir,
+                workspace_dir=workspace_dir,
+            )
+
+            self.assertFalse(snapshot.spectral.valid_for_state)
+            self.assertIn("rescue surface inactive", " ".join(snapshot.spectral.issues))
+
 
 if __name__ == "__main__":
     unittest.main()

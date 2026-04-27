@@ -11,11 +11,40 @@
 // Usage:
 //   spawn_av_gpu_server(video_tx, AvServerCfg::default()).await?;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use futures_util::{SinkExt, StreamExt};
+use std::path::PathBuf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+const AV_SHADER_RELATIVE_PATH: &str = "shaders/av_features.metal";
+
+fn resolve_av_shader_path() -> Result<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join(AV_SHADER_RELATIVE_PATH));
+        candidates.push(cwd.join("minime").join(AV_SHADER_RELATIVE_PATH));
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        let crate_root = exe
+            .parent()
+            .and_then(|path| path.parent())
+            .and_then(|path| path.parent());
+        if let Some(crate_root) = crate_root {
+            candidates.push(crate_root.join(AV_SHADER_RELATIVE_PATH));
+        }
+    }
+
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(AV_SHADER_RELATIVE_PATH));
+
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| anyhow!("could not locate {}", AV_SHADER_RELATIVE_PATH))
+}
 
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
@@ -220,6 +249,8 @@ pub async fn spawn_av_gpu_server_v2(
 ) -> Result<()> {
     use crate::sensory_bus::NowMs;
 
+    let shader_path = resolve_av_shader_path()?;
+
     // Channel for raw frames to GPU processor
     let (frame_tx, mut frame_rx) = tokio_mpsc::channel::<Vec<u8>>(16);
 
@@ -228,7 +259,9 @@ pub async fn spawn_av_gpu_server_v2(
     tokio::spawn(async move {
         // Initialize GPU once
         let mut av = match crate::av_gpu::AvGpu::new(
-            "shaders/av_features.metal",
+            shader_path
+                .to_str()
+                .expect("resolved shader path is valid UTF-8"),
             crate::av_gpu::MemMode::Shared,
         ) {
             Ok(mut gpu) => {
@@ -244,7 +277,10 @@ pub async fn spawn_av_gpu_server_v2(
             }
         };
 
-        println!("✅ GPU initialized (Metal unified memory)");
+        println!(
+            "✅ GPU initialized (Metal unified memory) using {}",
+            shader_path.display()
+        );
 
         let mut frame_count = 0u64;
         while let Some(frame_bytes) = frame_rx.recv().await {

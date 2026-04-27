@@ -31,14 +31,18 @@ pub struct RegulatorContext {
 }
 
 impl RegulatorContext {
-    fn from_value(value: &Value) -> Self {
+    fn from_value(value: &Value, restore_adaptive_target: bool) -> Self {
         let integ_fill = read_f32(value, "integ_fill");
         let integ_lam = read_f32(value, "integ_lam");
         let integ_geom = read_f32(value, "integ_geom");
         let gate = read_f32(value, "gate");
         let filt = read_f32(value, "filt");
-        let fill_ema = read_f32(value, "fill_ema");
-        let adaptive_target = read_f32(value, "adaptive_target");
+        let fill_ema = restore_adaptive_target
+            .then(|| read_f32(value, "fill_ema"))
+            .flatten();
+        let adaptive_target = restore_adaptive_target
+            .then(|| read_f32(value, "adaptive_target"))
+            .flatten();
 
         let pi_state = match (integ_fill, integ_lam, integ_geom, gate, filt) {
             (Some(integ_fill), Some(integ_lam), Some(integ_geom), Some(gate), Some(filt)) => {
@@ -127,12 +131,12 @@ pub struct StartupRestoreReport {
     pub status: StartupRestoreStatus,
 }
 
-pub fn load_regulator_context(path: &Path) -> StartupRestoreReport {
+pub fn load_regulator_context(path: &Path, restore_adaptive_target: bool) -> StartupRestoreReport {
     match fs::read_to_string(path) {
         Ok(json) => match serde_json::from_str::<Value>(&json) {
             Ok(value) => {
-                let context = RegulatorContext::from_value(&value);
-                let missing_fields = missing_restore_fields(&value);
+                let context = RegulatorContext::from_value(&value, restore_adaptive_target);
+                let missing_fields = missing_restore_fields(&value, restore_adaptive_target);
                 let restored_pi_state = context.pi_state.is_some();
                 let restored_adaptive_target = context.adaptive_state.is_some();
                 let resume_mode = classify_resume_mode(restored_pi_state, restored_adaptive_target);
@@ -224,9 +228,20 @@ fn build_summary(
 ) -> String {
     let path_display = path.display();
     match state {
-        StartupRestoreState::Restored => format!(
-            "restored_resume from {path_display}; PI state and adaptive target were restored cleanly."
-        ),
+        StartupRestoreState::Restored => match resume_mode {
+            StartupResumeMode::RestoredResume => format!(
+                "restored_resume from {path_display}; PI state and adaptive target were restored cleanly."
+            ),
+            StartupResumeMode::PiOnlyResume => format!(
+                "pi_only_resume from {path_display}; PI state restored cleanly while adaptive target restore was intentionally disabled."
+            ),
+            StartupResumeMode::TargetOnlyResume => format!(
+                "target_only_resume from {path_display}; adaptive target restored without PI state."
+            ),
+            StartupResumeMode::ColdStart => format!(
+                "cold_start from {path_display}; no resumable controller state was available."
+            ),
+        },
         StartupRestoreState::Partial => match resume_mode {
             StartupResumeMode::PiOnlyResume => format!(
                 "pi_only_resume from {path_display}; {reason}. PI state resumed, but adaptive target did not fully restore."
@@ -265,7 +280,7 @@ fn classify_resume_mode(
     }
 }
 
-fn missing_restore_fields(value: &Value) -> Vec<String> {
+fn missing_restore_fields(value: &Value, include_adaptive_fields: bool) -> Vec<String> {
     let mut missing_fields = Vec::new();
 
     for field in PI_STATE_FIELDS {
@@ -274,9 +289,11 @@ fn missing_restore_fields(value: &Value) -> Vec<String> {
         }
     }
 
-    for field in ADAPTIVE_FIELDS {
-        if read_f32(value, field).is_none() {
-            missing_fields.push(field.to_owned());
+    if include_adaptive_fields {
+        for field in ADAPTIVE_FIELDS {
+            if read_f32(value, field).is_none() {
+                missing_fields.push(field.to_owned());
+            }
         }
     }
 
@@ -314,7 +331,7 @@ mod tests {
     #[test]
     fn missing_context_is_cold_start() {
         let path = temp_path("missing");
-        let report = load_regulator_context(&path);
+        let report = load_regulator_context(&path, true);
 
         assert_eq!(report.status.state, StartupRestoreState::Missing);
         assert_eq!(report.status.resume_mode, StartupResumeMode::ColdStart);
@@ -331,7 +348,7 @@ mod tests {
         )
         .expect("write partial context");
 
-        let report = load_regulator_context(&path);
+        let report = load_regulator_context(&path, true);
         let _ = fs::remove_file(&path);
 
         assert_eq!(report.status.state, StartupRestoreState::Partial);
@@ -361,7 +378,7 @@ mod tests {
         )
         .expect("write full context");
 
-        let report = load_regulator_context(&path);
+        let report = load_regulator_context(&path, true);
         let _ = fs::remove_file(&path);
 
         assert_eq!(report.status.state, StartupRestoreState::Restored);
@@ -376,5 +393,30 @@ mod tests {
         let adaptive_state = context.adaptive_state.expect("adaptive state");
         assert_eq!(pi_state.integ_fill, 1.2);
         assert_eq!(adaptive_state.adaptive_target, 70.0);
+    }
+
+    #[test]
+    fn hard_reset_mode_ignores_adaptive_restore_fields() {
+        let path = temp_path("fixed_target");
+        fs::write(
+            &path,
+            concat!(
+                r#"{"baseline_lambda1":512.0,"last_fill_pct":73.1,"smoothed_fill_pct":72.4,"#,
+                r#""last_lambda1_rel":0.98,"integ_fill":1.2,"integ_lam":-0.4,"integ_geom":0.3,"#,
+                r#""gate":0.3,"filt":0.8,"fill_ema":72.0,"adaptive_target":70.0}"#
+            ),
+        )
+        .expect("write fixed-target context");
+
+        let report = load_regulator_context(&path, false);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(report.status.state, StartupRestoreState::Restored);
+        assert_eq!(report.status.resume_mode, StartupResumeMode::PiOnlyResume);
+        assert!(report.status.restored_pi_state);
+        assert!(!report.status.restored_adaptive_target);
+        assert!(report.status.missing_fields.is_empty());
+        let context = report.context.expect("context");
+        assert!(context.adaptive_state.is_none());
     }
 }
