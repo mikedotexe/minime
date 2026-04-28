@@ -25,7 +25,7 @@ const STABILITY_PI_KI: f32 = 0.04;
 const STABILITY_PI_MAX_OUTPUT: f32 = 0.045;
 const STABILITY_PI_INTEGRAL_DECAY: f32 = 0.85;
 pub const STABILITY_PI_RECOVERY_IMPULSE_TRIGGER_PCT: f32 = STABILITY_PI_TARGET_FILL_PCT;
-pub const STABILITY_PI_RECOVERY_SLOPE_TRIGGER_FILL_PCT: f32 = 68.0;
+pub const STABILITY_PI_RECOVERY_SLOPE_TRIGGER_FILL_PCT: f32 = 66.0;
 pub const STABILITY_PI_RECOVERY_SLOPE_TRIGGER_PCT_PER_SEC: f32 = -2.0;
 pub const STABILITY_PI_LOW_FILL_TRIGGER_PCT: f32 = 55.0;
 pub const STABILITY_PI_IMPULSE_MIN_TICKS: u32 = 2;
@@ -37,13 +37,14 @@ pub const STABILITY_PI_REENTRY_FALLBACK_FILL_PCT: f32 = 58.0;
 pub const STABILITY_PI_REENTRY_SLOPE_FALLBACK_FILL_PCT: f32 = 62.0;
 pub const STABILITY_PI_REENTRY_SLOPE_FALLBACK_PCT_PER_SEC: f32 = -1.5;
 pub const STABILITY_PI_REENTRY_ELEVATED_FILL_PCT: f32 = 72.0;
-const STABILITY_PI_SOFT_DRAIN_FILL_PCT: f32 = 68.0;
-const STABILITY_PI_MODERATE_DRAIN_FILL_PCT: f32 = 72.0;
+const STABILITY_PI_SOFT_DRAIN_FILL_PCT: f32 = 67.0;
+const STABILITY_PI_MODERATE_DRAIN_FILL_PCT: f32 = 70.0;
 const STABILITY_PI_STRONG_DRAIN_FILL_PCT: f32 = 78.0;
-const STABILITY_PI_SOFT_DRAIN: f32 = 0.015;
-const STABILITY_PI_MODERATE_DRAIN: f32 = 0.030;
+const STABILITY_PI_SOFT_DRAIN: f32 = 0.020;
+const STABILITY_PI_MODERATE_DRAIN: f32 = 0.040;
 const STABILITY_PI_STRONG_DRAIN: f32 = 0.060;
 const STABILITY_PI_FALLING_DRAIN_CAP: f32 = 0.015;
+const STABILITY_PI_FALLING_CENTERING_DRAIN: f32 = 0.006;
 pub const STABLE_CORE_RECOVERY_IMPULSE_KEEP: f32 = 0.90;
 pub const STABLE_CORE_RECOVERY_IMPULSE_TRACE_SCALE: f32 = 1.0;
 pub const STABLE_CORE_SCAFFOLD_REENTRY_INITIAL_LIVE_WEIGHT: f32 = 0.55;
@@ -734,12 +735,20 @@ fn stable_core_drain_policy(
     }
     if fill_pct >= STABILITY_PI_MODERATE_DRAIN_FILL_PCT {
         if fill_slope_pct_per_sec < 0.0 {
+            let falling_weight = if fill_pct >= STABILITY_PI_REENTRY_ELEVATED_FILL_PCT {
+                STABILITY_PI_FALLING_CENTERING_DRAIN
+                    .max(pi_output.min(STABILITY_PI_FALLING_DRAIN_CAP))
+            } else {
+                pi_output.min(STABILITY_PI_FALLING_DRAIN_CAP)
+            };
             return DrainPolicy {
-                weight: pi_output
-                    .min(STABILITY_PI_FALLING_DRAIN_CAP)
-                    .clamp(0.0, 1.0),
+                weight: falling_weight.clamp(0.0, 1.0),
                 damping_state: "moderate_drain_capped",
-                reason: "falling_slope_capped",
+                reason: if fill_pct >= STABILITY_PI_REENTRY_ELEVATED_FILL_PCT {
+                    "falling_slope_residual_centering"
+                } else {
+                    "falling_slope_capped"
+                },
                 suppressed_by_slope: true,
                 high_fill_active: false,
             };
@@ -1248,7 +1257,7 @@ mod tests {
         assert_eq!(neutral.pi_output, 0.0);
         assert_eq!(neutral.drain_weight, 0.0);
 
-        let below_soft = pi.step(67.9, 2.0, OverfillStage::Hold, true);
+        let below_soft = pi.step(66.9, 2.0, OverfillStage::Hold, true);
         assert_eq!(below_soft.drain_weight, 0.0);
         assert_eq!(below_soft.drain_gate_reason, "below_soft_drain_band");
 
@@ -1260,14 +1269,19 @@ mod tests {
         assert_eq!(soft_falling.drain_weight, 0.0);
         assert!(soft_falling.drain_suppressed_by_slope);
 
-        let moderate_rising = pi.step(72.0, 0.1, OverfillStage::Elevated, true);
+        let moderate_rising = pi.step(70.5, 0.1, OverfillStage::Elevated, true);
         assert_eq!(moderate_rising.damping_state, "moderate_drain");
         assert!(moderate_rising.drain_weight >= STABILITY_PI_MODERATE_DRAIN);
         assert!(moderate_rising.drain_weight <= STABILITY_PI_MAX_OUTPUT);
 
         let moderate_falling = pi.step(73.0, -0.5, OverfillStage::Elevated, true);
         assert_eq!(moderate_falling.damping_state, "moderate_drain_capped");
+        assert_eq!(
+            moderate_falling.drain_gate_reason,
+            "falling_slope_residual_centering"
+        );
         assert!(moderate_falling.drain_suppressed_by_slope);
+        assert!(moderate_falling.drain_weight >= STABILITY_PI_FALLING_CENTERING_DRAIN);
         assert!(moderate_falling.drain_weight <= STABILITY_PI_FALLING_DRAIN_CAP);
 
         let strong = pi.step(78.0, -1.0, OverfillStage::Elevated, true);
@@ -1317,7 +1331,7 @@ mod tests {
     #[test]
     fn stability_pi_enters_on_negative_slope_before_low_fill() {
         let mut pi = StabilityPiState::default();
-        let output = pi.step(66.0, -2.5, OverfillStage::Elevated, true);
+        let output = pi.step(65.5, -2.5, OverfillStage::Elevated, true);
 
         assert!(output.low_fill_escape_active);
         assert!(output.recovery_impulse_active);
