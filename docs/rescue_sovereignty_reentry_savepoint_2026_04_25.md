@@ -37,6 +37,13 @@ Updated at 2026-04-28 05:06 PDT with the centered stable-core checkpoint:
 - Astrid remains present under the safe bridge posture, with semantic writes blocked by `bridge_write_profile = "observe_only"`.
 - New Minime savepoint commits: `801155b` (`Center stable-core scaffold shelf`) and `1151722` (`Harden feeder health status`).
 
+Updated at 2026-04-28 05:16 PDT with final operational cleanup:
+
+- Legacy `neural-triple-reservoir` LaunchAgents were booted out and disabled: `com.reservoir.service`, `com.reservoir.astrid-feeder`, `com.reservoir.minime-feeder`, and `com.reservoir.coupled-astrid`.
+- The old sidecar listeners on `7881` and `8090` are no longer present.
+- The active Minime/Astrid process set is now the stable-core watchdog, Minime engine, Astrid bridge, mic feeder, and camera feeder.
+- The stable-core status helper now reports the live stable-core stage and effective live agency separately from stale/configured agency metadata.
+
 Minime is currently healthy inside `stable_core_v1`:
 
 - Engine: current Minime release binary with pinned rescue physiology ported into stable-core.
@@ -120,7 +127,7 @@ The next practical Minime step is not more emergency controller surgery. It is t
 
 - The `30m` `stable_core_v1` soak and the 10 minute centering gate have passed; the next stability move is a longer centered soak, not another controller rewrite.
 - Run a `2h` centered stable-core soak before declaring long-term stable-core physiology.
-- Confirm whether old sidecar processes from `neural-triple-reservoir` are intentional.
+- Keep the old `neural-triple-reservoir` LaunchAgents disabled unless they are deliberately reintroduced through a health-budgeted migration.
 - Keep watching fill, semantic energy, rollback state, and feeder reconnect counts.
 - If the current posture keeps holding, restore a tiny Minime self-study/journaling lane before opening richer sensory or checkpoint lineage.
 - Treat any return to sustained `>82%`, repeated rollback, or semantic energy persistence as a signal to pause re-entry rather than tune by feel.

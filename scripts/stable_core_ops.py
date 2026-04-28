@@ -94,21 +94,41 @@ def build_status() -> dict[str, Any]:
     camera = load_json(WORKSPACE_DIR / "runtime" / "camera_status.json", {})
     mic = load_json(WORKSPACE_DIR / "runtime" / "mic_status.json", {})
     stable_core_health = health.get("stable_core") if isinstance(health, dict) else {}
+    stable_core_enabled = bool(profile.get("stable_core_enabled"))
+    semantic = health.get("semantic") if isinstance(health, dict) else {}
+    if stable_core_enabled and not isinstance(semantic, dict):
+        semantic = {"energy": 0.0, "active": False}
+    elif not isinstance(semantic, dict):
+        semantic = {}
+    effective_agency = {
+        "configured": agency if isinstance(agency, dict) else {},
+        "profile_stage": profile.get("stable_core_agency_stage"),
+        "profile_agent_budget_mode": profile.get("stable_core_agent_budget"),
+        "effective_stage": stable_core_health.get("agency_stage")
+        if isinstance(stable_core_health, dict)
+        else None,
+        "effective_agent_budget_mode": stable_core_health.get("agent_budget_mode")
+        if isinstance(stable_core_health, dict)
+        else None,
+    }
 
     payload = {
-        "mode": "stable_core_v1" if profile.get("stable_core_enabled") else "inactive",
+        "mode": "stable_core_v1" if stable_core_enabled else "inactive",
         "profile": profile.get("profile"),
         "runtime_profile": profile.get("runtime_profile"),
         "engine_pid": rescue_status.get("engine_pid"),
         "watchdog_state": rescue_status.get("watchdog_state"),
         "telemetry_state": rescue_status.get("telemetry_state"),
         "fill_pct": health.get("fill_pct") if isinstance(health, dict) else None,
-        "stage": (health.get("rescue") or {}).get("stage") if isinstance(health, dict) else None,
-        "semantic_energy": (health.get("semantic") or {}).get("energy")
+        "stage": stable_core_health.get("stage")
+        if stable_core_enabled and isinstance(stable_core_health, dict)
+        else (health.get("rescue") or {}).get("stage")
         if isinstance(health, dict)
         else None,
+        "semantic_energy": semantic.get("energy"),
+        "semantic_active": semantic.get("active", False),
         "stable_core": stable_core_health if isinstance(stable_core_health, dict) else {},
-        "agency": agency,
+        "agency": effective_agency,
         "bridge": {
             "send_count": bridge_status.get("send_count"),
             "rollback_at_unix_s": bridge_status.get("rollback_at_unix_s"),
