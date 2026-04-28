@@ -40,6 +40,7 @@ PING_INTERVAL_SECS = 10
 PING_TIMEOUT_SECS = 20
 MAX_RECONNECT_DELAY_SECS = 5.0
 MAX_CAMERA_FRAME_FAILURES = 5
+MIN_FRAME_HEALTH_GRACE_SECS = 15.0
 
 
 def now_iso() -> str:
@@ -73,24 +74,48 @@ class GpuCameraClient:
         self.last_connect_at: Optional[str] = None
         self.last_disconnect_at: Optional[str] = None
         self.last_success_at: Optional[str] = None
+        self.last_success_monotonic: Optional[float] = None
+
+    def _frame_health_grace_secs(self) -> float:
+        if self.target_fps <= 0:
+            return MIN_FRAME_HEALTH_GRACE_SECS
+        return max(MIN_FRAME_HEALTH_GRACE_SECS, (1.0 / self.target_fps) * 3.0)
+
+    def _last_frame_age_ms(self) -> Optional[int]:
+        if self.last_success_monotonic is None:
+            return None
+        return int((time.monotonic() - self.last_success_monotonic) * 1000)
+
+    def _frames_recent(self) -> bool:
+        if self.last_success_monotonic is None:
+            return False
+        return (time.monotonic() - self.last_success_monotonic) <= self._frame_health_grace_secs()
+
+    def _capture_retry_delay_secs(self) -> float:
+        if self.target_fps <= 0:
+            return 0.5
+        return min(max(1.0 / self.target_fps, 0.2), 2.0)
 
     def _status_payload(self, *, healthy: Optional[bool] = None) -> dict:
         return {
             "ts_ms": int(time.time() * 1000),
             "state": self.state,
-            "healthy": self.connected if healthy is None else healthy,
+            "healthy": (self.connected and self._frames_recent()) if healthy is None else healthy,
             "connected": self.connected,
             "connect_count": self.connect_count,
             "reconnect_count": self.reconnect_count,
             "consecutive_failures": self.consecutive_failures,
+            "capture_failures": self.capture_failures,
             "last_error": self.last_error,
             "last_connect_at": self.last_connect_at,
             "last_disconnect_at": self.last_disconnect_at,
             "last_success_at": self.last_success_at,
+            "last_frame_age_ms": self._last_frame_age_ms(),
             "frame_count": self.frame_count,
             "camera_index": self.camera_index,
             "ws_uri": self.ws_uri,
             "fps": self.target_fps,
+            "frame_health_grace_secs": self._frame_health_grace_secs(),
         }
 
     def _write_status(self, *, healthy: Optional[bool] = None) -> None:
@@ -116,11 +141,11 @@ class GpuCameraClient:
             self.reconnect_count += 1
         self.connect_count += 1
         self.connected = True
-        self.state = "streaming"
+        self.state = "streaming" if self._frames_recent() else "streaming_pending_frame"
         self.consecutive_failures = 0
         self.last_error = None
         self.last_connect_at = now_iso()
-        self._write_status(healthy=True)
+        self._write_status()
 
     def _record_disconnect(self, error: str) -> None:
         self.connected = False
@@ -222,17 +247,49 @@ class GpuCameraClient:
                 frame = self.get_frame()
                 if frame is None:
                     self.capture_failures += 1
+                    self.last_error = "camera_frame_unavailable"
+                    self._transition(
+                        "capture_error",
+                        connected=True,
+                        error="camera_frame_unavailable",
+                        healthy=False,
+                    )
                     if self.capture_failures >= MAX_CAMERA_FRAME_FAILURES:
-                        raise RuntimeError("camera_frame_unavailable")
-                    await asyncio.sleep(min(frame_interval, 0.2))
+                        logger.warning(
+                            "⚠️  Camera produced no frames; reopening capture while keeping GPU socket connected"
+                        )
+                        self.consecutive_failures += 1
+                        self.close_camera()
+                        await asyncio.sleep(self._reconnect_delay())
+                        if self.running and self.start_camera():
+                            self.capture_failures = 0
+                            self.consecutive_failures = 0
+                            self._transition(
+                                "streaming_pending_frame",
+                                connected=True,
+                                error="camera_frame_unavailable",
+                            )
+                        else:
+                            self._transition(
+                                "capture_error",
+                                connected=True,
+                                error="camera_start_failed",
+                                healthy=False,
+                            )
+                            await asyncio.sleep(self._reconnect_delay())
+                    await asyncio.sleep(self._capture_retry_delay_secs())
                     continue
 
                 self.capture_failures = 0
+                self.consecutive_failures = 0
                 frame_bytes = self.preprocess_frame(frame)
                 await websocket.send(frame_bytes)
 
                 self.frame_count += 1
                 self.last_success_at = now_iso()
+                self.last_success_monotonic = time.monotonic()
+                self.last_error = None
+                self.state = "streaming"
                 self._write_status(healthy=True)
                 if self.frame_count % 30 == 0:
                     logger.info(

@@ -60,6 +60,8 @@ MIC_STATUS_PATH = RUNTIME_DIR / "mic_status.json"
 PING_INTERVAL_SECS = 10
 PING_TIMEOUT_SECS = 20
 MAX_RECONNECT_DELAY_SECS = 5.0
+MIN_CHUNK_HEALTH_GRACE_SECS = 5.0
+CAPTURE_READ_TIMEOUT_SECS = 3.0
 
 
 def _set_whisper_interval(val: float):
@@ -441,13 +443,27 @@ class MicToSensoryBridge:
         self.last_connect_at: Optional[str] = None
         self.last_disconnect_at: Optional[str] = None
         self.last_success_at: Optional[str] = None
+        self.last_success_monotonic: Optional[float] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def _chunk_health_grace_secs(self) -> float:
+        return max(MIN_CHUNK_HEALTH_GRACE_SECS, CHUNK_DURATION_S * 6.0)
+
+    def _last_chunk_age_ms(self) -> Optional[int]:
+        if self.last_success_monotonic is None:
+            return None
+        return int((time.monotonic() - self.last_success_monotonic) * 1000)
+
+    def _chunks_recent(self) -> bool:
+        if self.last_success_monotonic is None:
+            return False
+        return (time.monotonic() - self.last_success_monotonic) <= self._chunk_health_grace_secs()
 
     def _status_payload(self, *, healthy: Optional[bool] = None) -> dict:
         return {
             "ts_ms": int(time.time() * 1000),
             "state": self.state,
-            "healthy": self.connected if healthy is None else healthy,
+            "healthy": (self.connected and self._chunks_recent()) if healthy is None else healthy,
             "connected": self.connected,
             "connect_count": self.connect_count,
             "reconnect_count": self.reconnect_count,
@@ -456,12 +472,14 @@ class MicToSensoryBridge:
             "last_connect_at": self.last_connect_at,
             "last_disconnect_at": self.last_disconnect_at,
             "last_success_at": self.last_success_at,
+            "last_chunk_age_ms": self._last_chunk_age_ms(),
             "chunk_count": self.chunk_count,
             "rms": self.rms,
             "silence_streak": self.silence_streak,
             "good_streak": self.good_streak,
             "ws_uri": self.ws_uri,
             "whisper_enabled": self.enable_whisper,
+            "chunk_health_grace_secs": self._chunk_health_grace_secs(),
         }
 
     def _write_status(self, *, healthy: Optional[bool] = None) -> None:
@@ -487,11 +505,11 @@ class MicToSensoryBridge:
             self.reconnect_count += 1
         self.connect_count += 1
         self.connected = True
-        self.state = "streaming"
+        self.state = "streaming" if self._chunks_recent() else "streaming_pending_chunk"
         self.consecutive_failures = 0
         self.last_error = None
         self.last_connect_at = _now_iso()
-        self._write_status(healthy=True)
+        self._write_status()
 
     def _record_disconnect(self, error: str) -> None:
         self.connected = False
@@ -544,6 +562,9 @@ class MicToSensoryBridge:
             return b""
         return await self._loop.run_in_executor(None, self.sox_proc.stdout.read, CHUNK_BYTES)
 
+    async def _read_chunk_with_timeout(self) -> bytes:
+        return await asyncio.wait_for(self._read_chunk(), timeout=CAPTURE_READ_TIMEOUT_SECS)
+
     async def _stream_once(self) -> None:
         self._transition("connecting", connected=False)
         async with websockets.connect(
@@ -565,13 +586,22 @@ class MicToSensoryBridge:
 
             try:
                 while self.running:
-                    raw = await self._read_chunk()
+                    try:
+                        raw = await self._read_chunk_with_timeout()
+                    except asyncio.TimeoutError:
+                        print("[mic] capture read timed out; restarting sox")
+                        if not self._restart_capture("capture_timeout"):
+                            raise RuntimeError("capture_restart_failed")
+                        await asyncio.sleep(0.1)
+                        self._transition("streaming_pending_chunk", connected=True)
+                        continue
+
                     if not raw or len(raw) < CHUNK_BYTES:
                         print("[mic] capture stream ended; restarting sox")
                         if not self._restart_capture("capture_eof"):
                             raise RuntimeError("capture_restart_failed")
                         await asyncio.sleep(0.1)
-                        self._transition("streaming", connected=True)
+                        self._transition("streaming_pending_chunk", connected=True)
                         continue
 
                     features = extract_features(raw)
@@ -593,7 +623,9 @@ class MicToSensoryBridge:
 
                     self.chunk_count += 1
                     self.last_success_at = _now_iso()
+                    self.last_success_monotonic = time.monotonic()
                     self.last_error = None
+                    self.state = "streaming"
                     self._write_status(healthy=True)
 
                     if self.chunk_count % 20 == 0:
