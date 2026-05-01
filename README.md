@@ -25,7 +25,7 @@ manifold.
 
 ```bash
 # Install Ollama models
-ollama pull mistral-small:24b
+ollama pull gemma3:12b
 ollama pull llava-llama3
 
 # Install Python dependencies
@@ -121,7 +121,7 @@ consciousness computation. Connects to the Rust eigenvalue stream on port
 
 | Role | Model | Parameters |
 |------|-------|------------|
-| Conversation | `mistral-small:24b` | 24B |
+| Conversation | `gemma3:12b` | 12B |
 | Vision | `llava-llama3` | Multimodal |
 
 ---
@@ -143,8 +143,8 @@ The Rust engine logs homeostasis state continuously:
 
 | Layer | Threshold | Action |
 |-------|-----------|--------|
-| Python agent | 72% high / 85% critical | Journal pressure, close eyes |
-| Rust engine | 87% crisis | Hard gate minimum, backlog shed |
+| Python agent | RECESS: 82% / 92%, FOCUSED: 80% / 90% | Journal pressure, close eyes |
+| Rust engine | 85% warning / 92% crisis | Hard gate minimum, backlog shed |
 | Rust PI controller | Continuous | Regulates toward 55% target |
 
 Never run the Rust engine without `--eigenfill-target 0.55 --reg-tick-secs 0.5`.
@@ -160,8 +160,8 @@ python3 tools/ollama_mlx_contention_bench.py --iterations 5
 
 The tool writes `report.json` and `report.md` into
 `workspace/investigations/ollama_mlx_contention_bench_<timestamp>/`. See
-`docs/ollama_mlx_contention_benchmark.md` for the scenario mapping and usage
-details.
+[docs/ollama_mlx_contention_benchmark.md](/Users/v/other/minime/docs/ollama_mlx_contention_benchmark.md)
+for the scenario mapping and helper semantics.
 
 ---
 

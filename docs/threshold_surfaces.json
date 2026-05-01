@@ -1,0 +1,52 @@
+{
+  "authoritative_surfaces": [
+    {
+      "surface": "engine_warning_fill",
+      "value_pct": 85.0,
+      "owner": "minime_rust_engine",
+      "source": "minime/src/main.rs"
+    },
+    {
+      "surface": "engine_crisis_fill",
+      "value_pct": 92.0,
+      "owner": "minime_rust_engine",
+      "source": "minime/src/main.rs"
+    },
+    {
+      "surface": "monitor_fill_warning_band",
+      "value_pct": 85.0,
+      "owner": "monitor_unified",
+      "source": "docs/threshold_surfaces.json"
+    },
+    {
+      "surface": "monitor_fill_crisis_band",
+      "value_pct": 92.0,
+      "owner": "monitor_unified",
+      "source": "docs/threshold_surfaces.json"
+    },
+    {
+      "surface": "agent_recess_high_fill",
+      "value_pct": 82.0,
+      "owner": "python_agent",
+      "source": "thresholds.py"
+    },
+    {
+      "surface": "agent_recess_critical_fill",
+      "value_pct": 92.0,
+      "owner": "python_agent",
+      "source": "thresholds.py"
+    },
+    {
+      "surface": "agent_focused_high_fill",
+      "value_pct": 80.0,
+      "owner": "python_agent",
+      "source": "thresholds.py"
+    },
+    {
+      "surface": "agent_focused_critical_fill",
+      "value_pct": 90.0,
+      "owner": "python_agent",
+      "source": "thresholds.py"
+    }
+  ]
+}

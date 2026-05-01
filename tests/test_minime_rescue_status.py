@@ -39,7 +39,7 @@ class TestMinimeRescueStatus(unittest.TestCase):
                             "scaffold_last_loaded_at_unix_ms": 123,
                             "scaffold_last_captured_at_unix_ms": 456,
                             "stability_pi_active": True,
-                            "stability_pi_target_fill_pct": 64.0,
+                            "stability_pi_target_fill_pct": 68.0,
                             "stability_pi_error_pct": 9.5,
                             "stability_pi_integral": 0.42,
                         }
@@ -80,6 +80,9 @@ class TestMinimeRescueStatus(unittest.TestCase):
                         "runtime_root": "/tmp/runtime",
                         "workspace_path": "/tmp/workspace",
                         "db_path": "/tmp/workspace/minime_consciousness.db",
+                        "runtime_profile": "stable_core_v1",
+                        "stable_core_enabled": True,
+                        "engine_target_fill": 55.0,
                         "state_variant": "current_live_workspace",
                         "matrix_run_id": "run-123",
                     },
@@ -116,7 +119,8 @@ class TestMinimeRescueStatus(unittest.TestCase):
             self.assertEqual(payload["scaffold_last_loaded_at_unix_ms"], 123)
             self.assertEqual(payload["scaffold_last_captured_at_unix_ms"], 456)
             self.assertTrue(payload["stability_pi_active"])
-            self.assertEqual(payload["stability_pi_target_fill_pct"], 64.0)
+            self.assertEqual(payload["stability_pi_target_fill_pct"], 68.0)
+            self.assertEqual(payload["engine_target_fill"], 68.0)
             self.assertEqual(payload["stability_pi_error_pct"], 9.5)
             self.assertEqual(payload["stability_pi_integral"], 0.42)
 
@@ -167,6 +171,59 @@ class TestMinimeRescueStatus(unittest.TestCase):
             self.assertEqual(payload["engine_pid"], 200)
             self.assertTrue(payload["engine_pid_changed_without_watchdog_restart"])
             self.assertIsNotNone(payload["engine_pid_changed_at"])
+
+    def test_build_active_status_uses_stable_core_structural_pi_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            status_path = base / "rescue_status.json"
+            status_path.write_text(json.dumps({"stability_pi_target_fill_pct": 64.0}))
+            health_path = base / "health.json"
+            health_path.write_text(
+                json.dumps(
+                    {
+                        "stable_core": {
+                            "structural_pi": {
+                                "active": True,
+                                "target_fill_pct": 68.0,
+                                "error_pct": 0.5,
+                                "integral": 0.1,
+                            }
+                        }
+                    }
+                )
+            )
+            mic_status = base / "mic_status.json"
+            mic_status.write_text("{}")
+            camera_status = base / "camera_status.json"
+            camera_status.write_text("{}")
+
+            with (
+                mock.patch.object(minime_rescue_status, "STATUS_PATH", status_path),
+                mock.patch.object(minime_rescue_status, "HEALTH_PATH", health_path),
+                mock.patch.object(minime_rescue_status, "MIC_STATUS_PATH", mic_status),
+                mock.patch.object(minime_rescue_status, "CAMERA_STATUS_PATH", camera_status),
+                mock.patch.object(
+                    minime_rescue_status,
+                    "load_active_profile",
+                    return_value={
+                        "profile": "bridge_budgeted_sovereignty_v1",
+                        "runtime_profile": "stable_core_v1",
+                        "stable_core_enabled": True,
+                        "engine_target_fill": 55.0,
+                    },
+                ),
+            ):
+                payload = minime_rescue_status.build_active_status(
+                    watchdog_state="monitoring",
+                    binary_path="/tmp/minime",
+                    engine_pid=42,
+                )
+
+            self.assertEqual(payload["engine_target_fill"], 68.0)
+            self.assertTrue(payload["stability_pi_active"])
+            self.assertEqual(payload["stability_pi_target_fill_pct"], 68.0)
+            self.assertEqual(payload["stability_pi_error_pct"], 0.5)
+            self.assertEqual(payload["stability_pi_integral"], 0.1)
 
     def test_build_inactive_status_resets_lane_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -25,13 +25,15 @@ HEALTHY_HOLD_WINDOW_SECS = 20 * 60
 DEFAULT_HOLD_WINDOW_SECS = HEALTHY_HOLD_WINDOW_SECS
 RESCUE_MIN_FILL_AFTER_WARMUP = 45.0
 RESCUE_MAX_FILL_AFTER_WARMUP = 82.0
-RESCUE_TARGET_FILL = 55.0
+RESCUE_TARGET_FILL = 68.0
 RESCUE_REG_TICK_SECS = 0.5
 RESCUE_MODE = "rescue_b8823ad"
 RESCUE_PHYSIOLOGICAL_FALLBACK = True
 BRIDGE_USER_LABEL = "com.astrid.consciousness-bridge"
 CAMERA_USER_LABEL = "com.minime.camera-client"
 MIC_USER_LABEL = "com.minime.mic-to-sensory"
+HOST_SENSORY_USER_LABEL = "com.minime.host-sensory"
+VISUAL_FRAME_SERVICE_USER_LABEL = "com.minime.visual-frame-service"
 HOME_LAUNCH_AGENTS = Path.home() / "Library" / "LaunchAgents"
 DEFAULT_OPERATIONAL_PROFILE = "bridge_telemetry_only"
 DEFAULT_OPERATIONAL_STATE_VARIANT = "current_live_workspace"
@@ -213,6 +215,7 @@ PROFILE_DEFINITIONS: dict[str, dict[str, Any]] = {
         "rescue_live_video_divisor": 8,
         "rescue_live_intake_stages": [
             "hold",
+            "elevated",
         ],
         "limited_write_block_terms": [
             "localized gravity",
@@ -269,6 +272,7 @@ PROFILE_DEFINITIONS: dict[str, dict[str, Any]] = {
         "rescue_live_video_divisor": 6,
         "rescue_live_intake_stages": [
             "hold",
+            "elevated",
         ],
         "limited_write_block_terms": [
             "localized gravity",
@@ -357,10 +361,85 @@ PROFILE_DEFINITIONS: dict[str, dict[str, Any]] = {
         "gpu_av_enabled": True,
         "description": "Budgeted sovereignty: richer Astrid expression and hold/elevated sensory trickle, still bounded by health-scored rollback.",
     },
+    "bridge_full_expression_v1": {
+        "bridge_enabled": True,
+        "bridge_write_enabled": True,
+        "bridge_autonomous_enabled": True,
+        "bridge_write_profile": "full_expression_v1",
+        "limited_write_enabled": True,
+        "limited_write_policy_version": 2,
+        "limited_write_cooldown_secs": 60,
+        "limited_write_feature_scale": 0.08,
+        "limited_write_max_abs": 0.16,
+        "limited_write_min_fill_pct": 58.0,
+        "limited_write_max_fill_pct": 68.0,
+        "limited_write_rising_epsilon_pct": 0.5,
+        "limited_write_semantic_energy_rising_epsilon_pct": 0.0,
+        "limited_write_rollback_semantic_energy": 0.12,
+        "limited_write_health_max_age_secs": 5,
+        "limited_write_peak_fill_max_pct": 72.0,
+        "limited_write_allowed_stages": [
+            "hold",
+        ],
+        "limited_write_post_send_eval_secs": 120,
+        "limited_write_adverse_fill_rise_pct": 6.0,
+        "limited_write_adverse_cooldown_secs": 300,
+        "limited_write_rollback_target": "bridge_observe_only",
+        "limited_write_rollback_fill_pct": 84.0,
+        "limited_write_rollback_adverse_count": 2,
+        "limited_write_rollback_on_elevated_peak": False,
+        "limited_write_require_zero_live_divisors": False,
+        "limited_write_require_dampen_inquiry_text": False,
+        "limited_write_block_structural_dump_language": True,
+        "limited_write_block_terms_always": False,
+        "limited_write_block_terms_on_rising": False,
+        "limited_write_mute_live_intake_secs": 0,
+        "limited_write_pre_mute_live_intake_secs": 0,
+        "limited_write_require_pre_muted_live_intake": False,
+        "limited_write_serializes_live_intake": False,
+        "rescue_live_audio_divisor": 12,
+        "rescue_live_video_divisor": 12,
+        "rescue_live_intake_stages": [
+            "hold",
+        ],
+        "stable_core_sensory_presence_profile": "full_presence_v1",
+        "limited_write_block_terms": [
+            "localized gravity",
+            "compaction",
+            "pressure",
+            "density",
+            "dense",
+            "tightness",
+            "restriction",
+        ],
+        "limited_write_allowed_modes": [
+            "dialogue_live",
+            "dialogue",
+            "dialogue_fallback",
+            "witness",
+            "mirror",
+            "daydream",
+            "aspiration",
+            "moment_capture",
+            "creation",
+            "initiate",
+            "introspect",
+            "experiment",
+            "evolve",
+            "self_study",
+            "research_note",
+        ],
+        "mic_enabled": True,
+        "camera_enabled": True,
+        "gpu_av_enabled": True,
+        "description": "Full expression: broad Astrid semantic modes and simultaneous live sensory trickle, with only hard physiology-backed rollback.",
+    },
     "stable_core_v1": {
         "bridge_enabled": True,
         "bridge_write_enabled": False,
         "bridge_autonomous_enabled": True,
+        "host_sensory_enabled": True,
+        "visual_frame_service_enabled": True,
         "bridge_write_profile": "observe_only",
         "limited_write_enabled": False,
         "limited_write_policy_version": 2,
@@ -390,6 +469,7 @@ PROFILE_DEFINITIONS: dict[str, dict[str, Any]] = {
         "stable_core_profile": STABLE_CORE_PROFILE,
         "stable_core_agency_stage": "self_journal",
         "stable_core_agent_budget": "self_journal_only",
+        "stable_core_allowed_action_families": ["journaling", "self_study"],
         "stable_core_checkpoint_lineage_enabled": False,
         "stable_core_neural_bundle_enabled": False,
         "limited_write_allowed_modes": [
@@ -587,6 +667,20 @@ class InvestigationContext:
         return [
             self.project_dir / "launchd" / "com.minime.mic-to-sensory.plist",
             HOME_LAUNCH_AGENTS / "com.minime.mic-to-sensory.plist",
+        ]
+
+    @property
+    def host_sensory_plist_candidates(self) -> list[Path]:
+        return [
+            self.project_dir / "launchd" / "com.minime.host-sensory.plist",
+            HOME_LAUNCH_AGENTS / "com.minime.host-sensory.plist",
+        ]
+
+    @property
+    def visual_frame_service_plist_candidates(self) -> list[Path]:
+        return [
+            self.project_dir / "launchd" / "com.minime.visual-frame-service.plist",
+            HOME_LAUNCH_AGENTS / "com.minime.visual-frame-service.plist",
         ]
 
     @property
@@ -923,6 +1017,15 @@ def prepare_profile(
     )
     effective_mic_enabled = bool(profile_def["mic_enabled"])
     effective_camera_enabled = bool(profile_def["camera_enabled"])
+    host_sensory_enabled = bool(
+        profile_def.get("host_sensory_enabled", profile_def.get("stable_core_enabled", False))
+    )
+    visual_frame_service_enabled = bool(
+        profile_def.get(
+            "visual_frame_service_enabled",
+            profile_def.get("stable_core_enabled", False),
+        )
+    )
     engine_binary = context.engine_binary_for_profile(profile_name)
     payload = {
         "profile": profile_name,
@@ -953,6 +1056,15 @@ def prepare_profile(
         "limited_write_max_fill_pct": float(profile_def.get("limited_write_max_fill_pct", 100.0)),
         "limited_write_rising_epsilon_pct": float(
             profile_def.get("limited_write_rising_epsilon_pct", 0.0)
+        ),
+        "limited_write_semantic_energy_rising_epsilon_pct": float(
+            profile_def.get(
+                "limited_write_semantic_energy_rising_epsilon_pct",
+                profile_def.get("limited_write_rising_epsilon_pct", 0.0),
+            )
+        ),
+        "limited_write_rollback_semantic_energy": float(
+            profile_def.get("limited_write_rollback_semantic_energy", 0.05)
         ),
         "limited_write_health_max_age_secs": int(
             profile_def.get("limited_write_health_max_age_secs", 0)
@@ -992,6 +1104,24 @@ def prepare_profile(
         "limited_write_block_structural_dump_language": bool(
             profile_def.get("limited_write_block_structural_dump_language", True)
         ),
+        "limited_write_block_terms_always": bool(
+            profile_def.get("limited_write_block_terms_always", False)
+        ),
+        "limited_write_block_terms_on_rising": bool(
+            profile_def.get("limited_write_block_terms_on_rising", True)
+        ),
+        "limited_write_mute_live_intake_secs": int(
+            profile_def.get("limited_write_mute_live_intake_secs", 0)
+        ),
+        "limited_write_pre_mute_live_intake_secs": int(
+            profile_def.get("limited_write_pre_mute_live_intake_secs", 0)
+        ),
+        "limited_write_require_pre_muted_live_intake": bool(
+            profile_def.get("limited_write_require_pre_muted_live_intake", False)
+        ),
+        "limited_write_serializes_live_intake": bool(
+            profile_def.get("limited_write_serializes_live_intake", False)
+        ),
         "rescue_live_audio_divisor": int(profile_def.get("rescue_live_audio_divisor", 0)),
         "rescue_live_video_divisor": int(profile_def.get("rescue_live_video_divisor", 0)),
         "rescue_live_intake_stages": list(profile_def.get("rescue_live_intake_stages", [])),
@@ -999,6 +1129,12 @@ def prepare_profile(
         "stable_core_profile": profile_def.get("stable_core_profile"),
         "stable_core_agency_stage": profile_def.get("stable_core_agency_stage", "off"),
         "stable_core_agent_budget": profile_def.get("stable_core_agent_budget", "disabled"),
+        "stable_core_allowed_action_families": list(
+            profile_def.get("stable_core_allowed_action_families", [])
+        ),
+        "stable_core_sensory_presence_profile": profile_def.get(
+            "stable_core_sensory_presence_profile", ""
+        ),
         "stable_core_checkpoint_lineage_enabled": bool(
             profile_def.get("stable_core_checkpoint_lineage_enabled", False)
         ),
@@ -1011,6 +1147,10 @@ def prepare_profile(
         "effective_mic_enabled": effective_mic_enabled,
         "camera_enabled": bool(profile_def["camera_enabled"]),
         "effective_camera_enabled": effective_camera_enabled,
+        "host_sensory_enabled": host_sensory_enabled,
+        "effective_host_sensory_enabled": host_sensory_enabled,
+        "visual_frame_service_enabled": visual_frame_service_enabled,
+        "effective_visual_frame_service_enabled": visual_frame_service_enabled,
         "enable_gpu_av": bool(profile_def["gpu_av_enabled"] and effective_camera_enabled),
         "hold_window_secs": int(hold_window_secs or DEFAULT_HOLD_WINDOW_SECS),
         "matrix_run_id": matrix_run_id,
@@ -1127,7 +1267,15 @@ def quiesce_optional_services(context: InvestigationContext) -> dict[str, Any]:
     bootout_service(context, BRIDGE_USER_LABEL)
     bootout_service(context, MIC_USER_LABEL)
     bootout_service(context, CAMERA_USER_LABEL)
-    return {"bridge": "stopped", "mic": "stopped", "camera": "stopped"}
+    bootout_service(context, HOST_SENSORY_USER_LABEL)
+    bootout_service(context, VISUAL_FRAME_SERVICE_USER_LABEL)
+    return {
+        "bridge": "stopped",
+        "mic": "stopped",
+        "camera": "stopped",
+        "host_sensory": "stopped",
+        "visual_frame_service": "stopped",
+    }
 
 
 def apply_profile_services(context: InvestigationContext, profile: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1156,6 +1304,24 @@ def apply_profile_services(context: InvestigationContext, profile: dict[str, Any
     else:
         bootout_service(context, CAMERA_USER_LABEL)
         actions["camera"] = "stopped"
+
+    if active.get("effective_host_sensory_enabled", False):
+        actions["host_sensory"] = "started" if bootstrap_service(
+            context, HOST_SENSORY_USER_LABEL, context.host_sensory_plist_candidates
+        ) else "missing_plist"
+    else:
+        bootout_service(context, HOST_SENSORY_USER_LABEL)
+        actions["host_sensory"] = "stopped"
+
+    if active.get("effective_visual_frame_service_enabled", False):
+        actions["visual_frame_service"] = "started" if bootstrap_service(
+            context,
+            VISUAL_FRAME_SERVICE_USER_LABEL,
+            context.visual_frame_service_plist_candidates,
+        ) else "missing_plist"
+    else:
+        bootout_service(context, VISUAL_FRAME_SERVICE_USER_LABEL)
+        actions["visual_frame_service"] = "stopped"
     return actions
 
 
@@ -1182,6 +1348,9 @@ def emit_launch_env(context: InvestigationContext) -> str:
         "MINIME_RESCUE_LIVE_INTAKE_STAGES": ",".join(
             str(stage) for stage in profile.get("rescue_live_intake_stages", [])
         ),
+        "MINIME_STABLE_CORE_SENSORY_PROFILE": str(
+            profile.get("stable_core_sensory_presence_profile") or ""
+        ),
         "MINIME_RUNTIME_PROFILE": str(profile.get("runtime_profile", RESCUE_MODE)),
         "MINIME_STABLE_CORE": "1" if profile.get("stable_core_enabled", False) else "0",
         "MINIME_HARD_RECOVERY_RESET": "0"
@@ -1194,6 +1363,12 @@ def emit_launch_env(context: InvestigationContext) -> str:
         "MINIME_STABLE_CORE_AGENT_BUDGET": str(
             profile.get("stable_core_agent_budget", "disabled")
         ),
+        "SENSORY_SOURCE": "auto"
+        if profile.get("effective_host_sensory_enabled", False)
+        else "physical",
+        "LOOK_SOURCE": "active"
+        if profile.get("effective_visual_frame_service_enabled", False)
+        else "physical",
         "MINIME_STABLE_CORE_ENABLE_CHECKPOINT_LINEAGE": "1"
         if profile.get("stable_core_checkpoint_lineage_enabled", False)
         else "0",
@@ -1201,8 +1376,15 @@ def emit_launch_env(context: InvestigationContext) -> str:
         if profile.get("stable_core_neural_bundle_enabled", False)
         else "0",
         "MINIME_RESCUE_PHYSIOLOGICAL_FALLBACK": "1",
-        "MINIME_RESCUE_DISABLE_NN_CHECKPOINTS": "1",
-        "MINIME_RESCUE_DISABLE_NEURAL_BUNDLE": "1",
+        "MINIME_RESCUE_DISABLE_NN_CHECKPOINTS": "0"
+        if (
+            profile.get("stable_core_checkpoint_lineage_enabled", False)
+            or profile.get("stable_core_neural_bundle_enabled", False)
+        )
+        else "1",
+        "MINIME_RESCUE_DISABLE_NEURAL_BUNDLE": "0"
+        if profile.get("stable_core_neural_bundle_enabled", False)
+        else "1",
     }
     return "\n".join(f"{key}={shlex.quote(value)}" for key, value in exports.items())
 

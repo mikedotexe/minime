@@ -225,7 +225,7 @@ class TestMinimeRescueInvestigation(unittest.TestCase):
             self.assertFalse(profile["limited_write_require_zero_live_divisors"])
             self.assertEqual(profile["rescue_live_audio_divisor"], 8)
             self.assertEqual(profile["rescue_live_video_divisor"], 8)
-            self.assertEqual(profile["rescue_live_intake_stages"], ["hold"])
+            self.assertEqual(profile["rescue_live_intake_stages"], ["hold", "elevated"])
             self.assertIn("MINIME_RESCUE_LIVE_AUDIO_DIVISOR=8", env)
             self.assertIn("MINIME_RESCUE_LIVE_VIDEO_DIVISOR=8", env)
             self.assertIn("MINIME_RESCUE_LIVE_INTAKE_STAGES=hold", env)
@@ -290,6 +290,42 @@ class TestMinimeRescueInvestigation(unittest.TestCase):
             self.assertEqual(profile["rescue_live_intake_stages"], ["hold", "elevated"])
             self.assertIn("research_note", profile["limited_write_allowed_modes"])
 
+    def test_prepare_profile_full_expression_removes_serial_mute_and_uses_full_presence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = build_context(Path(tmp))
+            seed_live_db(context.live_db_path)
+
+            profile = prepare_profile(
+                context,
+                profile_name="bridge_full_expression_v1",
+                state_variant="current_live_workspace",
+                hold_window_secs=1200,
+                matrix_run_id="run-full-expression",
+                notes=None,
+            )
+            env = emit_launch_env(context)
+
+            self.assertEqual(profile["bridge_write_profile"], "full_expression_v1")
+            self.assertEqual(profile["limited_write_cooldown_secs"], 60)
+            self.assertEqual(profile["limited_write_feature_scale"], 0.08)
+            self.assertEqual(profile["limited_write_max_abs"], 0.16)
+            self.assertEqual(profile["limited_write_min_fill_pct"], 58.0)
+            self.assertEqual(profile["limited_write_max_fill_pct"], 68.0)
+            self.assertEqual(profile["limited_write_peak_fill_max_pct"], 72.0)
+            self.assertEqual(profile["limited_write_allowed_stages"], ["hold"])
+            self.assertEqual(profile["limited_write_rollback_fill_pct"], 84.0)
+            self.assertFalse(profile["limited_write_block_terms_always"])
+            self.assertFalse(profile["limited_write_block_terms_on_rising"])
+            self.assertFalse(profile["limited_write_serializes_live_intake"])
+            self.assertEqual(profile["limited_write_pre_mute_live_intake_secs"], 0)
+            self.assertFalse(profile["limited_write_require_pre_muted_live_intake"])
+            self.assertEqual(profile["rescue_live_audio_divisor"], 12)
+            self.assertEqual(profile["rescue_live_video_divisor"], 12)
+            self.assertEqual(profile["rescue_live_intake_stages"], ["hold"])
+            self.assertIn("MINIME_RESCUE_LIVE_AUDIO_DIVISOR=12", env)
+            self.assertIn("MINIME_RESCUE_LIVE_VIDEO_DIVISOR=12", env)
+            self.assertIn("MINIME_STABLE_CORE_SENSORY_PROFILE=full_presence_v1", env)
+
     def test_prepare_profile_stable_core_exports_new_core_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = build_context(Path(tmp))
@@ -317,8 +353,11 @@ class TestMinimeRescueInvestigation(unittest.TestCase):
             self.assertFalse(profile["limited_write_enabled"])
             self.assertEqual(profile["stable_core_agency_stage"], "self_journal")
             self.assertEqual(profile["stable_core_agent_budget"], "self_journal_only")
+            self.assertEqual(profile["stable_core_allowed_action_families"], ["journaling", "self_study"])
             self.assertFalse(profile["stable_core_checkpoint_lineage_enabled"])
             self.assertFalse(profile["stable_core_neural_bundle_enabled"])
+            self.assertTrue(profile["effective_host_sensory_enabled"])
+            self.assertTrue(profile["effective_visual_frame_service_enabled"])
             self.assertEqual(profile["rescue_live_audio_divisor"], 0)
             self.assertEqual(profile["rescue_live_video_divisor"], 0)
             self.assertEqual(profile["rescue_live_intake_stages"], [])
@@ -331,7 +370,32 @@ class TestMinimeRescueInvestigation(unittest.TestCase):
             )
             self.assertIn("MINIME_STABLE_CORE=1", env)
             self.assertIn("MINIME_STABLE_CORE_AGENCY_STAGE=self_journal", env)
+            self.assertIn("SENSORY_SOURCE=auto", env)
+            self.assertIn("LOOK_SOURCE=active", env)
             self.assertIn("MINIME_STABLE_CORE_ENABLE_CHECKPOINT_LINEAGE=0", env)
+
+    def test_emit_launch_env_allows_direct_stable_core_lineage_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = build_context(Path(tmp))
+            seed_live_db(context.live_db_path)
+
+            profile = prepare_profile(
+                context,
+                profile_name="stable_core_v1",
+                state_variant="current_live_workspace",
+                hold_window_secs=1200,
+                matrix_run_id="run-direct-restore",
+                notes=None,
+            )
+            profile["stable_core_checkpoint_lineage_enabled"] = True
+            profile["stable_core_neural_bundle_enabled"] = True
+            context.profile_path.write_text(json.dumps(profile, indent=2))
+            env = emit_launch_env(context)
+
+            self.assertIn("MINIME_STABLE_CORE_ENABLE_CHECKPOINT_LINEAGE=1", env)
+            self.assertIn("MINIME_STABLE_CORE_ENABLE_NEURAL_BUNDLE=1", env)
+            self.assertIn("MINIME_RESCUE_DISABLE_NN_CHECKPOINTS=0", env)
+            self.assertIn("MINIME_RESCUE_DISABLE_NEURAL_BUNDLE=0", env)
 
     def test_prepare_profile_keeps_bridge_online_but_disables_autonomy_for_telemetry_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -454,7 +518,7 @@ class TestMinimeRescueInvestigation(unittest.TestCase):
 
             env_text = emit_launch_env(context)
 
-            self.assertIn("EIGENFILL_TARGET=0.5500", env_text)
+            self.assertIn("EIGENFILL_TARGET=0.6800", env_text)
             self.assertIn("MINIME_RESCUE_PHYSIOLOGICAL_FALLBACK=1", env_text)
             self.assertIn("MINIME_RESCUE_DISABLE_NN_CHECKPOINTS=1", env_text)
             self.assertIn("MINIME_RESCUE_DISABLE_NEURAL_BUNDLE=1", env_text)

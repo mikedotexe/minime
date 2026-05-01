@@ -347,7 +347,7 @@ impl Default for GateCfg {
 /// PI controller configuration for homeostatic regulation
 #[derive(Clone, Copy, Debug)]
 pub struct PIRegCfg {
-    pub target_fill: f32,          // Target EigenFill% (e.g., 0.55)
+    pub target_fill: f32,          // Target EigenFill% (0-100)
     pub target_lambda1_rel: f32,   // Target λ₁ relative to baseline (e.g., 0.85)
     pub target_geom_rel: f32,      // Target geometric radius relative to baseline
     pub geom_weight: f32,          // Weight of geometric error in PI term
@@ -375,7 +375,7 @@ impl Default for PIRegCfg {
             .unwrap_or(false);
 
         let mut cfg = Self {
-            target_fill: 0.55, // 55% EigenFill target (matches CLI default)
+            target_fill: 68.0, // Stable-core shelf target; launch profiles may override.
             // Golden Reset (2026-04-02): restored to values from commit 1167939
             // which produced 62-68% fill for 4+ hours (326K DB records as evidence).
             // Post-golden "improvements" weakened the controller 40-50% and shifted

@@ -3,6 +3,8 @@ set -euo pipefail
 
 PROJECT_DIR="/Users/v/other/minime"
 ENGINE_BIN="$PROJECT_DIR/minime/target/release/minime"
+INVESTIGATION_SCRIPT="$PROJECT_DIR/scripts/minime_rescue_investigation.py"
+PYTHON_BIN="${MINIME_PYTHON_BIN:-/opt/homebrew/bin/python3}"
 
 cd "$PROJECT_DIR"
 
@@ -11,8 +13,24 @@ if [ ! -x "$ENGINE_BIN" ]; then
     exit 1
 fi
 
+if [ -x "$PYTHON_BIN" ] && [ -f "$INVESTIGATION_SCRIPT" ] && [ -f "$PROJECT_DIR/workspace/rescue_profile.json" ]; then
+    profile_runtime="$("$PYTHON_BIN" - <<'PY'
+import json
+from pathlib import Path
+profile = json.loads(Path("/Users/v/other/minime/workspace/rescue_profile.json").read_text())
+print(profile.get("runtime_profile") or "")
+PY
+)"
+    if [ "$profile_runtime" = "stable_core_v1" ]; then
+        set -a
+        eval "$("$PYTHON_BIN" "$INVESTIGATION_SCRIPT" emit-launch-env)"
+        set +a
+    fi
+fi
+
 SENSORY_SOURCE="${SENSORY_SOURCE:-auto}"
-EIGENFILL_TARGET="${EIGENFILL_TARGET:-0.55}"
+EIGENFILL_TARGET="${EIGENFILL_TARGET:-0.65}"
+MINIME_HARD_RECOVERY_RESET="${MINIME_HARD_RECOVERY_RESET:-1}"
 WARM_START_BLEND="${WARM_START_BLEND:-0.55}"
 REG_TICK_SECS="${REG_TICK_SECS:-0.5}"
 ENABLE_GPU_AV="${ENABLE_GPU_AV:-true}"
@@ -46,6 +64,8 @@ args=(
     --legacy-audio-synth-enabled "$LEGACY_AUDIO_ENABLED"
     --legacy-video-synth-enabled "$LEGACY_VIDEO_ENABLED"
 )
+
+export MINIME_HARD_RECOVERY_RESET
 
 if [ "$ENABLE_GPU_AV" = "true" ]; then
     args+=(--enable-gpu-av)

@@ -33,12 +33,140 @@ SAMPLE_RATE = 16000
 ROOT_MIDI = 60  # C4
 
 
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _spectral_flatness(spectrum: np.ndarray) -> float:
+    """Return 0 for tone-like spectra and 1 for noise-like spectra."""
+    positive = np.asarray(spectrum, dtype=np.float64)
+    positive = positive[np.isfinite(positive)]
+    positive = positive[positive > 1e-12]
+    if positive.size == 0:
+        return 0.0
+    geom = float(np.exp(np.mean(np.log(positive))))
+    arith = float(np.mean(positive))
+    return _clamp01(geom / max(arith, 1e-12))
+
+
+def _adjacent_frame_coherence(mag_matrix: np.ndarray) -> float:
+    """Mean cosine similarity of adjacent STFT frames."""
+    if mag_matrix.shape[0] < 2:
+        return 1.0
+    prev = mag_matrix[:-1].astype(np.float64)
+    curr = mag_matrix[1:].astype(np.float64)
+    numer = np.sum(prev * curr, axis=1)
+    denom = np.linalg.norm(prev, axis=1) * np.linalg.norm(curr, axis=1)
+    valid = denom > 1e-12
+    if not np.any(valid):
+        return 0.0
+    return _clamp01(float(np.mean(numer[valid] / denom[valid])))
+
+
+def _harmonic_coherence(avg_spectrum: np.ndarray, freqs: np.ndarray) -> tuple[float, float | None]:
+    """Estimate how much voiced-band energy sits on a harmonic ladder."""
+    voiced = (freqs >= 80.0) & (freqs <= 6000.0)
+    if not np.any(voiced):
+        return 0.0, None
+
+    voiced_energy = float(np.sum(avg_spectrum[voiced]))
+    if voiced_energy <= 1e-12:
+        return 0.0, None
+
+    fundamental_band = (freqs >= 80.0) & (freqs <= min(1000.0, freqs[-1]))
+    if not np.any(fundamental_band):
+        return 0.0, None
+
+    candidates = np.where(fundamental_band)[0]
+    fundamental_idx = int(candidates[np.argmax(avg_spectrum[candidates])])
+    fundamental_hz = float(freqs[fundamental_idx])
+    if fundamental_hz <= 0.0:
+        return 0.0, None
+
+    bin_width = max(float(freqs[1] - freqs[0]), 1.0) if len(freqs) > 1 else 1.0
+    harmonic_energy = 0.0
+    max_harmonic = int(min(6000.0, freqs[-1]) // fundamental_hz)
+    used_bins: set[int] = set()
+    for harmonic in range(1, max_harmonic + 1):
+        target = harmonic * fundamental_hz
+        width = max(2.0 * bin_width, min(35.0, target * 0.025))
+        near = np.where(np.abs(freqs - target) <= width)[0]
+        for idx in near:
+            if int(idx) not in used_bins and voiced[int(idx)]:
+                harmonic_energy += float(avg_spectrum[int(idx)])
+                used_bins.add(int(idx))
+
+    return _clamp01(harmonic_energy / voiced_energy), round(fundamental_hz, 1)
+
+
+def _centroid_drift(mag_matrix: np.ndarray, freqs: np.ndarray) -> float:
+    """Normalize frame-centroid movement into a 0..1 drift score."""
+    if mag_matrix.shape[0] < 2:
+        return 0.0
+    totals = mag_matrix.sum(axis=1)
+    valid = totals > 1e-12
+    if not np.any(valid):
+        return 0.0
+    centroids = np.sum(mag_matrix[valid] * freqs, axis=1) / totals[valid]
+    if centroids.size < 2:
+        return 0.0
+    mean_centroid = max(float(np.mean(centroids)), 1.0)
+    return _clamp01(float(np.std(centroids)) / mean_centroid)
+
+
+def _acoustic_decay_factor(mag_matrix: np.ndarray, freqs: np.ndarray) -> dict:
+    """Measure harmonic dissociation without mutating or corrupting audio.
+
+    ADF rises when harmonic ladder coherence falls, spectra become flatter,
+    adjacent frames stop resembling one another, or centroid motion becomes
+    erratic. It is deliberately diagnostic: a cartography surface for the
+    beings, not an audio-destruction control.
+    """
+    avg_spectrum = mag_matrix.mean(axis=0) if mag_matrix.size else np.zeros_like(freqs)
+    non_dc = freqs > 20.0
+    flatness = _spectral_flatness(avg_spectrum[non_dc])
+    temporal = _adjacent_frame_coherence(mag_matrix[:, non_dc] if mag_matrix.size else mag_matrix)
+    harmonic, fundamental = _harmonic_coherence(avg_spectrum, freqs)
+    drift = _centroid_drift(mag_matrix, freqs)
+    adf = _clamp01(
+        (0.45 * (1.0 - harmonic))
+        + (0.25 * flatness)
+        + (0.20 * (1.0 - temporal))
+        + (0.10 * drift)
+    )
+
+    if adf < 0.25:
+        classification = "coherent_harmonic"
+        plain = "harmonic ladder remains legible; decay is low"
+    elif adf < 0.45:
+        classification = "textured_decay"
+        plain = "some harmonic texture is dispersing, but coherence remains recoverable"
+    elif adf < 0.70:
+        classification = "harmonic_dissociation"
+        plain = "harmonic structure is breaking into a less recoverable texture"
+    else:
+        classification = "entropy_scatter"
+        plain = "audio is mostly dispersed texture with weak harmonic recoverability"
+
+    return {
+        "acoustic_decay_factor": round(adf, 4),
+        "adf_classification": classification,
+        "adf_plain_read": plain,
+        "harmonic_coherence": round(harmonic, 4),
+        "adf_fundamental_hz": fundamental,
+        "spectral_flatness": round(flatness, 4),
+        "temporal_coherence": round(temporal, 4),
+        "centroid_drift": round(drift, 4),
+    }
+
+
 def analyze_wav(path: str | Path) -> dict:
     """STFT analysis of a WAV file, returning a spectral summary.
 
     Returns a dict with: duration_s, sample_rate, n_frames,
     peak_frequencies, spectral_centroid, spectral_bandwidth,
-    energy_profile (8 bins), rms_energy, estimated description.
+    energy_profile (8 bins), rms_energy, estimated description, and
+    Acoustic Decay Factor (ADF) harmonic-dissociation diagnostics.
     """
     path = Path(path)
     with wave.open(str(path), "rb") as wf:
@@ -107,6 +235,8 @@ def analyze_wav(path: str | Path) -> dict:
     else:
         desc = "bright, high-frequency"
 
+    adf = _acoustic_decay_factor(mag_matrix, freqs)
+
     return {
         "duration_s": round(duration, 2),
         "sample_rate": sr,
@@ -117,6 +247,7 @@ def analyze_wav(path: str | Path) -> dict:
         "peak_frequencies_hz": peak_freqs,
         "energy_profile_8band": energy_profile,
         "description": desc,
+        **adf,
     }
 
 
@@ -376,6 +507,17 @@ def format_analysis_for_prompt(analysis: dict, filename: str) -> str:
     peaks = ", ".join(f"{f}Hz" for f in analysis.get("peak_frequencies_hz", [])[:3])
     bands = analysis.get("energy_profile_8band", [])
     band_str = " ".join(f"{b:.3f}" for b in bands)
+    adf = analysis.get("acoustic_decay_factor")
+    adf_line = ""
+    if adf is not None:
+        adf_line = (
+            f"\n  Acoustic Decay Factor: {adf:.3f} "
+            f"({analysis.get('adf_classification', 'unknown')})"
+            f"\n  Harmonic coherence: {analysis.get('harmonic_coherence', 0.0):.3f}, "
+            f"temporal coherence: {analysis.get('temporal_coherence', 0.0):.3f}, "
+            f"flatness: {analysis.get('spectral_flatness', 0.0):.3f}"
+            f"\n  ADF read: {analysis.get('adf_plain_read', 'not available')}"
+        )
 
     return (
         f"[AUDIO INBOX: {filename}]\n"
@@ -385,4 +527,5 @@ def format_analysis_for_prompt(analysis: dict, filename: str) -> str:
         f"  Spectral centroid: {analysis['spectral_centroid_hz']}Hz\n"
         f"  Peak frequencies: {peaks}\n"
         f"  Energy bands (low→high): {band_str}"
+        f"{adf_line}"
     )

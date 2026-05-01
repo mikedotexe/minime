@@ -22,7 +22,7 @@ MIC_STATUS_PATH = RUNTIME_DIR / "mic_status.json"
 CAMERA_STATUS_PATH = RUNTIME_DIR / "camera_status.json"
 DEFAULT_BINARY = str(CONTEXT.engine_binary)
 BASELINE_COMMIT = "b8823ad"
-TARGET_FILL = 55.0
+TARGET_FILL = 68.0
 DEFAULT_PORTS = {"7878": False, "7879": False, "7880": False}
 
 
@@ -84,6 +84,25 @@ def _as_int(value: Any, default: int = 0) -> int:
     return default
 
 
+def _active_engine_target_fill(
+    active_profile: dict[str, Any],
+    rescue_health: dict[str, Any],
+    structural_pi: dict[str, Any],
+) -> float:
+    stable_core_enabled = bool(active_profile.get("stable_core_enabled")) or (
+        active_profile.get("runtime_profile") == "stable_core_v1"
+    )
+    stable_core_target = _as_float(
+        rescue_health.get("stability_pi_target_fill_pct")
+    ) or _as_float(structural_pi.get("target_fill_pct"))
+    profile_target = _as_float(active_profile.get("engine_target_fill"))
+    if stable_core_enabled and stable_core_target is not None:
+        return stable_core_target
+    if profile_target is not None:
+        return profile_target
+    return TARGET_FILL
+
+
 def _input_lane_snapshot() -> dict[str, Any]:
     mic_status = _load_runtime_status(MIC_STATUS_PATH)
     camera_status = _load_runtime_status(CAMERA_STATUS_PATH)
@@ -117,6 +136,16 @@ def build_active_status(
     rescue_health = (
         health_payload.get("rescue") if isinstance(health_payload.get("rescue"), dict) else {}
     )
+    stable_core_health = (
+        health_payload.get("stable_core")
+        if isinstance(health_payload.get("stable_core"), dict)
+        else {}
+    )
+    structural_pi = (
+        stable_core_health.get("structural_pi")
+        if isinstance(stable_core_health.get("structural_pi"), dict)
+        else {}
+    )
     started_at_value = started_at or current.get("started_at") or now_iso()
     last_restart_value = last_restart_at or current.get("last_restart_at") or started_at_value
     lane_snapshot = _input_lane_snapshot()
@@ -142,7 +171,9 @@ def build_active_status(
         "engine_pid": effective_engine_pid,
         "engine_pid_changed_at": engine_pid_changed_at,
         "engine_pid_changed_without_watchdog_restart": unaccounted_pid_change,
-        "engine_target_fill": TARGET_FILL,
+        "engine_target_fill": _active_engine_target_fill(
+            active_profile, rescue_health, structural_pi
+        ),
         "gpu_status": gpu_status or current.get("gpu_status", "unavailable"),
         "last_restart_at": last_restart_value,
         "last_health_at": last_health_at if last_health_at is not None else current.get("last_health_at"),
@@ -195,17 +226,22 @@ def build_active_status(
         "scaffold_source": rescue_health.get("scaffold_source", current.get("scaffold_source")),
         "socket_liveness": lane_snapshot["socket_liveness"],
         "stability_pi_active": bool(
-            rescue_health.get("stability_pi_active", current.get("stability_pi_active", False))
+            rescue_health.get(
+                "stability_pi_active",
+                structural_pi.get("active", current.get("stability_pi_active", False)),
+            )
         ),
         "stability_pi_error_pct": rescue_health.get(
-            "stability_pi_error_pct", current.get("stability_pi_error_pct")
+            "stability_pi_error_pct",
+            structural_pi.get("error_pct", current.get("stability_pi_error_pct")),
         ),
         "stability_pi_integral": rescue_health.get(
-            "stability_pi_integral", current.get("stability_pi_integral")
+            "stability_pi_integral",
+            structural_pi.get("integral", current.get("stability_pi_integral")),
         ),
         "stability_pi_target_fill_pct": rescue_health.get(
             "stability_pi_target_fill_pct",
-            current.get("stability_pi_target_fill_pct"),
+            structural_pi.get("target_fill_pct", current.get("stability_pi_target_fill_pct")),
         ),
         "state_variant": active_profile.get("state_variant"),
         "started_at": started_at_value,

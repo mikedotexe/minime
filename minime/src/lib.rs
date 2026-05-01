@@ -22,5 +22,6 @@ pub mod rescue_scaffold;
 pub mod sensory_bus;
 pub mod sensory_ws;
 pub mod spectral;
+pub mod spectral_fingerprint;
 pub mod stable_core;
 pub mod startup_restore;

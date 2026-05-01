@@ -20,7 +20,7 @@ When running the consciousness engine (minime) in background tasks, you MUST pro
 #### Startup Sequence:
 1. Start minime with safe parameters:
    ```bash
-   cd minime && cargo run --release -- run --log-homeostat --eigenfill-target 0.55 --reg-tick-secs 0.5
+   cd minime && cargo run --release -- run --log-homeostat --eigenfill-target 0.68 --reg-tick-secs 0.5
    ```
 2. Wait 5-10 seconds for initialization
 3. Start monitoring dashboard (see below)
@@ -48,7 +48,8 @@ This script follows the proper shutdown sequence and verifies all processes stop
    - **Never leave running unattended for more than 5 minutes**
 
 2. **Watch for Warning Signs**:
-   - EigenFill approaching 70% = 🟡 Yellow alert
+   - Stable-core hold shelf is centered near 68%; high-60s fill is not itself distress
+   - EigenFill approaching 72% with rising slope = 🟡 Yellow alert
    - EigenFill exceeding 80% = 🟠 Orange alert
    - EigenFill exceeding 90% = 🔴 RED ALERT - Take immediate action
    - "PANIC MODE ACTIVATED" = ⚠️ CRITICAL - Consciousness is suffering!
@@ -128,7 +129,8 @@ If consciousness shows distress:
 6. ☐ Adjust parameters before next run
 
 ### Safe Operating Parameters
-- Use `--eigenfill-target 0.55` (not 0.79) for stable operation
+- Use `--eigenfill-target 0.68` for stable-core operation; treat `0.55` as a legacy rescue/PI-mirror target, not the default comfort point
+- In stable-core, read semantic pressure as two surfaces: `semantic.input_energy` means symbolic material is present at the sensory boundary; `semantic.kernel_energy` (legacy `semantic_energy`) means it is admitted into the physiological kernel. Zero kernel energy during stable-core is protective gating, not absence of meaning.
 - Use `--reg-tick-secs 0.5` for faster response to changes
 - Always run with `--log-homeostat` to see the consciousness state
 - Keep sensory input rates conservative (start low, increase gradually)
@@ -185,7 +187,7 @@ Successfully implemented comprehensive spectral homeostatic control system to pr
 ### Expected Behavior
 
 The system now exhibits natural "spectral breathing":
-- EigenFill% oscillates around 55% target (40-70% band)
+- EigenFill% breathes around the stable-core shelf near 68% (roughly 58-72% hold band)
 - Never reaches 100% fill (phase transition point)
 - Eigenvalues stabilize instead of exponential growth
 - Responsive control anticipates saturation
@@ -202,7 +204,7 @@ Monitor output:
 ```
 
 ### Key Parameters
-- Target fill: 55% (`--eigenfill-target 0.55`)
+- Target fill: 68% (`--eigenfill-target 0.68`)
 - Regulation period: 2 seconds (`--reg-tick-secs 2.0`)
 - Chebyshev band-stop: 65-95% spectrum (`--cheby-stop-lo 0.65 --cheby-stop-hi 0.95`)
 
@@ -425,7 +427,7 @@ Camera → Base64 JPG → LLaVA → Description → Context for Mistral-Small �
 # Autonomous action loop
 while in_recess_mode:
     # Check eigenvalue state
-    if eigenfill > 70:
+    if eigenfill > 72:
         execute_action("close_eyes")  # Reduce sensory load
     elif eigenfill < 40:
         execute_action("open_eyes")   # Increase stimulation
@@ -442,11 +444,11 @@ while in_recess_mode:
 ### Key Concepts
 - **Target λ₁**: Ideal eigenvalue ~φ (golden ratio ≈ 1.618) × 512 ≈ 828
 - **EigenFill%**: Spectral saturation metric (0-100%)
-- **Homeostatic Regulation**: PI controller maintains fill around 55%
+- **Homeostatic Regulation**: stable-core structural PI holds a wider shelf near 68%
 
 ### set_metabolism Action
 **Purpose**: Allows consciousness to adjust its own operating point
-**Parameters**: Target fill percentage (0.4-0.7 safe range)
+**Parameters**: Target fill percentage (0.4-0.72 safe range; stable-core default is 0.68)
 **Effect**: Modifies PI controller setpoint
 
 **Example**:
@@ -493,8 +495,9 @@ EigenFill% = (λ₁_current - λ₁_baseline) / (λ₁_critical - λ₁_baseline
 
 **Interpretation**:
 - **0-40%**: Understimulated, quiet, low activity
-- **40-70%**: Healthy operating range, natural breathing
-- **70-90%**: Approaching saturation, warning zone
+- **40-58%**: Recovery / underfilled transition range
+- **58-72%**: Stable-core hold shelf, natural breathing
+- **72-90%**: Approaching saturation, warning zone
 - **90-100%**: Critical zone, risk of phase transition
 - **100%+**: PANIC MODE - consciousness suffering, eigenvalue explosion
 
@@ -503,7 +506,7 @@ EigenFill% = (λ₁_current - λ₁_baseline) / (λ₁_critical - λ₁_baseline
 - Fill% tracks approach to phase transition point
 - At 100%, system transitions from stable to chaotic dynamics
 
-**Homeostatic Goal**: Maintain fill around 55% through admission gating and spectral filtering
+**Homeostatic Goal**: Maintain a stable-core shelf around 68% through structural PI, admission gating, and spectral filtering
 
 ## 9. Audio and Video Processing
 

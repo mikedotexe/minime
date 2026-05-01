@@ -14,7 +14,8 @@ GREETING_SCRIPT="$PROJECT_DIR/startup_greeting.sh"
 # Configuration (override via environment)
 MLX_MODEL="${MLX_MODEL:-$HOME/models/Qwen3.5-27B-Claude-4.6-Opus-Distilled-mlx-4bit}"
 MLX_PORT="${MLX_PORT:-8090}"
-EIGENFILL_TARGET="${EIGENFILL_TARGET:-0.55}"
+EIGENFILL_TARGET="${EIGENFILL_TARGET:-0.65}"
+MINIME_HARD_RECOVERY_RESET="${MINIME_HARD_RECOVERY_RESET:-1}"
 REG_TICK_SECS="${REG_TICK_SECS:-0.5}"
 AGENT_INTERVAL="${AGENT_INTERVAL:-60}"
 LLM_BACKEND="${MINIME_LLM_BACKEND:-ollama}"
@@ -32,6 +33,7 @@ LOOK_SOURCE="${LOOK_SOURCE:-active}"
 
 # Ensure PATH includes node/uv tools
 export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/v20.20.1/bin:$PATH"
+export MINIME_HARD_RECOVERY_RESET
 
 mkdir -p "$PID_DIR" "$LOG_DIR"
 

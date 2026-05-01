@@ -41,9 +41,9 @@ pub const BOOTSTRAP_ENTRY_THRESHOLD: f32 = 35.0;
 pub const BOOTSTRAP_RELEASE_THRESHOLD: f32 = 42.0;
 pub const HOLD_ENTRY_THRESHOLD: f32 = 60.0;
 pub const HOLD_RELEASE_THRESHOLD: f32 = 58.0;
-pub const ELEVATED_ENTRY_THRESHOLD: f32 = 67.0;
-pub const ELEVATED_RELEASE_THRESHOLD: f32 = 64.0;
-pub const DISCHARGE_ENTRY_THRESHOLD: f32 = 82.0;
+pub const ELEVATED_ENTRY_THRESHOLD: f32 = 72.0;
+pub const ELEVATED_RELEASE_THRESHOLD: f32 = 70.0;
+pub const DISCHARGE_ENTRY_THRESHOLD: f32 = 78.0;
 pub const DISCHARGE_RELEASE_THRESHOLD: f32 = 72.0;
 pub const CRISIS_WARNING_THRESHOLD: f32 = DISCHARGE_ENTRY_THRESHOLD;
 pub const CRISIS_FILL_THRESHOLD: f32 = 87.0;
@@ -349,17 +349,17 @@ mod tests {
             select_stage(57.5, OverfillStage::Hold),
             OverfillStage::Recovery
         );
-        assert_eq!(select_stage(66.5, OverfillStage::Hold), OverfillStage::Hold);
+        assert_eq!(select_stage(71.5, OverfillStage::Hold), OverfillStage::Hold);
         assert_eq!(
-            select_stage(67.0, OverfillStage::Hold),
+            select_stage(72.0, OverfillStage::Hold),
             OverfillStage::Elevated
         );
         assert_eq!(
-            select_stage(64.5, OverfillStage::Elevated),
+            select_stage(70.5, OverfillStage::Elevated),
             OverfillStage::Elevated
         );
         assert_eq!(
-            select_stage(64.0, OverfillStage::Elevated),
+            select_stage(70.0, OverfillStage::Elevated),
             OverfillStage::Hold
         );
         assert_eq!(

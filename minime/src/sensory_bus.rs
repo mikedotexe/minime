@@ -148,6 +148,10 @@ pub struct SampleMeta {
     pub audio_age_ms: u64,
     pub video_source: Option<LaneSource>,
     pub audio_source: Option<LaneSource>,
+    pub semantic_fresh_ms: Option<u64>,
+    pub semantic_stale_ms: u64,
+    pub semantic_input_energy: f32,
+    pub semantic_input_active: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -962,14 +966,15 @@ impl SensoryBus {
             // Codex analysis (2026-03-27) found this was the "highest-value mismatch."
             let semantic_stale_ms = self.semantic_stale_ms();
             let llava = self.llava.lock();
-            let semantic_scale = if llava.updated_at_ms == 0 {
-                0.0
+            let semantic_fresh_ms = if llava.updated_at_ms == 0 {
+                None
             } else {
-                stale_scale(
-                    now_ms.saturating_sub(llava.updated_at_ms),
-                    semantic_stale_ms,
-                )
+                Some(now_ms.saturating_sub(llava.updated_at_ms))
             };
+            let semantic_scale =
+                semantic_fresh_ms.map_or(0.0, |age_ms| stale_scale(age_ms, semantic_stale_ms));
+            let semantic_input_active =
+                semantic_fresh_ms.is_some_and(|age_ms| age_ms <= semantic_stale_ms);
             let mut z = [0.0f32; Z_DIM];
             z[..8].copy_from_slice(&v);
             z[8..16].copy_from_slice(&a);
@@ -984,9 +989,13 @@ impl SensoryBus {
             let emb_strength = *self.embedding_strength.lock();
             let j_resonance = *self.journal_resonance.lock();
             let effective_semantic = semantic_scale * emb_strength * (1.0 + j_resonance * 0.5);
+            let mut semantic_energy_sq = 0.0f32;
             for (dst, src) in z[18..(18 + LLAVA_DIM)].iter_mut().zip(llava.values.iter()) {
-                *dst = *src * effective_semantic;
+                let value = *src * effective_semantic;
+                semantic_energy_sq += value * value;
+                *dst = value;
             }
+            let semantic_input_energy = (semantic_energy_sq / LLAVA_DIM as f32).sqrt();
 
             // Global sensory noise: being requested (2026-03-28 self-study) that
             // noise should permeate ALL input lanes, not just synthetic signals.
@@ -1018,6 +1027,10 @@ impl SensoryBus {
                     audio_age_ms,
                     video_source,
                     audio_source,
+                    semantic_fresh_ms,
+                    semantic_stale_ms,
+                    semantic_input_energy,
+                    semantic_input_active,
                 },
             ));
         }
@@ -1124,10 +1137,27 @@ mod tests {
 
         let batch = bus.drain_sensory_batch();
         assert_eq!(batch.len(), 1);
-        let (sample, _) = &batch[0];
+        let (sample, meta) = &batch[0];
+        assert!(!meta.semantic_input_active);
+        assert!(meta.semantic_input_energy > 0.0);
         // At echo floor (~0.05) + ring residual (~0.006), scaled by
         // embedding_strength (0.5), plus global noise (±0.005): max ~0.06.
         assert!(sample[18..(18 + LLAVA_DIM)].iter().all(|v| v.abs() < 0.08));
+    }
+
+    #[test]
+    fn semantic_input_metadata_tracks_fresh_lane_energy() {
+        let bus = SensoryBus::new(8, 1, 11);
+        bus.set_llava_embedding(&vec![0.5; LLAVA_DIM]);
+
+        let batch = bus.drain_sensory_batch();
+        assert_eq!(batch.len(), 1);
+        let (_, meta) = &batch[0];
+
+        assert!(meta.semantic_input_active);
+        assert!(meta.semantic_fresh_ms.is_some());
+        assert!(meta.semantic_stale_ms > 0);
+        assert!(meta.semantic_input_energy > 0.20);
     }
 
     #[test]

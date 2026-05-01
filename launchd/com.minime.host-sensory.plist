@@ -3,24 +3,18 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.minime.engine</string>
+	<string>com.minime.host-sensory</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/bash</string>
-		<string>/Users/v/other/minime/scripts/launchd_minime_engine.sh</string>
+		<string>/Users/v/other/minime/scripts/launchd_host_sensory.sh</string>
 	</array>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-		<key>EIGENFILL_TARGET</key>
-		<string>0.65</string>
-		<key>MINIME_HARD_RECOVERY_RESET</key>
-		<string>1</string>
-		<key>LEGACY_AUDIO_ENABLED</key>
-		<string>false</string>
-		<key>LEGACY_VIDEO_ENABLED</key>
-		<string>false</string>
+		<key>SENSORY_SOURCE</key>
+		<string>auto</string>
 	</dict>
 	<key>WorkingDirectory</key>
 	<string>/Users/v/other/minime</string>
@@ -31,8 +25,8 @@
 	<key>ThrottleInterval</key>
 	<integer>5</integer>
 	<key>StandardOutPath</key>
-	<string>/Users/v/other/minime/logs/minime-engine.log</string>
+	<string>/Users/v/other/minime/logs/host-sensory.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Users/v/other/minime/logs/minime-engine.log</string>
+	<string>/Users/v/other/minime/logs/host-sensory.log</string>
 </dict>
 </plist>

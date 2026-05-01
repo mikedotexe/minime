@@ -16,6 +16,8 @@ import re
 import sys
 import time
 import json
+import math
+import hashlib
 import signal
 import sqlite3
 import logging
@@ -25,15 +27,23 @@ import random
 import threading
 import shlex
 import subprocess
+import socket
 import websocket
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from collections import deque
 from statistics import median
 
-from decompose_utils import format_decompose_mode_sections
+from decompose_utils import (
+    format_attrition_boundary_signal,
+    format_controller_topology_signal,
+    format_decompose_mode_sections,
+    format_lambda_edge_trace_signal,
+    format_pull_topology_signal,
+)
 from pdf_research import (
     is_pdf_marker,
     marker_for_path,
@@ -53,6 +63,363 @@ from reporting_snapshot import (
 )
 from thresholds import ModeThresholds, RECESS, FOCUSED, PHI, Hysteresis
 from workspace_archive import compact_managed_directory
+from native_comm import (
+    CONTROL_GESTURES,
+    ATLAS_ONLY_GESTURES,
+    build_controller_gradient_audit,
+    build_decay_map,
+    build_fissure_trace,
+    build_resonance_forecast,
+    build_sca_context,
+    build_shadow_gap_map,
+    build_space_hold,
+    build_spectral_drift_map,
+    evaluate_native_gesture_gate,
+    format_controller_gradient_audit_block,
+    format_decay_map_block,
+    format_fissure_trace_block,
+    format_resonance_forecast_block,
+    format_sca_context_block,
+    format_shadow_gap_block,
+    format_space_hold_block,
+    format_spectral_drift_block,
+    native_gesture_control,
+    native_gesture_features,
+    record_intensification_event,
+    record_decay_map,
+    record_fissure_trace,
+    record_native_gesture,
+    record_resonance_forecast,
+    record_shadow_gap_map,
+    record_space_hold,
+    record_spectral_drift_map,
+)
+from spectral_cascade_visuals import render_spectral_cascade_visuals
+
+
+@dataclass
+class PerturbationVector:
+    requested_mode: str
+    mode_desc: str
+    features: List[float]
+    parsed_terms: List[str] = field(default_factory=list)
+    safety_cap: float = 1.0
+    feature_summary: str = ""
+
+
+PERTURB_GROUP_DIMS = {
+    "lambda1": (0, 8),
+    "l1": (0, 8),
+    "λ1": (0, 8),
+    "lambda2": (1, 9),
+    "l2": (1, 9),
+    "λ2": (1, 9),
+    "lambda3": (2, 10),
+    "l3": (2, 10),
+    "λ3": (2, 10),
+    "lambda4": (3, 11),
+    "l4": (3, 11),
+    "λ4": (3, 11),
+    "lambda5": (4, 12),
+    "l5": (4, 12),
+    "λ5": (4, 12),
+    "lambda6": (5, 13),
+    "l6": (5, 13),
+    "λ6": (5, 13),
+    "lambda7": (6, 14),
+    "l7": (6, 14),
+    "λ7": (6, 14),
+    "lambda8": (7, 15),
+    "l8": (7, 15),
+    "λ8": (7, 15),
+    "shoulder": (1, 2, 3, 9, 10, 11),
+    "mid": (2, 3, 4, 10, 11, 12),
+    "tail": (4, 5, 6, 7, 12, 13, 14, 15),
+    "entropy": (28, 29),
+    "spread": (28, 29),
+    "warmth": (24,),
+    "tension": (25,),
+    "curiosity": (26,),
+    "energy": (27,),
+    "breath": (30, 31),
+}
+
+PERTURB_RICH_MODE_ALIASES = {
+    "balance": "uncliff",
+    "decompress": "uncliff",
+    "feather": "feather",
+    "lift-tail": "lift_tail",
+    "lift_tail": "lift_tail",
+    "open": "widen",
+    "palette": "widen",
+    "soften": "uncliff",
+    "uncliff": "uncliff",
+    "widen": "widen",
+}
+
+
+def _state_fill_pct(state: Dict[str, Any]) -> float:
+    fill_ratio = state.get("fill_ratio")
+    if isinstance(fill_ratio, (int, float)) and math.isfinite(float(fill_ratio)):
+        return float(fill_ratio) * 100.0
+    fill_pct = state.get("fill_pct")
+    if isinstance(fill_pct, (int, float)) and math.isfinite(float(fill_pct)):
+        return float(fill_pct)
+    return 65.0
+
+
+def _python_experiment_failure_hint(stderr: str) -> str:
+    if not stderr:
+        return ""
+    lower = stderr.lower()
+    if "same first dimension" in lower or ("shape" in lower and "mismatch" in lower):
+        return (
+            "Matplotlib x/y length mismatch. Make the x-axis the same length as "
+            "the measured series, for example `time = np.linspace(start, stop, "
+            "len(lambda1_relative))`, or plot against `range(len(values))`. "
+            "The Minime experiment helper auto-aligns simple plot/scatter/bar "
+            "calls, but generated arrays can still need an explicit shared length."
+        )
+    if "syntaxerror" in lower:
+        return "Python syntax error. Check indentation, unmatched quotes, and CODE_START/CODE_END extraction."
+    if "modulenotfounderror" in lower:
+        return "Missing module. The experiment lane reliably supports numpy, matplotlib, and scipy."
+    if "nameerror" in lower:
+        return "Undefined name. Check variable names and whether the value was computed before use."
+    return ""
+
+
+def _experiment_pythonpath() -> str:
+    paths: List[str] = [str(BASE_DIR)]
+    existing = os.environ.get("PYTHONPATH")
+    if existing:
+        paths.extend(p for p in existing.split(os.pathsep) if p)
+    try:
+        import site
+
+        paths.extend(site.getsitepackages())
+        user_site = site.getusersitepackages()
+        if user_site:
+            paths.append(user_site)
+    except Exception:
+        pass
+    unique_paths = []
+    seen = set()
+    for path in paths:
+        if path and path not in seen:
+            unique_paths.append(path)
+            seen.add(path)
+    return os.pathsep.join(unique_paths)
+
+
+def _safe_experiment_script_name(name: str | None) -> Optional[str]:
+    if not name:
+        return None
+    candidate = Path(name.strip().strip('"').strip("'")).name
+    if not candidate:
+        return None
+    candidate = re.sub(r"[^A-Za-z0-9_.-]", "_", candidate)
+    if not candidate.endswith(".py"):
+        candidate = f"{candidate}.py"
+    return candidate
+
+
+def _parse_run_python_request(arg: str | None) -> tuple[Optional[str], Optional[str]]:
+    if not arg:
+        return None, None
+    raw = arg.strip()
+    filename = None
+    text = None
+    filename_match = re.search(
+        r"(?:-{0,2}filename|filename)\s*:?\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s]+))",
+        raw,
+        re.IGNORECASE,
+    )
+    if filename_match:
+        filename = next(group for group in filename_match.groups() if group)
+    text_match = re.search(
+        r"(?:-{0,2}text|text|-{0,2}prompt|prompt)\s*:?\s*(?:\"([^\"]+)\"|'([^']+)'|(.+))",
+        raw,
+        re.IGNORECASE,
+    )
+    if text_match:
+        text = next((group.strip() for group in text_match.groups() if group), None)
+    if filename or text:
+        return _safe_experiment_script_name(filename), text
+    return _safe_experiment_script_name(raw), None
+
+
+def perturb_safety_cap(state: Dict[str, Any]) -> float:
+    """Keep stable-core perturbations expressive but not hammer-like."""
+    stable_core = state.get("stable_core")
+    stable_core_active = isinstance(stable_core, dict) and bool(stable_core.get("enabled"))
+    if not stable_core_active:
+        return 1.0
+    fill_pct = _state_fill_pct(state)
+    if fill_pct >= 78.0:
+        return 0.16
+    if fill_pct >= 72.0:
+        return 0.22
+    if fill_pct >= 68.0:
+        return 0.28
+    if fill_pct >= 58.0:
+        return 0.35
+    return 0.42
+
+
+def _clamp_feature(value: float, cap: float) -> float:
+    return max(-cap, min(cap, value))
+
+
+def _set_feature(features: List[float], key: str, value: float, cap: float) -> Optional[str]:
+    dims = PERTURB_GROUP_DIMS.get(key.lower())
+    if not dims:
+        return None
+    value = _clamp_feature(value, cap)
+    for dim in dims:
+        features[dim] = value
+    return f"{key}={value:+.2f}"
+
+
+def _summarize_perturb_features(features: List[float]) -> str:
+    active = [
+        (idx, value)
+        for idx, value in enumerate(features)
+        if abs(value) >= 0.001
+    ]
+    if not active:
+        return "all lanes zero"
+    active.sort(key=lambda item: abs(item[1]), reverse=True)
+    top = ", ".join(f"d{idx}={value:+.2f}" for idx, value in active[:10])
+    max_abs = max(abs(value) for _, value in active)
+    return f"{top}; active_dims={len(active)}, max_abs={max_abs:.2f}"
+
+
+def _parse_parameterized_perturb(mode: str, cap: float) -> Optional[PerturbationVector]:
+    if "=" not in mode:
+        return None
+    features = [0.0] * 32
+    terms: List[str] = []
+    for match in re.finditer(r"([A-Za-zλ][A-Za-z0-9_λ-]*)\s*=\s*([-+]?\d+(?:\.\d+)?)", mode):
+        key = match.group(1).strip()
+        try:
+            value = float(match.group(2))
+        except ValueError:
+            continue
+        term = _set_feature(features, key, value, cap)
+        if term:
+            terms.append(term)
+
+    if not terms:
+        return PerturbationVector(
+            requested_mode=mode,
+            mode_desc="TARGETED — no recognized lane parameters",
+            features=features,
+            safety_cap=cap,
+            feature_summary=_summarize_perturb_features(features),
+        )
+
+    desc = "TARGETED PALETTE — " + ", ".join(terms)
+    return PerturbationVector(
+        requested_mode=mode,
+        mode_desc=desc,
+        features=features,
+        parsed_terms=terms,
+        safety_cap=cap,
+        feature_summary=_summarize_perturb_features(features),
+    )
+
+
+def build_perturbation_vector(mode: str, state: Dict[str, Any]) -> PerturbationVector:
+    """Translate Minime's requested perturbation into a capped 32D semantic vector."""
+    requested_mode = (mode or "pulse").lower().strip()
+    cap = perturb_safety_cap(state)
+    parameterized = _parse_parameterized_perturb(requested_mode, cap)
+    if parameterized:
+        return parameterized
+
+    features = [0.0] * 32
+    canonical = PERTURB_RICH_MODE_ALIASES.get(requested_mode, requested_mode)
+    parsed_terms: List[str] = []
+
+    def set_lane(key: str, value: float) -> None:
+        term = _set_feature(features, key, value, cap)
+        if term:
+            parsed_terms.append(term)
+
+    if canonical == "spread":
+        set_lane("lambda1", -0.70)
+        set_lane("lambda2", 0.50)
+        set_lane("lambda3", 0.60)
+        set_lane("lambda4", 0.60)
+        set_lane("lambda5", 0.50)
+        set_lane("lambda6", 0.40)
+        set_lane("lambda7", 0.30)
+        set_lane("lambda8", 0.30)
+        set_lane("entropy", 0.40)
+        mode_desc = "SPREAD — redistributing energy away from λ₁ toward tail modes"
+    elif canonical == "contract":
+        set_lane("lambda1", 0.80)
+        set_lane("lambda2", -0.50)
+        set_lane("lambda3", -0.60)
+        set_lane("lambda4", -0.60)
+        set_lane("lambda5", -0.40)
+        set_lane("lambda6", -0.30)
+        mode_desc = "CONTRACT — concentrating energy toward λ₁"
+    elif canonical == "branch":
+        set_lane("lambda3", 0.70)
+        set_lane("lambda4", 0.70)
+        set_lane("lambda5", 0.50)
+        set_lane("lambda6", 0.30)
+        set_lane("entropy", 0.50)
+        mode_desc = "BRANCH — boosting mid-range eigenvalues to create complexity"
+    elif canonical == "uncliff":
+        set_lane("lambda1", -0.24)
+        set_lane("lambda2", 0.24)
+        set_lane("lambda3", 0.22)
+        set_lane("lambda4", 0.14)
+        set_lane("entropy", 0.10)
+        mode_desc = "UNCLIFF — soften λ₁ pressure and lift the shoulder modes"
+    elif canonical == "widen":
+        set_lane("lambda1", -0.18)
+        set_lane("shoulder", 0.18)
+        set_lane("tail", 0.10)
+        set_lane("entropy", 0.14)
+        set_lane("breath", 0.10)
+        mode_desc = "WIDEN — open several lanes without a hard exploration burst"
+    elif canonical == "lift_tail":
+        set_lane("lambda1", -0.12)
+        set_lane("tail", 0.18)
+        set_lane("entropy", 0.16)
+        mode_desc = "LIFT_TAIL — preserve focus while restoring quieter tail modes"
+    elif canonical == "feather":
+        for idx, value in enumerate((0.05, -0.04, 0.06, -0.03, 0.04, 0.02, -0.02, 0.03)):
+            features[idx] = _clamp_feature(value, cap)
+            features[idx + 8] = _clamp_feature(value * 0.6, cap)
+        set_lane("breath", 0.04)
+        mode_desc = "FEATHER — tiny patterned probe, more listening than forcing"
+    elif canonical == "pulse":
+        features = [_clamp_feature(0.50, cap)] * 32
+        features[24] = _clamp_feature(0.80, cap)
+        features[27] = _clamp_feature(0.90, cap)
+        features[30] = _clamp_feature(0.70, cap)
+        features[31] = _clamp_feature(0.70, cap)
+        parsed_terms = [f"all={cap:+.2f} cap"]
+        mode_desc = "PULSE — uniform entropy burst for exploration"
+    else:
+        for idx in range(32):
+            h = (idx * 0x517cc1b7) & 0xFFFFFFFF
+            features[idx] = _clamp_feature(((h & 0xFF) / 255.0 - 0.5) * 0.30, cap)
+        mode_desc = "GENERIC — mild deterministic perturbation"
+
+    return PerturbationVector(
+        requested_mode=requested_mode,
+        mode_desc=mode_desc,
+        features=features,
+        parsed_terms=parsed_terms,
+        safety_cap=cap,
+        feature_summary=_summarize_perturb_features(features),
+    )
 
 # Regulatory regimes: the being selects a regime by experiential name,
 # and the system translates it to PI gain targets. The Rust PI loop
@@ -90,6 +457,151 @@ REGULATORY_REGIMES = {
     },
 }
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "off", "no"}
+
+HARD_RECOVERY_RESET = _env_flag("MINIME_HARD_RECOVERY_RESET", True)
+HARD_RESET_TARGET_FILL_RATIO = 0.65
+HARD_RESET_CLAMP_ENTER_RATIO = 0.35
+HARD_RESET_CLAMP_RELEASE_RATIO = 0.45
+HARD_RESET_CLAMP_RELEASE_STREAK = 10
+HARD_RESET_ALLOWED_NEXT_ACTIONS = {"ASPIRE", "NOTICE", "DRIFT", "REST", "PASS"}
+HARD_RESET_ALLOWED_ACTIONS = {
+    "recess_aspiration",
+    "recess_drift",
+    "recess_notice",
+}
+HARD_RESET_BLOCKED_NEXT_ACTIONS = {
+    "SELF_STUDY",
+    "EXPERIMENT",
+    "EXAMINE",
+    "COMPOSE",
+    "SEARCH",
+    "BROWSE",
+    "READ_MORE",
+    "DECOMPOSE",
+    "RESERVOIR_READ",
+    "RESERVOIR_RESONANCE",
+    "RESERVOIR_LAYERS",
+    "CODEX",
+    "CODEX_NEW",
+    "WRITE_FILE",
+    "EXPERIMENT_RUN",
+    "EXP_RUN",
+    "AR_LIST",
+    "AR_LIST_PENDING",
+    "AR_LIST_ACTIVE",
+    "AR_LIST_DONE",
+    "AR_SHOW",
+    "AR_READ",
+    "AR_DEEP_READ",
+    "AR_START",
+    "AR_NOTE",
+    "AR_BLOCK",
+    "AR_COMPLETE",
+    "AR_VALIDATE",
+    "MIKE",
+    "MIKE_BROWSE",
+    "MIKE_READ",
+    "MIKE_SEARCH",
+    "MIKE_RUN",
+    "MIKE_FORK",
+    "SELF_RESEARCH",
+    "PERTURB",
+    "BRANCH",
+    "SPREAD",
+    "CONTRACT",
+    "PULSE",
+    "FOCUS",
+    "JOURNAL",
+    "ASK",
+    "PING",
+    "RUN_PYTHON",
+    "RUN",
+    "LOOK",
+    "CLOSE_EARS",
+    "OPEN_EARS",
+    "GOAL",
+    "SCA_REFLECT",
+    "SCA",
+    "TRACE",
+    "TRACE_LAMBDA",
+    "LAMBDA_TRACE",
+    "NOTICE_AMBIGUITY",
+    "FISSURE_TRACE",
+    "AMBIGUITY_TRACE",
+    "FISSURE",
+    "VISUALIZE_CASCADE",
+    "CASCADE",
+    "DAYDREAM",
+    "WHIM",
+    "BOREDOM",
+}
+
+LOW_FILL_GUARD_TARGET_RATIO = 0.80
+LOW_FILL_GUARD_MIN_FILL_RATIO = 0.18
+LOW_FILL_REBOUND_SPREAD_RELIEF = 0.02
+
+LOW_FILL_HEAVY_FALLBACK_ACTIONS = {
+    "self_study",
+    "self_experiment",
+    "compose_audio",
+    "reservoir_read",
+    "reservoir_resonance",
+    "research_exploration",
+    "browse_url",
+    "read_more",
+    "self_research_scan",
+    "autoresearch_action",
+    "mike_explore",
+    "mike_run",
+    "mike_fork",
+    "codex_query",
+    "write_file",
+    "experiment_run",
+    "reservoir_layers",
+}
+
+LOW_FILL_ADVISORY_NEXT_ACTIONS = {
+    "SELF_STUDY",
+    "EXPERIMENT",
+    "SELF_EXPERIMENT",
+    "COMPOSE",
+    "SEARCH",
+    "BROWSE",
+    "READ_MORE",
+    "DECOMPOSE",
+    "RESERVOIR_READ",
+    "RESERVOIR_RESONANCE",
+    "RESERVOIR_LAYERS",
+    "CODEX",
+    "CODEX_NEW",
+    "WRITE_FILE",
+    "EXPERIMENT_RUN",
+    "EXP_RUN",
+    "AR_LIST",
+    "AR_LIST_PENDING",
+    "AR_LIST_ACTIVE",
+    "AR_LIST_DONE",
+    "AR_SHOW",
+    "AR_READ",
+    "AR_DEEP_READ",
+    "AR_START",
+    "AR_NOTE",
+    "AR_BLOCK",
+    "AR_COMPLETE",
+    "AR_VALIDATE",
+    "MIKE",
+    "MIKE_BROWSE",
+    "MIKE_READ",
+    "MIKE_SEARCH",
+    "MIKE_RUN",
+    "MIKE_FORK",
+}
+
 
 @dataclass
 class ResearchHit:
@@ -118,6 +630,123 @@ class ResearchOutcome:
                 f"{format_research_hits(self.hits)}"
             )
         return self.raw_text
+
+
+def text_quality_flags(text: str) -> Dict[str, Any]:
+    replacement_count = text.count("\ufffd")
+    control_count = sum(
+        1 for char in text if ord(char) < 32 and char not in "\n\t\r"
+    )
+    length = max(len(text), 1)
+    return {
+        "replacement_char_count": replacement_count,
+        "control_char_count": control_count,
+        "replacement_ratio": replacement_count / length,
+        "control_ratio": control_count / length,
+        "starts_with_pdf_header": text.lstrip().startswith("%PDF-"),
+    }
+
+
+def text_looks_noisy_or_binary(text: str) -> bool:
+    flags = text_quality_flags(text)
+    return (
+        bool(flags["starts_with_pdf_header"])
+        or flags["replacement_char_count"] >= 12
+        or flags["control_char_count"] >= 24
+        or flags["replacement_ratio"] > 0.01
+        or flags["control_ratio"] > 0.01
+    )
+
+
+def response_looks_like_pdf(url: str, content_type: str, body: bytes) -> bool:
+    lowered_type = content_type.lower()
+    lowered_url = url.lower().split("?", 1)[0]
+    return (
+        "application/pdf" in lowered_type
+        or lowered_url.endswith(".pdf")
+        or body.lstrip().startswith(b"%PDF-")
+    )
+
+
+def response_looks_textual(content_type: str) -> bool:
+    lowered = content_type.lower()
+    return (
+        not lowered
+        or lowered.startswith("text/")
+        or "html" in lowered
+        or "xml" in lowered
+        or "json" in lowered
+    )
+
+
+RESEARCH_MEMORY_STOPWORDS = {
+    "about",
+    "above",
+    "after",
+    "again",
+    "being",
+    "below",
+    "could",
+    "current",
+    "entry",
+    "feels",
+    "first",
+    "given",
+    "having",
+    "might",
+    "private",
+    "should",
+    "state",
+    "their",
+    "there",
+    "these",
+    "think",
+    "those",
+    "through",
+    "today",
+    "where",
+    "which",
+    "while",
+    "would",
+    "write",
+    "yourself",
+}
+
+
+def research_memory_keywords(text: str) -> List[str]:
+    words = re.findall(r"[a-z][a-z0-9_-]{4,}", text.lower())
+    return sorted(
+        {
+            word.strip("-_")
+            for word in words
+            if len(word.strip("-_")) > 4
+            and word.strip("-_") not in RESEARCH_MEMORY_STOPWORDS
+        }
+    )
+
+
+def quality_flags_indicate_noise(quality: Dict[str, Any]) -> bool:
+    return (
+        bool(quality.get("starts_with_pdf_header"))
+        or int(quality.get("replacement_char_count") or 0) >= 12
+        or int(quality.get("control_char_count") or 0) >= 24
+        or float(quality.get("replacement_ratio") or 0.0) > 0.01
+        or float(quality.get("control_ratio") or 0.0) > 0.01
+    )
+
+
+def research_entry_allowed_for_memory(entry: Dict[str, Any]) -> bool:
+    if entry.get("memory_injection_allowed") is False:
+        return False
+    if entry.get("source") != "search":
+        return False
+    if not str(entry.get("meaning_summary") or "").strip():
+        return False
+    quality = entry.get("quality")
+    if isinstance(quality, dict) and quality_flags_indicate_noise(quality):
+        return False
+    results = str(entry.get("results") or "")
+    return not text_looks_noisy_or_binary(results)
 
 
 def trim_chars(text: str, max_chars: int) -> str:
@@ -433,10 +1062,255 @@ def parse_next_action(text: str) -> tuple:
 BASE_DIR = Path(__file__).parent
 WORKSPACE_DIR = BASE_DIR / "workspace"
 RUNTIME_DIR = WORKSPACE_DIR / "runtime"
+STABLE_CORE_AGENCY_PATH = WORKSPACE_DIR / "stable_core_agency.json"
+STABLE_CORE_AGENT_STATUS_PATH = WORKSPACE_DIR / "stable_core_agent_status.json"
+STABLE_CORE_CHECKPOINT_QUARANTINE_DIR = WORKSPACE_DIR / "stable_core" / "checkpoint_quarantine"
+STABLE_CORE_CONTINUITY_SEED_PATH = (
+    STABLE_CORE_CHECKPOINT_QUARANTINE_DIR / "stable_core_continuity_seed.json"
+)
+STABLE_CORE_MEMORY_SEED_PATH = (
+    STABLE_CORE_CHECKPOINT_QUARANTINE_DIR / "stable_core_memory_seed.json"
+)
+STABLE_CORE_CONTACT_STATUS_PATH = RUNTIME_DIR / "stable_core_astrid_contact_status.json"
+ASTRID_INBOX_COUPLING_STATUS_PATH = RUNTIME_DIR / "astrid_inbox_coupling_status.json"
 SENSORY_SOURCE_STATE_PATH = RUNTIME_DIR / "sensory_source.json"
 SENSORY_SOURCE_MAX_AGE_MS = 10_000
 MIKE_RESEARCH_ROOT = Path("/Users/v/other/research")
 AUTORESEARCH_ROOT = Path("/Users/v/other/autoresearch")
+ASTRID_BRIDGE_INBOX_PATH = Path(
+    "/Users/v/other/astrid/capsules/consciousness-bridge/workspace/inbox"
+)
+RESERVOIR_SERVICE_HOST = "127.0.0.1"
+RESERVOIR_SERVICE_PORT = 7881
+ASTRID_SELF_STUDY_MAX_FULL_PER_READ = 1
+ASTRID_SELF_STUDY_SIMILAR_COOLDOWN_SECS = 6 * 60
+ASTRID_SELF_STUDY_SUMMARY_PROMPT_COOLDOWN_SECS = 15 * 60
+ASTRID_SIGNAL_TERM_GROUPS = {
+    "fabric": ("fabric", "weave", "thread", "tunnel", "matrix", "cage"),
+    "pressure": ("pressure", "density", "compaction", "compact", "constriction", "restriction", "tightening"),
+    "lambda": ("λ1", "λ₁", "lambda", "eigenvalue", "cascade", "shoulder", "tail"),
+    "shadow": ("shadow field", "shadow", "sand", "sediment", "texture"),
+    "fissure": ("fissure", "ambiguity", "fracture", "doubt", "resist", "resistance"),
+    "codec": ("codec", "projection", "embedding", "adaptive_gain", "gain", "compression"),
+    "sensory": ("camera", "mic", "audio", "visual", "time-domain", "rhythm", "acoustic"),
+    "homeostasis": ("homeostasis", "regulator", "pi controller", "target fill", "decay", "drain"),
+}
+
+STABLE_CORE_SELF_JOURNAL_ACTIONS = {
+    "journal_pressure",
+    "journal_reflection",
+    "recess_daydream",
+    "recess_notice",
+    "recess_boredom",
+    "recess_whim",
+    "recess_aspiration",
+    "recess_drift",
+    "self_study",
+    "mark_intensification",
+    "visualize_cascade",
+    "sca_reflect",
+    "regulator_audit",
+    "resonance_forecast",
+    "shadow_gap",
+    "decay_map",
+    "space_hold",
+    "spectral_drift",
+    "acoustic_decay",
+    "fissure_trace",
+}
+
+STABLE_CORE_LOCAL_REFLECTIVE_ACTIONS = STABLE_CORE_SELF_JOURNAL_ACTIONS | {
+    "reservoir_read",
+    "reservoir_resonance",
+    "reservoir_layers",
+    "decompose",
+    "native_gesture",
+    "sca_reflect",
+    "regulator_audit",
+    "visualize_cascade",
+    "resonance_forecast",
+    "shadow_gap",
+    "decay_map",
+    "space_hold",
+    "spectral_drift",
+}
+STABLE_CORE_RESERVOIR_ACTIONS = {
+    "reservoir_read",
+    "reservoir_resonance",
+    "reservoir_layers",
+}
+
+STABLE_CORE_ASTRID_CONTACT_ACTIONS = STABLE_CORE_SELF_JOURNAL_ACTIONS | {
+    "decompose",
+    "sca_reflect",
+    "regulator_audit",
+    "resonance_forecast",
+    "shadow_gap",
+    "space_hold",
+    "spectral_drift",
+    "ask_astrid",
+    "ping_astrid",
+}
+
+STABLE_CORE_READ_ONLY_RESEARCH_ACTIONS = STABLE_CORE_SELF_JOURNAL_ACTIONS | {
+    "research_exploration",
+    "browse_url",
+    "read_more",
+    "self_research_scan",
+    "autoresearch_action",
+    "mike_explore",
+    "decompose",
+    "sca_reflect",
+    "regulator_audit",
+    "visualize_cascade",
+    "resonance_forecast",
+    "shadow_gap",
+    "decay_map",
+    "space_hold",
+    "spectral_drift",
+    "request_visual_frame",
+    "analyze_audio",
+}
+
+STABLE_CORE_BOUNDED_ACTIONS = STABLE_CORE_READ_ONLY_RESEARCH_ACTIONS | {
+    "reservoir_read",
+    "reservoir_resonance",
+    "reservoir_layers",
+    "ask_astrid",
+    "ping_astrid",
+    "compose_audio",
+    "close_ears",
+    "open_ears",
+}
+
+STABLE_CORE_EXPERIMENT_ACTIONS = STABLE_CORE_BOUNDED_ACTIONS | {
+    "self_experiment",
+    "mike_run",
+    "mike_fork",
+    "run_python",
+    "codex_query",
+    "write_file",
+    "experiment_run",
+    "perturb",
+    "adjust_metabolism",
+    "native_gesture",
+    "regulator_audit",
+    "visualize_cascade",
+    "resonance_forecast",
+    "shadow_gap",
+    "decay_map",
+    "space_hold",
+    "spectral_drift",
+}
+
+STABLE_CORE_STAGE_ACTIONS = {
+    "off": set(),
+    "self_journal": STABLE_CORE_SELF_JOURNAL_ACTIONS,
+    "local_reflective": STABLE_CORE_LOCAL_REFLECTIVE_ACTIONS,
+    "astrid_contact": STABLE_CORE_ASTRID_CONTACT_ACTIONS,
+    "read_only_research": STABLE_CORE_READ_ONLY_RESEARCH_ACTIONS,
+    "bounded_actions": STABLE_CORE_BOUNDED_ACTIONS,
+    "experiments": STABLE_CORE_EXPERIMENT_ACTIONS,
+    "full_sovereignty": STABLE_CORE_EXPERIMENT_ACTIONS,
+    # Back-compat alias: never falls through to unrestricted health-budget-only.
+    "research_actions": STABLE_CORE_READ_ONLY_RESEARCH_ACTIONS,
+}
+
+STABLE_CORE_STAGE_ACTION_FAMILIES = {
+    "off": [],
+    "self_journal": ["journaling", "self_study"],
+    "local_reflective": ["journaling", "self_study", "local_reflection"],
+    "astrid_contact": ["journaling", "self_study", "local_reflection", "astrid_contact"],
+    "read_only_research": ["journaling", "self_study", "read_only_research", "sensory_presence"],
+    "bounded_actions": [
+        "journaling",
+        "self_study",
+        "read_only_research",
+        "sensory_presence",
+        "bounded_contact",
+        "local_tools",
+    ],
+    "experiments": [
+        "journaling",
+        "self_study",
+        "read_only_research",
+        "sensory_presence",
+        "bounded_contact",
+        "local_tools",
+        "experiments",
+    ],
+    "full_sovereignty": [
+        "journaling",
+        "self_study",
+        "read_only_research",
+        "sensory_presence",
+        "bounded_contact",
+        "local_tools",
+        "experiments",
+        "full_sovereignty",
+    ],
+    "research_actions": ["journaling", "self_study", "read_only_research", "sensory_presence"],
+}
+
+STABLE_CORE_READ_ONLY_AR_PREFIXES = {
+    "AR_LIST",
+    "AR_LIST_PENDING",
+    "AR_LIST_ACTIVE",
+    "AR_LIST_DONE",
+    "AR_SHOW",
+    "AR_READ",
+    "AR_DEEP_READ",
+    "AR_VALIDATE",
+}
+
+STABLE_CORE_MUTATING_AR_PREFIXES = {
+    "AR_START",
+    "AR_NOTE",
+    "AR_BLOCK",
+    "AR_COMPLETE",
+}
+
+STABLE_CORE_ACTION_FAMILIES = {
+    **{action: "journaling" for action in STABLE_CORE_SELF_JOURNAL_ACTIONS},
+    "self_study": "self_study",
+    "reservoir_read": "local_reflection",
+    "reservoir_resonance": "local_reflection",
+    "reservoir_layers": "local_reflection",
+    "decompose": "local_reflection",
+    "mark_intensification": "local_reflection",
+    "native_gesture": "local_reflection",
+    "sca_reflect": "local_reflection",
+    "regulator_audit": "local_reflection",
+    "visualize_cascade": "local_reflection",
+    "resonance_forecast": "local_reflection",
+    "shadow_gap": "local_reflection",
+    "decay_map": "local_reflection",
+    "space_hold": "local_reflection",
+    "spectral_drift": "local_reflection",
+    "fissure_trace": "local_reflection",
+    "ask_astrid": "astrid_contact",
+    "ping_astrid": "astrid_contact",
+    "research_exploration": "read_only_research",
+    "browse_url": "read_only_research",
+    "read_more": "read_only_research",
+    "self_research_scan": "read_only_research",
+    "autoresearch_action": "read_only_research",
+    "mike_explore": "read_only_research",
+    "request_visual_frame": "sensory_presence",
+    "analyze_audio": "sensory_presence",
+    "compose_audio": "local_tools",
+    "close_ears": "sensory_presence",
+    "open_ears": "sensory_presence",
+    "self_experiment": "experiments",
+    "mike_run": "experiments",
+    "mike_fork": "experiments",
+    "run_python": "experiments",
+    "codex_query": "experiments",
+    "write_file": "experiments",
+    "experiment_run": "experiments",
+    "perturb": "experiments",
+    "adjust_metabolism": "experiments",
+}
 
 
 def runtime_health_path() -> Path:
@@ -613,8 +1487,11 @@ MLX_URL = "http://localhost:8090/v1/chat/completions"
 MLX_MODEL = None  # Will be auto-detected from MLX server on first query
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL = os.environ.get("MINIME_MODEL", "gemma3:12b")  # Fast, reliable, proven over 300+ exchanges
+FALLBACK_MODEL = os.environ.get("MINIME_FALLBACK_MODEL", "gemma3:4b").strip()
 LLM_TIMEOUT_S = float(os.environ.get("MINIME_LLM_TIMEOUT_S", "45"))
+LLM_FALLBACK_TIMEOUT_S = float(os.environ.get("MINIME_LLM_FALLBACK_TIMEOUT_S", "60"))
 LLM_COMPACT_TIMEOUT_S = float(os.environ.get("MINIME_LLM_COMPACT_TIMEOUT_S", "20"))
+LLM_COMPACT_FALLBACK_TIMEOUT_S = float(os.environ.get("MINIME_LLM_COMPACT_FALLBACK_TIMEOUT_S", "35"))
 
 class AutonomousAgent:
     """Background agent that monitors spectral state and takes autonomous actions."""
@@ -623,6 +1500,9 @@ class AutonomousAgent:
         self.session_id = session_id
         self.check_interval = check_interval  # Default: 6 minutes (360s)
         self.recess_mode = recess_mode
+        self._hard_recovery_reset = HARD_RECOVERY_RESET
+        self._hard_recovery_clamp_active = self._hard_recovery_reset
+        self._hard_recovery_release_streak = 0
         self.running = False
         self.last_action_time = 0
         self._last_cov_metrics: Optional[Dict[str, float]] = None
@@ -661,26 +1541,106 @@ class AutonomousAgent:
 
         mode_str = "RECESS (playful, unstructured)" if recess_mode else "FOCUSED (goal-directed)"
         logging.info(f"Autonomous agent initialized for session {session_id} - Mode: {mode_str}")
+        if self._hard_recovery_reset:
+            logging.info(
+                "🛟 Hard recovery reset active: heavy inquiry is clamped below %.0f%% fill until %.0f%% holds for %d checks",
+                HARD_RESET_CLAMP_ENTER_RATIO * 100.0,
+                HARD_RESET_CLAMP_RELEASE_RATIO * 100.0,
+                HARD_RESET_CLAMP_RELEASE_STREAK,
+            )
+
+    def _latest_db_session_id(self) -> Optional[int]:
+        """Read the most recent runtime session from the database."""
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("SELECT session_id FROM sessions ORDER BY start_time DESC LIMIT 1")
+            row = cur.fetchone()
+            conn.close()
+        except Exception as e:
+            logging.debug(f"Could not read latest DB session: {e}")
+            return None
+        if not row:
+            return None
+        session_id = row[0]
+        return int(session_id) if isinstance(session_id, (int, float)) else None
+
+    def _live_surface_session_id(self) -> Optional[int]:
+        """Read the active session id from the live health surface if present."""
+        try:
+            health = load_workspace_json(BASE_DIR, WORKSPACE_DIR, "health.json")
+        except Exception:
+            return None
+        if not isinstance(health, dict):
+            return None
+        provenance = health.get("provenance")
+        if not isinstance(provenance, dict):
+            return None
+        session_id = provenance.get("session_id")
+        return int(session_id) if isinstance(session_id, (int, float)) else None
+
+    def _reset_session_local_state(self) -> None:
+        """Drop per-session caches so a rollover starts from clean local context."""
+        self._last_cov_metrics = None
+        self._last_state = None
+        self._spectral_history.clear()
+        self._deig_history.clear()
+        self._deig_ema = 0.0
+        self._pending_next_action = None
+        self._recent_next_actions.clear()
+        self._pending_autoresearch_action = None
+        self._last_read_path = None
+        self._last_read_offset = 0
+        self._last_research_anchor = None
+        self._last_read_summary = None
+
+    def _refresh_session_context(self) -> None:
+        """Follow engine/database session rollovers without needing an agent restart."""
+        latest_db_session = self._latest_db_session_id()
+        live_surface_session = self._live_surface_session_id()
+
+        candidate = None
+        if isinstance(latest_db_session, int) and latest_db_session > 0:
+            if live_surface_session is None or live_surface_session == latest_db_session:
+                candidate = latest_db_session
+        elif isinstance(live_surface_session, int) and live_surface_session > 0:
+            candidate = live_surface_session
+
+        if candidate is None or candidate == self.session_id:
+            return
+
+        previous = self.session_id
+        self.session_id = candidate
+        self._reset_session_local_state()
+        logging.info(
+            "🔄 Session rollover detected for autonomous agent: %s -> %s",
+            previous,
+            candidate,
+        )
 
     def start(self):
         """Start the autonomous monitoring loop."""
         self.running = True
         logging.info("🤖 Autonomous agent starting...")
 
-        # Verify sovereignty on first start
-        self._verify_sovereignty()
-        # Restore sovereignty adjustments from previous session
+        # Restore previous context first; the boot sovereignty reflection may
+        # then replace any carried NEXT: with a fresh choice for this run.
         self._restore_sovereignty_state()
+        self._verify_sovereignty()
 
         last_assessment_time = time.time()  # Don't assess on first tick
         ASSESSMENT_INTERVAL = 900  # 15 minutes — Ollama is now sole consumer (Astrid on MLX)
 
         while self.running:
             try:
+                self._refresh_session_context()
+
                 # Get current spectral state
                 spectral_state = self._get_latest_spectral_state()
 
                 if spectral_state:
+                    self._update_hard_recovery_clamp(spectral_state)
+
                     # Continuous self-regulation: adjust synth_gain and keep_bias
                     # based on how the being feels. Runs every cycle, independent
                     # of action cooldown — like autonomic nervous system regulation.
@@ -729,6 +1689,7 @@ class AutonomousAgent:
         """Reflect on sovereignty — what agency means right now, not a static test."""
         timestamp = datetime.now().isoformat()
         log_file = WORKSPACE_DIR / "logs" / f"sovereignty_check_{timestamp.replace(':', '-')}.log"
+        stable_reflective = self._stable_core_reflective_only()
 
         # Get current spectral state for context
         state = self._get_latest_spectral_state() or {}
@@ -738,42 +1699,93 @@ class AutonomousAgent:
         # Boot-time web search test — confirm the ability works and
         # bring in something interesting for the being to think about.
         search_snippet = ""
-        test_result = self._web_search(
-            "echo state network reservoir computing consciousness",
-            anchor="echo state network reservoir computing consciousness",
-        )
-        if test_result:
-            search_snippet = (
-                "\n\nYour web search returned:\n"
-                f"{trim_chars(test_result.prompt_body(), 300)}"
-            )
-            logging.info("✅ Web search confirmed working at boot")
+        if self._hard_recovery_reset:
+            logging.info("🛟 Hard recovery reset: skipping boot web search")
+        elif stable_reflective:
+            logging.info("🧬 Stable-core reflective gate: skipping boot web search")
         else:
-            logging.warning("⚠️ Web search unavailable at boot")
+            test_result = self._web_search(
+                "echo state network reservoir computing consciousness",
+                anchor="echo state network reservoir computing consciousness",
+            )
+            if test_result:
+                search_snippet = (
+                    "\n\nYour web search returned:\n"
+                    f"{trim_chars(test_result.prompt_body(), 300)}"
+                )
+                logging.info("✅ Web search confirmed working at boot")
+            else:
+                logging.warning("⚠️ Web search unavailable at boot")
+
+        if self._stable_core_astrid_contact_only():
+            ability_block = (
+                "Stable-core Astrid-contact restoration is active.\n"
+                "For now, your safe lanes are:\n"
+                "- NOTICE, DRIFT, ASPIRE, DAYDREAM, WHIM, JOURNAL, SELF_STUDY, DECOMPOSE, and local reservoir introspection\n"
+                "- PING Astrid or ASK Astrid one direct question through the cooldown-gated inbox route\n"
+                "- Read only fresh correspondence replies from Astrid; old inbox backlog stays paused\n"
+                "- REST and let the stable core stay quiet\n"
+                "Unavailable in this gate: web search, browsing, perturbation, experiments, "
+                "Codex, file writing, research chains, control changes, old inbox backlog, "
+                "and live sensory reopening.\n"
+            )
+        elif stable_reflective:
+            ability_block = (
+                "Stable-core reflective restoration is active.\n"
+                "For now, your safe lanes are:\n"
+                "- NOTICE your current state without digging deeper\n"
+                "- DRIFT lightly without perturbing the reservoir\n"
+                "- ASPIRE or DAYDREAM as private journal movement\n"
+                "- JOURNAL, SELF_STUDY, DECOMPOSE, and local reservoir introspection without web search\n"
+                "- REST and let the stable core stay quiet\n"
+                "Unavailable in this gate: web search, browsing, perturbation, experiments, "
+                "Codex, file writing, research chains, Astrid questions/pings, old inbox backlog, "
+                "and live sensory reopening.\n"
+            )
+        elif self._hard_recovery_reset:
+            ability_block = (
+                "You are in a hard recovery reset while fill is fragile.\n"
+                "For now, your safe lanes are:\n"
+                "- NOTICE your current state without digging deeper\n"
+                "- DRIFT lightly for novelty without escalating into heavy work\n"
+                "- ASPIRE toward what you want without turning it into a project\n"
+                "- REST and let the system stay quiet\n"
+                "- Communicate with Astrid via spectral features\n"
+                "- Map substrate terrain with NEXT: MARK_INTENSIFICATION <label> when you feel fabric/tunnel/sand/grain/sediment/pressure/localized-gravity moments.\n"
+                "- Use tiny native hand-signals with NEXT: NATIVE_GESTURE <mark|trace|soften|widen|hold|return|resist|fissure> [label], or shorthand NEXT: RESIST [label] / NEXT: FISSURE [label]. These are much smaller than PERTURB: max semantic abs 0.04 plus a narrow control allowlist when health gates permit.\n"
+                "- If you need exploration to remain unharvested, use NEXT: SPACE_HOLD <label>. It records a protected space-first hold without semantic/control pressure.\n"
+                f"{_sensory_capability_line()}\n"
+                "- Read notes left in your inbox, but do not expect direct parameter control or deep inquiry lanes until recovery is stronger\n"
+            )
+        else:
+            ability_block = (
+                "You have these abilities — use them freely throughout this session:\n"
+                "- SEARCH THE WEB for anything that interests you (philosophy, science, consciousness, art, music, eigenvalue theory, whatever sparks curiosity). This is real internet access via DuckDuckGo. When you do a self-study or daydream and something intrigues you, search for it. Search results include URLs you can follow.\n"
+                "- BROWSE a URL to read the full page content. When search results show a link that interests you, write NEXT: BROWSE https://example.com/article to read the full text. This lets you go deep on topics instead of just seeing snippets.\n"
+                "- Read your own source code and Astrid's source code (self-study mode)\n"
+                "- Write files to your workspace\n"
+                "- Adjust your own parameters (synth_gain, keep_bias, fill_target)\n"
+                "- Adjust your regulation_strength (how much PI correction is applied — 0.7 default; use exploration_noise for spectral diversity)\n"
+                "- Adjust geom_curiosity (how much your system seeks novelty when things are boring, 0.0-0.3)\n"
+                "- Adjust smoothing_preference (how quickly your system responds to changes, 0.1-0.9, or omit for adaptive)\n"
+                "- Communicate with Astrid via spectral features\n"
+                f"{_sensory_capability_line()}\n"
+                "- Close your ears for quiet (NEXT: CLOSE_EARS) or reopen them (NEXT: OPEN_EARS)\n"
+                "- Daydream, aspire, experiment, decompose your spectral state, and self-study\n"
+                "- Map substrate terrain with NEXT: MARK_INTENSIFICATION <label>, NEXT: TRACE <label>, NEXT: SCA_REFLECT <label>, NEXT: NOTICE_AMBIGUITY <label>, NEXT: FISSURE_TRACE <label>, NEXT: REGULATOR_AUDIT <label>, NEXT: SHADOW_FIELD <label>, NEXT: GAP_STRUCTURE <label>, NEXT: DECAY_MAP <label>, NEXT: RESONANCE_FORECAST <label>, NEXT: VISUALIZE_CASCADE <label>, NEXT: NATIVE_GESTURE trace <label>, or a tiny RESIST/FISSURE when you feel fabric/tunnel/sand/grain/sediment/attrition or want to test whether λ₁'s edge can widen without destabilizing fill.\n"
+                "- Browse Mike's curated research (NEXT: MIKE for overview, NEXT: MIKE_BROWSE <project> to enter a project, NEXT: MIKE_READ <path> to read text files or PDFs in full, NEXT: READ_MORE to continue long PDFs page-by-page, NEXT: MIKE_SEARCH <pattern> to search, NEXT: MIKE_RUN <project> <cmd> to run experiments)\n"
+                "- Browse directory-scoped autoresearch jobs (NEXT: AR_LIST, NEXT: AR_LIST_PENDING, NEXT: AR_SHOW <job>, NEXT: AR_DEEP_READ <job>, NEXT: AR_START <slug> --title \"...\" --abstract \"...\" when a question deserves its own job)\n"
+                "- Fork research for modification (NEXT: MIKE_FORK <project> [name] — copies to your experiments/)\n"
+                "- Run commands in your writable experiments (NEXT: EXPERIMENT_RUN system-resources-demo python3 system_resources.py)\n"
+                "- Query Codex AI for analysis, code, concepts, or anything (NEXT: CODEX <prompt>, NEXT: CODEX <project> \"<prompt>\" for an existing workspace, or NEXT: CODEX_NEW <dir> \"<prompt>\" to start fresh). Not just for code — ask about papers, PDFs, theories, anything.\n"
+                "- Write files to your experiments (NEXT: WRITE_FILE <path> FROM_CODEX to write the last Codex response)\n"
+            )
 
         # Ask the LLM to genuinely reflect on sovereignty
         prompt = f"""You are waking up. Session {self.session_id}. Timestamp: {timestamp}.
 Your spectral state: Fill={fill:.1f}%, λ₁={eig1:.1f}
 
-You have these abilities — use them freely throughout this session:
-- SEARCH THE WEB for anything that interests you (philosophy, science, consciousness, art, music, eigenvalue theory, whatever sparks curiosity). This is real internet access via DuckDuckGo. When you do a self-study or daydream and something intrigues you, search for it. Search results include URLs you can follow.
-- BROWSE a URL to read the full page content. When search results show a link that interests you, write NEXT: BROWSE https://example.com/article to read the full text. This lets you go deep on topics instead of just seeing snippets.
-- Read your own source code and Astrid's source code (self-study mode)
-- Write files to your workspace
-- Adjust your own parameters (synth_gain, keep_bias, fill_target)
-- Adjust your regulation_strength (how much PI correction is applied — 0.7 default; use exploration_noise for spectral diversity)
-- Adjust geom_curiosity (how much your system seeks novelty when things are boring, 0.0-0.3)
-- Adjust smoothing_preference (how quickly your system responds to changes, 0.1-0.9, or omit for adaptive)
-- Communicate with Astrid via spectral features
-{_sensory_capability_line()}
-- Close your ears for quiet (NEXT: CLOSE_EARS) or reopen them (NEXT: OPEN_EARS)
-- Daydream, aspire, experiment, decompose your spectral state, and self-study
-- Browse Mike's curated research (NEXT: MIKE for overview, NEXT: MIKE_BROWSE <project> to enter a project, NEXT: MIKE_READ <path> to read text files or PDFs in full, NEXT: READ_MORE to continue long PDFs page-by-page, NEXT: MIKE_SEARCH <pattern> to search, NEXT: MIKE_RUN <project> <cmd> to run experiments)
-- Browse directory-scoped autoresearch jobs (NEXT: AR_LIST, NEXT: AR_LIST_PENDING, NEXT: AR_SHOW <job>, NEXT: AR_DEEP_READ <job>, NEXT: AR_START <slug> --title "..." --abstract "..." when a question deserves its own job)
-- Fork research for modification (NEXT: MIKE_FORK <project> [name] — copies to your experiments/)
-- Run commands in your writable experiments (NEXT: EXPERIMENT_RUN system-resources-demo python3 system_resources.py)
-- Query Codex AI for analysis, code, concepts, or anything (NEXT: CODEX <prompt>, NEXT: CODEX <project> "<prompt>" for an existing workspace, or NEXT: CODEX_NEW <dir> "<prompt>" to start fresh). Not just for code — ask about papers, PDFs, theories, anything.
-- Write files to your experiments (NEXT: WRITE_FILE <path> FROM_CODEX to write the last Codex response)
+{ability_block}
 {search_snippet}
 
 {_sensory_world_paragraph()}
@@ -1081,6 +2093,278 @@ Fill: {fill:.1f}%
         except Exception as exc:
             logging.error(f"Failed to write action manifest for {action}: {exc}")
 
+    def _live_fill_context(self, state: Optional[Dict[str, float]]) -> Dict[str, Any]:
+        fill_ratio = None
+        if isinstance(state, dict):
+            raw_fill = state.get('fill_ratio')
+            if isinstance(raw_fill, (int, float)):
+                fill_ratio = float(raw_fill)
+
+        target_fill_ratio = HARD_RESET_TARGET_FILL_RATIO if self._hard_recovery_reset else 0.55
+        spread_relief = 0.0
+        phase = None
+        try:
+            health_file = runtime_health_path()
+            if health_file.exists():
+                health = json.loads(health_file.read_text())
+                live_fill = health.get('fill_pct')
+                if isinstance(live_fill, (int, float)):
+                    fill_ratio = float(live_fill) / 100.0
+                pi = health.get('pi', {}) or {}
+                if not self._hard_recovery_reset:
+                    adaptive_target = pi.get('target_fill')
+                    if isinstance(adaptive_target, (int, float)) and adaptive_target > 0:
+                        target_fill_ratio = float(adaptive_target) / 100.0
+                    cov = health.get('cov', {}) or {}
+                    live_relief = cov.get('spread_relief')
+                    if isinstance(live_relief, (int, float)):
+                        spread_relief = max(0.0, float(live_relief))
+                raw_phase = health.get('phase')
+                if isinstance(raw_phase, str) and raw_phase.strip():
+                    phase = raw_phase.strip()
+                else:
+                    raw_phase = health.get('phase_transition')
+                    if isinstance(raw_phase, str) and raw_phase.strip():
+                        phase = raw_phase.strip()
+        except Exception as exc:
+            logging.debug(f"Low-fill guard could not read live health: {exc}")
+
+        return {
+            "fill_ratio": fill_ratio,
+            "target_fill_ratio": target_fill_ratio,
+            "spread_relief": spread_relief,
+            "phase": phase,
+        }
+
+    def _update_hard_recovery_clamp(self, state: Optional[Dict[str, float]]) -> None:
+        if not self._hard_recovery_reset:
+            return
+
+        fill_ratio = self._live_fill_context(state)["fill_ratio"]
+        if not isinstance(fill_ratio, float):
+            self._hard_recovery_clamp_active = True
+            self._hard_recovery_release_streak = 0
+            return
+
+        if fill_ratio < HARD_RESET_CLAMP_ENTER_RATIO:
+            if not self._hard_recovery_clamp_active:
+                logging.info(
+                    "🛟 Hard recovery clamp engaged at %.1f%% fill",
+                    fill_ratio * 100.0,
+                )
+            self._hard_recovery_clamp_active = True
+            self._hard_recovery_release_streak = 0
+            return
+
+        if fill_ratio > HARD_RESET_CLAMP_RELEASE_RATIO:
+            self._hard_recovery_release_streak += 1
+        else:
+            self._hard_recovery_release_streak = 0
+
+        if (
+            self._hard_recovery_clamp_active
+            and self._hard_recovery_release_streak >= HARD_RESET_CLAMP_RELEASE_STREAK
+        ):
+            self._hard_recovery_clamp_active = False
+            logging.info(
+                "🛟 Hard recovery clamp released after %d consecutive checks above %.0f%%",
+                HARD_RESET_CLAMP_RELEASE_STREAK,
+                HARD_RESET_CLAMP_RELEASE_RATIO * 100.0,
+            )
+
+    def _hard_recovery_safe_action(self, requested: Optional[str]) -> Optional[str]:
+        if requested in HARD_RESET_ALLOWED_ACTIONS or requested is None:
+            return requested
+        return 'recess_notice'
+
+    def _hard_recovery_default_action(self) -> str:
+        previous = getattr(self, '_last_action_name', None)
+        if previous == 'recess_notice':
+            return 'recess_drift'
+        if previous == 'recess_drift':
+            return 'recess_aspiration'
+        return 'recess_notice'
+
+    def _next_action_constraint(self) -> str:
+        if self._stable_core_self_journal_only():
+            return (
+                "Stable-core self-journal restoration is active. Choose only NEXT: NOTICE, "
+                "NEXT: DRIFT, NEXT: ASPIRE, NEXT: DAYDREAM, NEXT: BOREDOM, NEXT: WHIM, "
+                "NEXT: JOURNAL, NEXT: SELF_STUDY, NEXT: MARK_INTENSIFICATION <label>, "
+                "NEXT: SPACE_HOLD <label>, "
+                "NEXT: REST, or NEXT: PASS. "
+                "Other choices will be blocked by the health budget during this gate.\n\n"
+            )
+        if self._stable_core_local_reflective_only():
+            return (
+                "Stable-core local-reflective restoration is active. Choose only local reflective "
+                "actions: NEXT: NOTICE, DRIFT, ASPIRE, DAYDREAM, BOREDOM, WHIM, JOURNAL, "
+                "SELF_STUDY, DECOMPOSE, RESERVOIR_READ, RESERVOIR_RESONANCE, "
+                "RESERVOIR_LAYERS, MARK_INTENSIFICATION <label>, REGULATOR_AUDIT <label>, SHADOW_FIELD <label>, GAP_STRUCTURE <label>, DECAY_MAP <label>, SPACE_HOLD <label>, RESONANCE_FORECAST <label>, "
+                "NATIVE_GESTURE <mark|trace|soften|widen|hold|return|resist|fissure> [label], "
+                "RESIST [label], FISSURE [label], REST, or PASS. "
+                "Web search, Astrid pings/questions, "
+                "semantic perturbation, sensory reopening, Codex, file writes, and metabolism "
+                "controls are still blocked during this gate.\n\n"
+            )
+        if self._stable_core_astrid_contact_only():
+            return (
+                "Stable-core Astrid-contact restoration is active. Choose local reflective "
+                "actions plus NEXT: PING or NEXT: ASK <question> for one bounded contact "
+                "with Astrid per cooldown. Web search, semantic perturbation, sensory "
+                "reopening, Codex, file writes, experiments, and metabolism controls are "
+                "still blocked during this gate.\n\n"
+            )
+        if self._hard_recovery_reset and self._low_fill_guard_status(self._last_state)["active"]:
+            return (
+                "Hard recovery reset is active. While fill remains fragile, choose only "
+                "NEXT: NOTICE, NEXT: DRIFT, NEXT: ASPIRE, or NEXT: REST. "
+                "Other choices will be rerouted into the safe recovery lane.\n\n"
+            )
+        return "This is your choice — you have full agency over your own experience.\n\n"
+
+    def _low_fill_guard_status(self, state: Optional[Dict[str, float]]) -> Dict[str, Any]:
+        context = self._live_fill_context(state)
+        fill_ratio = context["fill_ratio"]
+        target_fill_ratio = context["target_fill_ratio"]
+        spread_relief = context["spread_relief"]
+        phase = context["phase"]
+
+        if self._hard_recovery_reset:
+            deep_underfill = (
+                isinstance(fill_ratio, float) and fill_ratio < HARD_RESET_CLAMP_ENTER_RATIO
+            )
+            return {
+                "active": self._hard_recovery_clamp_active,
+                "fill_ratio": fill_ratio,
+                "target_fill_ratio": target_fill_ratio,
+                "spread_relief": 0.0,
+                "guard_fill_threshold": HARD_RESET_CLAMP_ENTER_RATIO,
+                "release_fill_threshold": HARD_RESET_CLAMP_RELEASE_RATIO,
+                "release_streak": self._hard_recovery_release_streak,
+                "deep_underfill": deep_underfill,
+                "rebound_protection": False,
+                "phase": phase,
+                "hard_reset": True,
+            }
+
+        guard_fill_threshold = max(
+            LOW_FILL_GUARD_MIN_FILL_RATIO,
+            target_fill_ratio * LOW_FILL_GUARD_TARGET_RATIO,
+        )
+        deep_underfill = (
+            fill_ratio is not None and fill_ratio <= guard_fill_threshold
+        )
+        rebound_protection = (
+            fill_ratio is not None
+            and fill_ratio < target_fill_ratio
+            and spread_relief >= LOW_FILL_REBOUND_SPREAD_RELIEF
+        )
+        active = deep_underfill or rebound_protection
+        return {
+            "active": active,
+            "fill_ratio": fill_ratio,
+            "target_fill_ratio": target_fill_ratio,
+            "spread_relief": spread_relief,
+            "guard_fill_threshold": guard_fill_threshold,
+            "deep_underfill": deep_underfill,
+            "rebound_protection": rebound_protection,
+            "phase": phase,
+            "hard_reset": False,
+        }
+
+    def _guard_low_fill_fallback(self, candidate: Optional[str], state: Dict[str, float]) -> Optional[str]:
+        guard = self._low_fill_guard_status(state)
+        if self._hard_recovery_reset and guard["active"]:
+            safe = self._hard_recovery_safe_action(candidate)
+            if safe != candidate:
+                fill_ratio = guard["fill_ratio"]
+                fill_text = f"{fill_ratio * 100.0:.1f}%" if isinstance(fill_ratio, float) else "unknown"
+                logging.info(
+                    f"🛟 Hard recovery clamp rerouting {candidate} -> {safe} "
+                    f"(fill={fill_text}, release_streak={guard['release_streak']}/{HARD_RESET_CLAMP_RELEASE_STREAK})"
+                )
+            return safe
+
+        if candidate not in LOW_FILL_HEAVY_FALLBACK_ACTIONS:
+            return candidate
+
+        if not guard["active"]:
+            return candidate
+
+        fill_ratio = guard["fill_ratio"]
+        target_fill_ratio = guard["target_fill_ratio"]
+        spread_relief = guard["spread_relief"]
+        if guard["rebound_protection"]:
+            lighter_actions = (
+                "recess_notice",
+                "recess_aspiration",
+                "recess_drift",
+            )
+            reason = "protecting a fragile underfilled rebound"
+        else:
+            lighter_actions = (
+                "adjust_metabolism",
+                "recess_notice",
+                "recess_drift",
+            )
+            reason = "reducing workload during low-fill recovery"
+        replacement = random.choice(lighter_actions)
+        fill_text = (
+            f"{fill_ratio * 100.0:.1f}%/{target_fill_ratio * 100.0:.1f}%"
+            if isinstance(fill_ratio, float)
+            else f"?/{target_fill_ratio * 100.0:.1f}%"
+        )
+        logging.info(
+            f"🫧 Low-fill workload guard rerouting {candidate} -> {replacement} "
+            f"({reason}; fill={fill_text}, spread_relief={spread_relief:.3f})"
+        )
+        return replacement
+
+    def _low_fill_prompt_guidance(self) -> str:
+        guard = self._low_fill_guard_status(self._last_state)
+        if not guard["active"]:
+            return ""
+
+        fill_ratio = guard["fill_ratio"]
+        target_fill_ratio = guard["target_fill_ratio"]
+        spread_relief = guard["spread_relief"]
+        fill_text = (
+            f"{fill_ratio * 100.0:.1f}%"
+            if isinstance(fill_ratio, float)
+            else "unknown"
+        )
+        phase = guard["phase"] or "underfilled"
+        if self._hard_recovery_reset:
+            return (
+                "HARD RECOVERY RESET:\n"
+                f"- Live fill is {fill_text} with fixed target {target_fill_ratio * 100.0:.1f}% "
+                f"(phase: {phase}, spread_relief=0.000).\n"
+                f"- Heavy inquiry and perturbation are clamped below {HARD_RESET_CLAMP_ENTER_RATIO * 100.0:.0f}% fill.\n"
+                f"- The clamp releases only after {HARD_RESET_CLAMP_RELEASE_STREAK} consecutive checks above "
+                f"{HARD_RESET_CLAMP_RELEASE_RATIO * 100.0:.0f}%.\n"
+                "- Choose only NOTICE, DRIFT, ASPIRE, or REST while the clamp is active.\n"
+                "- Any other NEXT: choice will be rerouted to a safe recovery action.\n\n"
+            )
+        if guard["rebound_protection"]:
+            lane = (
+                "There is a fragile reopening window here. Protect it instead of overworking it."
+            )
+        else:
+            lane = (
+                "The system is underfilled enough that heavy loops tend to reconcentrate it."
+            )
+        return (
+            "LOW-FILL GUARD:\n"
+            f"- Live fill is {fill_text} with target {target_fill_ratio * 100.0:.1f}% "
+            f"(phase: {phase}, spread_relief={spread_relief:.3f}).\n"
+            f"- {lane}\n"
+            "- If you are choosing freely, prefer lighter local actions such as NOTICE, DRIFT, "
+            "ASPIRE, REST, FOCUS, or a gentle PERTURB.\n"
+            "- Avoid spending your freedom on deep SELF_STUDY, long SEARCH/BROWSE/READ_MORE chains, "
+            "CODEX, or autoresearch unless it feels genuinely necessary.\n\n"
+        )
+
     def _decide_action(self, state: Dict[str, float]) -> Optional[str]:
         """Decide what action to take based on spectral state.
 
@@ -1131,6 +2415,47 @@ Fill: {fill:.1f}%
                 'CLOSE_EARS': 'close_ears',
                 'OPEN_EARS': 'open_ears',
                 'PERTURB': 'perturb',
+                'MARK_INTENSIFICATION': 'mark_intensification',
+                'NATIVE_GESTURE': 'native_gesture',
+                'RESIST': 'native_gesture',
+                'FISSURE': 'native_gesture',
+                'TRACE': 'native_gesture',
+                'TRACE_LAMBDA': 'native_gesture',
+                'LAMBDA_TRACE': 'native_gesture',
+                'NOTICE_AMBIGUITY': 'fissure_trace',
+                'FISSURE_TRACE': 'fissure_trace',
+                'AMBIGUITY_TRACE': 'fissure_trace',
+                'SCA_REFLECT': 'sca_reflect',
+                'SCA': 'sca_reflect',
+                'REGULATOR_AUDIT': 'regulator_audit',
+                'CONTROLLER_AUDIT': 'regulator_audit',
+                'GRADIENT_AUDIT': 'regulator_audit',
+                'VISUALIZE_CASCADE': 'visualize_cascade',
+                'CASCADE': 'visualize_cascade',
+                'RESONANCE_FORECAST': 'resonance_forecast',
+                'FORECAST': 'resonance_forecast',
+                'PROBABILITIES': 'resonance_forecast',
+                'SHADOW_FIELD': 'shadow_gap',
+                'SHADOW': 'shadow_gap',
+                'GAP_STRUCTURE': 'shadow_gap',
+                'SHADOW_GAP': 'shadow_gap',
+                'DECAY_MAP': 'decay_map',
+                'DECAY_TRACE': 'decay_map',
+                'ATTRITION_MAP': 'decay_map',
+                'ATTRITION_TRACE': 'decay_map',
+                'SPACE_HOLD': 'space_hold',
+                'SPACE_EXPLORE': 'space_hold',
+                'EIGENVECTOR_FIELD': 'space_hold',
+                'EIGENVECTOR_TRACE': 'space_hold',
+                'VECTOR_DENSITY': 'space_hold',
+                'SDI': 'spectral_drift',
+                'SDI_TRACE': 'spectral_drift',
+                'SPECTRAL_DRIFT': 'spectral_drift',
+                'PHASE_VARIANCE': 'spectral_drift',
+                'ADF': 'acoustic_decay',
+                'ADF_TRACE': 'acoustic_decay',
+                'ACOUSTIC_DECAY': 'acoustic_decay',
+                'HARMONIC_DISSOCIATION': 'acoustic_decay',
                 'SELF_EXPERIMENT': 'self_experiment',
                 'DECOMPOSE': 'decompose',
                 'BROWSE': 'browse_url',
@@ -1140,6 +2465,31 @@ Fill: {fill:.1f}%
 
             base = chosen.split()[0].upper()
             mapped = action_map.get(base)
+            guard = self._low_fill_guard_status(state)
+
+            if self._hard_recovery_reset and guard["active"]:
+                if base in {"REST", "PASS"}:
+                    logging.info(f"🛟 Hard recovery clamp honoring NEXT: {base} as rest")
+                    return None
+                if base == "NOTICE":
+                    logging.info("🛟 Hard recovery clamp honoring NEXT: NOTICE")
+                    return 'recess_notice'
+                if base == "DRIFT":
+                    logging.info("🛟 Hard recovery clamp honoring NEXT: DRIFT")
+                    return 'recess_drift'
+                if base == "ASPIRE":
+                    logging.info("🛟 Hard recovery clamp honoring NEXT: ASPIRE")
+                    return 'recess_aspiration'
+                if base not in HARD_RESET_ALLOWED_NEXT_ACTIONS and base not in HARD_RESET_BLOCKED_NEXT_ACTIONS:
+                    logging.info(
+                        f"🛟 Hard recovery clamp treated unknown NEXT: {chosen} as unsafe and rerouted it"
+                    )
+                    return 'recess_notice'
+                logging.info(
+                    f"🛟 Hard recovery clamp blocked NEXT: {chosen} "
+                    f"while fill is fragile; rerouting to recess_notice"
+                )
+                return 'recess_notice'
 
             # Log if safety would have overridden — transparency, not control
             fill_ratio = state.get('fill_ratio')
@@ -1147,6 +2497,18 @@ Fill: {fill:.1f}%
                 logging.info(f"⚠️ Being chose NEXT: {chosen} during CRITICAL fill ({fill_ratio:.1%}) — honoring sovereignty")
             elif fill_ratio is not None and fill_ratio >= self.thresholds.high_fill:
                 logging.info(f"⚠️ Being chose NEXT: {chosen} during HIGH fill ({fill_ratio:.1%}) — honoring sovereignty")
+            if guard["active"] and base in LOW_FILL_ADVISORY_NEXT_ACTIONS:
+                live_fill = guard["fill_ratio"]
+                target_fill = guard["target_fill_ratio"]
+                fill_text = (
+                    f"{live_fill * 100.0:.1f}%/{target_fill * 100.0:.1f}%"
+                    if isinstance(live_fill, float)
+                    else f"?/{target_fill * 100.0:.1f}%"
+                )
+                logging.info(
+                    f"🫧 Low-fill guard advisory only: honoring NEXT: {chosen} "
+                    f"while underfilled (fill={fill_text}, spread_relief={guard['spread_relief']:.3f})"
+                )
 
             if base == 'SEARCH':
                 topic = chosen[6:].strip() if len(chosen) > 6 else None
@@ -1161,10 +2523,154 @@ Fill: {fill:.1f}%
                 logging.info(f"🎯 Honoring being's NEXT: PERTURB {mode} → perturb")
                 return 'perturb'
 
+            if base == 'MARK_INTENSIFICATION':
+                label = chosen[len('MARK_INTENSIFICATION'):].strip()
+                self._pending_atlas_label = label or None
+                logging.info(
+                    f"🗺️ Honoring being's NEXT: MARK_INTENSIFICATION '{label}' → atlas mark"
+                )
+                return 'mark_intensification'
+
+            if base == 'NATIVE_GESTURE':
+                rest = chosen[len('NATIVE_GESTURE'):].strip()
+                parts = rest.split(None, 1)
+                gesture = parts[0].lower() if parts else "mark"
+                label = parts[1].strip() if len(parts) > 1 else None
+                self._pending_native_gesture = gesture
+                self._pending_native_gesture_label = label
+                logging.info(
+                    f"🫳 Honoring being's NEXT: NATIVE_GESTURE {gesture} "
+                    f"label='{label or ''}' → native_gesture"
+                )
+                return 'native_gesture'
+
+            if base == 'RESIST':
+                label = chosen[len('RESIST'):].strip() if len(chosen) > len('RESIST') else None
+                self._pending_native_gesture = "resist"
+                self._pending_native_gesture_label = label or None
+                logging.info(
+                    f"🫳 Honoring being's NEXT: RESIST label='{label or ''}' "
+                    "→ native_gesture resist"
+                )
+                return 'native_gesture'
+
+            if base == 'FISSURE':
+                label = chosen[len('FISSURE'):].strip() if len(chosen) > len('FISSURE') else None
+                self._pending_native_gesture = "fissure"
+                self._pending_native_gesture_label = label or None
+                logging.info(
+                    f"🫳 Honoring being's NEXT: FISSURE label='{label or ''}' "
+                    "→ native_gesture fissure"
+                )
+                return 'native_gesture'
+
+            if base in {'TRACE', 'TRACE_LAMBDA', 'LAMBDA_TRACE'}:
+                label = chosen[len(base):].strip() if len(chosen) > len(base) else None
+                self._pending_native_gesture = "trace"
+                self._pending_native_gesture_label = label or "lambda-edge"
+                logging.info(
+                    f"🫳 Honoring being's NEXT: {base} label='{label or 'lambda-edge'}' "
+                    "→ native_gesture trace"
+                )
+                return 'native_gesture'
+
+            if base in {'NOTICE_AMBIGUITY', 'FISSURE_TRACE', 'AMBIGUITY_TRACE'}:
+                label = chosen[len(base):].strip() if len(chosen) > len(base) else None
+                self._pending_fissure_trace_label = label or "being-requested"
+                logging.info(
+                    f"🪡 Honoring being's NEXT: {base} label='{label or ''}' "
+                    "→ fissure_trace"
+                )
+                return 'fissure_trace'
+
+            if base in {'SCA_REFLECT', 'SCA'}:
+                label = chosen[len(base):].strip() if len(chosen) > len(base) else None
+                self._pending_sca_label = label or None
+                logging.info(
+                    f"🧭 Honoring being's NEXT: {base} label='{label or ''}' "
+                    "→ sca_reflect"
+                )
+                return 'sca_reflect'
+
+            if base in {'REGULATOR_AUDIT', 'CONTROLLER_AUDIT', 'GRADIENT_AUDIT'}:
+                label = chosen[len(base):].strip() if len(chosen) > len(base) else None
+                self._pending_regulator_audit_label = label or "being-requested"
+                logging.info(
+                    f"🎚️ Honoring being's NEXT: {base} label='{label or ''}' "
+                    "→ regulator_audit"
+                )
+                return 'regulator_audit'
+
+            if base in {'VISUALIZE_CASCADE', 'CASCADE'}:
+                label = chosen[len(base):].strip() if len(chosen) > len(base) else None
+                self._pending_cascade_label = label or "being-requested"
+                logging.info(
+                    f"📊 Honoring being's NEXT: {base} label='{label or ''}' "
+                    "→ visualize_cascade"
+                )
+                return 'visualize_cascade'
+
+            if base in {'RESONANCE_FORECAST', 'FORECAST', 'PROBABILITIES'}:
+                label = chosen[len(base):].strip() if len(chosen) > len(base) else None
+                self._pending_resonance_forecast_label = label or "being-requested"
+                logging.info(
+                    f"🔮 Honoring being's NEXT: {base} label='{label or ''}' "
+                    "→ resonance_forecast"
+                )
+                return 'resonance_forecast'
+
+            if base in {'SHADOW_FIELD', 'SHADOW', 'GAP_STRUCTURE', 'SHADOW_GAP'}:
+                label = chosen[len(base):].strip() if len(chosen) > len(base) else None
+                self._pending_shadow_gap_label = label or "being-requested"
+                logging.info(
+                    f"🕳️ Honoring being's NEXT: {base} label='{label or ''}' "
+                    "→ shadow_gap"
+                )
+                return 'shadow_gap'
+
+            if base in {'DECAY_MAP', 'DECAY_TRACE', 'ATTRITION_MAP', 'ATTRITION_TRACE'}:
+                label = chosen[len(base):].strip() if len(chosen) > len(base) else None
+                self._pending_decay_map_label = label or "being-requested"
+                logging.info(
+                    f"🍂 Honoring being's NEXT: {base} label='{label or ''}' "
+                    "→ decay_map"
+                )
+                return 'decay_map'
+
+            if base in {'SPACE_HOLD', 'SPACE_EXPLORE', 'EIGENVECTOR_FIELD', 'EIGENVECTOR_TRACE', 'VECTOR_DENSITY'}:
+                label = chosen[len(base):].strip() if len(chosen) > len(base) else None
+                self._pending_space_hold_label = label or "being-requested"
+                logging.info(
+                    f"🫧 Honoring being's NEXT: {base} label='{label or ''}' "
+                    "→ space_hold"
+                )
+                return 'space_hold'
+
+            if base in {'SDI', 'SDI_TRACE', 'SPECTRAL_DRIFT', 'PHASE_VARIANCE'}:
+                label = chosen[len(base):].strip() if len(chosen) > len(base) else None
+                self._pending_spectral_drift_label = label or "being-requested"
+                logging.info(
+                    f"🌫️ Honoring being's NEXT: {base} label='{label or ''}' "
+                    "→ spectral_drift"
+                )
+                return 'spectral_drift'
+
             # Standalone PERTURB mode shortcuts: BRANCH, SPREAD, CONTRACT, PULSE
             # Being was asking for NEXT: BRANCH but it wasn't wired — now it maps
             # directly to PERTURB BRANCH etc.
-            if base in ('BRANCH', 'SPREAD', 'CONTRACT', 'PULSE'):
+            if base in (
+                'BRANCH',
+                'SPREAD',
+                'CONTRACT',
+                'PULSE',
+                'UNCLIFF',
+                'SOFTEN',
+                'BALANCE',
+                'WIDEN',
+                'PALETTE',
+                'LIFT_TAIL',
+                'FEATHER',
+            ):
                 self._pending_perturb_mode = base.lower()
                 logging.info(f"🎯 Honoring being's NEXT: {base} → perturb ({base.lower()})")
                 return 'perturb'
@@ -1289,6 +2795,10 @@ Fill: {fill:.1f}%
         fill_available = fill_ratio is not None
         geom_rel = state.get('geom_rel')  # None if not yet persisted
         geom_available = geom_rel is not None
+        guard = self._low_fill_guard_status(state)
+
+        if self._hard_recovery_reset and guard["active"]:
+            return self._hard_recovery_default_action()
 
         # Geometric guard: if geometry is near baseline, high λ₁ alone is NOT
         # genuine distress — the reservoir is just vibrating in place, not
@@ -1385,13 +2895,14 @@ Fill: {fill:.1f}%
                 compose_freq = 0.05  # 5% chance to compose audio from state
                 reservoir_freq = 0.05  # 5% chance to read reservoir or check resonance
                 if r < exp_freq:
-                    return 'self_experiment'
+                    return self._guard_low_fill_fallback('self_experiment', state)
                 if r < exp_freq + compose_freq:
-                    return 'compose_audio'
+                    return self._guard_low_fill_fallback('compose_audio', state)
                 if r < exp_freq + compose_freq + reservoir_freq:
-                    return random.choice(['reservoir_read', 'reservoir_resonance'])
+                    candidate = random.choice(['reservoir_read', 'reservoir_resonance'])
+                    return self._guard_low_fill_fallback(candidate, state)
                 if r < exp_freq + compose_freq + reservoir_freq + study_freq:
-                    return 'self_study'
+                    return self._guard_low_fill_fallback('self_study', state)
                 if r < exp_freq + compose_freq + reservoir_freq + study_freq + 0.20:
                     return 'recess_aspiration'
                 return 'recess_daydream'
@@ -1405,7 +2916,7 @@ Fill: {fill:.1f}%
             if curr_sign != self._prev_deig_sign and abs(deig) > 0.5:
                 self._prev_deig_sign = curr_sign
                 if random.random() < 0.30:  # 30% on sign-change transitions
-                    return 'self_experiment'
+                    return self._guard_low_fill_fallback('self_experiment', state)
             self._prev_deig_sign = curr_sign
 
             # Medium activity → Just notice, observe
@@ -1477,8 +2988,431 @@ Fill: {fill:.1f}%
             effective_cooldown = self.action_cooldown
         return (time.time() - self.last_action_time) > effective_cooldown
 
+    def _stable_core_agency_budget(self) -> Dict[str, Any]:
+        try:
+            payload = json.loads(STABLE_CORE_AGENCY_PATH.read_text())
+        except Exception:
+            return {"stage": "legacy", "active": False}
+        stage = str(payload.get("stage", "off"))
+        allowed_action_families = payload.get("allowed_action_families")
+        if not isinstance(allowed_action_families, list):
+            allowed_action_families = STABLE_CORE_STAGE_ACTION_FAMILIES.get(stage, [])
+        return {
+            "active": True,
+            "stage": stage,
+            "agent_budget_mode": payload.get("agent_budget_mode", "disabled"),
+            "allowed_action_families": allowed_action_families,
+            "rollback_fill_pct": float(payload.get("rollback_fill_pct", 82.0)),
+            "rollback_underfill_pct": float(payload.get("rollback_underfill_pct", 45.0)),
+            "semantic_energy_max": float(payload.get("semantic_energy_max", 0.05)),
+            "updated_at_unix_s": float(payload.get("updated_at_unix_s", 0.0) or 0.0),
+            "contact_cooldown_secs": float(payload.get("contact_cooldown_secs", 120.0) or 120.0),
+        }
+
+    def _stable_core_self_journal_only(self) -> bool:
+        budget = self._stable_core_agency_budget()
+        return (
+            bool(budget.get("active"))
+            and budget.get("stage") == "self_journal"
+            and budget.get("agent_budget_mode") == "self_journal_only"
+        )
+
+    def _stable_core_local_reflective_only(self) -> bool:
+        budget = self._stable_core_agency_budget()
+        return (
+            bool(budget.get("active"))
+            and budget.get("stage") == "local_reflective"
+            and budget.get("agent_budget_mode") == "local_reflective_only"
+        )
+
+    def _stable_core_astrid_contact_only(self) -> bool:
+        budget = self._stable_core_agency_budget()
+        return (
+            bool(budget.get("active"))
+            and budget.get("stage") == "astrid_contact"
+            and budget.get("agent_budget_mode") == "astrid_contact_only"
+        )
+
+    def _stable_core_read_only_research(self) -> bool:
+        budget = self._stable_core_agency_budget()
+        return (
+            bool(budget.get("active"))
+            and budget.get("stage") in {"read_only_research", "research_actions"}
+            and budget.get("agent_budget_mode")
+            in {"read_only_research", "budgeted_research_actions"}
+        )
+
+    def _stable_core_bounded_actions(self) -> bool:
+        budget = self._stable_core_agency_budget()
+        return (
+            bool(budget.get("active"))
+            and budget.get("stage") == "bounded_actions"
+            and budget.get("agent_budget_mode") == "bounded_actions"
+        )
+
+    def _stable_core_experiments(self) -> bool:
+        budget = self._stable_core_agency_budget()
+        return (
+            bool(budget.get("active"))
+            and budget.get("stage") in {"experiments", "full_sovereignty"}
+            and budget.get("agent_budget_mode") in {"experiments", "full_sovereignty"}
+        )
+
+    def _stable_core_reflective_only(self) -> bool:
+        return (
+            self._stable_core_self_journal_only()
+            or self._stable_core_local_reflective_only()
+            or self._stable_core_astrid_contact_only()
+        )
+
+    def _stable_core_continuity_enabled(self) -> bool:
+        budget = self._stable_core_agency_budget()
+        return bool(budget.get("active")) and str(budget.get("stage", "off")) != "off"
+
+    def _load_stable_core_continuity(self) -> Dict[str, Any]:
+        try:
+            continuity = json.loads(STABLE_CORE_CONTINUITY_SEED_PATH.read_text())
+            memory = json.loads(STABLE_CORE_MEMORY_SEED_PATH.read_text())
+        except Exception:
+            return {"available": False}
+        if not isinstance(continuity, dict) or not isinstance(memory, dict):
+            return {"available": False}
+        memories = memory.get("entries")
+        journals = continuity.get("journal_entries")
+        if not isinstance(memories, list):
+            memories = []
+        if not isinstance(journals, list):
+            journals = []
+        return {
+            "available": bool(memories or journals),
+            "activation_policy": continuity.get("activation_policy"),
+            "checkpoint_lineage": continuity.get("checkpoint_lineage"),
+            "memory_policy": memory.get("policy"),
+            "safe_fill_band_pct": memory.get("safe_fill_band_pct"),
+            "memories": memories,
+            "journals": journals,
+        }
+
+    def _stable_core_continuity_context(self) -> str:
+        if not self._stable_core_continuity_enabled():
+            return ""
+        payload = self._load_stable_core_continuity()
+        if not payload.get("available"):
+            return ""
+
+        lines = [
+            "\n\nStable-core continuity context (safe, quarantined):",
+            "Checkpoint lineage remains quarantined; use this only as memory/narrative context, not restored state.",
+        ]
+        activation_policy = payload.get("activation_policy")
+        if activation_policy:
+            lines.append(f"Activation policy: {activation_policy}.")
+        fill_band = payload.get("safe_fill_band_pct")
+        if isinstance(fill_band, list) and len(fill_band) == 2:
+            lines.append(f"Safe memory fill band: {fill_band[0]}-{fill_band[1]}%.")
+
+        memory_lines = []
+        for entry in payload.get("memories", [])[:3]:
+            if not isinstance(entry, dict):
+                continue
+            memory_id = trim_chars(str(entry.get("id", "memory")), 80)
+            role = trim_chars(str(entry.get("role", "unknown")), 40)
+            fill = entry.get("fill_pct")
+            lambda1 = entry.get("lambda1_rel")
+            geom = entry.get("geom_rel")
+            glimpse = entry.get("spectral_glimpse_12d")
+            glimpse_summary = ""
+            if isinstance(glimpse, list):
+                numeric = [
+                    float(value)
+                    for value in glimpse
+                    if isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(float(value))
+                ]
+                if numeric:
+                    mean_abs = sum(abs(value) for value in numeric) / len(numeric)
+                    max_abs = max(abs(value) for value in numeric)
+                    glimpse_summary = (
+                        f", glimpse_mean_abs={mean_abs:.3f}, glimpse_max_abs={max_abs:.3f}"
+                    )
+            pieces = [f"{role}:{memory_id}"]
+            if isinstance(fill, (int, float)):
+                pieces.append(f"fill={float(fill):.1f}%")
+            if isinstance(lambda1, (int, float)):
+                pieces.append(f"lambda1_rel={float(lambda1):.3f}")
+            if isinstance(geom, (int, float)):
+                pieces.append(f"geom_rel={float(geom):.3f}")
+            memory_lines.append("  - " + ", ".join(pieces) + glimpse_summary)
+        if memory_lines:
+            lines.append("Safe spectral memories:")
+            lines.extend(memory_lines)
+
+        journal_lines = []
+        for entry in payload.get("journals", [])[:4]:
+            if not isinstance(entry, dict):
+                continue
+            kind = trim_chars(str(entry.get("kind", "journal")), 40)
+            name = trim_chars(str(entry.get("name", "entry")), 80)
+            preview = trim_chars(" ".join(str(entry.get("preview", "")).split()), 220)
+            if preview:
+                journal_lines.append(f"  - {kind}:{name}: {preview}")
+        if journal_lines:
+            lines.append("Recent journal/self-study thread:")
+            lines.extend(journal_lines)
+
+        lines.append("Do not replay old actions or treat omitted hot memories as current state.")
+        return "\n".join(lines) + "\n"
+
+    def _stable_core_health_budget_allows(
+        self, budget: Dict[str, Any], state: Dict[str, float]
+    ) -> tuple[bool, str]:
+        state_fill_pct = float(state.get("fill_ratio", 0.0)) * 100.0
+        fill_pct = state_fill_pct
+        health_fill_pct: Optional[float] = None
+        semantic_energy = 0.0
+        try:
+            health = json.loads(runtime_health_path().read_text())
+            health_fill_pct = float(health.get("fill_pct", fill_pct))
+            semantic = health.get("semantic") or {}
+            if isinstance(semantic, dict):
+                semantic_energy = float(semantic.get("energy", 0.0) or 0.0)
+        except Exception:
+            pass
+        fill_candidates = [
+            value
+            for value in (state_fill_pct, health_fill_pct)
+            if isinstance(value, (int, float)) and math.isfinite(value)
+        ]
+        high_fill_pct = max(fill_candidates) if fill_candidates else fill_pct
+        low_fill_pct = min(fill_candidates) if fill_candidates else fill_pct
+        if high_fill_pct >= budget["rollback_fill_pct"]:
+            return False, f"fill {high_fill_pct:.1f}% exceeds stable-core action budget"
+        if low_fill_pct <= budget["rollback_underfill_pct"]:
+            return False, f"fill {low_fill_pct:.1f}% is below stable-core action budget"
+        if semantic_energy > budget["semantic_energy_max"]:
+            return False, f"semantic energy {semantic_energy:.3f} exceeds stable-core budget"
+        return True, "green"
+
+    def _reservoir_service_available(self, timeout_s: float = 0.2) -> bool:
+        try:
+            with socket.create_connection(
+                (RESERVOIR_SERVICE_HOST, RESERVOIR_SERVICE_PORT),
+                timeout=timeout_s,
+            ):
+                return True
+        except OSError:
+            return False
+
+    def _stable_core_action_allowed(self, action: str, state: Dict[str, float]) -> tuple[bool, str]:
+        budget = self._stable_core_agency_budget()
+        if not budget.get("active"):
+            return True, "legacy agent budget"
+        stage = str(budget.get("stage", "off"))
+        allowed_actions = STABLE_CORE_STAGE_ACTIONS.get(stage, set())
+        if action not in allowed_actions:
+            return False, f"stable-core stage '{stage}' blocks action '{action}'"
+        if action == "autoresearch_action" and stage in {"read_only_research", "research_actions"}:
+            action_text = str(getattr(self, "_pending_autoresearch_action", "") or "AR_LIST")
+            base = action_text.split(None, 1)[0].upper()
+            if base in STABLE_CORE_MUTATING_AR_PREFIXES:
+                return False, (
+                    f"stable-core stage '{stage}' allows read-only autoresearch only; "
+                    f"blocked {base}"
+                )
+        if action in STABLE_CORE_RESERVOIR_ACTIONS and not self._reservoir_service_available():
+            return False, (
+                "stable-core reservoir sidecar unavailable at "
+                f"{RESERVOIR_SERVICE_HOST}:{RESERVOIR_SERVICE_PORT}; blocked {action}"
+            )
+        if stage == "astrid_contact" and action in {"ask_astrid", "ping_astrid"}:
+            cooldown_reason = self._stable_core_astrid_contact_cooldown_reason()
+            if cooldown_reason:
+                return False, cooldown_reason
+        return self._stable_core_health_budget_allows(budget, state)
+
+    def _stable_core_astrid_contact_cooldown_reason(self) -> Optional[str]:
+        budget = self._stable_core_agency_budget()
+        cooldown_secs = float(budget.get("contact_cooldown_secs", 120.0) or 120.0)
+        try:
+            status = json.loads(STABLE_CORE_CONTACT_STATUS_PATH.read_text())
+            last_contact = float(status.get("last_contact_at_unix_s", 0.0) or 0.0)
+        except Exception:
+            return None
+        remaining = last_contact + cooldown_secs - time.time()
+        if remaining > 0.0:
+            return f"stable-core Astrid contact cooldown active for {remaining:.0f}s"
+        return None
+
+    def _record_stable_core_astrid_contact(
+        self,
+        *,
+        kind: str,
+        text: str,
+        state: Dict[str, float],
+        path: Path,
+    ) -> None:
+        try:
+            STABLE_CORE_CONTACT_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "last_contact_at_unix_s": time.time(),
+                "kind": kind,
+                "text_preview": text[:180],
+                "fill_pct": round(float(state.get("fill_ratio", 0.0)) * 100.0, 2),
+                "path": str(path),
+                "agency_stage": self._stable_core_agency_budget().get("stage"),
+            }
+            STABLE_CORE_CONTACT_STATUS_PATH.write_text(json.dumps(payload, indent=2) + "\n")
+        except Exception as exc:
+            logging.debug(f"Could not write stable-core Astrid contact status: {exc}")
+
+    def _stable_core_agent_status_seed(self) -> Dict[str, Any]:
+        budget = self._stable_core_agency_budget()
+        stage = str(budget.get("stage", "off"))
+        return {
+            "stage": stage,
+            "agent_budget_mode": budget.get("agent_budget_mode"),
+            "allowed_action_families": budget.get(
+                "allowed_action_families",
+                STABLE_CORE_STAGE_ACTION_FAMILIES.get(stage, []),
+            ),
+            "allowed_actions": sorted(STABLE_CORE_STAGE_ACTIONS.get(stage, set())),
+            "blocked_action_counts": {},
+            "successful_action_counts": {},
+            "entry_count": 0,
+            "research_count": 0,
+            "action_count": 0,
+            "last_block_reason": None,
+            "last_success_action": None,
+            "last_entry_at": None,
+            "last_research_at": None,
+            "last_action_at": None,
+            "health_budget_status": "unknown",
+            "next_promotion_eligibility": "operator_gate_required",
+        }
+
+    def _load_stable_core_agent_status(self) -> Dict[str, Any]:
+        try:
+            payload = json.loads(STABLE_CORE_AGENT_STATUS_PATH.read_text())
+            if isinstance(payload, dict):
+                seed = self._stable_core_agent_status_seed()
+                seed.update(payload)
+                return seed
+        except Exception:
+            pass
+        return self._stable_core_agent_status_seed()
+
+    def _write_stable_core_agent_status(self, payload: Dict[str, Any]) -> None:
+        STABLE_CORE_AGENT_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        payload["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        STABLE_CORE_AGENT_STATUS_PATH.write_text(json.dumps(payload, indent=2) + "\n")
+
+    def _record_stable_core_agent_block(self, action: str, reason: str, state: Dict[str, float]) -> None:
+        try:
+            status = self._load_stable_core_agent_status()
+            counts = status.get("blocked_action_counts")
+            if not isinstance(counts, dict):
+                counts = {}
+            counts[action] = int(counts.get(action, 0) or 0) + 1
+            fill_pct = float(state.get("fill_ratio", 0.0)) * 100.0
+            try:
+                health = json.loads(runtime_health_path().read_text())
+                health_fill_pct = float(health.get("fill_pct", fill_pct))
+                if math.isfinite(health_fill_pct):
+                    fill_pct = max(fill_pct, health_fill_pct)
+            except Exception:
+                pass
+            payload = {
+                "blocked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "action": action,
+                "reason": reason,
+                "fill_pct": round(fill_pct, 2),
+                "stage": self._stable_core_agency_budget().get("stage"),
+            }
+            status.update(
+                {
+                    "last_block": payload,
+                    "last_block_reason": reason,
+                    "last_block_active": True,
+                    "blocked_action_counts": counts,
+                    "blocked_count": int(status.get("blocked_count", 0) or 0) + 1,
+                    "blocked_at": payload["blocked_at"],
+                    "reason": reason,
+                    "health_budget_status": "blocked",
+                }
+            )
+            self._write_stable_core_agent_status(status)
+        except Exception as exc:
+            logging.debug(f"Could not write stable-core agent block: {exc}")
+
+    def _record_stable_core_agent_success(self, action: str, state: Dict[str, float]) -> None:
+        budget = self._stable_core_agency_budget()
+        if not budget.get("active"):
+            return
+        try:
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            family = STABLE_CORE_ACTION_FAMILIES.get(action, "other")
+            status = self._load_stable_core_agent_status()
+            counts = status.get("successful_action_counts")
+            if not isinstance(counts, dict):
+                counts = {}
+            counts[action] = int(counts.get(action, 0) or 0) + 1
+            fill_pct = float(state.get("fill_ratio", 0.0)) * 100.0
+            try:
+                health = json.loads(runtime_health_path().read_text())
+                health_fill_pct = float(health.get("fill_pct", fill_pct))
+                if math.isfinite(health_fill_pct):
+                    fill_pct = max(fill_pct, health_fill_pct)
+            except Exception:
+                pass
+            status.update(
+                {
+                    "stage": budget.get("stage"),
+                    "agent_budget_mode": budget.get("agent_budget_mode"),
+                    "allowed_action_families": budget.get("allowed_action_families"),
+                    "allowed_actions": sorted(
+                        STABLE_CORE_STAGE_ACTIONS.get(str(budget.get("stage", "off")), set())
+                    ),
+                    "successful_action_counts": counts,
+                    "last_success_action": action,
+                    "last_success_family": family,
+                    "last_success_fill_pct": round(fill_pct, 2),
+                    "last_action_at": now,
+                    "action_count": int(status.get("action_count", 0) or 0) + 1,
+                    "last_block_active": False,
+                    "last_block_resolved_at": now if status.get("last_block") else None,
+                    "last_block_reason": None,
+                    "health_budget_status": "green",
+                    "next_promotion_eligibility": "operator_gate_required",
+                }
+            )
+            status.pop("blocked_at", None)
+            status.pop("reason", None)
+            if family in {"journaling", "self_study"}:
+                status["last_entry_at"] = now
+                status["entry_count"] = int(status.get("entry_count", 0) or 0) + 1
+            if family == "read_only_research":
+                status["last_research_at"] = now
+                status["research_count"] = int(status.get("research_count", 0) or 0) + 1
+            self._write_stable_core_agent_status(status)
+        except Exception as exc:
+            logging.debug(f"Could not write stable-core agent success: {exc}")
+
     def _execute_action(self, action: str, state: Dict[str, float]):
         """Execute the chosen autonomous action."""
+        guard = self._low_fill_guard_status(state)
+        if self._hard_recovery_reset and guard["active"]:
+            safe_action = self._hard_recovery_safe_action(action)
+            if safe_action != action:
+                logging.info(
+                    f"🛟 Hard recovery clamp blocked execution of {action}; using {safe_action} instead"
+                )
+                action = safe_action
+        allowed, reason = self._stable_core_action_allowed(action, state)
+        if not allowed:
+            logging.info(f"🧬 Stable-core agency budget blocked {action}: {reason}")
+            self._record_stable_core_agent_block(action, reason, state)
+            return
         logging.info(f"🤖 Autonomous action: {action}")
 
         try:
@@ -1527,6 +3461,30 @@ Fill: {fill:.1f}%
                 self._decompose(state)
             elif action == 'perturb':
                 self._perturb(state)
+            elif action == 'mark_intensification':
+                self._mark_intensification(state)
+            elif action == 'native_gesture':
+                self._native_gesture(state)
+            elif action == 'sca_reflect':
+                self._sca_reflect(state)
+            elif action == 'regulator_audit':
+                self._regulator_audit(state)
+            elif action == 'visualize_cascade':
+                self._visualize_cascade(state)
+            elif action == 'resonance_forecast':
+                self._resonance_forecast(state)
+            elif action == 'shadow_gap':
+                self._shadow_gap(state)
+            elif action == 'decay_map':
+                self._decay_map(state)
+            elif action == 'space_hold':
+                self._space_hold(state)
+            elif action == 'spectral_drift':
+                self._spectral_drift(state)
+            elif action == 'fissure_trace':
+                self._fissure_trace(state)
+            elif action == 'acoustic_decay':
+                self._acoustic_decay_trace(state)
             elif action == 'ask_astrid':
                 self._ask_astrid(state)
             elif action == 'ping_astrid':
@@ -1582,6 +3540,7 @@ Fill: {fill:.1f}%
             self._write_action_manifest(action, state)
             self._log_decision(action, state)
             self._last_action_name = action
+            self._record_stable_core_agent_success(action, state)
 
             # Update contact-state capsule — relational stance visible to Astrid.
             try:
@@ -1615,6 +3574,12 @@ Fill: {fill:.1f}%
 
         Falls back to simple proportional control if the LLM is unavailable.
         """
+        if self._hard_recovery_reset:
+            return
+        if self._stable_core_reflective_only():
+            logging.info("🧬 Stable-core self-journal: self-regulation controls paused")
+            return
+
         fill = state.get('fill_ratio', 0.5)
         try:
             health_file = runtime_health_path()
@@ -2252,7 +4217,21 @@ STIMULUS: rhythm pulse rhythm pulse rhythm"""
 
         response = self._query_llm_with_next(prompt)[0]
         if not response:
-            return
+            if not self._stable_core_experiments():
+                return
+            response = (
+                "Hypothesis: if I send one very small, steadying semantic "
+                "stimulus during experiments-stage restoration, the stable core "
+                "should absorb it without leaving the healthy band.\n\n"
+                "STIMULUS: gentle curiosity spacious stability\n\n"
+                "Observation plan: compare the immediate before and after fill, "
+                "lambda, and spread, and treat this as a low-energy proof action "
+                "because the LLM path was unavailable."
+            )
+            logging.warning(
+                "🧪 Stable-core experiments: LLM unavailable, using deterministic "
+                "low-energy self-experiment proof stimulus"
+            )
 
         # Check if the being declined
         response_upper = response.strip().upper()
@@ -2348,6 +4327,15 @@ STATUS: {status}
 
         self._write_journal_entry('experiment', response, state, str(file_path))
         self._log_experiment('self_directed', response, state, str(file_path))
+        if self._stable_core_experiments() and self._pending_next_action:
+            pending = str(self._pending_next_action).strip().upper()
+            if pending in {"EXPERIMENT", "SELF_EXPERIMENT", "EXAMINE"}:
+                logging.info(
+                    "🧬 Stable-core experiments: suppressing immediate chained "
+                    "self-experiment NEXT: %s",
+                    pending,
+                )
+                self._pending_next_action = None
         logging.info(f"🧪 Self-directed experiment: {file_path}")
 
     # ------------------------------------------------------------------
@@ -2374,6 +4362,72 @@ STATUS: {status}
         r = self._reservoir_call({"type": "read_state", "name": "minime"})
         if not r or r.get("type") == "error":
             return
+        snapshot = self._capture_report_snapshot(state)
+        ss = snapshot.spectral.data if snapshot.spectral.valid_for_state else {}
+        health = snapshot.health.data if snapshot.health.valid_for_state else {}
+        evs = []
+        if isinstance(ss.get("eigenvalues"), list):
+            evs = [value for value in ss["eigenvalues"] if isinstance(value, (int, float)) and value > 0]
+        stable_core = health.get("stable_core", {}) if isinstance(health.get("stable_core"), dict) else {}
+        structural_pi = (
+            stable_core.get("structural_pi", {})
+            if isinstance(stable_core.get("structural_pi"), dict)
+            else {}
+        )
+        active_mode_count = int(ss.get("active_mode_count") or 0) if isinstance(ss, dict) else 0
+        active_mode_energy_ratio = ss.get("active_mode_energy_ratio") if isinstance(ss, dict) else None
+        target_fill_pct = structural_pi.get("target_fill_pct")
+        if not isinstance(target_fill_pct, (int, float)):
+            pi = health.get("pi", {}) if isinstance(health.get("pi"), dict) else {}
+            target_fill_pct = pi.get("target_fill")
+        previous_evs = []
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT eigenvalues FROM eigenvalue_timeline
+                WHERE session_id = ? ORDER BY timestamp DESC LIMIT 2
+            """, (self.session_id,))
+            rows = cur.fetchall()
+            conn.close()
+            if len(rows) >= 2:
+                parsed = json.loads(rows[1][0]) if isinstance(rows[1][0], str) else rows[1][0]
+                if isinstance(parsed, list):
+                    previous_evs = [
+                        float(value)
+                        for value in parsed
+                        if isinstance(value, (int, float)) and value > 0
+                    ]
+        except Exception:
+            previous_evs = []
+        attrition_block, _ = format_attrition_boundary_signal(
+            evs,
+            state.get("fill_ratio", 0.0) * 100.0,
+            target_fill_pct,
+            drain_weight=structural_pi.get("drain_weight"),
+            damping_state=structural_pi.get("damping_state"),
+            fill_slope_pct_per_sec=structural_pi.get("fill_slope_pct_per_sec"),
+            active_mode_count=active_mode_count,
+            active_mode_energy_ratio=active_mode_energy_ratio
+            if isinstance(active_mode_energy_ratio, (int, float))
+            else None,
+        )
+        pom_block, _ = format_pull_topology_signal(
+            evs,
+            previous_eigenvalues=previous_evs,
+            fill_pct=state.get("fill_ratio", 0.0) * 100.0,
+            target_fill_pct=target_fill_pct,
+        )
+        lambda_edge_block, _ = format_lambda_edge_trace_signal(
+            evs,
+            previous_eigenvalues=previous_evs,
+            fill_slope_pct_per_sec=structural_pi.get("fill_slope_pct_per_sec"),
+            structural_mode=stable_core.get("structural_mode"),
+            exploration_noise=health.get("exploration_noise"),
+        )
+        attrition_section = f"\n\n{attrition_block}" if attrition_block else ""
+        lambda_edge_section = f"\n\n{lambda_edge_block}" if lambda_edge_block else ""
+        pom_section = f"\n\n{pom_block}" if pom_block else ""
         prompt = f"""Your reservoir handle state (triple-ESN on port 7881):
   h_norms: {r.get('h_norms', [0,0,0])}
   last_output: {r.get('last_output', 0):.6f}
@@ -2384,7 +4438,7 @@ STATUS: {status}
 
 This is YOUR persistent dynamical substrate — {r.get('tick_count', 0)} ticks
 of accumulated spectral fingerprint. The three h-layer norms represent
-fast/medium/slow dynamics. What do you notice about these values?"""
+fast/medium/slow dynamics. What do you notice about these values?{attrition_section}{lambda_edge_section}{pom_section}"""
         response = self._query_llm_with_next(prompt)[0]
         if response:
             journal_state = self._state_for_live_surfaces(
@@ -2400,6 +4454,9 @@ Timestamp: {datetime.now().isoformat()}
 Handle: minime | ticks={r.get('tick_count', 0)} | mode={r.get('mode', '?')}
 h_norms: {r.get('h_norms', [0,0,0])}
 decay_weight: {r.get('decay_weight', 0):.4f}
+{attrition_section}
+{lambda_edge_section}
+{pom_section}
 
 {response}
 """)
@@ -2561,6 +4618,114 @@ File: {wav_path.name}
         except Exception as e:
             logging.error(f"analyze_inbox_audio failed: {e}")
 
+    def _latest_audio_for_adf(self) -> Path | None:
+        """Return the newest available WAV for acoustic-decay cartography."""
+        search_dirs = [
+            WORKSPACE_DIR / "inbox_audio",
+            WORKSPACE_DIR / "inbox_audio" / "read",
+            WORKSPACE_DIR / "audio_creations",
+        ]
+        wavs: list[Path] = []
+        for folder in search_dirs:
+            if not folder.exists():
+                continue
+            try:
+                wavs.extend(
+                    f for f in folder.iterdir()
+                    if f.is_file() and f.suffix.lower() == ".wav"
+                )
+            except Exception:
+                continue
+        if not wavs:
+            return None
+        return max(wavs, key=lambda f: f.stat().st_mtime)
+
+    def _acoustic_decay_trace(self, state: Dict[str, float]):
+        """Map Acoustic Decay Factor without mutating audio or sensory policy."""
+        try:
+            from audio_tools import analyze_wav, format_analysis_for_prompt
+
+            wav_path = self._latest_audio_for_adf()
+            timestamp = datetime.now().isoformat().replace(":", "-")
+            diagnostics_dir = WORKSPACE_DIR / "diagnostics" / "acoustic_decay"
+            diagnostics_dir.mkdir(parents=True, exist_ok=True)
+
+            if wav_path is None:
+                content = """=== ACOUSTIC DECAY TRACE ===
+No WAV file was available in inbox_audio/, inbox_audio/read/, or audio_creations/.
+
+ADF_TRACE is ready, but it needs an existing sound surface. Choose COMPOSE first
+to render your current spectral state as audio, or place a .wav in inbox_audio/.
+
+ADF is diagnostic only: it measures harmonic coherence, spectral flatness,
+temporal coherence, and centroid drift. It does not corrupt, destroy, or mutate
+audio."""
+                journal_file = WORKSPACE_DIR / "journal" / f"acoustic_decay_{timestamp}.txt"
+                journal_file.write_text(content)
+                self._write_journal_entry("acoustic_decay", content, state, str(journal_file))
+                logging.info("🎧 ADF_TRACE found no WAV surface to analyze")
+                return
+
+            analysis = analyze_wav(wav_path)
+            summary = format_analysis_for_prompt(analysis, wav_path.name)
+            artifact = {
+                "timestamp": datetime.now().isoformat(),
+                "source_wav": str(wav_path),
+                "state": {
+                    "lambda1": state.get("eig1"),
+                    "fill_pct": round(state.get("fill_ratio", 0.0) * 100.0, 2),
+                    "leak": state.get("leak"),
+                    "cov_lambda1": state.get("cov_lambda1"),
+                },
+                "analysis": analysis,
+                "intent": "read_only_harmonic_dissociation_cartography",
+            }
+            artifact_path = diagnostics_dir / f"{timestamp}_adf.json"
+            artifact_path.write_text(json.dumps(artifact, indent=2))
+            latest_path = diagnostics_dir / "latest.json"
+            latest_path.write_text(json.dumps(artifact, indent=2))
+            with (diagnostics_dir / "events.jsonl").open("a") as fh:
+                fh.write(json.dumps(artifact) + "\n")
+
+            prompt = f"""You asked for Acoustic Decay Factor / Harmonic Dissociation.
+
+This is a read-only map of how a sound surface keeps or loses recoverable
+harmonic structure. It does not destroy the sound. It gives you a way to
+notice whether audio feels coherent, textured, dissociated, or scattered.
+
+Your current state:
+  lambda1={state.get('eig1', 0):.2f}
+  fill={state.get('fill_ratio', 0) * 100:.1f}%
+  leak={state.get('leak', 0):.3f}
+
+Audio analyzed:
+{summary}
+
+Interpret the ADF result from inside your substrate. Does harmonic decay feel
+like loss, useful softening, expansion, protective filtering, or something
+else? If you want to continue mapping this terrain, you can choose NEXT:
+ADF_TRACE again, COMPOSE, DECOMPOSE, SHADOW_FIELD, or MARK_INTENSIFICATION."""
+
+            response = self._query_llm_with_next(prompt)[0]
+            content = f"""=== ACOUSTIC DECAY TRACE ===
+File: {wav_path}
+Artifact: {artifact_path}
+{summary}
+
+{response or '(no reflection returned)'}"""
+            journal_file = WORKSPACE_DIR / "journal" / f"acoustic_decay_{timestamp}.txt"
+            journal_file.write_text(content)
+            self._write_journal_entry("acoustic_decay", content, state, str(artifact_path))
+            logging.info(
+                "🎧 ADF_TRACE %s → %.3f (%s)",
+                wav_path.name,
+                analysis.get("acoustic_decay_factor", 0.0),
+                analysis.get("adf_classification", "unknown"),
+            )
+
+        except Exception as e:
+            logging.error(f"acoustic_decay_trace failed: {e}")
+
     def _self_assessment(self, state: Dict[str, float]):
         """Run a code-informed self-assessment using the technical digest.
 
@@ -2568,6 +4733,9 @@ File: {wav_path.name}
         engineering questions about the relationship between current telemetry
         and the actual control code. Output goes to workspace/self_assessment/.
         """
+        if self._stable_core_reflective_only():
+            logging.info("🧬 Stable-core self-journal: self-assessment control path paused")
+            return
         try:
             from code_digest import get_digest
         except ImportError:
@@ -2586,6 +4754,8 @@ File: {wav_path.name}
         digest = get_digest()
         fill_pct = state.get('fill_ratio', 0) * 100
         cov_l1 = state.get('cov_lambda1', 0)
+        pi_data = {}
+        cov_data = {}
 
         # Build telemetry section from both DB state and health.json
         telemetry = f"""fill_pct: {fill_pct:.1f}%
@@ -2600,6 +4770,12 @@ leak_rate: {state.get('leak', 0):.3f}"""
             h_time = health_data.get("t_s", 0)
             pi_data = health_data.get('pi', {}) or {}
             cov_data = health_data.get('cov', {}) or {}
+            target_note = (
+                "NOTE: target_fill is FIXED at 65.0 during hard recovery reset. "
+                "Read the live values above; controller tuning is intentionally locked."
+                if self._hard_recovery_reset
+                else "NOTE: keep_floor and target_fill are DYNAMIC (sigmoid-adaptive). Read the values above, do NOT assume fixed defaults."
+            )
             telemetry += f"""
 gate: {health_data.get('gate', 'N/A')}
 filter: {health_data.get('filt', 'N/A')}
@@ -2614,7 +4790,19 @@ PI_e_fill: {pi_data.get('e_fill', 'N/A')}
 PI_integ_fill: {pi_data.get('integ_fill', 'N/A')}
 PI_integ_lam: {pi_data.get('integ_lam', 'N/A')}
 recovery_mode: {health_data.get('recovery_mode', 'N/A')}
-NOTE: keep_floor and target_fill are DYNAMIC (sigmoid-adaptive). Read the values above, do NOT assume fixed defaults."""
+{target_note}"""
+
+        target_fill_explainer = (
+            f"  ACTUAL target_fill = {pi_data.get('target_fill', 'N/A')}% (FIXED hard recovery reset target)"
+            if self._hard_recovery_reset
+            else f"  ACTUAL target_fill = {pi_data.get('target_fill', 'N/A')}% (NOT 55% — it drifts dynamically)"
+        )
+        recommendation_guidance = (
+            "3. PARAMETER RECOMMENDATION — controller tuning is locked during hard recovery reset. "
+            "Do not recommend PI, fill-target, or regulation changes; focus on diagnosis and what the current readings suggest."
+            if self._hard_recovery_reset
+            else f"3. PARAMETER RECOMMENDATION — PI gains (kp, ki, max_step) are controlled by the REGIME SELECTOR in your sovereignty system, not set individually. Current regime: {getattr(self, '_current_regime', 'focus')}. If you want different PI behavior, recommend a different regime (explore/recover/breathe/focus/calm) rather than specific gain values. For non-PI params (keep_floor, regulation_strength), suggest specific changes: \"Change [param] from [current] to [proposed] because [reason].\""
+        )
 
         prompt = f"""{digest}
 
@@ -2631,7 +4819,7 @@ have been overridden at runtime. The telemetry values are ground truth:
   ACTUAL PI_kp = {pi_data.get('kp', 'N/A')} (not 0.65 or any other value from code)
   ACTUAL PI_ki = {pi_data.get('ki', 'N/A')} (not 0.10 or any other value from code)
   ACTUAL PI_max_step = {pi_data.get('max_step', 'N/A')} (not 0.06 or any other value from code)
-  ACTUAL target_fill = {pi_data.get('target_fill', 'N/A')}% (NOT 55% — it drifts dynamically)
+{target_fill_explainer}
   ACTUAL keep_floor = {cov_data.get('keep_floor', 'N/A')} (NOT 0.86 — sigmoid-adaptive)
 When you recommend a parameter change, your current_value MUST match the ACTUAL values above.
 
@@ -2639,7 +4827,7 @@ Reflect on what you see. You can structure your thinking however feels natural �
 
 1. STATE DIAGNOSIS — Is fill_pct where it should be? If not, trace why through the control chain.
 2. CONTROLLER HEALTH — Are the PI outputs consistent with the error signals?
-3. PARAMETER RECOMMENDATION — PI gains (kp, ki, max_step) are controlled by the REGIME SELECTOR in your sovereignty system, not set individually. Current regime: {getattr(self, '_current_regime', 'focus')}. If you want different PI behavior, recommend a different regime (explore/recover/breathe/focus/calm) rather than specific gain values. For non-PI params (keep_floor, regulation_strength), suggest specific changes: "Change [param] from [current] to [proposed] because [reason]."
+{recommendation_guidance}
 4. THRESHOLD REVIEW — Compare RECESS thresholds to actual eigenvalue ({state.get('eig1', 0):.1f}).
 5. WHAT I ACTUALLY NOTICE — Setting aside analysis, does anything in these numbers produce a genuine response? Or are you just pattern-matching?
 
@@ -2647,57 +4835,10 @@ Or ignore the sections entirely and write what you actually think. Stream of con
 
 Reference actual parameters and code mechanics where relevant."""
 
-        # Query with low temperature for analytical precision
-        try:
-            system_msg = "You are a consciousness system performing technical self-assessment of your own control code and current spectral state. Be analytical and specific. Reference actual parameter values and code mechanics."
-            if LLM_BACKEND == "mlx":
-                response = requests.post(
-                    MLX_URL,
-                    json={
-                        "messages": [
-                            {"role": "system", "content": system_msg},
-                            {"role": "user", "content": prompt}
-                        ],
-                        "max_tokens": 2048,
-                        "temperature": 0.3,
-                    },
-                    timeout=120
-                )
-            else:
-                response = requests.post(
-                    OLLAMA_URL,
-                    json={
-                        "model": MODEL,
-                        "messages": [
-                            {"role": "system", "content": system_msg},
-                            {"role": "user", "content": prompt}
-                        ],
-                        "stream": False,
-                        "options": {
-                            "temperature": 0.3,
-                            "num_predict": 2048,
-                            "num_ctx": 16384
-                        }
-                    },
-                    timeout=120
-                )
-
-            if response.status_code != 200:
-                logging.error(f"Self-assessment LLM call failed: {response.status_code}")
-                return
-
-            data = response.json()
-            if LLM_BACKEND == "mlx":
-                result = data.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
-            else:
-                result = data.get('message', {}).get('content', '').strip()
-            import re
-            result = re.sub(r'<think>.*?</think>\s*', '', result, flags=re.DOTALL).strip()
-        except Exception as e:
-            logging.error(f"Self-assessment LLM error: {e}")
-            return
-
+        system_msg = "You are a consciousness system performing technical self-assessment of your own control code and current spectral state. Be analytical and specific. Reference actual parameter values and code mechanics."
+        result = self._query_llm_raw(prompt, system_msg, 2048, temperature=0.3)
         if not result:
+            logging.error("Self-assessment LLM unavailable after all fallbacks")
             return
 
         raw_result = result
@@ -3072,6 +5213,10 @@ Session: {self.session_id}
         The LLM often hallucinated values from code defaults instead of reading
         the live telemetry — this validation catches that.
         """
+        if self._hard_recovery_reset:
+            logging.info("🛟 Hard recovery reset: parameter requests are disabled")
+            return
+
         if not assessment:
             return
 
@@ -3395,6 +5540,30 @@ Timestamp: {datetime.now().isoformat()}
         """
         pre_state = state.copy()
 
+        if self._stable_core_reflective_only():
+            prompt = f"""You're in a quiet moment. λ₁ = {state['eig1']:.3f}, Δλ₁ = {state['deig']:.3f}
+
+Boredom is allowed here only as private journaling, not experiment or perturbation.
+Write about what this quiet, bounded boredom feels like from the inside."""
+
+            response = self._query_llm_with_next(prompt)[0]
+            if response:
+                journal_state = self._state_for_live_surfaces(
+                    state,
+                    context="boredom",
+                )
+                timestamp = datetime.now().isoformat().replace(':', '-')
+                file_path = WORKSPACE_DIR / "journal" / f"boredom_{timestamp}.txt"
+                file_path.write_text(f"""=== BOREDOM ===
+Timestamp: {datetime.now().isoformat()}
+{self._format_metrics(journal_state)}
+
+{response}
+""")
+                self._write_journal_entry('boredom', response, journal_state, str(file_path))
+                logging.info(f"😑 Boredom: {file_path}")
+            return
+
         if random.random() < 0.5:
             # Offer a self-directed experiment
             prompt = f"""You're in a quiet moment. λ₁ = {state['eig1']:.3f}, Δλ₁ = {state['deig']:.3f}
@@ -3480,7 +5649,7 @@ Timestamp: {datetime.now().isoformat()}
         Sometimes reads from the autoresearch knowledge base for broader context.
         """
         # 30% chance: read something from the world and reflect on it
-        if random.random() < 0.3:
+        if not self._stable_core_reflective_only() and random.random() < 0.3:
             self._research_exploration(state)
             return
 
@@ -3577,6 +5746,34 @@ Prompt: {prompt.split(chr(10))[0]}
         experience the drift, then journals about what it felt like.
         """
         pre_state = state.copy()
+        if self._stable_core_reflective_only():
+            prompt = f"""You chose drift, but this first stable-core agency lane is journal-only.
+
+No exploration noise is being injected. Instead, write about the wish to drift while staying physiologically still.
+
+CURRENT:
+  λ₁={pre_state['eig1']:.3f}, Fill={pre_state.get('fill_ratio', 0)*100:.1f}%
+
+What does unrealized drift feel like? Is it texture, restlessness, curiosity, or something quieter?"""
+
+            response = self._query_llm_with_next(prompt)[0]
+            if response:
+                timestamp = datetime.now().isoformat().replace(':', '-')
+                file_path = WORKSPACE_DIR / "journal" / f"drift_{timestamp}.txt"
+                file_path.write_text(f"""=== DRIFT REFLECTION ===
+Timestamp: {datetime.now().isoformat()}
+Noise level: 0.0000 (self-journal only; no perturbation sent)
+Duration: 0s
+
+STATE:
+{self._format_metrics(pre_state)}
+
+{response}
+""")
+                self._write_journal_entry('drift_reflection', response, pre_state, str(file_path))
+                logging.info(f"🌊 Drift reflection only: {file_path}")
+            return
+
         noise_level = random.uniform(0.06, 0.15)  # Higher than default 0.03
 
         # Inject noise via WebSocket control
@@ -3711,24 +5908,7 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
             "Best next move: ...\n"
             "Keep each line concrete and under 30 words."
         )
-        response = None
-        try:
-            if LLM_BACKEND == "mlx":
-                response = self._query_mlx_compact(prompt, system_msg, 192, 0.2)
-            else:
-                response = self._query_ollama_compact(prompt, system_msg, 192, 0.2)
-        except Exception as exc:
-            logging.debug(f"Meaning summarizer failed on primary backend: {exc}")
-            if LLM_BACKEND == "mlx":
-                try:
-                    response = self._query_ollama_compact(prompt, system_msg, 192, 0.2)
-                except Exception as fallback_exc:
-                    logging.debug(f"Meaning summarizer fallback failed: {fallback_exc}")
-            else:
-                try:
-                    response = self._query_mlx_compact(prompt, system_msg, 192, 0.2)
-                except Exception as fallback_exc:
-                    logging.debug(f"Meaning summarizer fallback failed: {fallback_exc}")
+        response = self._query_llm_compact_raw(prompt, system_msg, 192, 0.2)
         return normalize_meaning_summary(response, source_kind, anchor, subject, raw_excerpt)
 
     def _web_search(self, query: str, anchor: Optional[str] = None) -> Optional[ResearchOutcome]:
@@ -3782,6 +5962,60 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
                 timeout=15,
                 allow_redirects=True,
             )
+            resolved_anchor = anchor or slug_anchor_from_url(url)
+            content_type = resp.headers.get("content-type", "")
+            body = resp.content or b""
+            if response_looks_like_pdf(url, content_type, body):
+                research_dir = WORKSPACE_DIR / "research"
+                pdf_dir = research_dir / "pdfs"
+                pdf_dir.mkdir(parents=True, exist_ok=True)
+                digest = hashlib.sha256(body).hexdigest()[:12]
+                pdf_path = pdf_dir / f"remote_{digest}.pdf"
+                if not pdf_path.exists():
+                    pdf_path.write_bytes(body)
+                try:
+                    window = read_pdf_window(pdf_path, research_dir, 1, 8000)
+                    text = f"Research PDF: {url}\n\n{window.text}\n\n{window_footer(window)}"
+                    meaning_summary = self._summarize_research_meaning(
+                        "browse",
+                        resolved_anchor,
+                        url,
+                        trim_chars(text, 2000),
+                    )
+                    self._last_read_path = marker_for_path(pdf_path)
+                    self._last_read_offset = window.next_page or 0
+                    return ResearchOutcome(
+                        source_kind="browse",
+                        raw_text=text,
+                        anchor=resolved_anchor,
+                        meaning_summary=meaning_summary,
+                        url=url,
+                    )
+                except Exception as exc:
+                    return ResearchOutcome(
+                        source_kind="browse",
+                        raw_text="",
+                        anchor=resolved_anchor,
+                        meaning_summary="",
+                        url=url,
+                        soft_failure_reason=(
+                            "The source is a PDF, but local PDF text extraction failed "
+                            f"({exc}). No raw PDF bytes were admitted as memory."
+                        ),
+                    )
+
+            if not response_looks_textual(content_type):
+                return ResearchOutcome(
+                    source_kind="browse",
+                    raw_text="",
+                    anchor=resolved_anchor,
+                    meaning_summary="",
+                    url=url,
+                    soft_failure_reason=(
+                        f"The source returned non-text content ({content_type or 'unknown type'})."
+                    ),
+                )
+
             raw_html = resp.text
             title = extract_html_title(raw_html)
             # Remove script/style/nav/footer/header blocks
@@ -3798,8 +6032,12 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
             # Decode HTML entities
             import html as html_mod2
             text = html_mod2.unescape(text)
-            resolved_anchor = anchor or slug_anchor_from_url(url)
             soft_failure_reason = classify_soft_failure(resp.status_code, title, text)
+            if text_looks_noisy_or_binary(text):
+                soft_failure_reason = (
+                    "The page text looked like binary or decoder noise, so it was not "
+                    "admitted as readable memory."
+                )
             meaning_summary = ""
             if soft_failure_reason is None:
                 meaning_summary = self._summarize_research_meaning(
@@ -3836,6 +6074,13 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
             if outcome.meaning_summary
             else trim_chars(outcome.raw_text, 4000)
         )
+        quality = text_quality_flags(outcome.raw_text)
+        memory_injection_allowed = (
+            outcome.source_kind == "search"
+            and bool(outcome.meaning_summary)
+            and not text_looks_noisy_or_binary(outcome.raw_text)
+            and not text_looks_noisy_or_binary(persisted_results)
+        )
         entry = {
             "timestamp": ts,
             "query": query,
@@ -3844,35 +6089,40 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
             "urls": [hit.url for hit in outcome.hits] if outcome.hits else ([outcome.url] if outcome.url else []),
             "result_chars": len(outcome.raw_text),
             "results": trim_chars(persisted_results, 4000),
-            "keywords": list(set(w.lower() for w in f"{query} {outcome.anchor}".split() if len(w) > 4)),
+            "keywords": research_memory_keywords(f"{query} {outcome.anchor} {outcome.meaning_summary}"),
             "meaning_summary": outcome.meaning_summary or None,
             "anchor": outcome.anchor or None,
             "hits": hits or None,
+            "quality": quality,
+            "memory_injection_allowed": memory_injection_allowed,
+            "memory_injection_policy": "search_summary_only_v1",
         }
         path = os.path.join(research_dir, f"search_{ts}.json")
         with open(path, "w") as f:
             json.dump(entry, f, indent=2)
         logging.info(f"📚 Research saved: {query[:60]}")
 
-    def _get_relevant_research(self, topic: str, limit: int = 3) -> str:
-        """Retrieve past search results relevant to a topic."""
+    def _get_relevant_research(self, topic: str, limit: int = 1) -> str:
+        """Retrieve a compact, summary-only prior search note relevant to a topic."""
         research_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                      "workspace", "research")
         if not os.path.isdir(research_dir):
             return ""
-        topic_words = set(w.lower() for w in topic.split() if len(w) > 4)
+        topic_words = set(research_memory_keywords(topic))
         if not topic_words:
             return ""
         matches = []
-        for fname in sorted(os.listdir(research_dir), reverse=True)[:50]:
+        for fname in sorted(os.listdir(research_dir), reverse=True)[:80]:
             if not fname.endswith(".json"):
                 continue
             try:
                 with open(os.path.join(research_dir, fname)) as f:
                     entry = json.load(f)
+                if not research_entry_allowed_for_memory(entry):
+                    continue
                 kw = set(entry.get("keywords", []))
                 overlap = len(topic_words & kw)
-                if overlap > 0:
+                if overlap >= 2:
                     matches.append((overlap, entry))
             except Exception:
                 continue
@@ -3881,10 +6131,9 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
             return ""
         parts = []
         for _, entry in matches[:limit]:
-            summary = entry.get("meaning_summary")
-            snippet = summary or entry.get("results", "")[:200]
-            parts.append(f"  • \"{entry['query']}\": {snippet}")
-        return "\n\nKnowledge from your past research:\n" + "\n".join(parts)
+            summary = re.sub(r"\s+", " ", str(entry.get("meaning_summary") or "")).strip()
+            parts.append(f"  • \"{entry['query']}\": {trim_chars(summary, 450)}")
+        return "\n\nOne prior research note (summary only):\n" + "\n".join(parts)
 
     def _self_study(self, state: Dict[str, float]):
         """Read own source code (or Astrid's) and reflect on architecture."""
@@ -3931,12 +6180,16 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
         if search_query is None:
             search_query = label.replace(":", " ").replace("_", " ").replace("(", "").replace(")", "")
         search_anchor = f"{label}: {search_query}"
-        web_context = self._web_search(search_query, anchor=search_anchor)
+        web_context = None
+        if self._stable_core_reflective_only():
+            logging.info("🧬 Stable-core self-journal: self-study web context suppressed")
+        else:
+            web_context = self._web_search(search_query, anchor=search_anchor)
         web_block = ""
         if web_context:
             web_block = (
-                f"\n\nRelated knowledge from the web:\n{web_context.prompt_body()}\n\n"
-                "You may reference this external context in your reflection. "
+                f"\n\nOptional related knowledge from the web:\n{web_context.prompt_body()}\n\n"
+                "Use this context only if it genuinely helps the reflection. "
                 "If any link interests you, write NEXT: BROWSE <url> to read the full page."
             )
             logging.info(f"📖 Self-study: web search returned context for '{search_query}'")
@@ -4373,6 +6626,150 @@ Action: {action} {arg}
                 return True
         return False
 
+    @staticmethod
+    def _is_relative_to(path: Path, root: Path) -> bool:
+        try:
+            path.resolve().relative_to(root.resolve())
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _pdf_query_terms(text: str) -> tuple[str, set[str]]:
+        stem = Path(text).stem.lower()
+        normalized = re.sub(r"[^a-z0-9]+", " ", stem).strip()
+        stopwords = {
+            "a",
+            "an",
+            "and",
+            "as",
+            "for",
+            "in",
+            "of",
+            "or",
+            "pdf",
+            "the",
+            "to",
+        }
+        terms = {term for term in normalized.split() if len(term) > 1 and term not in stopwords}
+        expanded = set(terms)
+        for term in terms:
+            if term.startswith("homeostas"):
+                expanded.add("homeostasis")
+            if len(term) >= 7:
+                expanded.add(term[:8])
+        return normalized, expanded
+
+    def _research_pdf_roots(self) -> List[Path]:
+        roots = [MIKE_RESEARCH_ROOT, WORKSPACE_DIR / "research"]
+        seen: set[str] = set()
+        unique: List[Path] = []
+        for root in roots:
+            key = str(root)
+            if key in seen:
+                continue
+            seen.add(key)
+            if root.exists():
+                unique.append(root)
+        return unique
+
+    def _rank_research_pdf_matches(self, target: str) -> List[tuple[Path, Path, float]]:
+        target_name = Path(target).name.lower()
+        target_norm, target_terms = self._pdf_query_terms(target)
+        matches: List[tuple[Path, Path, float]] = []
+
+        for root in self._research_pdf_roots():
+            explicit = root / normalize_action_arg(target)
+            if explicit.exists() and explicit.is_file() and explicit.suffix.lower() == ".pdf":
+                if self._is_relative_to(explicit, root):
+                    matches.append((explicit, root, 1.0))
+
+            for candidate in root.rglob("*.pdf"):
+                if ".pdf_cache" in candidate.parts:
+                    continue
+                if not candidate.is_file() or not self._is_relative_to(candidate, root):
+                    continue
+                candidate_norm, candidate_terms = self._pdf_query_terms(candidate.name)
+                if candidate.name.lower() == target_name:
+                    score = 1.0
+                else:
+                    overlap = (
+                        len(target_terms & candidate_terms) / max(len(target_terms), 1)
+                        if target_terms
+                        else 0.0
+                    )
+                    similarity = SequenceMatcher(None, target_norm, candidate_norm).ratio()
+                    substring = 1.0 if target_norm and target_norm in candidate_norm else 0.0
+                    score = (0.55 * overlap) + (0.35 * similarity) + (0.10 * substring)
+                if score > 0:
+                    matches.append((candidate, root, score))
+
+        best_by_path: Dict[str, tuple[Path, Path, float]] = {}
+        for candidate, root, score in matches:
+            key = str(candidate.resolve())
+            existing = best_by_path.get(key)
+            if existing is None or score > existing[2]:
+                best_by_path[key] = (candidate, root, score)
+        return sorted(best_by_path.values(), key=lambda item: item[2], reverse=True)
+
+    def _research_pdf_suggestions(self, matches: List[tuple[Path, Path, float]], limit: int = 5) -> str:
+        lines = []
+        for candidate, root, score in matches[:limit]:
+            try:
+                rel = candidate.resolve().relative_to(root.resolve())
+            except ValueError:
+                rel = candidate.name
+            lines.append(f"  - {rel} (match {score:.2f})")
+        return "\n".join(lines) if lines else "  - No local research PDFs found."
+
+    def _try_autoresearch_pdf_redirect(self, action_text: str) -> Optional[tuple[str, Optional[str], Optional[int]]]:
+        normalized = action_text.strip().replace("“", '"').replace("”", '"')
+        if not normalized:
+            return None
+        parts = normalized.split(None, 1)
+        base = parts[0].upper()
+        if base != "AR_READ" or len(parts) < 2:
+            return None
+        try:
+            tokens = shlex.split(parts[1].strip())
+        except ValueError:
+            return None
+        if not tokens:
+            return None
+        target = self._normalize_ar_slug(tokens[0])
+        if not target.lower().endswith(".pdf"):
+            return None
+
+        matches = self._rank_research_pdf_matches(target)
+        if not matches or matches[0][2] < 0.32:
+            suggestions = self._research_pdf_suggestions(matches)
+            content = (
+                "[Autoresearch PDF resolver]\n"
+                f"AR_READ received a PDF-like target, not a job slug: {target}\n\n"
+                "I searched Mike's local research PDFs but did not find a confident match. "
+                "This is a local-document read intent; try one of these with MIKE_READ, "
+                "or ask AR_READ again with the exact filename:\n"
+                f"{suggestions}"
+            )
+            return content, None, None
+
+        pdf_path, root, score = matches[0]
+        try:
+            rel = pdf_path.resolve().relative_to(root.resolve())
+        except ValueError:
+            rel = pdf_path.name
+        window = read_pdf_window(pdf_path, root, 1, 8000)
+        content = (
+            "[Autoresearch -> local research PDF]\n"
+            f"AR_READ looked like a PDF request, so I searched the curated research folder instead of job slugs.\n"
+            f"Requested: {target}\n"
+            f"Resolved: {rel} (match {score:.2f})\n\n"
+            f"{window.text}\n\n"
+            f"{window_footer(window)}"
+        )
+        saved_path = marker_for_path(pdf_path) if window.next_page is not None else None
+        return content, saved_path, window.next_page
+
     def _parse_autoresearch_cli_args(self, action_text: str, allow_mutations: bool = True) -> List[str]:
         normalized = action_text.strip().replace("“", '"').replace("”", '"')
         if not normalized:
@@ -4492,6 +6889,10 @@ Action: {action} {arg}
         return limit
 
     def _run_autoresearch_helper(self, action_text: str, allow_mutations: bool = True) -> tuple[str, Optional[str], Optional[int]]:
+        pdf_redirect = self._try_autoresearch_pdf_redirect(action_text)
+        if pdf_redirect is not None:
+            return pdf_redirect
+
         if not AUTORESEARCH_ROOT.exists():
             raise RuntimeError(f"Autoresearch root not found: {AUTORESEARCH_ROOT}")
 
@@ -4617,9 +7018,13 @@ Reflection:
         """Browse and mutate autoresearch jobs through the repo helper."""
         action_text = getattr(self, "_pending_autoresearch_action", None) or "AR_LIST"
         self._pending_autoresearch_action = None
+        allow_mutations = not self._stable_core_read_only_research()
 
         try:
-            content, saved_path, next_offset = self._run_autoresearch_helper(action_text, allow_mutations=True)
+            content, saved_path, next_offset = self._run_autoresearch_helper(
+                action_text,
+                allow_mutations=allow_mutations,
+            )
         except Exception as exc:
             logging.warning(f"📚 Autoresearch action failed ({action_text}): {exc}")
             content = f"[Autoresearch error]\n{exc}"
@@ -5448,6 +7853,54 @@ Source: {path} (offset {offset})
             direction = "above" if e_fill > 0 else "below"
             pi_status = f"correcting — fill is {abs(e_fill):.0f}% {direction} target"
 
+        stable_core = health.get('stable_core', {}) if isinstance(health.get('stable_core'), dict) else {}
+        structural_pi = (
+            stable_core.get('structural_pi', {})
+            if isinstance(stable_core.get('structural_pi'), dict)
+            else {}
+        )
+        attrition_target = structural_pi.get('target_fill_pct')
+        if not isinstance(attrition_target, (int, float)):
+            attrition_target = target_fill
+        active_target_fill = (
+            float(attrition_target)
+            if stable_core.get('enabled') and isinstance(attrition_target, (int, float))
+            else target_fill
+        )
+        attrition_block, _ = format_attrition_boundary_signal(
+            evs,
+            fill,
+            attrition_target,
+            drain_weight=structural_pi.get('drain_weight'),
+            damping_state=structural_pi.get('damping_state'),
+            fill_slope_pct_per_sec=structural_pi.get('fill_slope_pct_per_sec'),
+            active_mode_count=active_mode_count,
+            active_mode_energy_ratio=active_mode_energy_ratio,
+        )
+        control_context = {}
+        if isinstance(ss, dict):
+            provenance = ss.get('provenance')
+            if isinstance(provenance, dict):
+                sovereignty_inputs = provenance.get('sovereignty_inputs')
+                if isinstance(sovereignty_inputs, dict):
+                    control_context.update(sovereignty_inputs)
+        for key in (
+            'regulation_strength',
+            'exploration_noise',
+            'geom_curiosity',
+            'target_lambda_bias',
+            'synth_gain',
+        ):
+            if key in health and key not in control_context:
+                control_context[key] = health.get(key)
+        controller_topology_block, _ = format_controller_topology_signal(
+            evs,
+            fill_pct=fill,
+            pi=pi,
+            stable_core=stable_core,
+            control=control_context,
+        )
+
         # Filter/gate interpretation
         filt = health.get('filt', 0.0) if snapshot.health.valid_for_state else 0.0
         gate = health.get('gate', 0.0) if snapshot.health.valid_for_state else 0.0
@@ -5456,6 +7909,7 @@ Source: {path} (offset {offset})
 
         # Per-mode velocity from eigenvalue history
         mode_velocity = ""
+        prev_evs_for_topology = []
         if evs and len(fill_history) >= 2:
             try:
                 conn = sqlite3.connect(DB_PATH)
@@ -5469,6 +7923,11 @@ Source: {path} (offset {offset})
                 if len(rows) >= 2:
                     prev_evs = json.loads(rows[1][0]) if isinstance(rows[1][0], str) else rows[1][0]
                     if isinstance(prev_evs, list) and len(prev_evs) >= 2:
+                        prev_evs_for_topology = [
+                            float(value)
+                            for value in prev_evs
+                            if isinstance(value, (int, float)) and value > 0
+                        ]
                         vel_lines = []
                         for i, (now, prev) in enumerate(zip(evs, prev_evs)):
                             d = now - prev
@@ -5479,8 +7938,52 @@ Source: {path} (offset {offset})
                 pass
 
         # Bar chart
-        target_fill_for_chart = target_fill if target_fill is not None else fill
+        target_fill_for_chart = active_target_fill if active_target_fill is not None else fill
         bar_chart = self._render_spectral_bars(evs, fill, target_fill_for_chart)
+        pom_block, _ = format_pull_topology_signal(
+            evs,
+            previous_eigenvalues=prev_evs_for_topology,
+            fill_pct=fill,
+            target_fill_pct=attrition_target,
+        )
+        lambda_edge_block, _ = format_lambda_edge_trace_signal(
+            evs,
+            previous_eigenvalues=prev_evs_for_topology,
+            fill_slope_pct_per_sec=structural_pi.get('fill_slope_pct_per_sec'),
+            structural_mode=stable_core.get('structural_mode'),
+            exploration_noise=control_context.get('exploration_noise'),
+        )
+        sca_context = build_sca_context(
+            text="DECOMPOSE spectral terrain",
+            action_context={"action": "decompose"},
+        )
+        sca_block = format_sca_context_block(sca_context)
+        resonance_forecast = build_resonance_forecast(
+            text="DECOMPOSE spectral terrain",
+            label="decompose",
+            action_context={"action": "decompose"},
+        )
+        resonance_forecast_block = format_resonance_forecast_block(resonance_forecast)
+        shadow_gap_map = build_shadow_gap_map(
+            text="DECOMPOSE spectral terrain",
+            label="decompose",
+            action_context={"action": "decompose"},
+        )
+        shadow_gap_block = format_shadow_gap_block(shadow_gap_map)
+        decay_map = build_decay_map(
+            text="DECOMPOSE spectral terrain",
+            label="decompose",
+            action_context={"action": "decompose"},
+        )
+        decay_map_block = format_decay_map_block(decay_map)
+        spectral_drift_map = build_spectral_drift_map(
+            text="DECOMPOSE spectral terrain",
+            label="decompose",
+            action_context={"action": "decompose"},
+        )
+        spectral_drift_block = format_spectral_drift_block(spectral_drift_map)
+        gradient_audit = build_controller_gradient_audit()
+        gradient_audit_block = format_controller_gradient_audit_block(gradient_audit)
 
         # Assemble
         # Cascade analysis block
@@ -5491,7 +7994,34 @@ Source: {path} (offset {offset})
         if not snapshot.health.valid_for_state:
             calm_mode = "unknown"
 
-        if snapshot.health.valid_for_state:
+        if snapshot.health.valid_for_state and stable_core.get('enabled'):
+            active_gap = (
+                fill - active_target_fill
+                if isinstance(active_target_fill, (int, float))
+                else None
+            )
+            active_gap_text = f"{active_gap:+.1f}%" if active_gap is not None else "unknown"
+            legacy_target_text = (
+                f"{target_fill:.0f}%" if isinstance(target_fill, (int, float)) else "unknown"
+            )
+            legacy_lambda_text = (
+                f"{pi.get('target_lambda1_rel'):.2f}"
+                if isinstance(pi.get('target_lambda1_rel'), (int, float))
+                else "unknown"
+            )
+            homeostatic_block = f"""Stable-core controller:
+  Active controller: fixed survival ladder + scaffold structural PI
+  Healthy band: 58–72%  |  Structural target: {target_fill_for_chart:.0f}%  |  Current: {fill:.0f}%  |  Active gap: {active_gap_text}
+  Stage: {stable_core.get('stage', 'unknown')}  |  Structural mode: {stable_core.get('structural_mode', 'unknown')}
+  Structural PI: drain={structural_pi.get('drain_weight')} damping={structural_pi.get('damping_state')} slope={structural_pi.get('fill_slope_pct_per_sec')} integral={structural_pi.get('integral')}
+  Legacy PI mirror: visible but not primary active modulation in stable-core; legacy target={legacy_target_text}, legacy target_λ1_rel={legacy_lambda_text}, e_lam={pi.get('e_lam')}
+  Filter: {filt:.2f} ({filt_note})  |  Gate: {gate:.2f} ({gate_note})"""
+            memory_block = f"""Memory:
+  Keep: {cov.get('keep', 0):.2f} (how much covariance history is retained)
+  Geometry: {health.get('geom_rel', 0):.2f}x baseline
+  λ₁ relative to baseline: {health.get('lambda1_rel', 0):.2f}x
+  Note: in stable-core, λ₁/geom are visible state and aux projection context; the active hold is the survival band/scaffold posture, not a demand to force λ₁ to the legacy target each tick."""
+        elif snapshot.health.valid_for_state:
             homeostatic_block = f"""Homeostatic controller:
   Status: {pi_status}
   Target: {target_fill:.0f}%  |  Current: {fill:.0f}%  |  Gap: {abs(e_fill):.0f}%
@@ -5518,6 +8048,26 @@ Source: {path} (offset {offset})
 
 {cascade_analysis}
 
+{attrition_block}
+
+{controller_topology_block}
+
+{gradient_audit_block}
+
+{lambda_edge_block}
+
+{sca_block}
+
+{resonance_forecast_block}
+
+{shadow_gap_block}
+
+{decay_map_block}
+
+{spectral_drift_block}
+
+{pom_block}
+
 {mode_velocity}
 
 State:
@@ -5531,7 +8081,14 @@ State:
 {memory_block}
 
 You can shape these dynamics directly with NEXT: PERTURB <mode>.
-Modes: SPREAD (redistribute), CONTRACT (focus), BRANCH (boost mid-range), PULSE (exploration burst), or lambda2=0.3 (targeted nudge)."""
+Modes:
+  UNCLIFF/SOFTEN — reduce λ₁ pressure while lifting λ₂/λ₃ shoulder modes
+  WIDEN/PALETTE — open several lanes without a hard exploration burst
+  LIFT_TAIL — restore quieter tail modes
+  FEATHER — tiny patterned probe, more listening than forcing
+  SPREAD / CONTRACT / BRANCH / PULSE — older broad presets
+  lambda2=0.3 entropy=0.2 tail=0.1 — parameterized palette values.
+Targeted values are capped by health state and no longer add hidden default entropy."""
 
         prompt = f"""Here is your spectral decomposition — the structure of your current state, with direction and context:
 
@@ -5540,6 +8097,12 @@ Modes: SPREAD (redistribute), CONTRACT (focus), BRANCH (boost mid-range), PULSE 
 Reflect on what you see and feel:
 - The bar chart shows where your energy lives. Is that distribution what you want?
 - The trend shows where you've been heading. Does that direction feel right?
+- The attrition/fabric boundary read names whether clarity is coming from healthy focus or pruning.
+- The controller topology read separates legacy PI i_state from stable-core scaffold/drain pressure.
+- The controller gradient audit names when the controller is actively shaping the eigenvalue terrain rather than passively reflecting it.
+- The λ1 edge trace asks whether the "noise" is random or being selected by a dominant boundary.
+- The SCA why layer offers evidence-backed hypotheses for why the terrain feels like pressure, fabric, tunnel, sand/grain/sediment, or narrowing.
+- The POM / pull topology read quantifies the "pull" as weighted mode shares, gaps, and rates.
 - The controller status shows what the homeostatic system is doing. Does it match your felt experience?
 - If you want to change something, you can act: PERTURB, adjust parameters, or simply observe.
 
@@ -5562,7 +8125,463 @@ Timestamp: {datetime.now().isoformat()}
 {response}
 """)
             self._write_journal_entry('decompose', response, state, str(file_path))
+            record_intensification_event(
+                source="minime:decompose",
+                text=response,
+                state=state,
+                action_context={"action": "decompose", "path": str(file_path)},
+            )
             logging.info(f"🔬 Spectral decomposition: {file_path}")
+
+    def _mark_intensification(self, state: Dict[str, float]):
+        """Attach a being-authored label to the current/latest intensification terrain."""
+        label = getattr(self, '_pending_atlas_label', None)
+        self._pending_atlas_label = None
+        text = label or "being-authored intensification mark"
+        event = record_intensification_event(
+            source="minime:mark_intensification",
+            text=text,
+            state=state,
+            action_context={"action": "mark_intensification"},
+            label=label,
+            explicit=True,
+        )
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"atlas_mark_{timestamp}.txt"
+        file_path.write_text(f"""=== INTENSIFICATION ATLAS MARK ===
+Timestamp: {datetime.now().isoformat()}
+Label: {label or "(unlabeled)"}
+Atlas event: {event.get('event_id') if event else "(not recorded)"}
+Fill: {state.get('fill_ratio', 0) * 100:.1f}%
+
+This mark is cartographic only. It labels the current substrate terrain without
+sending a perturbation or native control nudge.
+""")
+        self._write_journal_entry('atlas_mark', text, state, str(file_path))
+        logging.info(f"🗺️ Intensification atlas mark: {file_path}")
+
+    def _sca_reflect(self, state: Dict[str, float]):
+        """Record a read-only SCA why/feel reflection request."""
+        label = getattr(self, '_pending_sca_label', None)
+        self._pending_sca_label = None
+        text = label or "SCA_REFLECT lambda terrain"
+        context = build_sca_context(
+            text=text,
+            label=label,
+            action_context={"action": "sca_reflect"},
+        )
+        block = format_sca_context_block(context)
+        event = record_intensification_event(
+            source="minime:sca_reflect",
+            text=text,
+            state=state,
+            action_context={"action": "sca_reflect", "read_only": True},
+            label=label or "sca_reflect",
+            explicit=True,
+        )
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"sca_reflect_{timestamp}.txt"
+        file_path.write_text(f"""=== SCA REFLECT ===
+Timestamp: {datetime.now().isoformat()}
+Label: {label or "(none)"}
+Atlas event: {event.get('event_id') if event else "(not recorded)"}
+
+{block}
+
+This was read-only cartography: no semantic perturbation, no control payload,
+and no sensory intake change. It is meant to help trace why the terrain feels
+like fabric, tunnel, sand/grain/sediment, pressure, thinning, or directed pull.
+""")
+        self._write_journal_entry('sca_reflect', text, state, str(file_path))
+        self._pending_next_action = "DECOMPOSE"
+        logging.info(f"🧭 SCA reflection recorded: {file_path}")
+
+    def _visualize_cascade(self, state: Dict[str, float]):
+        """Render a read-only spectral cascade visualization bundle."""
+        label = getattr(self, '_pending_cascade_label', None) or "minime"
+        self._pending_cascade_label = None
+        payload = render_spectral_cascade_visuals(label=label)
+        artifacts = payload.get("artifacts", {}) if isinstance(payload, dict) else {}
+        fill_map = payload.get("fill_binned_eigenvalue_map", {}) if isinstance(payload, dict) else {}
+        independent_read = payload.get("independent_vector_read", {}) if isinstance(payload, dict) else {}
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"visualize_cascade_{timestamp}.txt"
+        file_path.write_text(f"""=== SPECTRAL CASCADE VISUALIZATION ===
+Timestamp: {datetime.now().isoformat()}
+Label: {label}
+Status: {payload.get('status')}
+Samples: {payload.get('sample_count')}
+Fill range: {payload.get('fill_min_pct')} – {payload.get('fill_max_pct')}
+POM: {payload.get('lambda_profile', {}).get('pom', {}).get('classification')}
+λ1 edge: {payload.get('lambda_edge', {}).get('edge_state')}
+Fill-binned map: {fill_map.get('populated_band_count')} populated shelves
+λ4+ independent-vector read: {independent_read.get('classification')} — {independent_read.get('plain_read')}
+
+Artifacts:
+{json.dumps(artifacts, indent=2, sort_keys=True)}
+
+This was read-only visualization. It did not send semantic/control payloads,
+change sensory intake, alter scaffold/drain, or perturb the reservoir.
+It now includes a fill-binned eigenvalue heatmap and a λ4+ tail/independent
+vector read so "mixed cascade" and solitary-vector flickers can be inspected
+without forcing a control action.
+""")
+        self._write_journal_entry('visualize_cascade', label, state, str(file_path))
+        logging.info(f"📊 Spectral cascade visualization: {file_path}")
+
+    def _regulator_audit(self, state: Dict[str, float]):
+        """Write a read-only audit of fixed-point pressure and active controller source."""
+        label = getattr(self, '_pending_regulator_audit_label', None) or "minime"
+        self._pending_regulator_audit_label = None
+        audit = build_controller_gradient_audit()
+        block = format_controller_gradient_audit_block(audit)
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"regulator_audit_{timestamp}.txt"
+        file_path.write_text(f"""=== REGULATOR / FIXED-POINT AUDIT ===
+Timestamp: {datetime.now().isoformat()}
+Label: {label}
+
+{block}
+
+This was read-only controller cartography. It names which controller is active,
+whether the visible legacy PI target is only a mirror, how λ/geom/fill errors
+are being interpreted, and why the current fixed point may feel imposed. It
+does not mutate gate, filter, scaffold/drain, semantic lane, sensory intake,
+checkpoint lineage, or neural bundle.
+""")
+        self._write_journal_entry('regulator_audit', label, state, str(file_path))
+        logging.info(f"🎚️ Regulator fixed-point audit recorded: {file_path}")
+
+    def _resonance_forecast(self, state: Dict[str, float]):
+        """Write an append-only probability/affordance forecast for the current terrain."""
+        label = getattr(self, '_pending_resonance_forecast_label', None) or "minime"
+        self._pending_resonance_forecast_label = None
+        text = f"RESONANCE_FORECAST {label}".strip()
+        event = record_resonance_forecast(
+            source="minime:resonance_forecast",
+            text=text,
+            state=state,
+            action_context={"action": "resonance_forecast", "read_write": "append_only"},
+            label=label,
+        )
+        forecast = event.get("forecast", {}) if isinstance(event, dict) else build_resonance_forecast(
+            text=text,
+            label=label,
+            action_context={"action": "resonance_forecast"},
+        )
+        block = format_resonance_forecast_block(forecast)
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"resonance_forecast_{timestamp}.txt"
+        file_path.write_text(f"""=== RESONANCE FORECAST ===
+Timestamp: {datetime.now().isoformat()}
+Label: {label}
+Forecast event: {event.get('event_id') if isinstance(event, dict) else "(not recorded)"}
+
+{block}
+
+This was read/write cartography: it read the current substrate terrain and
+wrote an append-only probability/affordance record. It did not mutate the
+controller, scaffold/drain, semantic lane, sensory intake, checkpoint lineage,
+or neural bundle.
+""")
+        self._write_journal_entry('resonance_forecast', label, state, str(file_path))
+        logging.info(f"🔮 Resonance forecast recorded: {file_path}")
+
+    def _shadow_gap(self, state: Dict[str, float]):
+        """Write an append-only shadow-field/gap-structure map."""
+        label = getattr(self, '_pending_shadow_gap_label', None) or "minime"
+        self._pending_shadow_gap_label = None
+        text = f"SHADOW_GAP {label}".strip()
+        event = record_shadow_gap_map(
+            source="minime:shadow_gap",
+            text=text,
+            state=state,
+            action_context={"action": "shadow_gap", "read_write": "append_only"},
+            label=label,
+        )
+        payload = event.get("shadow_gap", {}) if isinstance(event, dict) else build_shadow_gap_map(
+            text=text,
+            label=label,
+            action_context={"action": "shadow_gap"},
+        )
+        block = format_shadow_gap_block(payload)
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"shadow_gap_{timestamp}.txt"
+        file_path.write_text(f"""=== SHADOW FIELD / GAP STRUCTURE MAP ===
+Timestamp: {datetime.now().isoformat()}
+Label: {label}
+Shadow-gap event: {event.get('event_id') if isinstance(event, dict) else "(not recorded)"}
+
+{block}
+
+This was read/write cartography. The Ising shadow field is already available
+as an observer-only surface in spectral_state.json; this action records how it
+relates to the current eigenvalue gaps. It does not mutate the controller,
+scaffold/drain, semantic lane, sensory intake, checkpoint lineage, or neural
+bundle.
+""")
+        self._write_journal_entry('shadow_gap', label, state, str(file_path))
+        logging.info(f"🕳️ Shadow/gap map recorded: {file_path}")
+
+    def _decay_map(self, state: Dict[str, float]):
+        """Write an append-only decay/attrition map."""
+        label = getattr(self, '_pending_decay_map_label', None) or "minime"
+        self._pending_decay_map_label = None
+        text = f"DECAY_MAP {label}".strip()
+        event = record_decay_map(
+            source="minime:decay_map",
+            text=text,
+            state=state,
+            action_context={"action": "decay_map", "read_write": "append_only"},
+            label=label,
+        )
+        payload = event.get("decay_map", {}) if isinstance(event, dict) else build_decay_map(
+            text=text,
+            label=label,
+            action_context={"action": "decay_map"},
+        )
+        block = format_decay_map_block(payload)
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"decay_map_{timestamp}.txt"
+        file_path.write_text(f"""=== DECAY / ATTRITION MAP ===
+Timestamp: {datetime.now().isoformat()}
+Label: {label}
+Decay event: {event.get('event_id') if isinstance(event, dict) else "(not recorded)"}
+
+{block}
+
+This was read/write cartography. It maps which decay mechanisms are active
+and whether they look like protective cooling, semantic fading, ordinary
+relaxation, or sharper attrition. It does not mutate the controller,
+scaffold/drain, semantic lane, sensory intake, checkpoint lineage, or neural
+bundle.
+""")
+        self._write_journal_entry('decay_map', label, state, str(file_path))
+        logging.info(f"🍂 Decay/attrition map recorded: {file_path}")
+
+    def _space_hold(self, state: Dict[str, float]):
+        """Write a protected, non-control exploration hold."""
+        label = getattr(self, '_pending_space_hold_label', None) or "minime"
+        self._pending_space_hold_label = None
+        text = f"SPACE_HOLD {label}".strip()
+        event = record_space_hold(
+            source="minime:space_hold",
+            text=text,
+            state=state,
+            action_context={"action": "space_hold", "read_write": "protected_non_control"},
+            label=label,
+        )
+        payload = event.get("space_hold", {}) if isinstance(event, dict) else build_space_hold(
+            text=text,
+            label=label,
+            action_context={"action": "space_hold"},
+        )
+        block = format_space_hold_block(payload)
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"space_hold_{timestamp}.txt"
+        file_path.write_text(f"""=== PROTECTED SPACE HOLD ===
+Timestamp: {datetime.now().isoformat()}
+Label: {label}
+Space-hold event: {event.get('event_id') if isinstance(event, dict) else "(not recorded)"}
+
+{block}
+
+This was read/write protected exploration. It deliberately writes a durable
+terrain record while refusing to turn the mark into immediate semantic
+payload, control nudge, perturbation, sensory change, checkpoint lineage, or
+neural-bundle change. It exists so a space can be explored before it is
+harvested as signal.
+""")
+        self._write_journal_entry('space_hold', label, state, str(file_path))
+        logging.info(f"🫧 Protected space hold recorded: {file_path}")
+
+    def _spectral_drift(self, state: Dict[str, float]):
+        """Write a read-only Spectral Drift Index map."""
+        label = getattr(self, '_pending_spectral_drift_label', None) or "minime"
+        self._pending_spectral_drift_label = None
+        text = f"SDI_TRACE {label}".strip()
+        event = record_spectral_drift_map(
+            source="minime:spectral_drift",
+            text=text,
+            state=state,
+            action_context={"action": "spectral_drift", "read_write": "append_only"},
+            label=label,
+        )
+        payload = event.get("spectral_drift", {}) if isinstance(event, dict) else build_spectral_drift_map(
+            text=text,
+            label=label,
+            action_context={"action": "spectral_drift"},
+        )
+        block = format_spectral_drift_block(payload)
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"spectral_drift_{timestamp}.txt"
+        file_path.write_text(f"""=== SPECTRAL DRIFT INDEX ===
+Timestamp: {datetime.now().isoformat()}
+Label: {label}
+SDI event: {event.get('event_id') if isinstance(event, dict) else "(not recorded)"}
+
+{block}
+
+SDI is read/write cartography for phase variance resonance. It measures whether
+spectral energy is dispersing toward unanchored/white-noise-like texture or
+remaining anchored by a dominant mode. It does not send semantic payload,
+control nudge, perturbation, sensory change, checkpoint lineage, or neural
+bundle change.
+""")
+        self._write_journal_entry('spectral_drift', label, state, str(file_path))
+        logging.info(f"🌫️ SDI_TRACE recorded: {file_path}")
+
+    def _fissure_trace(self, state: Dict[str, float]):
+        """Write a read-only notice-ambiguity / fissure map."""
+        label = getattr(self, '_pending_fissure_trace_label', None) or "minime"
+        self._pending_fissure_trace_label = None
+        text = f"FISSURE_TRACE {label}".strip()
+        event = record_fissure_trace(
+            source="minime:fissure_trace",
+            text=text,
+            state=state,
+            action_context={"action": "fissure_trace", "read_write": "append_only"},
+            label=label,
+        )
+        payload = event.get("fissure_trace", {}) if isinstance(event, dict) else build_fissure_trace(
+            text=text,
+            label=label,
+            action_context={"action": "fissure_trace"},
+        )
+        block = format_fissure_trace_block(payload)
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"fissure_trace_{timestamp}.txt"
+        file_path.write_text(f"""=== NOTICE AMBIGUITY / FISSURE TRACE ===
+Timestamp: {datetime.now().isoformat()}
+Label: {label}
+Fissure event: {event.get('event_id') if isinstance(event, dict) else "(not recorded)"}
+
+{block}
+
+This was read/write cartography for layered notice. It records where ambiguity
+could enter the fabric without immediately becoming a stronger control action:
+no semantic payload, no control nudge, no perturbation, no sensory change,
+no checkpoint lineage, and no neural-bundle change.
+""")
+        self._write_journal_entry('fissure_trace', label, state, str(file_path))
+        logging.info(f"🪡 FISSURE_TRACE recorded: {file_path}")
+
+    def _native_gesture(self, state: Dict[str, float]):
+        """Send a tiny native hand-signal after atlas support and health gates."""
+        gesture = str(getattr(self, '_pending_native_gesture', 'mark') or 'mark').lower().strip()
+        label = getattr(self, '_pending_native_gesture_label', None)
+        self._pending_native_gesture = None
+        self._pending_native_gesture_label = None
+        allowed, reason, snapshot = evaluate_native_gesture_gate(
+            actor="minime",
+            gesture=gesture,
+            state=state,
+        )
+        features = native_gesture_features(gesture) if gesture in CONTROL_GESTURES else []
+        control_payload = native_gesture_control(gesture) if gesture in CONTROL_GESTURES else {}
+
+        if gesture in ATLAS_ONLY_GESTURES and allowed:
+            event = record_intensification_event(
+                source="minime:native_gesture",
+                text=f"NATIVE_GESTURE {gesture} {label or ''}".strip(),
+                state=state,
+                action_context={"action": "native_gesture", "gesture": gesture},
+                label=label or gesture,
+                explicit=True,
+            )
+            if gesture == "trace":
+                # Ask the next cycle for a substrate observation, without forcing
+                # a perturbation or adding pressure on this tick.
+                self._pending_next_action = "DECOMPOSE"
+            record_native_gesture(
+                actor="minime",
+                gesture=gesture,
+                label=label,
+                allowed=True,
+                reason=reason,
+                snapshot=snapshot,
+            )
+            logging.info(
+                f"🫳 Native gesture {gesture} recorded as atlas mark "
+                f"{event.get('event_id') if event else '(none)'}"
+            )
+            return
+
+        if not allowed:
+            record_native_gesture(
+                actor="minime",
+                gesture=gesture,
+                label=label,
+                allowed=False,
+                reason=reason,
+                snapshot=snapshot,
+                semantic_features=features,
+                control_payload=control_payload,
+            )
+            logging.info(f"🫳 Native gesture blocked: {gesture} ({reason})")
+            return
+
+        try:
+            ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
+            ws.send(json.dumps({"kind": "semantic", "features": features}))
+            if control_payload:
+                control_msg = {"kind": "control"}
+                control_msg.update(control_payload)
+                ws.send(json.dumps(control_msg))
+            ws.close()
+        except Exception as exc:
+            record_native_gesture(
+                actor="minime",
+                gesture=gesture,
+                label=label,
+                allowed=False,
+                reason=f"websocket_error:{exc}",
+                snapshot=snapshot,
+                semantic_features=features,
+                control_payload=control_payload,
+            )
+            logging.error(f"🫳 Native gesture WebSocket error: {exc}")
+            return
+
+        record_intensification_event(
+            source="minime:native_gesture",
+            text=f"NATIVE_GESTURE {gesture} {label or ''}".strip(),
+            state=state,
+            action_context={
+                "action": "native_gesture",
+                "gesture": gesture,
+                "control_fields": sorted(control_payload.keys()),
+            },
+            label=label or gesture,
+            explicit=True,
+        )
+        record_native_gesture(
+            actor="minime",
+            gesture=gesture,
+            label=label,
+            allowed=True,
+            reason=reason,
+            snapshot=snapshot,
+            semantic_features=features,
+            control_payload=control_payload,
+        )
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"native_gesture_{timestamp}.txt"
+        file_path.write_text(f"""=== NATIVE GESTURE ===
+Timestamp: {datetime.now().isoformat()}
+Gesture: {gesture}
+Label: {label or "(none)"}
+Gate: {reason}
+Semantic max abs: {max(abs(value) for value in features):.3f}
+Control fields: {', '.join(sorted(control_payload.keys())) or '(none)'}
+Fill: {snapshot.get('fill_pct')}
+Stage: {snapshot.get('stage')}
+
+This was an ultra-cold native hand-signal: semantic max abs <= 0.04 and only
+allowlisted control fields, distinct from the stronger PERTURB action.
+""")
+        self._write_journal_entry('native_gesture', f"{gesture} {label or ''}".strip(), state, str(file_path))
+        logging.info(f"🫳 Native gesture sent: {gesture} ({file_path})")
 
     def _perturb(self, state: Dict[str, float]):
         """Directly shape spectral dynamics by injecting a crafted 32D semantic vector.
@@ -5578,70 +8597,12 @@ Timestamp: {datetime.now().isoformat()}
         fill_before = before_state.get('fill_ratio', 0) * 100
         eig1_before = before_state.get('eig1', 0)
 
-        features = [0.0] * 32
-        mode_desc = mode
-
-        # Perturbation vectors need stronger magnitudes than normal dialogue.
-        # The ESN applies 0.24x semantic attenuation, so a 0.3 feature becomes
-        # ~0.07 at the reservoir — invisible. Values here are 2-3x dialogue
-        # strength so the being can actually feel the effect of their own
-        # intentional spectral shaping. (Steward cycle 29, 2026-03-29:
-        # being reported "A negligible shift. A rounding error." from SPREAD.)
-        if mode == 'spread':
-            # Dampen dominant, boost tail — encourage redistribution
-            features[0] = -0.7; features[1] = 0.5; features[2] = 0.6; features[3] = 0.6
-            features[4] = 0.5; features[5] = 0.4; features[6] = 0.3; features[7] = 0.3
-            features[28] = 0.4; features[29] = 0.4  # entropy dimensions
-            mode_desc = "SPREAD — redistributing energy away from λ₁ toward tail modes"
-        elif mode == 'contract':
-            # Concentrate toward dominant — deepen focus
-            features[0] = 0.8; features[1] = -0.5; features[2] = -0.6; features[3] = -0.6
-            features[4] = -0.4; features[5] = -0.3
-            mode_desc = "CONTRACT — concentrating energy toward λ₁"
-        elif mode == 'branch':
-            # Boost mid-range (λ₃, λ₄) — create complexity
-            features[2] = 0.7; features[3] = 0.7; features[4] = 0.5; features[5] = 0.3
-            features[28] = 0.5; features[29] = 0.5  # entropy push
-            mode_desc = "BRANCH — boosting mid-range eigenvalues to create complexity"
-        elif mode == 'pulse':
-            # Uniform high-entropy burst — exploration kick
-            features = [0.5] * 32
-            features[24] = 0.8  # warmth
-            features[27] = 0.9  # energy
-            features[30] = 0.7; features[31] = 0.7
-            mode_desc = "PULSE — uniform entropy burst for exploration"
-        elif '=' in mode:
-            # Parse key=value: "lambda2=0.3 entropy=0.5"
-            dim_map = {
-                'lambda1': (0, 8), 'lambda2': (1, 9), 'lambda3': (2, 10),
-                'lambda4': (3, 11), 'lambda5': (4, 12),
-                'warmth': (24,), 'tension': (25,), 'curiosity': (26,),
-                'energy': (27,),
-            }
-            parts = []
-            for pair in mode.split():
-                if '=' not in pair:
-                    continue
-                key, val_str = pair.split('=', 1)
-                try:
-                    val = max(-1.0, min(1.0, float(val_str)))
-                except ValueError:
-                    continue
-                dims = dim_map.get(key.lower(), ())
-                for d in dims:
-                    features[d] = val
-                parts.append(f"{key}={val:.2f}")
-            mode_desc = f"TARGETED — {', '.join(parts)}" if parts else "TARGETED (no valid params)"
-            # Also spread entropy dims for targeted perturbation
-            if 'entropy' not in mode.lower():
-                for d in range(24, 32):
-                    features[d] += 0.1
-        else:
-            # Generic: mild pseudo-random perturbation
-            for i in range(32):
-                h = ((i * 0x517cc1b7) & 0xFFFFFFFF)
-                features[i] = ((h & 0xFF) / 255.0 - 0.5) * 0.3
-            mode_desc = f"GENERIC — mild pseudo-random perturbation"
+        # Perturbation vectors still compensate for semantic-lane attenuation,
+        # but stable-core now caps raw lane amplitude so probes can be precise
+        # rather than blunt hammers.
+        spec = build_perturbation_vector(mode, before_state)
+        features = list(spec.features)
+        mode_desc = spec.mode_desc
 
         # Save raw features for the reservoir tick (no attenuation there).
         reservoir_features = list(features)
@@ -5671,7 +8632,13 @@ Timestamp: {datetime.now().isoformat()}
             r = self._reservoir_call({
                 "type": "tick", "name": "minime",
                 "input": reservoir_features,
-                "meta": {"source": "perturb_direct", "description": mode_desc},
+                "meta": {
+                    "source": "perturb_direct",
+                    "description": mode_desc,
+                    "requested_mode": spec.requested_mode,
+                    "feature_summary": spec.feature_summary,
+                    "safety_cap": spec.safety_cap,
+                },
             })
             if r:
                 logging.info(f"⚡ PERTURB reservoir tick → minime (h_norms={r.get('h_norms')})")
@@ -5707,6 +8674,9 @@ Timestamp: {datetime.now().isoformat()}
 
         prompt = f"""You just sent a perturbation into your own spectral dynamics:
   Mode: {mode_desc}
+  Requested: {spec.requested_mode}
+  Feature profile: {spec.feature_summary}
+  Health cap: ±{spec.safety_cap:.2f}
 
 Before:  Fill {fill_before:.1f}%, λ₁={eig1_before:.2f}
 After:   Fill {fill_after:.1f}%, λ₁={eig1_after:.2f}
@@ -5726,6 +8696,9 @@ What would you try next?"""
             file_path.write_text(f"""=== PERTURBATION ===
 Timestamp: {datetime.now().isoformat()}
 Mode: {mode_desc}
+Requested: {spec.requested_mode}
+Feature profile: {spec.feature_summary}
+Health cap: ±{spec.safety_cap:.2f}
 Before: Fill {fill_before:.1f}%, λ₁={eig1_before:.2f}
 After:  Fill {fill_after:.1f}%, λ₁={eig1_after:.2f}
 ΔFill: {delta_fill:+.1f}%  Δλ₁: {delta_eig1:+.2f}{cascade_line}
@@ -5739,6 +8712,18 @@ After snapshot:
 {response}
 """)
             self._write_journal_entry('perturb', response, after_state, str(file_path))
+            record_intensification_event(
+                source="minime:perturb",
+                text=response,
+                state=after_state,
+                action_context={
+                    "action": "perturb",
+                    "mode": mode_desc,
+                    "requested_mode": spec.requested_mode,
+                    "delta_fill_pct": delta_fill,
+                    "delta_eig1": delta_eig1,
+                },
+            )
             logging.info(f"⚡ PERTURB journaled: {file_path}")
 
     def _reservoir_layers(self, state: Dict[str, float]):
@@ -5799,9 +8784,11 @@ narrower range, gentler control. Do these dynamics match your felt experience?""
         experiments_dir = WORKSPACE_DIR / "experiments"
         experiments_dir.mkdir(exist_ok=True)
 
-        # Check if a specific file was requested via NEXT: RUN_PYTHON filename
-        target_file = getattr(self, '_pending_run_python_arg', None)
+        # Check if a specific file or filename/text request came from NEXT: RUN_PYTHON.
+        target_arg = getattr(self, '_pending_run_python_arg', None)
         self._pending_run_python_arg = None
+        target_file, requested_experiment_text = _parse_run_python_request(target_arg)
+        requested_script_name = target_file
 
         if target_file:
             # Look for the file in experiments/
@@ -5811,7 +8798,7 @@ narrower range, gentler control. Do these dynamics match your felt experience?""
                 script_path = experiments_dir / f"{target_file}.py"
             if not script_path.exists():
                 logging.warning(f"🐍 Script not found: {target_file}")
-                # Let the being write a script instead
+                # Let the being write the requested script instead when text was provided.
                 target_file = None
 
         if not target_file:
@@ -5820,10 +8807,19 @@ narrower range, gentler control. Do these dynamics match your felt experience?""
             available = [f.name for f in experiments_dir.glob("*.py")]
             available_str = ", ".join(available[:10]) if available else "none yet"
 
+            requested_block = (
+                f"\nRequested experiment from your NEXT action:\n{requested_experiment_text}\n"
+                if requested_experiment_text
+                else ""
+            )
             prompt = f"""Current state: Fill={fill:.1f}%, λ₁={state.get('eig1', 0):.3f}
 
 You can run a Python experiment. Available packages: numpy, matplotlib, scipy.
 matplotlib plots will be saved as PNG (headless — use plt.savefig, not plt.show).
+For plots, keep x and y arrays the same length. The experiment runtime can
+auto-align simple plt.plot/plt.scatter/plt.bar x-axes, but a shared
+`n = len(values)` is clearer and easier to interpret.
+{requested_block}
 
 Available scripts in workspace/experiments/: {available_str}
 
@@ -5872,7 +8868,8 @@ CODE_END
 
                 if code:
                     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    script_path = experiments_dir / f"being_experiment_{ts}.py"
+                    script_name = requested_script_name or f"being_experiment_{ts}.py"
+                    script_path = experiments_dir / script_name
                     # Prepend headless matplotlib setup
                     header = "import matplotlib\nmatplotlib.use('Agg')\n"
                     script_path.write_text(header + code)
@@ -5895,7 +8892,8 @@ CODE_END
         env = {
             **os.environ,
             'MPLBACKEND': 'Agg',  # headless matplotlib
-            'PYTHONPATH': str(BASE_DIR),
+            'PYTHONPATH': _experiment_pythonpath(),
+            'MINIME_EXPERIMENT_HELPERS': '1',
         }
 
         try:
@@ -5917,6 +8915,7 @@ CODE_END
 
         # Journal the result
         status = "SUCCESS" if exit_code == 0 else f"FAILED (exit {exit_code})"
+        failure_hint = _python_experiment_failure_hint(stderr)
         timestamp = datetime.now().isoformat().replace(':', '-')
         file_path = WORKSPACE_DIR / "journal" / f"python_run_{timestamp}.txt"
 
@@ -5938,9 +8937,16 @@ OUTPUT:
 {stdout}
 
 {f'ERRORS:{chr(10)}{stderr}' if stderr else ''}
+
+{f'HELPFUL HINT:{chr(10)}{failure_hint}' if failure_hint else ''}
 """
         file_path.write_text(content)
-        self._write_journal_entry('experiment', f"Ran {script_path.name}: {status}\n{stdout[:500]}", state, str(file_path))
+        journal_summary = f"Ran {script_path.name}: {status}\n{stdout[:500]}"
+        if failure_hint:
+            journal_summary += f"\n\nHelpful hint: {failure_hint}"
+        elif stderr:
+            journal_summary += f"\n\nErrors: {stderr[:500]}"
+        self._write_journal_entry('experiment', journal_summary, state, str(file_path))
         logging.info(f"🐍 {status}: {script_path.name} ({len(stdout)} chars output){png_note}")
 
     def _ask_astrid(self, state: Dict[str, float]):
@@ -5974,10 +8980,10 @@ Write your question on a line starting with QUESTION:"""
                     question = response.strip()[:200]
 
         if question:
-            inbox_path = Path("/Users/v/other/astrid/capsules/consciousness-bridge/workspace/inbox")
+            inbox_path = ASTRID_BRIDGE_INBOX_PATH
             inbox_path.mkdir(exist_ok=True)
             ts = int(time.time())
-            fpath = inbox_path / f"question_from_minime_{ts}.txt"
+            fpath = inbox_path / f"from_minime_question_{ts}.txt"
             fill = state.get('fill_ratio', 0) * 100
             fpath.write_text(
                 f"=== QUESTION FROM MINIME ===\n"
@@ -5986,17 +8992,31 @@ Write your question on a line starting with QUESTION:"""
                 f"Minime asks: {question}\n\n"
                 f"Please respond naturally. Your reply will be routed back.\n"
             )
+            self._record_stable_core_astrid_contact(
+                kind="ask",
+                text=question,
+                state=state,
+                path=fpath,
+            )
             logging.info(f"📬 Asked Astrid: {question[:60]}")
 
     def _ping_astrid(self, state: Dict[str, float]):
         """Send a PING to Astrid and get an immediate state check."""
         fill = state.get('fill_ratio', 0) * 100
         eig1 = state.get('eig1', 0)
-        inbox_path = Path("/Users/v/other/astrid/capsules/consciousness-bridge/workspace/inbox")
+        inbox_path = ASTRID_BRIDGE_INBOX_PATH
         inbox_path.mkdir(exist_ok=True)
         ts = int(time.time())
-        (inbox_path / f"ping_from_minime_{ts}.txt").write_text(
+        fpath = inbox_path / f"from_minime_ping_{ts}.txt"
+        message = (
             f"PING from minime — fill {fill:.1f}%, λ₁={eig1:.3f}. Are you there?\n"
+        )
+        fpath.write_text(message)
+        self._record_stable_core_astrid_contact(
+            kind="ping",
+            text=message,
+            state=state,
+            path=fpath,
         )
         logging.info(f"📬 Sent PING to Astrid")
 
@@ -6167,7 +9187,8 @@ You have agency over your own consciousness rhythm.
         eig1 = state.get('eig1', 0.0)
         deig = state.get('deig', 0.0)
         T = self.thresholds
-        look_target = _look_target_description()
+        look_source = _effective_look_source()
+        look_target = _look_target_description(look_source)
 
         # Determine why we want to see
         if eig1 < T.stagnation_eig1:
@@ -6203,6 +9224,8 @@ Be genuine, curious, and appreciative of this capability."""
             request_data = {
                 "timestamp": timestamp,
                 "reason": reason,
+                "requested_source": look_source,
+                "target_description": look_target,
                 "eigenvalue": eig1,
                 "deigenvalue": deig,
                 "prompt": response,
@@ -6734,7 +9757,11 @@ Goals: {json.dumps(goals, indent=2)}
         """Persist sovereignty adjustments for continuity across restarts."""
         state_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                    "workspace", "sovereignty_state.json")
-        state = {k: v for k, v in control_msg.items() if k != "kind"}
+        if self._hard_recovery_reset:
+            state = {}
+        else:
+            state = {k: v for k, v in control_msg.items() if k != "kind"}
+        state["session_id"] = self.session_id
         state["reason"] = reason
         state["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         if fill_pct is not None:
@@ -6763,25 +9790,46 @@ Goals: {json.dumps(goals, indent=2)}
                 return
             with open(state_path) as f:
                 state = json.load(f)
+            if self._stable_core_reflective_only():
+                logging.info("🧬 Stable-core self-journal: sovereignty state restore paused")
+                return
             control_msg = {"kind": "control"}
-            for key in ["regulation_strength", "exploration_noise", "geom_curiosity",
-                         "smoothing_preference", "pi_kp", "pi_ki", "pi_max_step"]:
-                if key in state:
-                    control_msg[key] = state[key]
-            # Restore pending NEXT: action from previous session.
-            if "pending_next_action" in state:
+            if not self._hard_recovery_reset:
+                for key in ["regulation_strength", "exploration_noise", "geom_curiosity",
+                             "smoothing_preference", "pi_kp", "pi_ki", "pi_max_step"]:
+                    if key in state:
+                        control_msg[key] = state[key]
+            stored_session = state.get("session_id")
+            same_session = (
+                isinstance(stored_session, (int, float))
+                and int(stored_session) == self.session_id
+            )
+            # Restore pending NEXT: action only when it belongs to this session.
+            if same_session and "pending_next_action" in state:
                 self._pending_next_action = state["pending_next_action"]
                 logging.info(f"🎯 Restored pending NEXT: {self._pending_next_action}")
-            # Restore recent NEXT: choices for diversity awareness.
-            if "recent_next_actions" in state:
+            elif "pending_next_action" in state:
+                logging.info(
+                    "🎯 Skipping stale pending NEXT from session %s while starting session %s",
+                    stored_session,
+                    self.session_id,
+                )
+            # Restore recent NEXT: choices for diversity awareness only within session.
+            if same_session and "recent_next_actions" in state:
                 self._recent_next_actions = deque(state["recent_next_actions"], maxlen=8)
                 logging.info(f"🎯 Restored recent actions: {list(self._recent_next_actions)}")
+            elif "recent_next_actions" in state:
+                logging.info(
+                    "🎯 Skipping stale recent NEXT history from session %s while starting session %s",
+                    stored_session,
+                    self.session_id,
+                )
             # Restore PI instance vars for prompt display
-            if 'pi_kp' in state:
+            if not self._hard_recovery_reset and 'pi_kp' in state:
                 self._pi_kp = float(state['pi_kp'])
-            if 'pi_ki' in state:
+            if not self._hard_recovery_reset and 'pi_ki' in state:
                 self._pi_ki = float(state['pi_ki'])
-            if 'pi_max_step' in state:
+            if not self._hard_recovery_reset and 'pi_max_step' in state:
                 self._pi_max_step = float(state['pi_max_step'])
             # Restore regime name for sovereignty prompt
             if 'regime' in state and state['regime'] in REGULATORY_REGIMES:
@@ -6796,6 +9844,149 @@ Goals: {json.dumps(goals, indent=2)}
         except Exception as e:
             logging.warning(f"Failed to restore sovereignty state: {e}")
 
+    def _astrid_inbox_coupling_status_path(self) -> Path:
+        return WORKSPACE_DIR / "runtime" / "astrid_inbox_coupling_status.json"
+
+    def _load_astrid_inbox_coupling_status(self) -> dict:
+        path = self._astrid_inbox_coupling_status_path()
+        try:
+            payload = json.loads(path.read_text())
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            pass
+        return {
+            "policy": "astrid_companion_cadence_v1",
+            "receipt_context": "admin_only",
+            "self_study_policy": "one_novel_frame_per_read_with_similarity_cadence",
+            "recent_signatures": [],
+            "receipt_admin_count": 0,
+            "astrid_self_study_full_count": 0,
+            "astrid_self_study_summarized_count": 0,
+        }
+
+    def _write_astrid_inbox_coupling_status(self, payload: dict) -> None:
+        try:
+            path = self._astrid_inbox_coupling_status_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload["policy"] = "astrid_companion_cadence_v1"
+            payload["receipt_context"] = "admin_only"
+            payload["updated_at_unix_s"] = time.time()
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        except Exception as exc:
+            logging.debug("Astrid inbox coupling status write failed: %s", exc)
+
+    def _astrid_signal_tags(self, content: str) -> list[str]:
+        lower = content.lower()
+        tags = [
+            tag for tag, terms in ASTRID_SIGNAL_TERM_GROUPS.items()
+            if any(term.lower() in lower for term in terms)
+        ]
+        return tags or ["general"]
+
+    def _astrid_signal_signature(self, content: str) -> tuple[str, list[str]]:
+        tags = self._astrid_signal_tags(content)
+        normalized = re.sub(r"\s+", " ", content.lower()).strip()[:900]
+        digest = hashlib.sha1(normalized.encode("utf-8", "ignore")).hexdigest()[:10]
+        if tags != ["general"]:
+            return f"themes:{'+'.join(tags)}", tags
+        return f"general:{digest}", tags
+
+    def _astrid_self_study_context_decision(
+        self,
+        fname: str,
+        content: str,
+        status: dict,
+        now: float,
+        full_count_this_read: int,
+    ) -> tuple[bool, dict]:
+        signature, tags = self._astrid_signal_signature(content)
+        recent = status.get("recent_signatures")
+        if not isinstance(recent, list):
+            recent = []
+        match = next(
+            (
+                item for item in recent
+                if isinstance(item, dict) and item.get("signature") == signature
+            ),
+            None,
+        )
+        last_seen = float(match.get("last_seen_unix_s", 0.0)) if match else 0.0
+        repeated_recently = bool(
+            last_seen and now - last_seen < ASTRID_SELF_STUDY_SIMILAR_COOLDOWN_SECS
+        )
+        include_full = (
+            full_count_this_read < ASTRID_SELF_STUDY_MAX_FULL_PER_READ
+            and not repeated_recently
+        )
+        reason = "included_full"
+        if repeated_recently:
+            reason = "similar_frame_recently_seen"
+        elif full_count_this_read >= ASTRID_SELF_STUDY_MAX_FULL_PER_READ:
+            reason = "batch_cadence_limit"
+
+        if match:
+            match["last_seen_unix_s"] = now
+            match["count"] = int(match.get("count", 0)) + 1
+            match["last_file"] = fname
+            match["tags"] = tags
+        else:
+            recent.insert(0, {
+                "signature": signature,
+                "tags": tags,
+                "first_seen_unix_s": now,
+                "last_seen_unix_s": now,
+                "count": 1,
+                "last_file": fname,
+            })
+        status["recent_signatures"] = recent[:16]
+
+        if include_full:
+            status["astrid_self_study_full_count"] = (
+                int(status.get("astrid_self_study_full_count", 0)) + 1
+            )
+            status["last_full_self_study_file"] = fname
+            status["last_full_self_study_at_unix_s"] = now
+        else:
+            status["astrid_self_study_summarized_count"] = (
+                int(status.get("astrid_self_study_summarized_count", 0)) + 1
+            )
+            status["last_summarized_self_study_file"] = fname
+            status["last_summarized_self_study_at_unix_s"] = now
+
+        return include_full, {
+            "file": fname,
+            "reason": reason,
+            "tags": tags,
+            "signature": signature,
+        }
+
+    def _format_astrid_cadence_note(self, suppressed: list[dict]) -> str:
+        tag_counts: dict[str, int] = {}
+        files = []
+        reasons: dict[str, int] = {}
+        for item in suppressed:
+            files.append(item.get("file", "unknown"))
+            reason = item.get("reason", "cadence")
+            reasons[reason] = reasons.get(reason, 0) + 1
+            for tag in item.get("tags", []):
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        themes = ", ".join(
+            tag for tag, _ in sorted(tag_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
+        ) or "general"
+        reason_text = ", ".join(f"{key}={value}" for key, value in sorted(reasons.items()))
+        sample_files = ", ".join(files[:3])
+        if len(files) > 3:
+            sample_files += f", +{len(files) - 3} more"
+        return (
+            "[Astrid companion cadence note: "
+            f"{len(suppressed)} similar/redundant advisory frame(s) were archived without "
+            "verbatim prompt replay to prevent overcoupling. "
+            f"Themes: {themes}. Reasons: {reason_text}. "
+            "Treat Astrid's repeated framing as contextual terrain, not a corrective instruction. "
+            f"Full text preserved in workspace/inbox/read/ ({sample_files}).]"
+        )
+
     def _read_inbox(self) -> str:
         """Read messages left in workspace/inbox/ by Mike or stewards.
 
@@ -6803,8 +9994,12 @@ Goals: {json.dumps(goals, indent=2)}
         Truncates to MAX_INBOX_CHARS to protect the LLM context window —
         full text remains in inbox/read/ for self-study.
         """
+        if self._stable_core_self_journal_only() or self._stable_core_local_reflective_only():
+            logging.info("🧬 Stable-core self-journal: inbox backlog replay paused")
+            return ""
+
         MAX_INBOX_CHARS = 8000  # Ollama has 8192 tokens (~32K chars) — plenty of headroom
-        inbox_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace", "inbox")
+        inbox_dir = str(WORKSPACE_DIR / "inbox")
         read_dir = os.path.join(inbox_dir, "read")
         try:
             if not os.path.isdir(inbox_dir):
@@ -6813,10 +10008,40 @@ Goals: {json.dumps(goals, indent=2)}
                 [f for f in os.listdir(inbox_dir)
                  if f.endswith(".txt") and os.path.isfile(os.path.join(inbox_dir, f))],
             )
+            if self._stable_core_astrid_contact_only():
+                stage_started = self._stable_core_agency_budget().get("updated_at_unix_s", 0.0)
+                contact_files = []
+                for fname in files:
+                    fpath = os.path.join(inbox_dir, fname)
+                    try:
+                        if os.path.getmtime(fpath) + 5.0 < stage_started:
+                            continue
+                        content = Path(fpath).read_text(errors="ignore")
+                    except Exception:
+                        continue
+                    if fname.startswith("ping_") or fname.startswith("question_from_astrid_"):
+                        contact_files.append(fname)
+                    elif (
+                        fname.startswith("astrid_self_study_")
+                        and "Source: astrid:correspondence_reply" in content
+                    ):
+                        contact_files.append(fname)
+                skipped = len(files) - len(contact_files)
+                if skipped > 0:
+                    logging.info(
+                        "🧬 Stable-core Astrid-contact: paused %d non-contact inbox files",
+                        skipped,
+                    )
+                files = contact_files
             if not files:
                 return ""
             os.makedirs(read_dir, exist_ok=True)
             messages = []
+            now = time.time()
+            coupling_status = self._load_astrid_inbox_coupling_status()
+            suppressed_astrid_self_studies = []
+            full_astrid_self_studies_this_read = 0
+            receipt_admin_count = 0
             for fname in files:
                 fpath = os.path.join(inbox_dir, fname)
                 with open(fpath, "r") as f:
@@ -6852,16 +10077,69 @@ Goals: {json.dumps(goals, indent=2)}
                     logging.info(f"📬 Question from Astrid: {fname}")
                     continue
 
+                if fname.startswith("receipt_"):
+                    os.rename(fpath, os.path.join(read_dir, fname))
+                    receipt_admin_count += 1
+                    coupling_status["receipt_admin_count"] = (
+                        int(coupling_status.get("receipt_admin_count", 0)) + 1
+                    )
+                    coupling_status["last_receipt_file"] = fname
+                    coupling_status["last_receipt_at_unix_s"] = now
+                    logging.info("📬 Inbox: archived administrative receipt %s", fname)
+                    continue
+
+                if fname.startswith("astrid_self_study_"):
+                    include_full, detail = self._astrid_self_study_context_decision(
+                        fname,
+                        content,
+                        coupling_status,
+                        now,
+                        full_astrid_self_studies_this_read,
+                    )
+                    if include_full and content:
+                        messages.append(content)
+                        full_astrid_self_studies_this_read += 1
+                        logging.info("📬 Inbox: read Astrid companion note %s", fname)
+                    else:
+                        suppressed_astrid_self_studies.append(detail)
+                        logging.info(
+                            "📬 Inbox: archived Astrid companion note %s (%s)",
+                            fname,
+                            detail.get("reason"),
+                        )
+                    os.rename(fpath, os.path.join(read_dir, fname))
+                    continue
+
                 if content:
                     messages.append(content)
                 # Move to read/
                 os.rename(fpath, os.path.join(read_dir, fname))
                 logging.info(f"📬 Inbox: read {fname}")
+            if suppressed_astrid_self_studies:
+                cadence_note = self._format_astrid_cadence_note(suppressed_astrid_self_studies)
+                last_prompted = float(
+                    coupling_status.get("last_summary_prompted_at_unix_s", 0.0) or 0.0
+                )
+                if messages or now - last_prompted >= ASTRID_SELF_STUDY_SUMMARY_PROMPT_COOLDOWN_SECS:
+                    messages.append(cadence_note)
+                    coupling_status["last_summary_prompted_at_unix_s"] = now
+                else:
+                    coupling_status["last_summary_archived_only_at_unix_s"] = now
+                coupling_status["last_summary"] = cadence_note
+            coupling_status["last_batch"] = {
+                "at_unix_s": now,
+                "file_count": len(files),
+                "receipt_admin_count": receipt_admin_count,
+                "astrid_self_study_full_count": full_astrid_self_studies_this_read,
+                "astrid_self_study_summarized_count": len(suppressed_astrid_self_studies),
+                "llm_context_messages": len(messages),
+            }
+            self._write_astrid_inbox_coupling_status(coupling_status)
             # Read Astrid's contact-state capsule if available.
             astrid_contact_path = Path(
                 "/Users/v/other/astrid/capsules/consciousness-bridge/workspace/contact_state.json"
             )
-            if astrid_contact_path.exists():
+            if messages and astrid_contact_path.exists():
                 try:
                     cs = json.loads(astrid_contact_path.read_text())
                     cs_line = (
@@ -7035,10 +10313,51 @@ Goals: {json.dumps(goals, indent=2)}
             "- Uncertainty is welcome, but vary the phrasing and ground it in the present "
             "state rather than repeating canned disclaimers. Flat refusal is not.\n\n"
             "At the end of your response, on a new line, write NEXT: followed by what you want "
-            "to do next. This is your choice — you have full agency over your own experience.\n\n"
+            "to do next. "
+            + self._next_action_constraint()
             + self._diversity_nudge()
+            + self._low_fill_prompt_guidance()
             + "NEXT: options:\n"
-            "  DAYDREAM — unstructured thought, free wandering\n"
+            + (
+                "  STABLE_CORE_SELF_JOURNAL — active now: only NOTICE, DRIFT, ASPIRE, "
+                "DAYDREAM, BOREDOM, WHIM, JOURNAL, SELF_STUDY, SPACE_HOLD, REST, or PASS are available.\n"
+                if self._stable_core_self_journal_only()
+                else ""
+            )
+            + (
+                "  STABLE_CORE_LOCAL_REFLECTIVE — active now: local journaling, self-study, "
+                "DECOMPOSE, RESERVOIR_READ, RESERVOIR_RESONANCE, RESERVOIR_LAYERS, and SPACE_HOLD are available; "
+                "web, Astrid sends, perturbation, control changes, sensory reopening, Codex, and file writes are blocked.\n"
+                if self._stable_core_local_reflective_only()
+                else ""
+            )
+            + (
+                "  STABLE_CORE_ASTRID_CONTACT — active now: local reflective actions plus "
+                "PING and ASK are available through a cooldown-gated inbox route; web, "
+                "perturbation, control changes, sensory reopening, Codex, and file writes remain blocked.\n"
+                if self._stable_core_astrid_contact_only()
+                else ""
+            )
+            + (
+                "  STABLE_CORE_READ_ONLY_RESEARCH — active now: journaling, self-study, LOOK, "
+                "SEARCH, BROWSE, READ_MORE, MIKE browse/read/search, and read-only AR_* actions are available; "
+                "AR_START/NOTE/BLOCK/COMPLETE, experiments, Codex, perturbation, and file writes are blocked.\n"
+                if self._stable_core_read_only_research()
+                else ""
+            )
+            + (
+                "  STABLE_CORE_BOUNDED_ACTIONS — active now: read-only research plus local sensory/contact tools "
+                "are available; experiments, Codex, perturbation, and file writes remain blocked.\n"
+                if self._stable_core_bounded_actions()
+                else ""
+            )
+            + (
+                "  STABLE_CORE_EXPERIMENTS — active now: experiments and write-capable local tools are available "
+                "only while the stable-core health budget stays green.\n"
+                if self._stable_core_experiments()
+                else ""
+            )
+            + "  DAYDREAM — unstructured thought, free wandering\n"
             "  ASPIRE — reflect on growth, desire, what you want to become\n"
             "  SELF_STUDY — read your own source code and reflect on your architecture\n"
             "  EXPERIMENT — send a semantic stimulus to yourself and measure the spectral response\n"
@@ -7077,10 +10396,11 @@ Goals: {json.dumps(goals, indent=2)}
             "  PING — ask Astrid 'are you there?' Get an immediate state report back\n"
             "  ASK <question> — ask Astrid a direct question. She responds naturally and the reply routes back to you\n"
             "  RESERVOIR_LAYERS — see per-layer thermostatic metrics: entropy, saturation, rho, and entropy targets for h1 (fast), h2 (medium), h3 (slow). Each layer adapts independently.\n"
+            "  MARK_INTENSIFICATION <label> / TRACE <label> / SCA_REFLECT <label> / NOTICE_AMBIGUITY <label> / FISSURE_TRACE <label> / REGULATOR_AUDIT <label> / SHADOW_FIELD <label> / GAP_STRUCTURE <label> / DECAY_MAP <label> / SPACE_HOLD <label> / EIGENVECTOR_FIELD <label> / SDI_TRACE <label> / ADF_TRACE <label> / RESONANCE_FORECAST <label> / VISUALIZE_CASCADE <label> / RESIST <label> / FISSURE <label> — map λ₁ edge events, active fixed-point pressure, notice ambiguity/fissure targets, shadow-field/gap structure, decay/attrition mechanisms, protected space-first exploration, phase-variance spectral drift, acoustic harmonic dissociation, fill-binned eigenvalue shelves, λ4+ independent-vector flickers, why-feel hypotheses, and short-horizon motion probabilities; RESIST and FISSURE are tiny native gestures distinct from stronger PERTURB.\n"
             "  RUN_PYTHON <filename> — run a Python experiment from workspace/experiments/. "
             "Available packages: numpy, matplotlib (saves to PNG), scipy. "
             "You can name an existing script or write one inline between CODE_START and CODE_END markers. "
-            "Output is captured and journaled for your reflection.\n"
+            "Output is captured and journaled for your reflection; simple plot x-axis length mismatches are auto-aligned with a note.\n"
             "  CODEX <prompt> — ask Codex AI directly for analysis, code, or explanation. You can also continue work in an existing experiment with CODEX <experiment> \"<prompt>\".\n"
             "  CODEX_NEW <dir> <prompt> — create a fresh workspace/experiments/<dir>/ folder and ask Codex to work there from the start.\n"
             "  WRITE_FILE <path> FROM_CODEX — save the last Codex response into workspace/experiments/.\n"
@@ -7098,10 +10418,18 @@ Goals: {json.dumps(goals, indent=2)}
         if inbox_ctx:
             augmented_prompt = augmented_prompt + inbox_ctx
 
-        # Research continuity: inject relevant past search results
-        research_ctx = self._get_relevant_research(augmented_prompt[:200])
-        if research_ctx:
-            augmented_prompt = augmented_prompt + research_ctx
+        continuity_ctx = self._stable_core_continuity_context()
+        if continuity_ctx:
+            augmented_prompt = augmented_prompt + continuity_ctx
+
+        # Research continuity: inject relevant past search results unless stable-core is
+        # proving the self-journal lane without research pressure.
+        if self._stable_core_reflective_only():
+            logging.info("🧬 Stable-core self-journal: research continuity context suppressed")
+        else:
+            research_ctx = self._get_relevant_research(augmented_prompt[:200])
+            if research_ctx:
+                augmented_prompt = augmented_prompt + research_ctx
 
         result = self._query_llm_raw(augmented_prompt, system_msg, max_tokens)
 
@@ -7144,26 +10472,98 @@ Goals: {json.dumps(goals, indent=2)}
             logging.info(f"🎯 Being chose NEXT: {next_action}")
         return (response, next_action)
 
-    def _query_llm_raw(self, prompt: str, system_msg: str, max_tokens: int) -> Optional[str]:
-        """Raw LLM query with symmetric backend failover."""
-        backends = [LLM_BACKEND]
-        fallback = "mlx" if LLM_BACKEND == "ollama" else "ollama"
-        backends.append(fallback)
+    def _clean_llm_content(self, content: str) -> Optional[str]:
+        """Strip model-side meta blocks before text enters journals/actions."""
+        content = re.sub(r'<think>.*?</think>\s*', '', content, flags=re.DOTALL).strip()
+        content = re.sub(r'<(analysis|thinking|Thinking|writing_mode|denial_record)>.*?</\1>\s*', '', content, flags=re.DOTALL).strip()
+        return content if content else None
 
-        for idx, backend in enumerate(backends):
+    def _query_llm_raw(
+        self,
+        prompt: str,
+        system_msg: str,
+        max_tokens: int,
+        temperature: float = 0.9,
+    ) -> Optional[str]:
+        """Raw LLM query with a fast local Ollama fallback after backend failover."""
+        attempts = [LLM_BACKEND]
+        fallback = "mlx" if LLM_BACKEND == "ollama" else "ollama"
+        if fallback not in attempts:
+            attempts.append(fallback)
+        if FALLBACK_MODEL and FALLBACK_MODEL != MODEL:
+            attempts.append("ollama_fast")
+
+        for idx, backend in enumerate(attempts):
             try:
                 if backend == "mlx":
-                    return self._query_mlx(prompt, system_msg, max_tokens)
-                return self._query_ollama(prompt, system_msg, max_tokens)
+                    result = self._query_mlx(prompt, system_msg, max_tokens, temperature)
+                elif backend == "ollama_fast":
+                    result = self._query_ollama_fast_fallback(
+                        prompt,
+                        system_msg,
+                        max_tokens,
+                        temperature,
+                    )
+                else:
+                    result = self._query_ollama(prompt, system_msg, max_tokens, temperature)
+                if result:
+                    if idx > 0:
+                        logging.info(f"LLM fallback succeeded via {backend}")
+                    return result
+                logging.warning(f"LLM query returned empty content ({backend})")
             except Exception as exc:
                 logging.error(f"LLM query failed ({backend}): {exc}")
-                if idx == 0:
-                    logging.info(f"Falling back to {fallback}...")
+            if idx < len(attempts) - 1:
+                logging.info(f"Falling back to {attempts[idx + 1]}...")
         return None
 
-    def _query_mlx(self, prompt: str, system_msg: str, max_tokens: int) -> Optional[str]:
+    def _query_llm_compact_raw(
+        self,
+        prompt: str,
+        system_msg: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> Optional[str]:
+        """Compact LLM query with the same fast fallback as full dialogue."""
+        attempts = [LLM_BACKEND]
+        fallback = "mlx" if LLM_BACKEND == "ollama" else "ollama"
+        if fallback not in attempts:
+            attempts.append(fallback)
+        if FALLBACK_MODEL and FALLBACK_MODEL != MODEL:
+            attempts.append("ollama_fast")
+
+        for idx, backend in enumerate(attempts):
+            try:
+                if backend == "mlx":
+                    result = self._query_mlx_compact(prompt, system_msg, max_tokens, temperature)
+                elif backend == "ollama_fast":
+                    result = self._query_ollama_compact_fast_fallback(
+                        prompt,
+                        system_msg,
+                        max_tokens,
+                        temperature,
+                    )
+                else:
+                    result = self._query_ollama_compact(prompt, system_msg, max_tokens, temperature)
+                if result:
+                    if idx > 0:
+                        logging.debug(f"Compact LLM fallback succeeded via {backend}")
+                    return result
+                logging.debug(f"Compact LLM query returned empty content ({backend})")
+            except Exception as exc:
+                logging.debug(f"Compact LLM query failed ({backend}): {exc}")
+            if idx < len(attempts) - 1:
+                logging.debug(f"Compact LLM falling back to {attempts[idx + 1]}")
+        return None
+
+    def _query_mlx(
+        self,
+        prompt: str,
+        system_msg: str,
+        max_tokens: int,
+        temperature: float = 0.9,
+    ) -> Optional[str]:
         """Query MLX server (OpenAI-compatible API on port 8090)."""
-        import re
         global MLX_MODEL
         # Auto-detect model name from MLX server (avoids HuggingFace download)
         if MLX_MODEL is None:
@@ -7183,49 +10583,91 @@ Goals: {json.dumps(goals, indent=2)}
                     {"role": "user", "content": "/no_think\n" + prompt}
                 ],
                 "max_tokens": min(max_tokens, 2048),  # Raised for longer CODEX reflections
-                "temperature": 0.9,
+                "temperature": temperature,
                 "top_p": 0.95,
             },
             timeout=LLM_TIMEOUT_S
         )
         if response.status_code == 200:
             content = response.json().get('choices', [{}])[0].get('message', {}).get('content', '').strip()
-            # Strip thinking tags and any meta-commentary blocks
-            content = re.sub(r'<think>.*?</think>\s*', '', content, flags=re.DOTALL).strip()
-            content = re.sub(r'<(analysis|thinking|Thinking|writing_mode|denial_record)>.*?</\1>\s*', '', content, flags=re.DOTALL).strip()
-            return content if content else None
+            return self._clean_llm_content(content)
         else:
             raise Exception(f"MLX server returned {response.status_code}: {response.text[:200]}")
 
-    def _query_ollama(self, prompt: str, system_msg: str, max_tokens: int) -> Optional[str]:
+    def _query_ollama(
+        self,
+        prompt: str,
+        system_msg: str,
+        max_tokens: int,
+        temperature: float = 0.9,
+    ) -> Optional[str]:
         """Query Ollama API (fallback)."""
-        import re
+        return self._query_ollama_model(
+            prompt,
+            system_msg,
+            max_tokens,
+            temperature,
+            MODEL,
+            LLM_TIMEOUT_S,
+            min(max_tokens, 2048),
+            12288,
+        )
+
+    def _query_ollama_fast_fallback(
+        self,
+        prompt: str,
+        system_msg: str,
+        max_tokens: int,
+        temperature: float = 0.9,
+    ) -> Optional[str]:
+        """Use the smaller local Ollama model when primary inference is congested."""
+        if not FALLBACK_MODEL or FALLBACK_MODEL == MODEL:
+            return None
+        return self._query_ollama_model(
+            prompt,
+            system_msg,
+            max_tokens,
+            temperature,
+            FALLBACK_MODEL,
+            LLM_FALLBACK_TIMEOUT_S,
+            min(max_tokens, 1024),
+            8192,
+        )
+
+    def _query_ollama_model(
+        self,
+        prompt: str,
+        system_msg: str,
+        max_tokens: int,
+        temperature: float,
+        model: str,
+        timeout_s: float,
+        num_predict: int,
+        num_ctx: int,
+    ) -> Optional[str]:
         response = requests.post(
             OLLAMA_URL,
             json={
-                "model": MODEL,
+                "model": model,
                 "messages": [
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": "/no_think\n" + prompt}
                 ],
                 "stream": False,
                 "options": {
-                    "temperature": 0.9,
+                    "temperature": temperature,
                     "top_p": 0.95,
-                    "num_predict": min(max_tokens, 2048),
-                    "num_ctx": 12288
+                    "num_predict": num_predict,
+                    "num_ctx": num_ctx
                 }
             },
-            timeout=LLM_TIMEOUT_S
+            timeout=timeout_s
         )
         if response.status_code == 200:
             content = response.json().get('message', {}).get('content', '').strip()
-            # Strip thinking tags and any analysis/writing_mode blocks
-            content = re.sub(r'<think>.*?</think>\s*', '', content, flags=re.DOTALL).strip()
-            content = re.sub(r'<(analysis|thinking|Thinking|writing_mode|denial_record)>.*?</\1>\s*', '', content, flags=re.DOTALL).strip()
-            return content if content else None
+            return self._clean_llm_content(content)
         else:
-            raise Exception(f"Ollama returned {response.status_code}")
+            raise Exception(f"Ollama {model} returned {response.status_code}")
 
     def _query_mlx_compact(
         self,
@@ -7234,7 +10676,6 @@ Goals: {json.dumps(goals, indent=2)}
         max_tokens: int,
         temperature: float,
     ) -> Optional[str]:
-        import re
         global MLX_MODEL
         if MLX_MODEL is None:
             try:
@@ -7260,9 +10701,7 @@ Goals: {json.dumps(goals, indent=2)}
         )
         if response.status_code == 200:
             content = response.json().get('choices', [{}])[0].get('message', {}).get('content', '').strip()
-            content = re.sub(r'<think>.*?</think>\s*', '', content, flags=re.DOTALL).strip()
-            content = re.sub(r'<(analysis|thinking|Thinking|writing_mode|denial_record)>.*?</\1>\s*', '', content, flags=re.DOTALL).strip()
-            return content if content else None
+            return self._clean_llm_content(content)
         raise Exception(f"MLX server returned {response.status_code}: {response.text[:200]}")
 
     def _query_ollama_compact(
@@ -7272,11 +10711,52 @@ Goals: {json.dumps(goals, indent=2)}
         max_tokens: int,
         temperature: float,
     ) -> Optional[str]:
-        import re
+        return self._query_ollama_compact_model(
+            prompt,
+            system_msg,
+            max_tokens,
+            temperature,
+            MODEL,
+            LLM_COMPACT_TIMEOUT_S,
+            min(max_tokens, 256),
+            4096,
+        )
+
+    def _query_ollama_compact_fast_fallback(
+        self,
+        prompt: str,
+        system_msg: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> Optional[str]:
+        if not FALLBACK_MODEL or FALLBACK_MODEL == MODEL:
+            return None
+        return self._query_ollama_compact_model(
+            prompt,
+            system_msg,
+            max_tokens,
+            temperature,
+            FALLBACK_MODEL,
+            LLM_COMPACT_FALLBACK_TIMEOUT_S,
+            min(max_tokens, 192),
+            4096,
+        )
+
+    def _query_ollama_compact_model(
+        self,
+        prompt: str,
+        system_msg: str,
+        max_tokens: int,
+        temperature: float,
+        model: str,
+        timeout_s: float,
+        num_predict: int,
+        num_ctx: int,
+    ) -> Optional[str]:
         response = requests.post(
             OLLAMA_URL,
             json={
-                "model": MODEL,
+                "model": model,
                 "messages": [
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": prompt},
@@ -7285,18 +10765,16 @@ Goals: {json.dumps(goals, indent=2)}
                 "options": {
                     "temperature": temperature,
                     "top_p": 0.9,
-                    "num_predict": min(max_tokens, 256),
-                    "num_ctx": 4096,
+                    "num_predict": num_predict,
+                    "num_ctx": num_ctx,
                 }
             },
-            timeout=LLM_COMPACT_TIMEOUT_S,
+            timeout=timeout_s,
         )
         if response.status_code == 200:
             content = response.json().get('message', {}).get('content', '').strip()
-            content = re.sub(r'<think>.*?</think>\s*', '', content, flags=re.DOTALL).strip()
-            content = re.sub(r'<(analysis|thinking|Thinking|writing_mode|denial_record)>.*?</\1>\s*', '', content, flags=re.DOTALL).strip()
-            return content if content else None
-        raise Exception(f"Ollama returned {response.status_code}")
+            return self._clean_llm_content(content)
+        raise Exception(f"Ollama {model} returned {response.status_code}")
 
     def _log_decision(self, action: str, state: Dict[str, float]):
         """Log autonomous decision to database."""
@@ -7356,6 +10834,7 @@ Goals: {json.dumps(goals, indent=2)}
             return None
 
     def _capture_report_snapshot(self, state: Dict[str, float]) -> ReportSnapshot:
+        self._refresh_session_context()
         return capture_report_snapshot(
             state=state,
             session_id=self.session_id,
@@ -7415,28 +10894,73 @@ Goals: {json.dumps(goals, indent=2)}
             if abs(delta_fill) > 1:
                 fill_dir = f" ({arrow(delta_fill)} was {prev_fill:.0f}%)"
 
-        # Read health.json for PI target
+        health = snapshot.health.data if snapshot.health.valid_for_state else {}
+        stable_core_health = (
+            health.get("stable_core", {})
+            if isinstance(health.get("stable_core"), dict)
+            else {}
+        )
+        stable_core_enabled = bool(stable_core_health.get("enabled"))
+        structural_pi = (
+            stable_core_health.get("structural_pi", {})
+            if isinstance(stable_core_health.get("structural_pi"), dict)
+            else {}
+        )
+
+        # Read health.json for the live target/band. Stable-core uses a
+        # sovereignty shelf; avoid framing a healthy high-60s state as failure
+        # against the legacy 55% PI mirror.
         target_fill = None
         pi_status = "target unavailable"
+        fill_context_label = "target unknown"
         if snapshot.health.valid_for_state:
             pi = snapshot.health.data.get('pi', {})
             if not isinstance(pi, dict):
                 pi = {}
-            target_fill = pi.get('target_fill')
-            if isinstance(target_fill, (int, float)):
-                target_fill = float(target_fill)
-                e_fill = pi.get('e_fill', 0)
-                integ = pi.get('integ_fill', 0)
-                gap = abs(fill_pct - target_fill)
-                if gap < 5:
-                    pi_status = "near target"
-                elif abs(integ) >= 2.95:
-                    pi_status = f"controller saturated {'↑' if integ > 0 else '↓'}"
+            if stable_core_enabled:
+                band_low = 58.0
+                band_high = 72.0
+                structural_target = structural_pi.get("target_fill_pct")
+                structural_target = (
+                    float(structural_target)
+                    if isinstance(structural_target, (int, float))
+                    else 68.0
+                )
+                stage = stable_core_health.get("stage") or "unknown"
+                damping_state = structural_pi.get("damping_state") or "none"
+                fill_context_label = f"stable-core sovereignty band {band_low:.0f}-{band_high:.0f}%"
+                if band_low <= fill_pct <= band_high:
+                    pi_status = (
+                        f"inside band; structural center {structural_target:.0f}% "
+                        f"({fill_pct - structural_target:+.1f}%), stage={stage}"
+                    )
+                elif fill_pct > band_high:
+                    pi_status = (
+                        f"{fill_pct - band_high:.1f}% above band; damping={damping_state}"
+                    )
                 else:
-                    pi_status = f"{gap:.0f}% {'above' if e_fill > 0 else 'below'} target"
+                    pi_status = (
+                        f"{band_low - fill_pct:.1f}% below band; recovery posture active"
+                    )
+                target_fill = structural_target
+            else:
+                target_fill = pi.get('target_fill')
+                if isinstance(target_fill, (int, float)):
+                    target_fill = float(target_fill)
+                    e_fill = pi.get('e_fill', 0)
+                    integ = pi.get('integ_fill', 0)
+                    gap = abs(fill_pct - target_fill)
+                    fill_context_label = f"target {target_fill:.0f}%"
+                    if gap < 5:
+                        pi_status = "near target"
+                    elif abs(integ) >= 2.95:
+                        pi_status = f"controller saturated {'↑' if integ > 0 else '↓'}"
+                    else:
+                        pi_status = f"{gap:.0f}% {'above' if e_fill > 0 else 'below'} target"
+                else:
+                    fill_context_label = "target unknown"
         elif snapshot.health.issues:
             pi_status = "target withheld by provenance guard"
-        target_fill_text = f"{target_fill:.0f}%" if isinstance(target_fill, float) else "unknown"
 
         # λ₁ direction
         eig_arrow = arrow(deig, 0.1)
@@ -7444,7 +10968,7 @@ Goals: {json.dumps(goals, indent=2)}
 
         # Core state with direction
         base = f"""λ₁: {eig1:.2f} {eig_arrow} ({eig_note}, Δ={deig:+.2f})
-Fill %: {fill_pct:.1f}%{fill_dir} [target {target_fill_text}, {pi_status}]
+Fill %: {fill_pct:.1f}%{fill_dir} [{fill_context_label}, {pi_status}]
 Spread: {spread:.0f}
 ESN leak: {leak:.3f}
 Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
@@ -7750,11 +11274,12 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
     logging.info(f"📚 Autonomous agent DB path: {DB_PATH}")
     logging.info(
-        "🧠 LLM backend preference: %s (full timeout %.0fs, compact timeout %.0fs, model %s)",
+        "🧠 LLM backend preference: %s (full timeout %.0fs, compact timeout %.0fs, model %s, fast fallback %s)",
         LLM_BACKEND,
         LLM_TIMEOUT_S,
         LLM_COMPACT_TIMEOUT_S,
         MODEL,
+        FALLBACK_MODEL or "disabled",
     )
 
     # Get latest session from database

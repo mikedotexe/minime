@@ -1,4 +1,8 @@
-use std::{env, path::PathBuf};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::sensory_bus::{AUDIO_DIM, AUX_DIM, VIDEO_DIM, Z_DIM};
 
@@ -7,6 +11,11 @@ pub const DEFAULT_AGENCY_STAGE: &str = "off";
 pub const DEFAULT_AGENT_BUDGET_MODE: &str = "disabled";
 pub const PINNED_RESCUE_INPUT_PATH: &str = "pinned_rescue_aux_projection";
 pub const PINNED_RESCUE_ESN_PATH: &str = "pinned_rescue_direct";
+pub const LIVE_INTAKE_MAX_FILL_PCT: f32 = 70.0;
+pub const LIVE_INTAKE_MAX_RISING_SLOPE_PCT_PER_SEC: f32 = 1.0;
+pub const FULL_PRESENCE_PROFILE: &str = "full_presence_v1";
+pub const FULL_PRESENCE_MAX_FILL_PCT: f32 = 72.0;
+pub const SEMANTIC_SENSORY_MUTE_FILE: &str = "stable_core_sensory_mute.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StableCoreRuntime {
@@ -17,9 +26,18 @@ pub struct StableCoreRuntime {
     pub live_audio_divisor: u32,
     pub live_video_divisor: u32,
     pub live_intake_stages: Vec<String>,
+    pub sensory_presence_profile: String,
     pub checkpoint_lineage_enabled: bool,
     pub neural_bundle_enabled: bool,
     pub rollback_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StableCoreAgencyMirror {
+    pub agency_stage: String,
+    pub agent_budget_mode: String,
+    pub source: &'static str,
+    pub updated_at_unix_s: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -28,6 +46,28 @@ pub struct StableCoreEsnPolicy {
     pub exploration_noise_override: bool,
     pub dynamic_rho_modulation: bool,
     pub external_geom_noise: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StableCoreSensoryMute {
+    pub active: bool,
+    pub active_until_unix_s: Option<f64>,
+    pub reason: Option<String>,
+    pub source_profile: Option<String>,
+    pub last_semantic_sent_at_unix_s: Option<f64>,
+}
+
+impl StableCoreSensoryMute {
+    #[must_use]
+    pub const fn inactive() -> Self {
+        Self {
+            active: false,
+            active_until_unix_s: None,
+            reason: None,
+            source_profile: None,
+            last_semantic_sent_at_unix_s: None,
+        }
+    }
 }
 
 impl StableCoreEsnPolicy {
@@ -230,6 +270,9 @@ impl StableCoreRuntime {
             live_audio_divisor: u32_from_lookup(&lookup, "MINIME_RESCUE_LIVE_AUDIO_DIVISOR", 0),
             live_video_divisor: u32_from_lookup(&lookup, "MINIME_RESCUE_LIVE_VIDEO_DIVISOR", 0),
             live_intake_stages: csv_from_lookup(&lookup, "MINIME_RESCUE_LIVE_INTAKE_STAGES"),
+            sensory_presence_profile: lookup("MINIME_STABLE_CORE_SENSORY_PROFILE")
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "runtime_profile".to_string()),
             checkpoint_lineage_enabled,
             neural_bundle_enabled,
             rollback_reason: lookup("MINIME_STABLE_CORE_ROLLBACK_REASON"),
@@ -244,10 +287,154 @@ impl StableCoreRuntime {
     }
 
     #[must_use]
+    pub fn live_intake_divisors_for_stage(
+        &self,
+        stage: &str,
+        scaffold_active: bool,
+        high_fill_drain_active: bool,
+        fill_pct: f32,
+        fill_slope_pct_per_sec: f32,
+    ) -> (u32, u32) {
+        if !self.enabled
+            || !scaffold_active
+            || !self.allows_live_intake_for_stage(stage)
+            || !fill_pct.is_finite()
+            || !fill_slope_pct_per_sec.is_finite()
+        {
+            return (0, 0);
+        }
+        if self.sensory_presence_profile == FULL_PRESENCE_PROFILE {
+            if stage == "discharge" || fill_pct >= FULL_PRESENCE_MAX_FILL_PCT {
+                return (0, 0);
+            }
+            return (self.live_audio_divisor, self.live_video_divisor);
+        }
+        if high_fill_drain_active
+            || fill_pct >= LIVE_INTAKE_MAX_FILL_PCT
+            || fill_slope_pct_per_sec > LIVE_INTAKE_MAX_RISING_SLOPE_PCT_PER_SEC
+        {
+            return (0, 0);
+        }
+        (self.live_audio_divisor, self.live_video_divisor)
+    }
+
+    #[must_use]
     pub fn stable_checkpoint_path(&self, workspace_dir: &std::path::Path) -> PathBuf {
         workspace_dir
             .join("stable_core")
             .join("spectral_checkpoint_stable_core.bin")
+    }
+
+    #[must_use]
+    pub fn agency_mirror(&self, workspace_dir: &Path) -> StableCoreAgencyMirror {
+        if !self.enabled {
+            return StableCoreAgencyMirror::from_runtime(self, "runtime_env");
+        }
+
+        if let Some(mirror) = self.agency_mirror_from_file(
+            &workspace_dir.join("stable_core_agency.json"),
+            "stage",
+            "agent_budget_mode",
+            "updated_at_unix_s",
+            "stable_core_agency",
+        ) {
+            return mirror;
+        }
+
+        if let Some(mirror) = self.agency_mirror_from_file(
+            &workspace_dir.join("rescue_profile.json"),
+            "stable_core_agency_stage",
+            "stable_core_agent_budget",
+            "stable_core_agency_updated_at_unix_s",
+            "rescue_profile",
+        ) {
+            return mirror;
+        }
+
+        StableCoreAgencyMirror::from_runtime(self, "runtime_env")
+    }
+
+    fn agency_mirror_from_file(
+        &self,
+        path: &Path,
+        stage_field: &str,
+        budget_field: &str,
+        updated_field: &str,
+        source: &'static str,
+    ) -> Option<StableCoreAgencyMirror> {
+        let payload = fs::read_to_string(path).ok()?;
+        let value = serde_json::from_str::<serde_json::Value>(&payload).ok()?;
+        let agency_stage = json_string_field(&value, stage_field)?;
+        let agent_budget_mode = json_string_field(&value, budget_field)
+            .unwrap_or_else(|| self.agent_budget_mode.clone());
+        let updated_at_unix_s = value
+            .get(updated_field)
+            .and_then(serde_json::Value::as_f64)
+            .filter(|value| value.is_finite());
+
+        Some(StableCoreAgencyMirror {
+            agency_stage,
+            agent_budget_mode,
+            source,
+            updated_at_unix_s,
+        })
+    }
+}
+
+impl StableCoreAgencyMirror {
+    fn from_runtime(runtime: &StableCoreRuntime, source: &'static str) -> Self {
+        Self {
+            agency_stage: runtime.agency_stage.clone(),
+            agent_budget_mode: runtime.agent_budget_mode.clone(),
+            source,
+            updated_at_unix_s: None,
+        }
+    }
+}
+
+#[must_use]
+pub fn stable_core_sensory_mute_path(workspace_dir: &Path) -> PathBuf {
+    workspace_dir
+        .join("runtime")
+        .join(SEMANTIC_SENSORY_MUTE_FILE)
+}
+
+#[must_use]
+pub fn now_unix_s() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
+
+#[must_use]
+pub fn load_stable_core_sensory_mute(path: &Path, current_unix_s: f64) -> StableCoreSensoryMute {
+    let Ok(payload) = fs::read_to_string(path) else {
+        return StableCoreSensoryMute::inactive();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
+        return StableCoreSensoryMute::inactive();
+    };
+    let active_until_unix_s = value
+        .get("active_until_unix_s")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite());
+    let active = active_until_unix_s.is_some_and(|until| until > current_unix_s);
+    StableCoreSensoryMute {
+        active,
+        active_until_unix_s,
+        reason: value
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        source_profile: value
+            .get("source_profile")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        last_semantic_sent_at_unix_s: value
+            .get("last_semantic_sent_at_unix_s")
+            .and_then(serde_json::Value::as_f64)
+            .filter(|value| value.is_finite()),
     }
 }
 
@@ -287,6 +474,15 @@ where
     })
 }
 
+fn json_string_field(value: &serde_json::Value, name: &str) -> Option<String> {
+    value
+        .get(name)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +502,7 @@ mod tests {
         assert!(!runtime.neural_bundle_enabled);
         assert_eq!(runtime.agency_stage, DEFAULT_AGENCY_STAGE);
         assert_eq!(runtime.live_audio_divisor, 0);
+        assert_eq!(runtime.sensory_presence_profile, "runtime_profile");
     }
 
     #[test]
@@ -327,6 +524,134 @@ mod tests {
         assert_eq!(runtime.live_video_divisor, 6);
         assert!(runtime.allows_live_intake_for_stage("hold"));
         assert!(!runtime.allows_live_intake_for_stage("recovery"));
+    }
+
+    #[test]
+    fn stable_core_agency_mirror_prefers_live_agency_file() {
+        let runtime = runtime(&[
+            ("MINIME_RUNTIME_PROFILE", STABLE_CORE_PROFILE),
+            ("MINIME_STABLE_CORE_AGENCY_STAGE", "self_journal"),
+            ("MINIME_STABLE_CORE_AGENT_BUDGET", "self_journal_only"),
+        ]);
+        let dir = env::temp_dir().join(format!("stable_core_agency_test_{}", now_unix_s()));
+        let _ = fs::create_dir_all(&dir);
+        fs::write(
+            dir.join("rescue_profile.json"),
+            r#"{
+                "stable_core_agency_stage": "bounded_actions",
+                "stable_core_agent_budget": "bounded_actions"
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("stable_core_agency.json"),
+            r#"{
+                "stage": "full_sovereignty",
+                "agent_budget_mode": "full_sovereignty",
+                "updated_at_unix_s": 1234.5
+            }"#,
+        )
+        .unwrap();
+
+        let mirror = runtime.agency_mirror(&dir);
+
+        assert_eq!(mirror.agency_stage, "full_sovereignty");
+        assert_eq!(mirror.agent_budget_mode, "full_sovereignty");
+        assert_eq!(mirror.source, "stable_core_agency");
+        assert_eq!(mirror.updated_at_unix_s, Some(1234.5));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stable_core_live_intake_divisors_follow_stage_budget_and_drain_gate() {
+        let runtime = runtime(&[
+            ("MINIME_RUNTIME_PROFILE", STABLE_CORE_PROFILE),
+            ("MINIME_RESCUE_LIVE_AUDIO_DIVISOR", "16"),
+            ("MINIME_RESCUE_LIVE_VIDEO_DIVISOR", "4"),
+            ("MINIME_RESCUE_LIVE_INTAKE_STAGES", "hold,elevated"),
+        ]);
+
+        assert_eq!(
+            runtime.live_intake_divisors_for_stage("hold", true, false, 66.0, 0.0),
+            (16, 4)
+        );
+        assert_eq!(
+            runtime.live_intake_divisors_for_stage("elevated", true, false, 68.0, -0.5),
+            (16, 4)
+        );
+        assert_eq!(
+            runtime.live_intake_divisors_for_stage("discharge", true, false, 66.0, 0.0),
+            (0, 0)
+        );
+        assert_eq!(
+            runtime.live_intake_divisors_for_stage("hold", true, true, 66.0, 0.0),
+            (0, 0)
+        );
+        assert_eq!(
+            runtime.live_intake_divisors_for_stage("hold", false, false, 66.0, 0.0),
+            (0, 0)
+        );
+        assert_eq!(
+            runtime.live_intake_divisors_for_stage("hold", true, false, 70.0, 0.0),
+            (0, 0)
+        );
+        assert_eq!(
+            runtime.live_intake_divisors_for_stage("hold", true, false, 66.0, 1.5),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn stable_core_full_presence_profile_allows_simultaneous_intake_until_discharge() {
+        let runtime = runtime(&[
+            ("MINIME_RUNTIME_PROFILE", STABLE_CORE_PROFILE),
+            ("MINIME_RESCUE_LIVE_AUDIO_DIVISOR", "4"),
+            ("MINIME_RESCUE_LIVE_VIDEO_DIVISOR", "4"),
+            ("MINIME_RESCUE_LIVE_INTAKE_STAGES", "hold,elevated"),
+            ("MINIME_STABLE_CORE_SENSORY_PROFILE", FULL_PRESENCE_PROFILE),
+        ]);
+
+        assert_eq!(
+            runtime.live_intake_divisors_for_stage("hold", true, true, 71.9, 2.0),
+            (4, 4)
+        );
+        assert_eq!(
+            runtime.live_intake_divisors_for_stage("hold", true, false, 72.0, 0.0),
+            (0, 0)
+        );
+        assert_eq!(
+            runtime.live_intake_divisors_for_stage("discharge", true, false, 78.0, -1.0),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn stable_core_sensory_mute_is_active_until_deadline() {
+        let dir = env::temp_dir().join(format!("stable_core_sensory_mute_test_{}", now_unix_s()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join(SEMANTIC_SENSORY_MUTE_FILE);
+        fs::write(
+            &path,
+            r#"{
+                "active_until_unix_s": 150.0,
+                "reason": "limited_write_semantic_send",
+                "source_profile": "bridge_semantic_serial_v1",
+                "last_semantic_sent_at_unix_s": 20.0
+            }"#,
+        )
+        .unwrap();
+
+        let active = load_stable_core_sensory_mute(&path, 100.0);
+        assert!(active.active);
+        assert_eq!(
+            active.source_profile.as_deref(),
+            Some("bridge_semantic_serial_v1")
+        );
+
+        let expired = load_stable_core_sensory_mute(&path, 151.0);
+        assert!(!expired.active);
+        assert_eq!(expired.active_until_unix_s, Some(150.0));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

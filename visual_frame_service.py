@@ -33,12 +33,14 @@ RUNTIME_DIR = WORKSPACE_DIR / "runtime"
 HOST_FRAME_PATH = RUNTIME_DIR / "host_frame.jpg"
 HOST_TELEMETRY_PATH = RUNTIME_DIR / "host_telemetry.json"
 SENSORY_SOURCE_PATH = RUNTIME_DIR / "sensory_source.json"
+RESCUE_PROFILE_PATH = WORKSPACE_DIR / "rescue_profile.json"
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 LLAVA_MODEL = "llava-llama3"
 WS_URI = "ws://127.0.0.1:7879"
 SOURCE_STATE_MAX_AGE_MS = 10_000
 HOST_FRAME_MAX_AGE_S = 15.0
+REQUEST_MAX_AGE_S = float(os.environ.get("MINIME_VISUAL_REQUEST_MAX_AGE_S", "600"))
 
 
 class VisualFrameService:
@@ -88,6 +90,36 @@ class VisualFrameService:
             return False
 
         return frame_age_s <= HOST_FRAME_MAX_AGE_S
+
+    def _request_is_fresh(self, request_file: Path, request_data: Dict[str, Any]) -> bool:
+        timestamp = str(request_data.get("timestamp", "") or "")
+        if timestamp:
+            try:
+                requested_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                age_s = abs((datetime.now(requested_at.tzinfo) - requested_at).total_seconds())
+                return age_s <= REQUEST_MAX_AGE_S
+            except Exception:
+                pass
+        try:
+            age_s = time.time() - request_file.stat().st_mtime
+        except OSError:
+            return False
+        return age_s <= REQUEST_MAX_AGE_S
+
+    def _semantic_send_allowed(self) -> tuple[bool, str]:
+        try:
+            profile = json.loads(RESCUE_PROFILE_PATH.read_text())
+        except Exception:
+            return True, "no_stable_core_profile"
+        if not isinstance(profile, dict):
+            return True, "invalid_profile"
+        if bool(profile.get("stable_core_enabled")) and not bool(
+            profile.get("visual_frame_semantic_enabled", False)
+        ):
+            return False, "stable_core_visual_semantic_disabled"
+        if profile.get("bridge_write_profile") == "observe_only":
+            return False, "observe_only_profile"
+        return True, "allowed"
 
     def _active_source(self) -> str:
         if self.source == "physical":
@@ -179,6 +211,28 @@ class VisualFrameService:
             logging.error(f"Bad request {request_file}: {e}")
             return
 
+        if not self._request_is_fresh(request_file, request_data):
+            request_id = request_data.get("request_id", request_file.stem)
+            response = {
+                "request_id": request_id,
+                "request_timestamp": request_data.get("timestamp", ""),
+                "response_timestamp": datetime.now().isoformat(),
+                "visual_available": False,
+                "description": "Visual request expired before processing.",
+                "error": "stale_request_skipped",
+                "source": "none",
+                "semantic_sent": False,
+                "semantic_block_reason": "stale_request_skipped",
+            }
+            resp_file = RESPONSES_DIR / f"response_{request_id}.json"
+            resp_file.write_text(json.dumps(response, indent=2))
+            logging.info(f"Skipped stale visual request: {request_file.name}")
+            try:
+                request_file.rename(REQUESTS_DIR / "processed" / request_file.name)
+            except Exception:
+                request_file.unlink(missing_ok=True)
+            return
+
         prompt = request_data.get("prompt", "Describe what you see concisely.")
         analyze = request_data.get("analyze", True)
         request_id = request_data.get("request_id", request_file.stem)
@@ -192,6 +246,8 @@ class VisualFrameService:
                 "description": "Host-state frame not accessible" if capture_source == "host" else "Camera not accessible",
                 "error": "capture_failed",
                 "source": capture_source,
+                "semantic_sent": False,
+                "semantic_block_reason": "capture_failed",
             }
         else:
             timestamp = datetime.now().isoformat().replace(":", "-")
@@ -206,8 +262,13 @@ class VisualFrameService:
             if analyze:
                 description = self.analyze_with_llava(frame, prompt)
 
-            if description:
+            semantic_allowed, semantic_reason = self._semantic_send_allowed()
+            semantic_sent = False
+            if description and semantic_allowed:
                 self.send_semantic(description)
+                semantic_sent = True
+            elif description:
+                logging.info(f"Semantic embedding suppressed: {semantic_reason}")
 
             response = {
                 "visual_available": True,
@@ -217,6 +278,8 @@ class VisualFrameService:
                 "image_filename": image_filename,
                 "image_base64": image_b64,
                 "source": capture_source,
+                "semantic_sent": semantic_sent,
+                "semantic_block_reason": None if semantic_sent else semantic_reason,
             }
 
         response["request_id"] = request_id

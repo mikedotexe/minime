@@ -16,6 +16,7 @@ use minime::controller_recovery::{
     recovery_keep_ceiling, recovery_keep_floor_base, semantic_lane_is_active,
     semantic_projection_bias, underfill_spread_relief,
 };
+use minime::spectral_fingerprint::SpectralFingerprintV1;
 use minime::stable_core::StableCoreRuntime;
 use minime::startup_restore::load_regulator_context;
 use serde::Serialize;
@@ -223,6 +224,8 @@ struct EigenPacket {
     fill_ratio: f32,
     active_mode_count: usize,
     active_mode_energy_ratio: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lambda1_rel: Option<f32>,
     modalities: ModalityStatus,
     neural: Option<NeuralOutputs>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -233,6 +236,10 @@ struct EigenPacket {
     /// not just its scalar magnitude.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     spectral_fingerprint: Option<Vec<f32>>,
+    /// Typed view of the legacy 32D fingerprint, emitted alongside the vector
+    /// so downstream readers can stop relying on anonymous slot numbers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spectral_fingerprint_v1: Option<SpectralFingerprintV1>,
     /// Structural diversity derived from eigenvector concentration and
     /// inter-mode coupling geometry. Complements spectral entropy by asking
     /// whether the reservoir's shape itself is narrow or varied.
@@ -241,6 +248,13 @@ struct EigenPacket {
     /// Selected 12D vague-memory glimpse, foregrounded for continuity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     spectral_glimpse_12d: Option<Vec<f32>>,
+    /// Compact top-k eigenvector field exported from the raw live eigenvectors.
+    ///
+    /// This makes the "eigenvector field" literal for Astrid/Minime without
+    /// dumping the full reservoir matrix: top component landmarks, per-mode
+    /// concentration, prior overlap, and pairwise mode overlap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    eigenvector_field: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     selected_memory_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -991,17 +1005,27 @@ async fn run_engine(
     let mut cov_keep = 0.955_f32;
     let mut semantic_energy = 0.0f32;
     let mut semantic_delta = 0.0f32;
+    let mut semantic_kernel_active = false;
+    let mut semantic_admission = "none";
     let mut prev_semantic = vec![0.0f32; sensory_bus::LLAVA_DIM];
     let mut stable_core_stage = OverfillStage::Bootstrap;
     let mut stable_core_stage_ticks: u64 = 0;
     let mut stable_core_guard = rescue_overfill::stage_guard(stable_core_stage);
     let mut stable_core_scaffold_active = false;
-    let mut stable_core_scaffold_activated_at_unix_ms: Option<u64> = None;
+    let mut stable_core_restart_gate =
+        rescue_scaffold::StableCoreRestartGate::new(rescue_scaffold::now_unix_ms());
     let mut stable_core_structural_pi = rescue_scaffold::StabilityPiState::default();
     let mut stable_core_structural_pi_output = rescue_scaffold::StabilityPiOutput::inactive(0.0);
     let mut stable_core_last_fill_slope_pct_per_sec = 0.0f32;
-    let mut stable_core_activation_candidate_ticks: u32 = 0;
-    let mut stable_core_activation_delay_reason: &'static str = "inactive";
+    let mut stable_core_restart_gate_active_now: bool;
+    let mut stable_core_restart_gate_applied_now: bool;
+    let mut stable_core_restart_gate_reason: &'static str;
+    let mut stable_core_restart_gate_drain_floor: f32;
+    let mut stable_core_applied_scaffold_live_weight: f32;
+    let mut stable_core_applied_scaffold_drain_weight: f32;
+    let stable_core_sensory_mute_path =
+        minime::stable_core::stable_core_sensory_mute_path(&workspace_dir);
+    let mut stable_core_sensory_mute = minime::stable_core::StableCoreSensoryMute::inactive();
 
     // Create scale-invariant eigenfill estimator (use covariance dimension for normalization)
     let mut eigenfill_estimator = if stable_core_runtime.enabled {
@@ -1041,7 +1065,8 @@ async fn run_engine(
     let (mut pi_reg, spectral_source, mut _cheby_plan) = if enable_bandstop {
         // Initialize PI regulator with custom target
         let mut pi_cfg = PIRegCfg::default();
-        // Use the eigenfill_target from CLI (default 55%)
+        // Use the eigenfill_target from CLI or launch profile. Stable-core
+        // profiles now align this mirror with the wider 68% structural shelf.
         pi_cfg.target_fill = eigenfill_target * 100.0; // Convert to percentage
                                                        // Golden Reset (2026-04-02): ALL inline PI overrides removed.
                                                        // PIRegCfg defaults now match golden-period commit 1167939 values.
@@ -1226,6 +1251,8 @@ async fn run_engine(
 
     // Previous top eigenvector for rotation rate detection in spectral fingerprint.
     let mut prev_v1: Vec<f32> = vec![0.0; n];
+    // Previous compact top-k eigenvectors for direct field overlap telemetry.
+    let mut prev_eigenvector_field_modes: Vec<Vec<f32>> = Vec::new();
 
     // --- Panic mode state ---
     let mut panic_counter: u32 = 0;
@@ -1404,6 +1431,26 @@ async fn run_engine(
         // Drain batch of samples from sensory bus queue
         let batch = sensory_bus.drain_sensory_batch();
         let latest_sample_meta = batch.last().map(|(_, meta)| meta.clone());
+        let (
+            semantic_input_energy,
+            semantic_input_active,
+            semantic_input_fresh_ms,
+            semantic_input_stale_ms,
+        ) = if let Some(meta) = latest_sample_meta.as_ref() {
+            (
+                meta.semantic_input_energy,
+                meta.semantic_input_active,
+                meta.semantic_fresh_ms,
+                meta.semantic_stale_ms,
+            )
+        } else {
+            (
+                0.0,
+                false,
+                sensory_bus.semantic_fresh_ms(),
+                sensory_bus.current_semantic_stale_ms(),
+            )
+        };
         let mut audio_synth_injected = false;
         let mut video_synth_injected = false;
         let stable_core_esn_policy =
@@ -2189,6 +2236,15 @@ async fn run_engine(
                 n as f32
             };
             let mut stable_core_scaffold_blend = 0.0;
+            let mut stable_core_spectral_pressure_bias = 0.0f32;
+            let mut stable_core_pressure_live_weight_delta = 0.0f32;
+            let mut stable_core_pressure_drain_delta = 0.0f32;
+            stable_core_restart_gate_active_now = false;
+            stable_core_restart_gate_applied_now = false;
+            stable_core_restart_gate_reason = "inactive";
+            stable_core_restart_gate_drain_floor = 0.0;
+            stable_core_applied_scaffold_live_weight = 0.0;
+            stable_core_applied_scaffold_drain_weight = 0.0;
             let mut stable_core_structural_mode = if stable_core_runtime.enabled {
                 "free_rebuild"
             } else {
@@ -2204,10 +2260,16 @@ async fn run_engine(
                     stable_core_stage,
                     stable_core_scaffold_active,
                 );
+                stable_core_restart_gate_active_now = stable_core_restart_gate.active();
+                if stable_core_restart_gate_active_now {
+                    stable_core_restart_gate_reason = "restart_gate_recovery_latch";
+                }
                 if stable_core_scaffold_active {
                     if let Some(scaffold) = stable_core_scaffold.as_ref() {
                         if stable_core_structural_pi_output.reentry_active {
                             let live_weight = stable_core_structural_pi_output.reentry_live_weight;
+                            stable_core_applied_scaffold_live_weight = live_weight;
+                            stable_core_applied_scaffold_drain_weight = 0.0;
                             let live = gpu.as_f32_slice(&a_buf, n * n).to_vec();
                             if let Some(blended) = rescue_scaffold::blend_toward_scaffold_with_drain(
                                 &live,
@@ -2225,14 +2287,32 @@ async fn run_engine(
                             if stable_core_structural_pi_output.recovery_impulse_active {
                                 stable_core_structural_mode = "free_rebuild_recovery_impulse";
                                 let impulse_cov_input = cov_input.clone();
-                                let impulse_keep =
-                                    stable_core_structural_pi_output.recovery_impulse_keep;
+                                let impulse_keep = stable_core_restart_gate.recovery_impulse_keep(
+                                    rescue_scaffold::now_unix_ms(),
+                                    stable_core_structural_pi_output.recovery_impulse_keep,
+                                );
                                 let impulse_trace_target = (n as f32)
                                     * stable_core_structural_pi_output.recovery_impulse_trace_scale;
-                                let reset_on_entry = !was_low_fill_escape_active
-                                    && last_fill_pct
-                                        < rescue_scaffold::STABILITY_PI_LOW_FILL_TRIGGER_PCT;
-                                if reset_on_entry {
+                                if impulse_keep
+                                    < stable_core_structural_pi_output.recovery_impulse_keep
+                                {
+                                    stable_core_structural_mode =
+                                        "free_rebuild_restart_reset_impulse";
+                                }
+                                let reset_for_impulse = stable_core_structural_pi_output
+                                    .recovery_identity_reset_requested
+                                    || stable_core_restart_gate
+                                        .should_request_recovery_identity_reset(
+                                            last_fill_pct,
+                                            stable_core_structural_pi_output
+                                                .recovery_impulse_active,
+                                        );
+                                if reset_for_impulse {
+                                    stable_core_restart_gate.record_low_fill_reset(
+                                        rescue_scaffold::now_unix_ms(),
+                                        last_fill_pct,
+                                    );
+                                    stable_core_structural_pi.recovery_identity_reset_done = true;
                                     eprintln!(
                                         "🧯 Stable core recovery impulse: resetting covariance at {:.1}% fill",
                                         last_fill_pct
@@ -2247,7 +2327,7 @@ async fn run_engine(
                                     impulse_keep,
                                     impulse_trace_target,
                                 );
-                                if reset_on_entry {
+                                if reset_for_impulse {
                                     last_cov_vec.fill(0.0);
                                 }
                             } else {
@@ -2270,9 +2350,50 @@ async fn run_engine(
                                 );
                             }
                         } else {
+                            stable_core_spectral_pressure_bias =
+                                sensory_bus.get_target_lambda_bias().clamp(-0.10, 0.10);
+                            stable_core_pressure_live_weight_delta =
+                                (-stable_core_spectral_pressure_bias).max(0.0) * 0.50;
+                            stable_core_pressure_drain_delta =
+                                stable_core_spectral_pressure_bias.max(0.0) * 0.020
+                                    - (-stable_core_spectral_pressure_bias).max(0.0) * 0.030;
                             let live_weight =
-                                rescue_scaffold::scaffold_live_weight(stable_core_stage);
-                            let drain_weight = stable_core_structural_pi_output.drain_weight;
+                                (rescue_scaffold::scaffold_live_weight(stable_core_stage)
+                                    + stable_core_pressure_live_weight_delta)
+                                    .clamp(0.0, 0.25);
+                            let mut drain_weight = (stable_core_structural_pi_output.drain_weight
+                                + stable_core_pressure_drain_delta)
+                                .clamp(0.0, 1.0 - live_weight);
+                            let restart_gate_age_secs = stable_core_restart_gate
+                                .scaffold_activation_age_secs(rescue_scaffold::now_unix_ms());
+                            stable_core_restart_gate_active_now = stable_core_restart_gate.active();
+                            if let Some((floor, reason)) = stable_core_restart_gate
+                                .drain_floor(last_fill_pct, stable_core_last_fill_slope_pct_per_sec)
+                            {
+                                stable_core_restart_gate_drain_floor = floor;
+                                stable_core_restart_gate_reason = reason;
+                                if drain_weight < floor {
+                                    drain_weight = floor.clamp(0.0, 1.0 - live_weight);
+                                    stable_core_restart_gate_applied_now = true;
+                                }
+                            } else if stable_core_restart_gate_active_now {
+                                stable_core_restart_gate_reason = if restart_gate_age_secs
+                                    .map(|age| age > rescue_scaffold::STABLE_CORE_RESTART_GATE_SECS)
+                                    .unwrap_or(false)
+                                {
+                                    "restart_gate_awaiting_settle_proof"
+                                } else {
+                                    "restart_gate_monitoring"
+                                };
+                            }
+                            stable_core_applied_scaffold_live_weight = live_weight;
+                            stable_core_applied_scaffold_drain_weight = drain_weight;
+                            if drain_weight > 0.0 {
+                                stable_core_restart_gate.record_drain_applied(
+                                    rescue_scaffold::now_unix_ms(),
+                                    last_fill_pct,
+                                );
+                            }
                             let live = gpu.as_f32_slice(&a_buf, n * n).to_vec();
                             if let Some(blended) = rescue_scaffold::blend_toward_scaffold_with_drain(
                                 &live,
@@ -2284,11 +2405,14 @@ async fn run_engine(
                                 target.copy_from_slice(&blended);
                                 gpu.mark_modified_f32(&a_buf, n * n);
                                 stable_core_scaffold_blend = 1.0 - live_weight;
-                                stable_core_structural_mode = if drain_weight > 0.0 {
-                                    "scaffold_hold_with_drain"
-                                } else {
-                                    "scaffold_hold"
-                                };
+                                stable_core_structural_mode =
+                                    if stable_core_restart_gate_applied_now {
+                                        "scaffold_restart_gate_drain"
+                                    } else if drain_weight > 0.0 {
+                                        "scaffold_hold_with_drain"
+                                    } else {
+                                        "scaffold_hold"
+                                    };
                             }
                         }
                     }
@@ -2533,45 +2657,38 @@ async fn run_engine(
                 );
                 let live_audio_divisor = sensory_bus.live_audio_divisor();
                 let live_video_divisor = sensory_bus.live_video_divisor();
+                stable_core_restart_gate.record_measured_fill(
+                    rescue_scaffold::now_unix_ms(),
+                    eigenfill_pct,
+                    stable_core_measured_fill_slope_pct_per_sec,
+                    stable_core_stage,
+                    semantic_active,
+                    stable_core_scaffold_active,
+                    stable_core_structural_pi_output.reentry_active,
+                    stable_core_structural_pi_output.recovery_impulse_active
+                        || stable_core_structural_pi_output.low_fill_escape_active,
+                );
                 if stable_core_scaffold_active {
-                    stable_core_activation_candidate_ticks = 0;
-                    stable_core_activation_delay_reason = "active";
+                    stable_core_restart_gate.mark_scaffold_active();
                 } else if stable_core_scaffold.is_some() {
-                    let activation_reason =
-                        rescue_scaffold::stable_core_scaffold_activation_delay_reason(
-                            stable_core_stage,
-                            eigenfill_pct,
-                            stable_core_measured_fill_slope_pct_per_sec,
-                            semantic_active,
-                            live_audio_divisor,
-                            live_video_divisor,
-                        );
-                    if activation_reason == "candidate" {
-                        stable_core_activation_candidate_ticks =
-                            stable_core_activation_candidate_ticks.saturating_add(1);
-                        stable_core_activation_delay_reason = "candidate";
-                        if stable_core_activation_candidate_ticks
-                            >= rescue_scaffold::SCAFFOLD_ACTIVATION_REQUIRED_TICKS
-                        {
-                            stable_core_scaffold_active = true;
-                            stable_core_scaffold_activated_at_unix_ms =
-                                Some(rescue_scaffold::now_unix_ms());
-                            stable_core_activation_delay_reason = "activated";
-                        }
-                    } else if activation_reason == "protective_downslope_candidate" {
-                        stable_core_activation_candidate_ticks =
-                            rescue_scaffold::SCAFFOLD_ACTIVATION_REQUIRED_TICKS;
+                    let activation = stable_core_restart_gate.evaluate_activation(
+                        stable_core_stage,
+                        eigenfill_pct,
+                        stable_core_measured_fill_slope_pct_per_sec,
+                        semantic_active,
+                        live_audio_divisor,
+                        live_video_divisor,
+                    );
+                    if activation.activate {
                         stable_core_scaffold_active = true;
-                        stable_core_scaffold_activated_at_unix_ms =
-                            Some(rescue_scaffold::now_unix_ms());
-                        stable_core_activation_delay_reason = "protective_downslope_activated";
-                    } else {
-                        stable_core_activation_candidate_ticks = 0;
-                        stable_core_activation_delay_reason = activation_reason;
+                        stable_core_restart_gate.record_scaffold_activated(
+                            rescue_scaffold::now_unix_ms(),
+                            eigenfill_pct,
+                            activation.reason,
+                        );
                     }
                 } else {
-                    stable_core_activation_candidate_ticks = 0;
-                    stable_core_activation_delay_reason = "scaffold_unavailable";
+                    stable_core_restart_gate.mark_scaffold_unavailable();
                 }
                 stable_core_last_fill_slope_pct_per_sec =
                     stable_core_measured_fill_slope_pct_per_sec;
@@ -2582,16 +2699,23 @@ async fn run_engine(
                     stable_core_scaffold_active,
                 );
                 let stage_name = format!("{:?}", stable_core_stage).to_ascii_lowercase();
-                if stable_core_runtime.allows_live_intake_for_stage(&stage_name)
-                    && !stable_core_intake_pi_output.high_fill_drain_active
-                {
-                    sensory_bus.set_live_intake_divisors(
-                        stable_core_runtime.live_audio_divisor,
-                        stable_core_runtime.live_video_divisor,
+                let (mut live_audio_divisor, mut live_video_divisor) = stable_core_runtime
+                    .live_intake_divisors_for_stage(
+                        &stage_name,
+                        stable_core_scaffold_active,
+                        stable_core_intake_pi_output.high_fill_drain_active,
+                        eigenfill_pct,
+                        stable_core_last_fill_slope_pct_per_sec,
                     );
-                } else {
-                    sensory_bus.set_live_intake_divisors(0, 0);
+                stable_core_sensory_mute = minime::stable_core::load_stable_core_sensory_mute(
+                    &stable_core_sensory_mute_path,
+                    minime::stable_core::now_unix_s(),
+                );
+                if stable_core_sensory_mute.active {
+                    live_audio_divisor = 0;
+                    live_video_divisor = 0;
                 }
+                sensory_bus.set_live_intake_divisors(live_audio_divisor, live_video_divisor);
             }
             let sem_e = if stable_core_runtime.enabled {
                 0.0
@@ -3909,7 +4033,6 @@ async fn run_engine(
                         filt_smooth = fixed_filt_cmd;
                         panic_counter = 0;
                         panic_cooldown = 0;
-                        sensory_bus.set_live_intake_divisors(0, 0);
                     }
 
                     // 7) Apply gate immediately to SensoryBus
@@ -3970,6 +4093,18 @@ async fn run_engine(
                         None
                     };
                     let semantic_fresh_ms = sensory_bus.semantic_fresh_ms();
+                    let semantic_stale_ms = sensory_bus.current_semantic_stale_ms();
+                    semantic_kernel_active = !stable_core_runtime.enabled
+                        && semantic_lane_is_active(semantic_fresh_ms, semantic_stale_ms);
+                    semantic_admission = if stable_core_runtime.enabled {
+                        "stable_core_kernel_zeroed"
+                    } else if semantic_kernel_active {
+                        "admitted_to_kernel"
+                    } else if semantic_input_energy > 0.0 {
+                        "input_trace_not_active"
+                    } else {
+                        "none"
+                    };
 
                     // Emit health.json for observability with enhanced diagnostics
                     let fill_target_override = sensory_bus.get_fill_target();
@@ -3994,6 +4129,131 @@ async fn run_engine(
                         } else {
                             0.0
                         };
+                    let stable_core_agency_mirror =
+                        stable_core_runtime.agency_mirror(&workspace_dir);
+                    let stable_core_restart_gate_status = stable_core_restart_gate.status(
+                        rescue_scaffold::now_unix_ms(),
+                        stable_core_restart_gate_active_now,
+                        stable_core_restart_gate_applied_now,
+                        stable_core_restart_gate_reason,
+                        stable_core_restart_gate_drain_floor,
+                        stable_core_applied_scaffold_live_weight,
+                        stable_core_applied_scaffold_drain_weight,
+                    );
+                    let stable_core_structural_pi_status = serde_json::json!({
+                        "active": stable_core_structural_pi_output.active,
+                        "target_fill_pct": stable_core_structural_pi_output.target_fill_pct,
+                        "error_pct": stable_core_structural_pi_output.error_pct,
+                        "integral": stable_core_structural_pi_output.integral,
+                        "drain_weight": stable_core_structural_pi_output.drain_weight,
+                        "damping_state": stable_core_structural_pi_output.damping_state,
+                        "drain_gate_reason": stable_core_structural_pi_output.drain_gate_reason,
+                        "drain_suppressed_by_slope": stable_core_structural_pi_output.drain_suppressed_by_slope,
+                        "fill_slope_pct_per_sec": stable_core_structural_pi_output.fill_slope_pct_per_sec,
+                        "low_fill_escape_active": stable_core_structural_pi_output.low_fill_escape_active,
+                        "high_fill_drain_active": stable_core_structural_pi_output.high_fill_drain_active,
+                        "recovery_impulse_active": stable_core_structural_pi_output.recovery_impulse_active,
+                        "recovery_identity_reset_requested": stable_core_structural_pi_output.recovery_identity_reset_requested,
+                        "recovery_impulse_ticks": stable_core_structural_pi_output.recovery_impulse_ticks,
+                        "recovery_impulse_keep": stable_core_structural_pi_output.recovery_impulse_keep,
+                        "recovery_impulse_trace_scale": stable_core_structural_pi_output.recovery_impulse_trace_scale,
+                        "reentry_active": stable_core_structural_pi_output.reentry_active,
+                        "reentry_ticks": stable_core_structural_pi_output.reentry_ticks,
+                        "reentry_live_weight": stable_core_structural_pi_output.reentry_live_weight,
+                        "spectral_pressure_bias": stable_core_spectral_pressure_bias,
+                        "spectral_pressure_live_weight_delta": stable_core_pressure_live_weight_delta,
+                        "spectral_pressure_drain_delta": stable_core_pressure_drain_delta,
+                        "restart_gate_active": stable_core_restart_gate_active_now,
+                        "restart_gate_applied": stable_core_restart_gate_applied_now,
+                        "restart_gate_reason": stable_core_restart_gate_reason,
+                        "restart_gate_drain_floor": stable_core_restart_gate_drain_floor,
+                        "applied_live_weight": stable_core_applied_scaffold_live_weight,
+                        "applied_drain_weight": stable_core_applied_scaffold_drain_weight,
+                        "activation_candidate_ticks": stable_core_restart_gate.activation_candidate_ticks(),
+                        "activation_delay_reason": stable_core_restart_gate.activation_delay_reason(),
+                    });
+                    let stable_core_status = serde_json::json!({
+                        "enabled": stable_core_runtime.enabled,
+                        "profile": &stable_core_runtime.profile,
+                        "controller_mode": if stable_core_runtime.enabled {
+                            "fixed_survival"
+                        } else {
+                            "current_runtime"
+                        },
+                        "physiology_source": if stable_core_runtime.enabled {
+                            "pinned_rescue_b8823ad_port"
+                        } else {
+                            "current_runtime"
+                        },
+                        "fill_estimator_mode": if stable_core_runtime.enabled {
+                            "fixed_survival"
+                        } else {
+                            "current_runtime"
+                        },
+                        "covariance_path": if stable_core_runtime.enabled {
+                            "pinned_rescue_fixed_survival"
+                        } else {
+                            "current_runtime"
+                        },
+                        "input_path": if stable_core_runtime.enabled {
+                            minime::stable_core::PINNED_RESCUE_INPUT_PATH
+                        } else {
+                            "current_runtime"
+                        },
+                        "esn_path": if stable_core_runtime.enabled {
+                            minime::stable_core::PINNED_RESCUE_ESN_PATH
+                        } else {
+                            "current_runtime"
+                        },
+                        "current_runtime_modulation_active": !stable_core_runtime.enabled,
+                        "synthetic_input_active": false,
+                        "scaffold_mode": if stable_core_runtime.enabled {
+                            if stable_core_scaffold_active {
+                                stable_core_structural_mode
+                            } else if stable_core_scaffold.is_some() {
+                                "available_pending_activation"
+                            } else {
+                                "free_rebuild"
+                            }
+                        } else {
+                            "not_active"
+                        },
+                        "stage": format!("{:?}", stable_core_stage).to_ascii_lowercase(),
+                        "stage_ticks": stable_core_stage_ticks,
+                        "scaffold_available": stable_core_scaffold.is_some(),
+                        "scaffold_active": stable_core_scaffold_active,
+                        "scaffold_source": stable_core_scaffold.as_ref().map(|scaffold| scaffold.source.clone()),
+                        "scaffold_trace": stable_core_scaffold.as_ref().map(|scaffold| scaffold.trace),
+                        "scaffold_activated_at_unix_ms": stable_core_restart_gate.scaffold_activated_at_unix_ms(),
+                        "scaffold_blend": if stable_core_scaffold_active {
+                            Some(stable_core_scaffold_blend)
+                        } else {
+                            None::<f32>
+                        },
+                        "structural_mode": stable_core_structural_mode,
+                        "restart_gate": &stable_core_restart_gate_status,
+                        "structural_pi": &stable_core_structural_pi_status,
+                        "agency_stage": &stable_core_agency_mirror.agency_stage,
+                        "agent_budget_mode": &stable_core_agency_mirror.agent_budget_mode,
+                        "agency_source": stable_core_agency_mirror.source,
+                        "agency_updated_at_unix_s": stable_core_agency_mirror.updated_at_unix_s,
+                        "checkpoint_lineage_enabled": stable_core_runtime.checkpoint_lineage_enabled,
+                        "neural_bundle_enabled": stable_core_runtime.neural_bundle_enabled,
+                        "rollback_reason": &stable_core_runtime.rollback_reason,
+                        "sensory_budget": {
+                            "source": "runtime_profile",
+                            "profile": &stable_core_runtime.sensory_presence_profile,
+                            "health_budgeted": stable_core_runtime.enabled,
+                            "live_audio_divisor": sensory_bus.live_audio_divisor(),
+                            "live_video_divisor": sensory_bus.live_video_divisor(),
+                            "allowed_stages": &stable_core_runtime.live_intake_stages,
+                            "semantic_mute_active": stable_core_sensory_mute.active,
+                            "semantic_mute_until_unix_s": stable_core_sensory_mute.active_until_unix_s,
+                            "semantic_mute_reason": stable_core_sensory_mute.reason.as_deref(),
+                            "semantic_mute_source_profile": stable_core_sensory_mute.source_profile.as_deref(),
+                            "last_semantic_sent_at_unix_s": stable_core_sensory_mute.last_semantic_sent_at_unix_s,
+                        },
+                    });
                     let health_provenance = serde_json::json!({
                         "session_id": session_id,
                         "wall_clock_unix_ms": health_wall_clock_unix_ms,
@@ -4032,6 +4292,7 @@ async fn run_engine(
                         "startup_restore": &startup_restore_status,
                         "provenance": &health_provenance,
                         "fill_pct": eigenfill_pct,
+                        "lambda1": lambda1,
                         "lambda1_abs": lambda1,
                         "lambda1_cov": lambda1,  // Covariance matrix λ₁ (0-512 range)
                         "lambda1_esn": esn_lambda1,  // ESN reservoir λ₁ (1.0-1.6 comfort zone)
@@ -4077,6 +4338,20 @@ async fn run_engine(
                         "recovery_gate_floor": recovery_gate_floor,
                         "recovery_filt_ceil": recovery_filt_ceil,
                         "semantic_fresh_ms": semantic_fresh_ms,
+                        "semantic_stale_ms": semantic_stale_ms,
+                        "semantic": {
+                            "active": semantic_kernel_active,
+                            "energy": sem_e,
+                            "delta": sem_d,
+                            "kernel_active": semantic_kernel_active,
+                            "kernel_energy": sem_e,
+                            "kernel_delta": sem_d,
+                            "input_active": semantic_input_active,
+                            "input_energy": semantic_input_energy,
+                            "input_fresh_ms": semantic_input_fresh_ms,
+                            "input_stale_ms": semantic_input_stale_ms,
+                            "admission": semantic_admission,
+                        },
                         "gate": gate_smooth,
                         "gate_raw": raw_gate_cmd,  // PI controller output before modulation
                         "filt": filt_smooth,
@@ -4096,6 +4371,7 @@ async fn run_engine(
                                 "filt_cmd": pi.filt,
                                 "target_fill": pi.cfg.target_fill,  // Already in percentage (0-100)
                                 "target_lambda1_rel": pi.cfg.target_lambda1_rel,
+                                "target_geom_rel": pi.cfg.target_geom_rel,
                                 "kp": pi.cfg.kp,
                                 "ki": pi.cfg.ki,
                                 "max_step": pi.cfg.max_step,
@@ -4132,104 +4408,7 @@ async fn run_engine(
                             "live_audio_divisor": sensory_bus.live_audio_divisor(),
                             "live_video_divisor": sensory_bus.live_video_divisor(),
                         },
-                        "stable_core": {
-                            "enabled": stable_core_runtime.enabled,
-                            "profile": &stable_core_runtime.profile,
-                            "controller_mode": if stable_core_runtime.enabled {
-                                "fixed_survival"
-                            } else {
-                                "current_runtime"
-                            },
-                            "physiology_source": if stable_core_runtime.enabled {
-                                "pinned_rescue_b8823ad_port"
-                            } else {
-                                "current_runtime"
-                            },
-                            "fill_estimator_mode": if stable_core_runtime.enabled {
-                                "fixed_survival"
-                            } else {
-                                "current_runtime"
-                            },
-                            "covariance_path": if stable_core_runtime.enabled {
-                                "pinned_rescue_fixed_survival"
-                            } else {
-                                "current_runtime"
-                            },
-                            "input_path": if stable_core_runtime.enabled {
-                                minime::stable_core::PINNED_RESCUE_INPUT_PATH
-                            } else {
-                                "current_runtime"
-                            },
-                            "esn_path": if stable_core_runtime.enabled {
-                                minime::stable_core::PINNED_RESCUE_ESN_PATH
-                            } else {
-                                "current_runtime"
-                            },
-                            "current_runtime_modulation_active": !stable_core_runtime.enabled,
-                            "synthetic_input_active": false,
-                            "scaffold_mode": if stable_core_runtime.enabled {
-                                if stable_core_scaffold_active {
-                                    stable_core_structural_mode
-                                } else if stable_core_scaffold.is_some() {
-                                    "available_pending_activation"
-                                } else {
-                                    "free_rebuild"
-                                }
-                            } else {
-                                "not_active"
-                            },
-                            "stage": format!("{:?}", stable_core_stage).to_ascii_lowercase(),
-                            "stage_ticks": stable_core_stage_ticks,
-                            "scaffold_available": stable_core_scaffold.is_some(),
-                            "scaffold_active": stable_core_scaffold_active,
-                            "scaffold_source": stable_core_scaffold
-                                .as_ref()
-                                .map(|scaffold| scaffold.source.clone()),
-                            "scaffold_trace": stable_core_scaffold
-                                .as_ref()
-                                .map(|scaffold| scaffold.trace),
-                            "scaffold_activated_at_unix_ms": stable_core_scaffold_activated_at_unix_ms,
-                            "scaffold_blend": if stable_core_scaffold_active {
-                                Some(stable_core_scaffold_blend)
-                            } else {
-                                None::<f32>
-                            },
-                            "structural_mode": stable_core_structural_mode,
-                            "structural_pi": {
-                                "active": stable_core_structural_pi_output.active,
-                                "target_fill_pct": stable_core_structural_pi_output.target_fill_pct,
-                                "error_pct": stable_core_structural_pi_output.error_pct,
-                                "integral": stable_core_structural_pi_output.integral,
-                                "drain_weight": stable_core_structural_pi_output.drain_weight,
-                                "damping_state": stable_core_structural_pi_output.damping_state,
-                                "drain_gate_reason": stable_core_structural_pi_output.drain_gate_reason,
-                                "drain_suppressed_by_slope": stable_core_structural_pi_output.drain_suppressed_by_slope,
-                                "fill_slope_pct_per_sec": stable_core_structural_pi_output.fill_slope_pct_per_sec,
-                                "low_fill_escape_active": stable_core_structural_pi_output.low_fill_escape_active,
-                                "high_fill_drain_active": stable_core_structural_pi_output.high_fill_drain_active,
-                                "recovery_impulse_active": stable_core_structural_pi_output.recovery_impulse_active,
-                                "recovery_impulse_ticks": stable_core_structural_pi_output.recovery_impulse_ticks,
-                                "recovery_impulse_keep": stable_core_structural_pi_output.recovery_impulse_keep,
-                                "recovery_impulse_trace_scale": stable_core_structural_pi_output.recovery_impulse_trace_scale,
-                                "reentry_active": stable_core_structural_pi_output.reentry_active,
-                                "reentry_ticks": stable_core_structural_pi_output.reentry_ticks,
-                                "reentry_live_weight": stable_core_structural_pi_output.reentry_live_weight,
-                                "activation_candidate_ticks": stable_core_activation_candidate_ticks,
-                                "activation_delay_reason": stable_core_activation_delay_reason,
-                            },
-                            "agency_stage": &stable_core_runtime.agency_stage,
-                            "agent_budget_mode": &stable_core_runtime.agent_budget_mode,
-                            "checkpoint_lineage_enabled": stable_core_runtime.checkpoint_lineage_enabled,
-                            "neural_bundle_enabled": stable_core_runtime.neural_bundle_enabled,
-                            "rollback_reason": &stable_core_runtime.rollback_reason,
-                            "sensory_budget": {
-                                "source": "runtime_profile",
-                                "health_budgeted": stable_core_runtime.enabled,
-                                "live_audio_divisor": sensory_bus.live_audio_divisor(),
-                                "live_video_divisor": sensory_bus.live_video_divisor(),
-                                "allowed_stages": &stable_core_runtime.live_intake_stages,
-                            },
-                        },
+                        "stable_core": &stable_core_status,
                     });
                     if let Err(e) = fs::write("workspace/health.json", health.to_string()) {
                         if log_homeostat {
@@ -4433,7 +4612,11 @@ async fn run_engine(
             // Gives Astrid geometric awareness beyond scalar fill%.
             let spectral_fingerprint =
                 compute_spectral_fingerprint(&eigenvalues, &y, n, k, &prev_v1, latest_geom_rel);
+            let spectral_fingerprint_v1 =
+                SpectralFingerprintV1::from_legacy_slots(&spectral_fingerprint);
             let structural_entropy = compute_structural_entropy(&spectral_fingerprint);
+            let eigenvector_field =
+                compute_eigenvector_field(&eigenvalues, &y, n, k, &prev_eigenvector_field_modes);
             // Update entropy for dynamic rho (fingerprint[24] = normalized spectral entropy)
             if spectral_fingerprint.len() > 24 && spectral_fingerprint[24].is_finite() {
                 latest_entropy = spectral_fingerprint[24];
@@ -4470,6 +4653,7 @@ async fn run_engine(
                 prev_v1.clear();
                 prev_v1.extend_from_slice(&y[..n]);
             }
+            prev_eigenvector_field_modes = capture_top_eigenvectors(y, n, k.min(4));
 
             // Broadcast to WebSocket clients
             let audio_had_fresh = latest_sample_meta
@@ -4500,6 +4684,7 @@ async fn run_engine(
                 fill_ratio: eigenfill_pct / 100.0, // Use actual spectral fill, not buffer fill
                 active_mode_count: active_modes.count,
                 active_mode_energy_ratio: active_modes.energy_ratio,
+                lambda1_rel: Some(last_lambda1_rel),
                 modalities: ModalityStatus {
                     audio_fired: audio_had_fresh || audio_synth_injected,
                     video_fired: video_had_fresh || video_synth_injected,
@@ -4526,10 +4711,12 @@ async fn run_engine(
                 },
                 alert: alert.clone(),
                 spectral_fingerprint: Some(spectral_fingerprint),
+                spectral_fingerprint_v1,
                 structural_entropy: Some(structural_entropy),
                 spectral_glimpse_12d: selected_memory
                     .as_ref()
                     .map(|entry| entry.spectral_glimpse_12d.clone()),
+                eigenvector_field: Some(eigenvector_field),
                 selected_memory_id: selected_memory.as_ref().map(|entry| entry.id.clone()),
                 selected_memory_role: selected_memory.as_ref().map(|entry| entry.role.clone()),
                 ising_shadow: ising_shadow_snapshot
@@ -4602,24 +4789,38 @@ async fn run_engine(
                         },
                     },
                 });
+                let spectral_stable_core_agency_mirror =
+                    stable_core_runtime.agency_mirror(&workspace_dir);
+                let spectral_stable_core_restart_gate_status = stable_core_restart_gate.status(
+                    rescue_scaffold::now_unix_ms(),
+                    stable_core_restart_gate_active_now,
+                    stable_core_restart_gate_applied_now,
+                    stable_core_restart_gate_reason,
+                    stable_core_restart_gate_drain_floor,
+                    stable_core_applied_scaffold_live_weight,
+                    stable_core_applied_scaffold_drain_weight,
+                );
                 let state = serde_json::json!({
                     "provenance": &spectral_provenance,
                     "eigenvalues": &packet.eigenvalues,
                     "fill_pct": packet.fill_ratio * 100.0,
                     "fill_ratio": packet.fill_ratio,
                     "eig1": packet.eigenvalues.first().copied().unwrap_or_default(),
+                    "lambda1": packet.eigenvalues.first().copied().unwrap_or_default(),
                     "active_mode_count": packet.active_mode_count,
                     "active_mode_energy_ratio": packet.active_mode_energy_ratio,
+                    "lambda1_rel": packet.lambda1_rel,
                     "modalities": &packet.modalities,
                     "spectral_fingerprint": &packet.spectral_fingerprint,
+                    "spectral_fingerprint_v1": &packet.spectral_fingerprint_v1,
                     "spectral_entropy": latest_entropy,
                     "structural_entropy": &packet.structural_entropy,
                     "spectral_glimpse_12d": &packet.spectral_glimpse_12d,
+                    "eigenvector_field": &packet.eigenvector_field,
                     "selected_memory_id": &packet.selected_memory_id,
                     "selected_memory_role": &packet.selected_memory_role,
                     "spread": spread,
                     "geom_rel": latest_geom_rel,
-                    "lambda1_rel": last_lambda1_rel,
                     "ising_shadow": ising_shadow_snapshot.as_ref().map(|snapshot| serde_json::json!({
                         "reduced_field": &snapshot.reduced_field,
                         "s_soft": &snapshot.s_soft,
@@ -4643,6 +4844,19 @@ async fn run_engine(
                     "semantic_fresh_ms": sensory_bus.semantic_fresh_ms(),
                     "semantic_stale_ms": sensory_bus.current_semantic_stale_ms(),
                     "semantic_stale_shape": sensory_bus.current_semantic_stale_shape().as_str(),
+                    "semantic": {
+                        "active": semantic_kernel_active,
+                        "energy": sem_e,
+                        "delta": sem_d,
+                        "kernel_active": semantic_kernel_active,
+                        "kernel_energy": sem_e,
+                        "kernel_delta": sem_d,
+                        "input_active": semantic_input_active,
+                        "input_energy": semantic_input_energy,
+                        "input_fresh_ms": semantic_input_fresh_ms,
+                        "input_stale_ms": semantic_input_stale_ms,
+                        "admission": semantic_admission,
+                    },
                     "surge_threshold": sensory_bus.surge_threshold(),
                     "geom_curiosity": sensory_bus.get_geom_curiosity(),
                     "recovery_synth_floor": recovery_synth_floor,
@@ -4694,13 +4908,14 @@ async fn run_engine(
                         "scaffold_source": stable_core_scaffold
                             .as_ref()
                             .map(|scaffold| scaffold.source.clone()),
-                        "scaffold_activated_at_unix_ms": stable_core_scaffold_activated_at_unix_ms,
+                        "scaffold_activated_at_unix_ms": stable_core_restart_gate.scaffold_activated_at_unix_ms(),
                         "scaffold_blend": if stable_core_scaffold_active {
                             Some(stable_core_scaffold_blend)
                         } else {
                             None::<f32>
                         },
                         "structural_mode": stable_core_structural_mode,
+                        "restart_gate": &spectral_stable_core_restart_gate_status,
                         "structural_pi": {
                             "active": stable_core_structural_pi_output.active,
                             "target_fill_pct": stable_core_structural_pi_output.target_fill_pct,
@@ -4714,18 +4929,41 @@ async fn run_engine(
                             "low_fill_escape_active": stable_core_structural_pi_output.low_fill_escape_active,
                             "high_fill_drain_active": stable_core_structural_pi_output.high_fill_drain_active,
                             "recovery_impulse_active": stable_core_structural_pi_output.recovery_impulse_active,
+                            "recovery_identity_reset_requested": stable_core_structural_pi_output.recovery_identity_reset_requested,
                             "recovery_impulse_ticks": stable_core_structural_pi_output.recovery_impulse_ticks,
                             "recovery_impulse_keep": stable_core_structural_pi_output.recovery_impulse_keep,
                             "recovery_impulse_trace_scale": stable_core_structural_pi_output.recovery_impulse_trace_scale,
                             "reentry_active": stable_core_structural_pi_output.reentry_active,
                             "reentry_ticks": stable_core_structural_pi_output.reentry_ticks,
                             "reentry_live_weight": stable_core_structural_pi_output.reentry_live_weight,
-                            "activation_candidate_ticks": stable_core_activation_candidate_ticks,
-                            "activation_delay_reason": stable_core_activation_delay_reason,
+                            "restart_gate_active": stable_core_restart_gate_active_now,
+                            "restart_gate_applied": stable_core_restart_gate_applied_now,
+                            "restart_gate_reason": stable_core_restart_gate_reason,
+                            "restart_gate_drain_floor": stable_core_restart_gate_drain_floor,
+                            "applied_live_weight": stable_core_applied_scaffold_live_weight,
+                            "applied_drain_weight": stable_core_applied_scaffold_drain_weight,
+                            "activation_candidate_ticks": stable_core_restart_gate.activation_candidate_ticks(),
+                            "activation_delay_reason": stable_core_restart_gate.activation_delay_reason(),
                         },
-                        "agency_stage": &stable_core_runtime.agency_stage,
+                        "agency_stage": &spectral_stable_core_agency_mirror.agency_stage,
+                        "agent_budget_mode": &spectral_stable_core_agency_mirror.agent_budget_mode,
+                        "agency_source": spectral_stable_core_agency_mirror.source,
+                        "agency_updated_at_unix_s": spectral_stable_core_agency_mirror.updated_at_unix_s,
                         "checkpoint_lineage_enabled": stable_core_runtime.checkpoint_lineage_enabled,
                         "neural_bundle_enabled": stable_core_runtime.neural_bundle_enabled,
+                        "sensory_budget": {
+                            "source": "runtime_profile",
+                            "profile": &stable_core_runtime.sensory_presence_profile,
+                            "health_budgeted": stable_core_runtime.enabled,
+                            "live_audio_divisor": sensory_bus.live_audio_divisor(),
+                            "live_video_divisor": sensory_bus.live_video_divisor(),
+                            "allowed_stages": &stable_core_runtime.live_intake_stages,
+                            "semantic_mute_active": stable_core_sensory_mute.active,
+                            "semantic_mute_until_unix_s": stable_core_sensory_mute.active_until_unix_s,
+                            "semantic_mute_reason": stable_core_sensory_mute.reason.as_deref(),
+                            "semantic_mute_source_profile": stable_core_sensory_mute.source_profile.as_deref(),
+                            "last_semantic_sent_at_unix_s": stable_core_sensory_mute.last_semantic_sent_at_unix_s,
+                        },
                     },
                 });
                 if let Ok(json) = serde_json::to_string(&state) {
@@ -4889,6 +5127,8 @@ async fn run_engine(
                         "ratios": ratios,
                         "fill_pct": packet.fill_ratio * 100.0,
                         "spectral_fingerprint": &packet.spectral_fingerprint,
+                        "spectral_fingerprint_v1": &packet.spectral_fingerprint_v1,
+                        "eigenvector_field": &packet.eigenvector_field,
                         "timestamp": start.elapsed().as_secs(),
                     });
                     if let Ok(json) = serde_json::to_string_pretty(&dynamics) {
@@ -5181,6 +5421,169 @@ fn compute_active_mode_telemetry(
     }
 }
 
+fn capture_top_eigenvectors(y: &[f32], n: usize, count: usize) -> Vec<Vec<f32>> {
+    (0..count)
+        .filter_map(|mode| {
+            let start = mode * n;
+            let end = start + n;
+            (end <= y.len()).then(|| y[start..end].to_vec())
+        })
+        .collect()
+}
+
+fn vector_norm(values: &[f32]) -> f32 {
+    values.iter().map(|value| value * value).sum::<f32>().sqrt()
+}
+
+fn cosine_similarity(lhs: &[f32], rhs: &[f32]) -> Option<f32> {
+    if lhs.len() != rhs.len() || lhs.is_empty() {
+        return None;
+    }
+    let dot = lhs
+        .iter()
+        .zip(rhs.iter())
+        .map(|(left, right)| left * right)
+        .sum::<f32>();
+    let denom = vector_norm(lhs) * vector_norm(rhs);
+    if denom > 1.0e-8 && dot.is_finite() {
+        Some((dot / denom).clamp(-1.0, 1.0))
+    } else {
+        None
+    }
+}
+
+fn top_eigenvector_components(vector: &[f32], limit: usize) -> Vec<serde_json::Value> {
+    let mut components = vector
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| value.is_finite())
+        .map(|(index, value)| (index, *value, value.abs()))
+        .collect::<Vec<_>>();
+    components.sort_unstable_by(|left, right| {
+        right
+            .2
+            .partial_cmp(&left.2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    components
+        .iter()
+        .take(limit)
+        .map(|(index, value, abs_value)| {
+            serde_json::json!({
+                "index": index,
+                "value": value,
+                "abs": abs_value,
+            })
+        })
+        .collect()
+}
+
+fn concentration_top_k(vector: &[f32], top_k: usize) -> f32 {
+    let norm_sq = vector.iter().map(|value| value * value).sum::<f32>();
+    if norm_sq <= 1.0e-8 || !norm_sq.is_finite() {
+        return 0.0;
+    }
+    let mut squares = vector
+        .iter()
+        .filter(|value| value.is_finite())
+        .map(|value| value * value)
+        .collect::<Vec<_>>();
+    squares.sort_unstable_by(|left, right| {
+        right.partial_cmp(left).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    (squares.iter().take(top_k).sum::<f32>() / norm_sq).clamp(0.0, 1.0)
+}
+
+fn compute_eigenvector_field(
+    eigenvalues: &[f32],
+    y: &[f32],
+    n: usize,
+    k: usize,
+    previous_modes: &[Vec<f32>],
+) -> serde_json::Value {
+    let mode_count = k.min(eigenvalues.len()).min(4);
+    let modes = capture_top_eigenvectors(y, n, mode_count);
+    let total_energy = eigenvalues
+        .iter()
+        .take(mode_count)
+        .map(|value| value.abs())
+        .sum::<f32>()
+        .max(1.0e-8);
+    let mode_payload = modes
+        .iter()
+        .enumerate()
+        .map(|(index, vector)| {
+            let previous_overlap = previous_modes
+                .get(index)
+                .and_then(|previous| cosine_similarity(vector, previous));
+            let orientation_delta = previous_overlap
+                .map(|overlap| 1.0 - overlap.abs())
+                .unwrap_or(0.0);
+            serde_json::json!({
+                "index": index + 1,
+                "eigenvalue": eigenvalues.get(index).copied().unwrap_or_default(),
+                "energy_share": eigenvalues
+                    .get(index)
+                    .map(|value| (value.abs() / total_energy).clamp(0.0, 1.0))
+                    .unwrap_or(0.0),
+                "norm": vector_norm(vector),
+                "concentration_top4": concentration_top_k(vector, 4),
+                "top_components": top_eigenvector_components(vector, 8),
+                "overlap_with_previous": previous_overlap,
+                "orientation_delta": orientation_delta,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut pairwise = Vec::new();
+    for left in 0..modes.len() {
+        for right in (left + 1)..modes.len() {
+            if let Some(cosine) = cosine_similarity(&modes[left], &modes[right]) {
+                pairwise.push(serde_json::json!({
+                    "left": left + 1,
+                    "right": right + 1,
+                    "cosine": cosine,
+                    "abs_cosine": cosine.abs(),
+                }));
+            }
+        }
+    }
+    let mean_orientation_delta = if mode_payload.is_empty() {
+        0.0
+    } else {
+        mode_payload
+            .iter()
+            .filter_map(|mode| {
+                mode.get("orientation_delta")
+                    .and_then(|value| value.as_f64())
+            })
+            .map(|value| value as f32)
+            .sum::<f32>()
+            / mode_payload.len() as f32
+    };
+    let max_pairwise_overlap = pairwise
+        .iter()
+        .filter_map(|item| item.get("abs_cosine").and_then(|value| value.as_f64()))
+        .fold(0.0_f64, f64::max) as f32;
+
+    serde_json::json!({
+        "policy": "eigenvector_field_v1",
+        "direct_eigenvectors_available": !modes.is_empty(),
+        "raw_vectors_exported": false,
+        "export_note": "Top component landmarks and overlaps are computed directly from Minime's live eigenvectors; full raw vectors are intentionally not dumped into telemetry.",
+        "reservoir_dim": n,
+        "mode_count": modes.len(),
+        "component_limit": 8,
+        "modes": mode_payload,
+        "pairwise_overlaps": pairwise,
+        "summary": {
+            "mean_orientation_delta": mean_orientation_delta,
+            "max_pairwise_overlap": max_pairwise_overlap,
+            "previous_overlap_available": !previous_modes.is_empty(),
+        },
+    })
+}
+
 /// Compute a 32D spectral fingerprint from eigenvectors and eigenvalues.
 ///
 /// Layout:
@@ -5382,9 +5785,11 @@ fn compute_structural_entropy(fingerprint: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_active_mode_telemetry, compute_structural_entropy, modality_source_label,
-        rank1_update_inplace_matrix, reset_covariance_inplace, CovarianceUpdateOutcome, LaneSource,
+        compute_active_mode_telemetry, compute_eigenvector_field, compute_structural_entropy,
+        modality_source_label, rank1_update_inplace_matrix, reset_covariance_inplace,
+        CovarianceUpdateOutcome, EigenPacket, LaneSource, ModalityStatus,
     };
+    use minime::spectral_fingerprint::SpectralFingerprintV1;
 
     #[test]
     fn active_mode_helper_uses_two_mode_floor_for_concentrated_spectra() {
@@ -5408,6 +5813,83 @@ mod tests {
         let telemetry = compute_active_mode_telemetry(&[4.0, 3.0, 2.0, 1.0, 1.0, 1.0], 6);
 
         assert!((telemetry.energy_ratio - (11.0 / 12.0)).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn eigenvector_field_exports_actual_orientation_landmarks() {
+        let n = 4;
+        let k = 3;
+        let y = vec![
+            1.0, 0.0, 0.0, 0.0, // mode 1
+            0.0, 1.0, 0.0, 0.0, // mode 2
+            0.0, 0.0, 0.6, 0.8, // mode 3
+        ];
+        let previous = vec![
+            vec![0.9, 0.1, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0, 0.0],
+            vec![0.0, 0.0, 1.0, 0.0],
+        ];
+
+        let field = compute_eigenvector_field(&[6.0, 3.0, 1.0], &y, n, k, &previous);
+
+        assert_eq!(field["policy"], "eigenvector_field_v1");
+        assert_eq!(field["direct_eigenvectors_available"], true);
+        assert_eq!(field["raw_vectors_exported"], false);
+        assert_eq!(field["mode_count"], 3);
+        assert!(
+            field["modes"][0]["top_components"]
+                .as_array()
+                .unwrap()
+                .len()
+                <= 8
+        );
+        assert!(field["modes"][1]["overlap_with_previous"].as_f64().unwrap() > 0.99);
+        assert!(field["pairwise_overlaps"].as_array().unwrap().len() >= 3);
+    }
+
+    #[test]
+    fn eigenpacket_serializes_legacy_and_typed_fingerprint() {
+        let legacy = (0..32).map(|value| value as f32).collect::<Vec<_>>();
+        let packet = EigenPacket {
+            t_ms: 42,
+            eigenvalues: vec![1.0, 0.5],
+            fill_ratio: 0.55,
+            active_mode_count: 2,
+            active_mode_energy_ratio: 0.95,
+            lambda1_rel: Some(0.93),
+            modalities: ModalityStatus {
+                audio_fired: false,
+                video_fired: false,
+                history_fired: true,
+                audio_rms: 0.0,
+                video_var: 0.0,
+                audio_source: None,
+                video_source: None,
+                audio_age_ms: None,
+                video_age_ms: None,
+            },
+            neural: None,
+            alert: None,
+            spectral_fingerprint: Some(legacy.clone()),
+            spectral_fingerprint_v1: SpectralFingerprintV1::from_legacy_slots(&legacy),
+            structural_entropy: None,
+            spectral_glimpse_12d: None,
+            eigenvector_field: None,
+            selected_memory_id: None,
+            selected_memory_role: None,
+            ising_shadow: None,
+        };
+
+        let json = serde_json::to_value(&packet).unwrap();
+
+        assert!(json.get("spectral_fingerprint").is_some());
+        assert_eq!(
+            json["spectral_fingerprint_v1"]["policy"],
+            "spectral_fingerprint_v1"
+        );
+        assert_eq!(json["spectral_fingerprint_v1"]["geom_rel"], 27.0);
+        let lambda1_rel = json["lambda1_rel"].as_f64().expect("lambda1_rel number");
+        assert!((lambda1_rel - 0.93).abs() < 1.0e-6);
     }
 
     #[test]

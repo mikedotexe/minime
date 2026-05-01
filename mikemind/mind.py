@@ -16,13 +16,35 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
+from math import isqrt
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 import requests
-import sympy
-from persistqueue import Queue
+
+try:
+    from persistqueue import Queue
+except ImportError:  # pragma: no cover - exercised indirectly in import smoke tests
+    class Queue:  # type: ignore[override]
+        """Small in-memory fallback used when persistqueue is unavailable."""
+
+        def __init__(self, *_args, **_kwargs):
+            self._queue = queue.Queue()
+
+        def put(self, item):
+            self._queue.put(item)
+
+        def get(self):
+            return self._queue.get()
+
+        def empty(self) -> bool:
+            return self._queue.empty()
+
+try:
+    import sympy
+except ImportError:  # pragma: no cover - exercised indirectly in import smoke tests
+    sympy = None
 
 import mikemind.config as _cfg
 from mikemind.config import (
@@ -47,6 +69,37 @@ from mikemind.config import (
 from mikemind.llm_engine import LLMEngine
 from mikemind.vision import LLaVAVisionEngine
 from thresholds import FOCUSED, RECESS, Hysteresis, ModeThresholds
+
+
+def _isprime(value: int) -> bool:
+    """Optional-sympy primality check with a lightweight stdlib fallback."""
+    if sympy is not None:
+        return bool(sympy.isprime(value))
+
+    if value < 2:
+        return False
+    if value in (2, 3):
+        return True
+    if value % 2 == 0:
+        return False
+
+    limit = isqrt(value)
+    for factor in range(3, limit + 1, 2):
+        if value % factor == 0:
+            return False
+    return True
+
+
+def _primerange(low: int, high: int):
+    """Yield primes in [low, high) without requiring sympy at import time."""
+    if sympy is not None:
+        yield from sympy.primerange(low, high)
+        return
+
+    start = max(2, low)
+    for candidate in range(start, high):
+        if _isprime(candidate):
+            yield candidate
 
 # Conditional cv2 import
 try:
@@ -1723,7 +1776,7 @@ class MikesSpatialMind:
         time.sleep(20)
         p = 3
         while True:
-            if not sympy.isprime(p):
+            if not _isprime(p):
                 p += 1 if p % 2 == 0 else 2
                 continue
 
@@ -2039,7 +2092,7 @@ Just the thought, nothing else:"""
     # Twin Prime Enrichment Analysis
     # ------------------------------------------------------------------- #
     def analyze_twin_enrichment(self, p: int, zone: int = 50, baseline: int = 500) -> Dict:
-        if not sympy.isprime(p):
+        if not _isprime(p):
             return {"error": f"{p} not prime"}
 
         center = 2 * p * p
@@ -2067,7 +2120,7 @@ Just the thought, nothing else:"""
         return result
 
     def _count_twins(self, low: int, high: int) -> int:
-        primes = list(sympy.primerange(max(2, low), high + 1))
+        primes = list(_primerange(max(2, low), high + 1))
         return sum(1 for i in range(len(primes) - 1) if primes[i + 1] - primes[i] == 2)
 
     # ------------------------------------------------------------------- #
@@ -3146,4 +3199,3 @@ Active Models: {ModelConfig.get_active_models()}
         shutil.copy(HYPOTHESES_FILE, path)
         shutil.copy(THOUGHTS_QUEUE_FILE, path)
         return f"Exported to {path}"
-

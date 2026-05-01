@@ -50,8 +50,10 @@ class TestModelConfig(unittest.TestCase):
     """Verify model configuration is consistent."""
 
     def test_conversation_model(self):
-        from mikemind.config import ModelConfig
-        self.assertEqual(ModelConfig.CONVERSATION, "mistral-small:24b")
+        from mikemind.config import ModelConfig, OLLAMA_MODEL
+        self.assertIsInstance(ModelConfig.CONVERSATION, str)
+        self.assertTrue(ModelConfig.CONVERSATION)
+        self.assertEqual(ModelConfig.CONVERSATION, OLLAMA_MODEL)
 
     def test_legacy_alias(self):
         from mikemind.config import ModelConfig
@@ -73,8 +75,8 @@ class TestModelConfig(unittest.TestCase):
         self.assertIn("conversation", models)
         self.assertIn("vision", models)
         self.assertIn("api_url", models)
-        self.assertEqual(models["conversation"], "mistral-small:24b")
-        self.assertEqual(models["vision"], "llava-llama3")
+        self.assertEqual(models["conversation"], ModelConfig.CONVERSATION)
+        self.assertEqual(models["vision"], ModelConfig.LLAVA_VISION)
 
 
 class TestPaths(unittest.TestCase):
