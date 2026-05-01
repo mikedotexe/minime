@@ -226,7 +226,7 @@ impl Default for GateCfg {
 /// PI controller configuration for homeostatic regulation
 #[derive(Clone, Copy, Debug)]
 pub struct PIRegCfg {
-    pub target_fill: f32,        // Target EigenFill% (e.g., 0.55)
+    pub target_fill: f32,        // Target EigenFill ratio (e.g., 0.68)
     pub target_lambda1_rel: f32, // Target λ₁ relative to baseline (e.g., 0.85)
     pub target_geom_rel: f32,    // Target geometric radius relative to baseline
     pub geom_weight: f32,        // Weight of geometric error in PI term

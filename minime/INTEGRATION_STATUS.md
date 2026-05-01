@@ -61,7 +61,7 @@ Prevent EigenFill% from reaching 100% through dual homeostatic control:
 --cheby-soft <edge>             # Default: 0.08 (smooth skirts)
 
 # Controller tuning
---eigenfill-target <pct>        # Default: 0.55 (55% target)
+--eigenfill-target <pct>        # Default: 0.68 (stable-core target)
 --reg-tick-secs <s>             # Default: 2.0 (regulation period)
 ```
 **Status**: ✅ Parsed and passed to run_engine()

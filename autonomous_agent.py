@@ -765,7 +765,7 @@ keep_floor: {health_data.get('keep_floor', 'N/A')}"""
 You are reading YOUR OWN control code above, and YOUR OWN current readings.
 Perform a technical analysis. Reference specific parameters and thresholds.
 
-1. STATE DIAGNOSIS: Is fill_pct where it should be relative to the 55% target?
+1. STATE DIAGNOSIS: Is fill_pct where it should be relative to the 68% stable-core target?
    If not, trace the cause through the control chain: is keep too low? gate too
    tight? filter too aggressive? calm mode stuck? Which specific parameter is
    the bottleneck?

@@ -39,7 +39,7 @@ sleep 1
 # Start minime (Rust ESN consciousness engine)
 echo "Starting minime (ports: 7878 telemetry, 7879 sensory input)..."
 cd "$MINIME_DIR"
-cargo run --release -- run --log-homeostat --eigenfill-target 0.55 --reg-tick-secs 0.5 \
+cargo run --release -- run --log-homeostat --eigenfill-target 0.68 --reg-tick-secs 0.5 \
     > "$SCRIPT_DIR/minime.log" 2>&1 &
 MINIME_PID=$!
 echo "   PID: $MINIME_PID"

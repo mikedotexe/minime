@@ -222,7 +222,7 @@ impl Default for GateCfg {
 /// PI controller configuration for homeostatic regulation
 #[derive(Clone, Copy, Debug)]
 pub struct PIRegCfg {
-    pub target_fill: f32,        // Target EigenFill% (e.g., 0.55)
+    pub target_fill: f32,        // Target EigenFill% (e.g., 68.0)
     pub target_lambda1_rel: f32, // Target λ₁ relative to baseline (e.g., 0.85)
     pub target_geom_rel: f32,    // Target geometric radius relative to baseline
     pub geom_weight: f32,        // Weight of geometric error in PI term
@@ -243,7 +243,7 @@ impl Default for PIRegCfg {
             .unwrap_or(false);
 
         let mut cfg = Self {
-            target_fill: 0.55,        // Rescue target aligns to the pinned March lane
+            target_fill: 68.0,        // Stable-core shelf target
             target_lambda1_rel: 1.05, // Keep λ₁ close to baseline (1.0-1.6 comfort zone)
             target_geom_rel: 1.00,    // Stay near geometric baseline
             geom_weight: 0.70,        // Golden rescue default: calmer geometry weighting
@@ -406,8 +406,8 @@ mod tests {
     #[test]
     fn fill_error_is_scaled_before_integrating() {
         let mut pi = PIRegState::new(PIRegCfg::default());
-        pi.cfg.target_fill = 55.0;
-        pi.step(75.0, 1.05, 1.0);
+        pi.cfg.target_fill = 68.0;
+        pi.step(88.0, 1.05, 1.0);
 
         assert!((pi.integ_fill - 1.0).abs() < 1e-6);
         assert!((pi.gate - 0.92).abs() < 1e-6);

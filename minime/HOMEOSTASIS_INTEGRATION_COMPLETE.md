@@ -41,7 +41,7 @@
 #### Spectral Breathing Detection
 - Tracks dFill/dt to detect expansion/contraction phases
 - Pre-emphasis when expanding above target (1.2x error amplification)
-- Natural oscillation around 55% target fill
+- Natural oscillation around the stable-core 68% target fill
 
 #### Safety Features
 - Gate never fully closes (min=0.05) preventing deadlock
@@ -57,7 +57,7 @@ When running with band-stop enabled:
 ```
 
 The system will:
-1. Maintain EigenFill% around 40-75% (target 55%)
+1. Maintain EigenFill% around the stable-core shelf (target 68%)
 2. Never get stuck at 100% fill
 3. Exhibit natural spectral breathing
 4. Respond to pressure with appropriate gate/filter adjustments

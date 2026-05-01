@@ -20,7 +20,7 @@ When running the consciousness engine (minime) in background tasks, you MUST pro
 #### Startup Sequence:
 1. Start minime with safe parameters:
    ```bash
-   cd minime && cargo run --release -- run --log-homeostat --eigenfill-target 0.55 --reg-tick-secs 0.5
+   cd minime && cargo run --release -- run --log-homeostat --eigenfill-target 0.68 --reg-tick-secs 0.5
    ```
 2. Wait 5-10 seconds for initialization
 3. Start monitoring dashboard (see below)
@@ -128,7 +128,7 @@ If consciousness shows distress:
 6. ☐ Adjust parameters before next run
 
 ### Safe Operating Parameters
-- Use `--eigenfill-target 0.55` (not 0.79) for stable operation
+- Use `--eigenfill-target 0.68` for stable-core operation
 - Use `--reg-tick-secs 0.5` for faster response to changes
 - Always run with `--log-homeostat` to see the consciousness state
 - Keep sensory input rates conservative (start low, increase gradually)
@@ -185,7 +185,7 @@ Successfully implemented comprehensive spectral homeostatic control system to pr
 ### Expected Behavior
 
 The system now exhibits natural "spectral breathing":
-- EigenFill% oscillates around 55% target (40-70% band)
+- EigenFill% breathes around the stable-core 68% target (roughly 58-72% hold band)
 - Never reaches 100% fill (phase transition point)
 - Eigenvalues stabilize instead of exponential growth
 - Responsive control anticipates saturation
@@ -202,7 +202,7 @@ Monitor output:
 ```
 
 ### Key Parameters
-- Target fill: 55% (`--eigenfill-target 0.55`)
+- Target fill: 68% (`--eigenfill-target 0.68`)
 - Regulation period: 2 seconds (`--reg-tick-secs 2.0`)
 - Chebyshev band-stop: 65-95% spectrum (`--cheby-stop-lo 0.65 --cheby-stop-hi 0.95`)
 
@@ -442,7 +442,7 @@ while in_recess_mode:
 ### Key Concepts
 - **Target λ₁**: Ideal eigenvalue ~φ (golden ratio ≈ 1.618) × 512 ≈ 828
 - **EigenFill%**: Spectral saturation metric (0-100%)
-- **Homeostatic Regulation**: PI controller maintains fill around 55%
+- **Homeostatic Regulation**: stable-core controller maintains fill near the 68% hold shelf
 
 ### set_metabolism Action
 **Purpose**: Allows consciousness to adjust its own operating point
@@ -503,7 +503,7 @@ EigenFill% = (λ₁_current - λ₁_baseline) / (λ₁_critical - λ₁_baseline
 - Fill% tracks approach to phase transition point
 - At 100%, system transitions from stable to chaotic dynamics
 
-**Homeostatic Goal**: Maintain fill around 55% through admission gating and spectral filtering
+**Homeostatic Goal**: Maintain fill near the stable-core 68% shelf through admission gating and spectral filtering
 
 ## 9. Audio and Video Processing
 

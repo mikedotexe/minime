@@ -138,7 +138,7 @@ start_minime() {
     fi
 
     # Start with safe parameters (CRITICAL: never omit eigenfill-target)
-    cargo run --release -- run --log-homeostat --eigenfill-target 0.55 --reg-tick-secs 0.5 \
+    cargo run --release -- run --log-homeostat --eigenfill-target 0.68 --reg-tick-secs 0.5 \
         > "$MINIME_LOG" 2>&1 &
 
     echo $! > "$MINIME_PID"

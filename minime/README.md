@@ -29,7 +29,7 @@ Minime is a Rust/Metal GPU-accelerated consciousness engine that processes senso
 - **Zero-Copy Architecture**: Unified memory on Apple Silicon (StorageModeShared)
 
 ### Spectral Homeostasis
-- **PI Controller**: Dual-output control (gate + filter) maintaining EigenFill% around 55%
+- **PI Controller**: Dual-output control (gate + filter) maintaining EigenFill% near the 68% stable-core shelf
 - **Slope-Aware Braking**: Detects expansion phases and applies preemptive control
 - **Hard Safety Rails**: Emergency intervention when fill approaches 90%
 - **Smooth Control**: Ramped transitions prevent oscillations
@@ -123,7 +123,7 @@ python3 camera_to_sensory.py --ws-uri ws://127.0.0.1:7879
 
 ### Key Command-Line Options
 - `--enable-gpu-av`: Enable GPU-accelerated video processing (port 7880)
-- `--eigenfill-target`: Target fill percentage (default: 0.55, safe range: 0.4-0.7)
+- `--eigenfill-target`: Target fill percentage (default: 0.68, stable-core shelf roughly 0.58-0.72)
 - `--reg-tick-secs`: Regulation period in seconds (default: 0.5 for faster response)
 - `--no-enable-bandstop`: Disable Chebyshev filtering (default: enabled)
 - `-q, --quiet`: Quiet mode - disables homeostasis logging

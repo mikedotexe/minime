@@ -104,7 +104,7 @@ enum Cmd {
         cheby_soft: f32,
 
         /// Target EigenFill% (0-1)
-        #[arg(long, default_value_t = 0.55)]
+        #[arg(long, default_value_t = 0.68)]
         eigenfill_target: f32,
 
         /// Regulation tick interval in seconds
@@ -243,7 +243,7 @@ fn parse_u32_env(name: &str) -> u32 {
 
 // Recalibrated 2026-03-14: covariance λ₁ naturally operates at ~2.5-3.5.
 // Old thresholds (comfort_max=1.5, alert=1.9) kept system permanently in
-// "alert" mode, clamping keep floor too low for fill to reach 55% target.
+// "alert" mode, clamping keep floor too low for fill to reach the active shelf.
 const LAMBDA1_COMFORT_MIN: f32 = 2.0;
 const LAMBDA1_COMFORT_MAX: f32 = 4.0;
 const LAMBDA1_ALERT: f32 = 6.0;
@@ -822,7 +822,7 @@ async fn run_engine(
     let (mut pi_reg, spectral_source, mut _cheby_plan) = if enable_bandstop {
         // Initialize PI regulator with custom target
         let mut pi_cfg = PIRegCfg::default();
-        // Use the eigenfill_target from CLI (default 55%)
+        // Use the eigenfill_target from CLI (stable-core default 68%)
         pi_cfg.target_fill = eigenfill_target * 100.0; // Convert to percentage
         pi_cfg.geom_clamp_hi = 1.66;
         pi_cfg.geom_release = 1.32;
