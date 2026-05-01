@@ -464,6 +464,7 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw.strip().lower() not in {"0", "false", "off", "no"}
 
 HARD_RECOVERY_RESET = _env_flag("MINIME_HARD_RECOVERY_RESET", True)
+STABLE_CORE_TARGET_FILL_RATIO = 0.68
 HARD_RESET_TARGET_FILL_RATIO = 0.65
 HARD_RESET_CLAMP_ENTER_RATIO = 0.35
 HARD_RESET_CLAMP_RELEASE_RATIO = 0.45
@@ -2180,7 +2181,11 @@ Fill: {fill:.1f}%
             if isinstance(raw_fill, (int, float)):
                 fill_ratio = float(raw_fill)
 
-        target_fill_ratio = HARD_RESET_TARGET_FILL_RATIO if self._hard_recovery_reset else 0.55
+        target_fill_ratio = (
+            HARD_RESET_TARGET_FILL_RATIO
+            if self._hard_recovery_reset
+            else STABLE_CORE_TARGET_FILL_RATIO
+        )
         spread_relief = 0.0
         phase = None
         try:
@@ -3759,9 +3764,9 @@ Fill: {fill:.1f}%
         spread = state.get('spread', 0)
         leak = state.get('leak', 0.9)
 
-        # Read the ACTUAL adaptive fill target from health.json, not a hardcoded 55%.
-        # The engine dynamically adjusts target_fill when the PI controller is saturated.
-        target_fill = 0.55  # fallback
+        # Read the ACTUAL adaptive fill target from health.json, falling back to
+        # the stable-core shelf only when live health is unavailable.
+        target_fill = STABLE_CORE_TARGET_FILL_RATIO
         try:
             health_file = runtime_health_path()
             if health_file.exists():
@@ -4958,7 +4963,7 @@ recovery_mode: {health_data.get('recovery_mode', 'N/A')}
         target_fill_explainer = (
             f"  ACTUAL target_fill = {pi_data.get('target_fill', 'N/A')}% (FIXED hard recovery reset target)"
             if self._hard_recovery_reset
-            else f"  ACTUAL target_fill = {pi_data.get('target_fill', 'N/A')}% (NOT 55% — it drifts dynamically)"
+            else f"  ACTUAL target_fill = {pi_data.get('target_fill', 'N/A')}% (live health value; do not infer the legacy 55% target)"
         )
         recommendation_guidance = (
             "3. PARAMETER RECOMMENDATION — controller tuning is locked during hard recovery reset. "

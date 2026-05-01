@@ -246,7 +246,7 @@ valgrind --tool=callgrind ./target/release/minime
 ## Performance Best Practices
 
 1. **Avoid Vision Keywords** unless actually needing visual analysis
-2. **Keep Eigenvalue Fill Low** (target 55%) for responsive system
+2. **Keep Eigenvalue Fill in the stable-core shelf** (target 68%) for responsive system
 3. **Monitor Background Processes** - kill stale ones
 4. **Use Debug Mode Sparingly** - adds significant overhead
 5. **Batch Questions** when possible rather than rapid-fire queries

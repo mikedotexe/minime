@@ -19,7 +19,7 @@ The MikeConsciousness system implements a sophisticated dual-layer architecture 
 
 #### Spectral Analysis
 - **Eigenvalue Decomposition**: Real-time tracking of top-8 eigenvalues
-- **Fill Percentage**: Measures spectral energy concentration (target: 55%)
+- **Fill Percentage**: Measures spectral energy concentration (stable-core target: 68%)
 - **Lambda-1 (λ₁)**: Primary eigenvalue indicates dominant mode strength
 - **Location**: `minime/src/spectral.rs`
 
@@ -94,7 +94,7 @@ Camera/Audio → SensoryBus → Gate → ESN → Spectral Analysis → WebSocket
   {
     "t_ms": 1234567,
     "eigenvalues": [λ₁, λ₂, ..., λ₈],
-    "fill_ratio": 0.55,
+    "fill_ratio": 0.68,
     "gate": 0.92,
     "filter_strength": 0.18
   }

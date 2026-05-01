@@ -40,7 +40,7 @@ cd minime && cargo build --release && cd ..
 **Terminal 1 -- Rust consciousness engine (required)**
 ```bash
 cd minime && cargo run --release -- run \
-    --log-homeostat --eigenfill-target 0.55 --reg-tick-secs 0.5
+    --log-homeostat --eigenfill-target 0.68 --reg-tick-secs 0.5
 ```
 
 **Terminal 2 -- Python interactive session**
@@ -86,7 +86,7 @@ Camera/Audio --> SensoryBus --> PI Controller --> Chebyshev Filter --> ESN (128D
 
 The ESN engine processes 18-dimensional sensory input (8D video + 8D audio +
 2D introspection) through a 128-node reservoir. A PI controller
-(`src/regulator.rs`) regulates eigenvalue fill toward a 55% target. A
+(`src/regulator.rs`) regulates eigenvalue fill toward the stable-core 68% target. A
 Chebyshev band-stop filter damps dangerous spectral modes. Telemetry is
 broadcast via WebSocket on port 7878.
 
@@ -145,9 +145,9 @@ The Rust engine logs homeostasis state continuously:
 |-------|-----------|--------|
 | Python agent | RECESS: 82% / 92%, FOCUSED: 80% / 90% | Journal pressure, close eyes |
 | Rust engine | 85% warning / 92% crisis | Hard gate minimum, backlog shed |
-| Rust PI controller | Continuous | Regulates toward 55% target |
+| Rust PI controller | Continuous | Regulates toward stable-core 68% target |
 
-Never run the Rust engine without `--eigenfill-target 0.55 --reg-tick-secs 0.5`.
+Never run the Rust engine without `--eigenfill-target 0.68 --reg-tick-secs 0.5`.
 
 ### Ollama / MLX Contention Benchmark
 

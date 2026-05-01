@@ -431,6 +431,7 @@ impl PIRegState {
     pub fn new(cfg: PIRegCfg) -> Self {
         let kp = cfg.kp;
         let ki = cfg.ki;
+        let last_fill = cfg.target_fill;
         Self {
             cfg,
             integ_fill: 0.0,
@@ -440,7 +441,7 @@ impl PIRegState {
             filt: 0.0,
             shed_fraction: 0.0,
             geom_brake: false,
-            last_fill: 55.0,
+            last_fill,
             fill_variance_ema: 0.0,
             derived_kp: kp,
             derived_ki: ki,

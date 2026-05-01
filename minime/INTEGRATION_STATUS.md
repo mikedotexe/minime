@@ -39,7 +39,7 @@ Prevent EigenFill% from reaching 100% through dual homeostatic control:
 ### 3. PI Controller
 **File**: `src/regulator.rs` (added lines 176-261)
 - **Dual error signals**:
-  - `e_fill = EigenFill% - 0.55`
+  - `e_fill = EigenFill% - 0.68`
   - `e_lam = λ₁_rel - 0.85`
 - **Integrators**: Anti-windup clamping [-2, 2]
 - **Outputs**:
@@ -61,7 +61,7 @@ Prevent EigenFill% from reaching 100% through dual homeostatic control:
 --cheby-soft <edge>             # Default: 0.08 (smooth skirts)
 
 # Controller tuning
---eigenfill-target <pct>        # Default: 0.55 (55% target)
+--eigenfill-target <pct>        # Default: 0.68 (stable-core target)
 --reg-tick-secs <s>             # Default: 2.0 (regulation period)
 ```
 **Status**: ✅ Parsed and passed to run_engine()
@@ -164,7 +164,7 @@ Fill: 55.8% → 93.8% → 100.0% (stuck)
 ```
 Fill climbs: 10% → 40% → 60% → 70%
 PI kicks in: gate=0.85, filt=0.30
-Fill stabilizes: 68% → 65% → 58% → 55% (breathing around target)
+Fill stabilizes: 72% → 68% → 65% → 68% (breathing around target)
 Never exceeds: 75% (safety margin)
 ```
 

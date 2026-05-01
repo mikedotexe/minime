@@ -131,16 +131,16 @@ def extract_params(llm_response: str) -> dict:
 
 
 def compute_comfort(fills: list) -> float:
-    """Comfort metric: proximity to target (55%) with stability bonus.
+    """Comfort metric: proximity to stable-core target (68%) with stability bonus.
 
-    Higher is better. Perfect score = fill at 55% with zero variance.
+    Higher is better. Perfect score = fill at 68% with zero variance.
     """
     if not fills:
         return 0.0
     avg = mean(fills)
     sd = stdev(fills) if len(fills) > 1 else 0.0
-    # Distance from target (55%)
-    distance_penalty = abs(avg - 55.0)
+    # Distance from stable-core target (68%)
+    distance_penalty = abs(avg - 68.0)
     # Stability bonus (lower stdev = better)
     stability_penalty = sd
     # Comfort = 100 - penalties
@@ -182,13 +182,13 @@ def main():
 - Average fill: {baseline_avg:.1f}%
 - Fill std dev: {baseline_sd:.1f}
 - Comfort score: {baseline_comfort:.1f}/100
-- Target: 55% fill with low variance
+- Target: 68% fill with low variance
 - Current best params: synth_gain={best_params.get('synth_gain', 1.0)}, keep_bias={best_params.get('keep_bias', 0.0)}
 
 Previous experiments: {cycle - 1} completed, best comfort: {best_comfort:.1f}
 
 Propose new values for synth_gain (range 0.2-3.0) and keep_bias (range -0.15 to +0.15).
-Think about what would move fill closer to 55% with less variance.
+Think about what would move fill closer to 68% with less variance.
 
 Return ONLY a JSON object: {{"synth_gain": X.XX, "keep_bias": X.XXX, "reasoning": "brief explanation"}}"""
 

@@ -102,7 +102,7 @@ Operationally, this is a good place to save work. It is not a reason to remove t
 
 Keep these constraints unless deliberately changing the re-entry plan:
 
-- Rescue target remains `55%`.
+- Rescue target has moved to the stable-core `68%` hold shelf; `55%` remains historical context only.
 - Neural bundle remains disabled in rescue.
 - Checkpoint lineage remains disabled in rescue.
 - Minime autonomous agent remains off.

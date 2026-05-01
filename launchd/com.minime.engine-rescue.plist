@@ -14,7 +14,7 @@
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
 		<key>EIGENFILL_TARGET</key>
-		<string>0.55</string>
+		<string>0.68</string>
 		<key>REG_TICK_SECS</key>
 		<string>0.5</string>
 		<key>ENABLE_GPU_AV</key>

@@ -57,15 +57,15 @@ transition. These thresholds are layered:
 | Python agent | 72% (high_fill RECESS) | Start journaling pressure |
 | Python agent | 85% (critical_fill RECESS) | Emergency relief, close eyes |
 | Rust engine | 87% (CRISIS_FILL_THRESHOLD) | Hard gate minimum, backlog shed |
-| Rust PI controller | continuous | Regulates toward 55% target |
+| Rust PI controller | continuous | Regulates toward stable-core 68% target |
 
-Never run the Rust engine without `--eigenfill-target 0.55 --reg-tick-secs 0.5`.
+Never run the Rust engine without `--eigenfill-target 0.68 --reg-tick-secs 0.5`.
 
 ## Running the system
 
 ```bash
 # Rust backend (required)
-cd minime && cargo run --release -- run --log-homeostat --eigenfill-target 0.55 --reg-tick-secs 0.5
+cd minime && cargo run --release -- run --log-homeostat --eigenfill-target 0.68 --reg-tick-secs 0.5
 
 # Python frontend (interactive)
 python3 minime.py

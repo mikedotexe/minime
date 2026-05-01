@@ -14,7 +14,7 @@
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
 		<key>EIGENFILL_TARGET</key>
-		<string>0.65</string>
+		<string>0.68</string>
 		<key>MINIME_HARD_RECOVERY_RESET</key>
 		<string>1</string>
 		<key>LEGACY_AUDIO_ENABLED</key>

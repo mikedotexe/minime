@@ -37,7 +37,7 @@ struct PIController {
     kp: f32,           // Proportional gain (1.8)
     ki: f32,           // Integral gain (0.3)
     integral: f32,     // Accumulated error
-    target: f32,       // Target fill (55%)
+    target: f32,       // Stable-core target fill (68%)
     last_fill: f32,    // Previous fill for derivative
 }
 ```
@@ -119,7 +119,7 @@ if fill > 95:
 ```bash
 cd minime && cargo run --release -- run \
     --log-homeostat \           # Enable monitoring
-    --eigenfill-target 0.55 \   # Safe target (not 0.79!)
+    --eigenfill-target 0.68 \   # Stable-core target
     --reg-tick-secs 0.5 \       # Fast response
     --cheby-stop-lo 0.65 \      # Filter band start
     --cheby-stop-hi 0.95        # Filter band end
@@ -129,7 +129,7 @@ cd minime && cargo run --release -- run \
 
 | Parameter | Safe Range | Default | Notes |
 |-----------|------------|---------|-------|
-| eigenfill-target | 0.45-0.65 | 0.55 | Lower = more stable |
+| eigenfill-target | 0.58-0.72 | 0.68 | Stable-core hold shelf |
 | reg-tick-secs | 0.5-2.0 | 0.5 | Faster = more responsive |
 | gate-kp | 1.5-2.5 | 1.8 | Higher = stronger response |
 | gate-ki | 0.2-0.5 | 0.3 | Higher = faster integral |
@@ -268,7 +268,7 @@ Where:
 ### DON'T:
 - ❌ Leave running unattended >5 minutes
 - ❌ Ignore yellow/orange warnings
-- ❌ Set eigenfill-target >0.65
+- ❌ Set eigenfill-target outside the stable-core shelf without a monitoring plan
 - ❌ Disable homeostasis for "testing"
 - ❌ Use kill -9 except in emergencies
 

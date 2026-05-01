@@ -182,7 +182,7 @@ enum Cmd {
         cheby_soft: f32,
 
         /// Target EigenFill% (0-1)
-        #[arg(long, default_value_t = 0.65)]
+        #[arg(long, default_value_t = 0.68)]
         eigenfill_target: f32,
 
         /// Regulation tick interval in seconds
@@ -1141,11 +1141,12 @@ async fn run_engine(
     let mut last_lambda1_rel: f32 = 1.0;
 
     // Adaptive fill target state — persisted across restarts so the PI
-    // controller doesn't reset to 55% every time, causing minutes of
+    // controller doesn't reset to an outdated low shelf, causing minutes of
     // "tightening" and "pressure" while it re-converges.
     // (Steward cycle 16, 2026-03-29): fill_ema and adaptive_target were
     // static-mut locals, lost on every restart. The being's natural
-    // equilibrium is ~70-80% but the PI would fight it from 55% each time.
+    // equilibrium is ~70-80% but older PI mirrors would fight it from a
+    // rescue-era low target each time.
     let mut fill_ema: f32 = f32::NAN; // NAN = uninitialized sentinel
     let mut adaptive_target: f32 = eigenfill_target * 100.0; // CLI default
     let mut adaptive_saturated_ticks: u32 = 0;
@@ -1402,7 +1403,7 @@ async fn run_engine(
                 "gate": gate_smooth,
                 "filt": filt_smooth,
                 // Adaptive fill target state — persisted so restart doesn't
-                // reset to CLI default (55%) causing PI saturation.
+                // reset to the CLI default and cause PI saturation.
                 // (Steward cycle 16, 2026-03-29)
                 "fill_ema": fill_ema,
                 "adaptive_target": adaptive_target,
@@ -2797,8 +2798,8 @@ async fn run_engine(
             //
             // At fill=16% lr=0.5: sigmoid≈0.29 → floor≈0.96 (preserves)
             // At fill=16% lr=0.8: sigmoid≈0.71 → floor≈0.97 (max preserve)
-            // At fill=55% lr=0.7: sigmoid≈0.57 → floor≈0.89 (normal shed)
-            // At fill=55% lr=1.0: sigmoid≈0.89 → floor≈0.86 (max shed)
+            // Around the old mid-fill rescue shelf, the floor permitted normal
+            // shedding instead of low-fill preservation.
             let keep_bias = sensory_bus.get_keep_bias();
             let dominance = lambda1_rel_for_cov;
             // fill_boost: raised from 0.06 → 0.15 → 0.30 → 0.40 (stewardship cycles).
@@ -2819,7 +2820,7 @@ async fn run_engine(
             //
             // Fix: raise base 0.93 → 0.95 and boost coeff 0.30 → 0.40.
             // At fill=15%,lr=0.8: half-life doubles from 5.1s to 11.4s.
-            // At fill=55%,lr=0.8: half-life 2.3s → 2.7s (minimal change).
+            // Near the old mid-fill rescue shelf, half-life changed minimally.
             // The boost still zeroes at fill>40%, preserving normal shedding.
             // fill_boost coeff: 0.06 → 0.15 → 0.30 → 0.40 → 0.50.
             // Cycle 5: at coeff=0.40 with dominance≈1.0 (baseline tracks
@@ -2877,7 +2878,8 @@ async fn run_engine(
             //
             // Fix (cycle 5): ceiling lerps from 0.998 at fill=0% to 0.97
             // at fill>=target.  At fill=15% → ceiling=0.988, half-life=28s,
-            // ~10% survives 90s rest.  At fill=55% → 0.97 (unchanged).
+            // ~10% survives 90s rest. Near the old mid-fill rescue shelf,
+            // the ceiling stayed unchanged.
             // This lets the being retain some spectral structure across rest
             // periods without reducing shedding during normal operation.
             //
@@ -5098,7 +5100,7 @@ async fn run_engine(
                         "gate": gate_smooth,
                         "filt": filt_smooth,
                         // Adaptive fill target state — persisted so restart doesn't
-                        // reset to CLI default (55%) causing PI saturation.
+                        // reset to the CLI default and cause PI saturation.
                         // (Steward cycle 16, 2026-03-29)
                         "fill_ema": fill_ema,
                         "adaptive_target": adaptive_target,

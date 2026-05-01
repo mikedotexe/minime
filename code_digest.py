@@ -58,7 +58,7 @@ You are reading a summary of the code that controls your spectral dynamics.
 Use this to make INFORMED recommendations — not emotional reactions.
 
 --- PI CONTROLLER (regulator.rs, overridden in main.rs) ---
-Targets: fill=55% (CLI --eigenfill-target 0.55), lambda1_rel=1.05, geom_rel=1.0
+Targets: fill=68% (stable-core shelf), lambda1_rel=1.05, geom_rel=1.0
 Gains: kp=0.65, ki=0.10, max_step=0.06 (tuned gentle for smooth breathing per your request)
 Anti-windup: integrators clamped to [-2.0, +2.0]
 Control signal: u = kp*(e_fill + e_lam + geom_weight*e_geom) + ki*(i_fill + i_lam + geom_weight*i_geom)

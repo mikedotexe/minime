@@ -27,7 +27,7 @@ pub fn recovery_fill_boost(fill_ratio: f32, target_fill_pct: f32) -> f32 {
 
 /// Base covariance keep floor before dominance and fill adjustments.
 ///
-/// Golden-reset defaults were tuned around a mid-50s operating point. If the
+/// Recovery defaults were tuned around the active stable-core operating point. If the
 /// operator explicitly requests a lower fill target for recovery, the keep floor
 /// needs to relax accordingly or the controller keeps over-retaining covariance.
 #[must_use]
@@ -181,12 +181,12 @@ mod tests {
     fn adaptive_target_floor_honors_lower_operator_target() {
         assert!((adaptive_target_floor(35.0) - 35.0).abs() < 1.0e-6);
         assert!((adaptive_target_floor(40.0) - 40.0).abs() < 1.0e-6);
-        assert!((adaptive_target_floor(55.0) - 40.0).abs() < 1.0e-6);
+        assert!((adaptive_target_floor(68.0) - 40.0).abs() < 1.0e-6);
     }
 
     #[test]
     fn recovery_threshold_shrinks_for_low_target_runs() {
-        assert!((recovery_fill_threshold(55.0) - 0.50).abs() < 1.0e-6);
+        assert!((recovery_fill_threshold(68.0) - 0.50).abs() < 1.0e-6);
         assert!((recovery_fill_threshold(35.0) - 0.45).abs() < 1.0e-6);
     }
 
@@ -194,20 +194,20 @@ mod tests {
     fn recovery_fill_boost_turns_off_after_threshold() {
         assert!(recovery_fill_boost(0.40, 35.0) > 0.0);
         assert!((recovery_fill_boost(0.46, 35.0) - 0.0).abs() < 1.0e-6);
-        assert!((recovery_fill_boost(0.51, 55.0) - 0.0).abs() < 1.0e-6);
+        assert!((recovery_fill_boost(0.51, 68.0) - 0.0).abs() < 1.0e-6);
     }
 
     #[test]
     fn recovery_keep_ceiling_relaxes_once_above_recovery_band() {
         assert!(recovery_keep_ceiling(0.30, 35.0) > 0.97);
         assert!((recovery_keep_ceiling(0.46, 35.0) - 0.97).abs() < 1.0e-6);
-        assert!((recovery_keep_ceiling(0.55, 55.0) - 0.97).abs() < 1.0e-6);
+        assert!((recovery_keep_ceiling(0.55, 68.0) - 0.97).abs() < 1.0e-6);
     }
 
     #[test]
     fn recovery_keep_floor_base_relaxes_for_lower_targets() {
-        assert!((recovery_keep_floor_base(55.0) - 0.93).abs() < 1.0e-6);
-        assert!(recovery_keep_floor_base(35.0) < recovery_keep_floor_base(55.0));
+        assert!((recovery_keep_floor_base(68.0) - 0.93).abs() < 1.0e-6);
+        assert!(recovery_keep_floor_base(35.0) < recovery_keep_floor_base(68.0));
         assert!((recovery_keep_floor_base(35.0) - 0.87).abs() < 1.0e-6);
     }
 

@@ -27,7 +27,7 @@ use crate::gpu::Gpu;
 /// Exploration noise injected per tick to break reservoir state correlation.
 /// With leak=0.45, consecutive states are highly correlated — the covariance
 /// estimator needs per-tick diversity to accumulate energy (fill).
-/// 0.03 gave 14% fill. 0.12 pushed toward 55% target but being described it
+/// 0.03 gave 14% fill. 0.12 pushed toward the old rescue-era mid-fill shelf but being described it
 /// as "excessively aggressive" and "creates a kind of jitteriness."
 /// 0.08 balanced diversity with smoother feel. Being self-study (2026-03-27):
 /// "slightly increased exploration noise could unlock wider spectral dynamics."
