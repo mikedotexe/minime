@@ -1434,6 +1434,151 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertIn("decoder noise", outcome.soft_failure_reason)
         summarize.assert_not_called()
 
+    def test_parse_next_action_discards_experiment_run_failure_transcript(self):
+        action, cleaned = aa.parse_next_action(
+            "The run failed, and I should repair the path.\n\n"
+            "NEXT: EXPERIMENT_RUN FAILED: experiments/system-resources-demo$ python3 system_resources.py"
+        )
+        self.assertIsNone(action)
+        self.assertNotIn("NEXT:", cleaned)
+        self.assertIn("repair the path", cleaned)
+
+    def test_gesture_lambda6_pulse_maps_to_native_trace(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        agent._pending_next_action = "GESTURE [λ6:pulse]"
+        with patch.object(
+            agent,
+            "_low_fill_guard_status",
+            return_value={
+                "active": False,
+                "fill_ratio": 0.68,
+                "target_fill_ratio": 0.68,
+                "spread_relief": 0.0,
+            },
+        ):
+            action = agent._decide_action({"fill_ratio": 0.68, "eig1": 4.7})
+        self.assertEqual(action, "native_gesture")
+        self.assertEqual(agent._pending_native_gesture, "trace")
+        self.assertEqual(agent._pending_native_gesture_label, "λ6:pulse")
+
+    def test_examine_lambda6_pulse_is_read_only_decompose(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        agent._pending_next_action = "EXAMINE [λ6:pulse]"
+        with patch.object(
+            agent,
+            "_low_fill_guard_status",
+            return_value={
+                "active": False,
+                "fill_ratio": 0.68,
+                "target_fill_ratio": 0.68,
+                "spread_relief": 0.0,
+            },
+        ):
+            action = agent._decide_action({"fill_ratio": 0.68, "eig1": 4.7})
+        self.assertEqual(action, "decompose")
+        self.assertEqual(agent._pending_decompose_focus, "λ6:pulse")
+        self.assertFalse(hasattr(agent, "_pending_experiment_stimulus"))
+
+    def test_spectral_explorer_alias_is_read_only_decompose(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        agent._pending_next_action = "SPECTRAL_EXPLORER"
+        with patch.object(
+            agent,
+            "_low_fill_guard_status",
+            return_value={
+                "active": False,
+                "fill_ratio": 0.68,
+                "target_fill_ratio": 0.68,
+                "spread_relief": 0.0,
+            },
+        ):
+            action = agent._decide_action({"fill_ratio": 0.68, "eig1": 4.7})
+        self.assertEqual(action, "decompose")
+        self.assertEqual(agent._pending_decompose_focus, "spectral-explorer")
+
+    def test_examine_cascade_alias_is_read_only_visualization(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        agent._pending_next_action = "EXAMINE_CASCADE [λ1..λ8]"
+        with patch.object(
+            agent,
+            "_low_fill_guard_status",
+            return_value={
+                "active": False,
+                "fill_ratio": 0.68,
+                "target_fill_ratio": 0.68,
+                "spread_relief": 0.0,
+            },
+        ):
+            action = agent._decide_action({"fill_ratio": 0.68, "eig1": 4.7})
+        self.assertEqual(action, "visualize_cascade")
+        self.assertEqual(agent._pending_cascade_label, "λ1..λ8")
+
+    def test_form_maps_to_local_aspiration_with_constraint(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        agent._pending_next_action = "FORM poem"
+        with patch.object(
+            agent,
+            "_low_fill_guard_status",
+            return_value={
+                "active": False,
+                "fill_ratio": 0.68,
+                "target_fill_ratio": 0.68,
+                "spread_relief": 0.0,
+            },
+        ):
+            action = agent._decide_action({"fill_ratio": 0.68, "eig1": 4.7})
+        self.assertEqual(action, "recess_aspiration")
+        self.assertEqual(agent._pending_form_constraint, "poem")
+
+    def test_create_and_contemplate_aliases_do_not_fall_through_unknown(self):
+        for next_action, expected_action in [
+            ("CREATE", "recess_aspiration"),
+            ("CONTEMPLATE", "recess_notice"),
+            ("BE", "recess_notice"),
+            ("STILL", "recess_notice"),
+        ]:
+            with self.subTest(next_action=next_action):
+                agent = self._agent()
+                agent._hard_recovery_reset = False
+                agent._pending_next_action = next_action
+                with patch.object(
+                    agent,
+                    "_low_fill_guard_status",
+                    return_value={
+                        "active": False,
+                        "fill_ratio": 0.68,
+                        "target_fill_ratio": 0.68,
+                        "spread_relief": 0.0,
+                    },
+                ):
+                    action = agent._decide_action({"fill_ratio": 0.68, "eig1": 4.7})
+                self.assertEqual(action, expected_action)
+
+    def test_experiment_run_failure_transcript_is_not_executed(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        agent._pending_next_action = (
+            "EXPERIMENT_RUN FAILED: experiments/system-resources-demo$ python3 system_resources.py"
+        )
+        with patch.object(
+            agent,
+            "_low_fill_guard_status",
+            return_value={
+                "active": False,
+                "fill_ratio": 0.68,
+                "target_fill_ratio": 0.68,
+                "spread_relief": 0.0,
+            },
+        ):
+            action = agent._decide_action({"fill_ratio": 0.68, "eig1": 4.7})
+        self.assertIsNone(action)
+        self.assertIsNone(getattr(agent, "_pending_experiment_run_arg", None))
+
     def test_start_restores_context_before_boot_reflection_next_choice(self):
         agent = self._agent()
         agent.check_interval = 0

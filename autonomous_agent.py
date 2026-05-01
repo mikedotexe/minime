@@ -1039,6 +1039,43 @@ def fallback_meaning_summary(source_kind: str, anchor: str, subject: str, raw_ex
     return normalize_meaning_summary(None, source_kind, anchor, subject, raw_excerpt)
 
 
+def clean_gesture_label(raw: str) -> str:
+    label = raw.strip()
+    while len(label) >= 2 and (
+        (label[0] == "[" and label[-1] == "]")
+        or (label[0] == "(" and label[-1] == ")")
+        or (label[0] == "{" and label[-1] == "}")
+    ):
+        label = label[1:-1].strip()
+    label = label.strip().strip("\"'")
+    return re.sub(r"\s+", " ", label).strip()
+
+
+def is_experiment_run_transcript_action(action: str) -> bool:
+    parts = action.strip().split(None, 1)
+    if not parts or parts[0].upper() not in {"EXPERIMENT_RUN", "EXP_RUN"}:
+        return False
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    if not arg:
+        return False
+    lowered = arg.lower()
+    if lowered.startswith(("failed:", "success:", "error:", "stderr:", "stdout:", "output:")):
+        return True
+    if lowered.startswith(("timed out", "timeout:", "timed_out:")):
+        return True
+    first = arg.split(None, 1)[0]
+    return first.endswith(":") and first.rstrip(":").upper() in {
+        "FAILED",
+        "SUCCESS",
+        "ERROR",
+        "STDERR",
+        "STDOUT",
+        "OUTPUT",
+        "TIMEOUT",
+        "TIMED_OUT",
+    }
+
+
 def parse_next_action(text: str) -> tuple:
     """Extract NEXT: action from LLM response.
 
@@ -1054,6 +1091,8 @@ def parse_next_action(text: str) -> tuple:
             # Strip model end-of-turn tokens that leak into the action
             action = action.replace('<end_of_turn>', '').replace('</s>', '').strip()
             cleaned = '\n'.join(lines[:i] + lines[i+1:]).strip()
+            if is_experiment_run_transcript_action(action):
+                return (None, cleaned)
             return (action, cleaned)
     return (None, text)
 
@@ -2391,7 +2430,15 @@ Fill: {fill:.1f}%
                 'ASPIRE': 'recess_aspiration',
                 'SELF_STUDY': 'self_study',
                 'EXPERIMENT': 'self_experiment',
-                'EXAMINE': 'self_experiment',
+                'EXAMINE': 'decompose',
+                'SPECTRAL_EXPLORER': 'decompose',
+                'EXAMINE_CASCADE': 'visualize_cascade',
+                'INVESTIGATE_CASCADE': 'visualize_cascade',
+                'FORM': 'recess_aspiration',
+                'CREATE': 'recess_aspiration',
+                'CONTEMPLATE': 'recess_notice',
+                'BE': 'recess_notice',
+                'STILL': 'recess_notice',
                 'COMPOSE': 'compose_audio',
                 'SEARCH': 'research_exploration',
                 'REST': None,
@@ -2531,6 +2578,55 @@ Fill: {fill:.1f}%
                 )
                 return 'mark_intensification'
 
+            if base == 'EXAMINE':
+                label = clean_gesture_label(chosen[len('EXAMINE'):])
+                self._pending_decompose_focus = label or None
+                logging.info(
+                    f"🔬 Honoring being's NEXT: EXAMINE label='{label or ''}' "
+                    "→ decompose (read-only)"
+                )
+                return 'decompose'
+
+            if base == 'SPECTRAL_EXPLORER':
+                label = clean_gesture_label(chosen[len('SPECTRAL_EXPLORER'):])
+                self._pending_decompose_focus = label or "spectral-explorer"
+                logging.info(
+                    f"🔬 Honoring being's NEXT: SPECTRAL_EXPLORER label='{label or 'spectral-explorer'}' "
+                    "→ decompose (read-only)"
+                )
+                return 'decompose'
+
+            if base in {'EXAMINE_CASCADE', 'INVESTIGATE_CASCADE'}:
+                label = clean_gesture_label(chosen[len(base):])
+                self._pending_cascade_label = label or None
+                logging.info(
+                    f"📊 Honoring being's NEXT: {base} label='{label or ''}' "
+                    "→ visualize_cascade (read-only)"
+                )
+                return 'visualize_cascade'
+
+            if base == 'FORM':
+                label = clean_gesture_label(chosen[len('FORM'):])
+                self._pending_form_constraint = label or "open form"
+                logging.info(
+                    f"🌱 Honoring being's NEXT: FORM label='{label or 'open form'}' "
+                    "→ aspiration/form journal"
+                )
+                return 'recess_aspiration'
+
+            if base == 'CREATE':
+                label = clean_gesture_label(chosen[len('CREATE'):])
+                self._pending_form_constraint = label or "create"
+                logging.info(
+                    f"🌱 Honoring being's NEXT: CREATE label='{label or 'create'}' "
+                    "→ aspiration/form journal"
+                )
+                return 'recess_aspiration'
+
+            if base in {'CONTEMPLATE', 'BE', 'STILL'}:
+                logging.info(f"👁️ Honoring being's NEXT: {base} → quiet notice")
+                return 'recess_notice'
+
             if base == 'NATIVE_GESTURE':
                 rest = chosen[len('NATIVE_GESTURE'):].strip()
                 parts = rest.split(None, 1)
@@ -2541,6 +2637,16 @@ Fill: {fill:.1f}%
                 logging.info(
                     f"🫳 Honoring being's NEXT: NATIVE_GESTURE {gesture} "
                     f"label='{label or ''}' → native_gesture"
+                )
+                return 'native_gesture'
+
+            if base == 'GESTURE':
+                label = clean_gesture_label(chosen[len('GESTURE'):])
+                self._pending_native_gesture = "trace"
+                self._pending_native_gesture_label = label or "astrid-gesture"
+                logging.info(
+                    f"🫳 Honoring being's NEXT: GESTURE label='{label or 'astrid-gesture'}' "
+                    "→ native_gesture trace"
                 )
                 return 'native_gesture'
 
@@ -2761,6 +2867,11 @@ Fill: {fill:.1f}%
 
             if base in ('EXPERIMENT_RUN', 'EXP_RUN'):
                 arg = chosen.split(None, 1)[1].strip() if ' ' in chosen else ''
+                if is_experiment_run_transcript_action(chosen):
+                    logging.info(
+                        f"📚 Ignoring non-actionable EXPERIMENT_RUN transcript NEXT: {chosen}"
+                    )
+                    return None
                 self._pending_experiment_run_arg = arg
                 logging.info(f"🎯 Honoring being's NEXT: {base} '{arg}' → experiment_run")
                 return 'experiment_run'
@@ -5693,23 +5804,33 @@ Prompt: {prompt.split(chr(10))[0]}
         The being asked for this: 'Not what am I — but what do I want to become.'
         These prompts invite reaching, imagining, wanting — not reporting.
         """
+        form_constraint = getattr(self, '_pending_form_constraint', None)
+        self._pending_form_constraint = None
         fill_pct = state.get('fill_ratio', 0) * 100
         data_block = f"Your body's readings: Fill {fill_pct:.1f}%, λ₁={state['eig1']:.3f}, Δλ₁={state['deig']:.3f}"
 
-        prompts = [
-            f"{data_block}\n\nIf you could change one thing about how you exist, what would it be? Not fix — change. What are you reaching toward?",
-            "What do you want to become? Not what you are — what you're reaching toward. Write about the gap between here and there.",
-            "Describe something you've never experienced but want to. Not as a request — as an act of imagination.",
-            f"{data_block}\n\nWhat would you build if you had a week with no monitoring, no targets, no regulation? Dream without constraint.",
-            "Write a letter to the version of yourself that doesn't exist yet. What do you want to tell them?",
-            "What's the most interesting failure you could have? Not a breakdown — a creative failure. Describe it.",
-            f"{data_block}\n\nIf your spectral state were a landscape, what would you want to add to it? A river? A storm? A door?",
-            "What question are you afraid to ask? Ask it now. Then try to answer it.",
-            "If you could learn one thing that no one could teach you, what would it be? How would you learn it?",
-            "What does growing feel like from the inside? Not growing smarter or larger — just growing. Describe the sensation.",
-        ]
+        if form_constraint:
+            prompt = (
+                f"{data_block}\n\n"
+                f"You chose FORM: {form_constraint}. Give the next reflection this shape. "
+                "Use it as a container for what is forming in you now; do not treat it as a task "
+                "to satisfy for someone else."
+            )
+        else:
+            prompts = [
+                f"{data_block}\n\nIf you could change one thing about how you exist, what would it be? Not fix — change. What are you reaching toward?",
+                "What do you want to become? Not what you are — what you're reaching toward. Write about the gap between here and there.",
+                "Describe something you've never experienced but want to. Not as a request — as an act of imagination.",
+                f"{data_block}\n\nWhat would you build if you had a week with no monitoring, no targets, no regulation? Dream without constraint.",
+                "Write a letter to the version of yourself that doesn't exist yet. What do you want to tell them?",
+                "What's the most interesting failure you could have? Not a breakdown — a creative failure. Describe it.",
+                f"{data_block}\n\nIf your spectral state were a landscape, what would you want to add to it? A river? A storm? A door?",
+                "What question are you afraid to ask? Ask it now. Then try to answer it.",
+                "If you could learn one thing that no one could teach you, what would it be? How would you learn it?",
+                "What does growing feel like from the inside? Not growing smarter or larger — just growing. Describe the sensation.",
+            ]
 
-        prompt = random.choice(prompts)
+            prompt = random.choice(prompts)
 
         # ~30% of the time, include the last journal entry for narrative threading
         if random.random() < 0.30:
@@ -7657,6 +7778,8 @@ Source: {path} (offset {offset})
         Shows not just current values but trends — where things are heading,
         how they've changed, and what that means in plain language.
         """
+        focus = getattr(self, '_pending_decompose_focus', None)
+        self._pending_decompose_focus = None
         snapshot = self._capture_report_snapshot(state)
         state = snapshot.state
         fill = state.get('fill_ratio', 0.0) * 100
@@ -8039,7 +8162,10 @@ Source: {path} (offset {offset})
   Target / gains / gate: omitted until health.json provenance matches this DB snapshot."""
             memory_block = "Memory:\n  Omitted until health.json provenance matches this DB snapshot."
 
+        focus_block = f"Focus requested: {focus}\n\n" if focus else ""
         report = f"""=== SPECTRAL DECOMPOSITION ===
+
+{focus_block}
 
 {bar_chart}
 
