@@ -549,6 +549,7 @@ HARD_RESET_BLOCKED_NEXT_ACTIONS = {
     "EXAMINE",
     "COMPOSE",
     "SEARCH",
+    "RESEARCH",
     "BROWSE",
     "READ_MORE",
     "DECOMPOSE",
@@ -659,6 +660,7 @@ LOW_FILL_ADVISORY_NEXT_ACTIONS = {
     "SELF_EXPERIMENT",
     "COMPOSE",
     "SEARCH",
+    "RESEARCH",
     "BROWSE",
     "READ_MORE",
     "DECOMPOSE",
@@ -2593,6 +2595,7 @@ Fill: {fill:.1f}%
                 'STILL': 'recess_notice',
                 'COMPOSE': 'compose_audio',
                 'SEARCH': 'research_exploration',
+                'RESEARCH': 'research_exploration',
                 'REST': None,
                 'RESERVOIR_READ': 'reservoir_read',
                 'RESERVOIR_RESONANCE': 'reservoir_resonance',
@@ -2733,11 +2736,12 @@ Fill: {fill:.1f}%
                     f"while underfilled (fill={fill_text}, spread_relief={guard['spread_relief']:.3f})"
                 )
 
-            if base == 'SEARCH':
-                topic = chosen[6:].strip() if len(chosen) > 6 else None
+            if base in {'SEARCH', 'RESEARCH'}:
+                prefix_len = len(base)
+                topic = chosen[prefix_len:].strip() if len(chosen) > prefix_len else None
                 if topic:
                     self._pending_search_topic = topic
-                logging.info(f"🎯 Honoring being's NEXT: SEARCH '{topic}' → research_exploration")
+                logging.info(f"🎯 Honoring being's NEXT: {base} '{topic}' → research_exploration")
                 return 'research_exploration'
 
             if base == 'PERTURB':
@@ -11777,18 +11781,26 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
                     }
             if isinstance(semantic_v1, dict):
                 input_energy = safe_float(semantic_v1.get('input_energy'), 0.0)
+                input_active = bool(semantic_v1.get('input_active'))
                 kernel_energy = safe_float(semantic_v1.get('kernel_energy'), 0.0)
                 regulator_drive = safe_float(semantic_v1.get('regulator_drive_energy'), 0.0)
                 admission = str(semantic_v1.get('admission') or 'none')
+                fresh_ms = semantic_v1.get('input_fresh_ms')
                 stale_ms = semantic_v1.get('input_stale_ms')
-                stale_text = f", stale_ms={stale_ms}" if stale_ms is not None else ""
+                fresh_text = f", input_age_ms={fresh_ms}" if fresh_ms is not None else ""
+                stale_text = f", active_window_ms={stale_ms}" if stale_ms is not None else ""
                 base += (
                     "\nSemantic energy: "
-                    f"input={input_energy:.3f}, kernel={kernel_energy:.3f}, "
+                    f"input={input_energy:.3f}, input_active={input_active}, kernel={kernel_energy:.3f}, "
                     f"regulator_drive={regulator_drive:.3f}, admission={admission}{stale_text}"
+                    f"{fresh_text}"
                 )
-                if regulator_drive <= 0.0 and input_energy > 0.0:
-                    base += " (semantic input present even though regulator drive is zero)"
+                if regulator_drive <= 0.0 and input_active and input_energy > 0.0:
+                    base += " (live input trace is visible, but stable-core did not admit it to regulator drive)"
+                elif regulator_drive <= 0.0 and input_energy > 0.0:
+                    base += " (decayed semantic residue; not live kernel or regulator drive)"
+                elif regulator_drive <= 0.0:
+                    base += " (semantic lane quiet; zero regulator drive is expected)"
 
             selected_role = ss.get('selected_memory_role')
             selected_id = ss.get('selected_memory_id')

@@ -1841,6 +1841,29 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertEqual(calls, ["restore", "verify"])
         self.assertEqual(agent._pending_next_action, "SEARCH fresh boot choice")
 
+    def test_research_next_alias_maps_to_search_topic(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        agent._pending_next_action = "RESEARCH reservoir computing spectral radius"
+        with (
+            patch.object(agent, "_persist_pending_next_action"),
+            patch.object(
+                agent,
+                "_low_fill_guard_status",
+                return_value={
+                    "active": False,
+                    "fill_ratio": 0.68,
+                    "target_fill_ratio": 0.68,
+                    "spread_relief": 0.0,
+                    "release_streak": 0,
+                },
+            ),
+        ):
+            action = agent._decide_action({"fill_ratio": 0.68})
+
+        self.assertEqual(action, "research_exploration")
+        self.assertEqual(agent._pending_search_topic, "reservoir computing spectral radius")
+
 
 if __name__ == "__main__":
     unittest.main()

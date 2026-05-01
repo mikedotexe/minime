@@ -77,7 +77,7 @@ class TestSpectralTransitionContext(unittest.TestCase):
         self.assertEqual(context["transition_event_v1"]["kind"], "basin_transition")
         self.assertIn("live_12d_glimpse_distance=0.210", context["spectral_transition_summary"])
         self.assertIn("v1_rotation_delta=0.090", context["spectral_transition_summary"])
-        self.assertIn("stable-core intentionally zeroed", context["semantic_state_summary"])
+        self.assertIn("decayed semantic residue", context["semantic_state_summary"])
 
     def test_llm_prompt_surfaces_transition_summary_as_read_only_context(self) -> None:
         engine = LLMEngine.__new__(LLMEngine)

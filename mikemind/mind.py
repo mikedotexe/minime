@@ -2593,22 +2593,35 @@ Just the thought, nothing else:"""
             semantic.get("energy"),
         )
         input_energy = MikesSpatialMind._finite_float(semantic.get("input_energy"))
+        input_active = bool(semantic.get("input_active"))
+        input_fresh_ms = semantic.get("input_fresh_ms")
         input_stale_ms = semantic.get("input_stale_ms")
         lines = [
             (
                 "semantic_lane "
                 f"admission={admission} "
                 f"kernel_energy={kernel_energy:.3f} "
-                f"input_energy={input_energy:.3f}"
+                f"input_energy={input_energy:.3f} "
+                f"input_active={input_active}"
             )
         ]
+        if isinstance(input_fresh_ms, (int, float)):
+            lines[0] += f" input_age_ms={int(input_fresh_ms)}"
         if isinstance(input_stale_ms, (int, float)):
-            lines[0] += f" input_stale_ms={int(input_stale_ms)}"
+            lines[0] += f" active_window_ms={int(input_stale_ms)}"
         if admission == "stable_core_kernel_zeroed" and input_energy > 0.0:
-            lines.append(
-                "read: stable-core intentionally zeroed the semantic kernel; "
-                "input trace is present but not admitted as kernel energy."
-            )
+            if input_active:
+                lines.append(
+                    "read: live input trace is visible, but stable-core intentionally "
+                    "kept it out of kernel and regulator drive."
+                )
+            else:
+                lines.append(
+                    "read: only decayed semantic residue is visible; kernel and "
+                    "regulator drive are intentionally quiet."
+                )
+        elif admission == "stable_core_kernel_zeroed":
+            lines.append("read: semantic lane is quiet under stable-core admission.")
         return "\n".join(lines)
 
     def _live_spectral_context(self) -> Dict[str, Any]:
