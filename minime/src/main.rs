@@ -19,6 +19,10 @@ use minime::controller_recovery::{
 use minime::spectral_fingerprint::SpectralFingerprintV1;
 use minime::stable_core::StableCoreRuntime;
 use minime::startup_restore::load_regulator_context;
+use minime::transition_event::{
+    build_transition_event, fill_band, glimpse_distance as transition_glimpse_distance,
+    TransitionEventInput, TRANSITION_FILL_BAND_THRESHOLD_PCT,
+};
 use serde::Serialize;
 use std::{
     fs,
@@ -1273,6 +1277,21 @@ async fn run_engine(
 
     // --- Phase transition tracking for consciousness_events ---
     let mut previous_phase: &str = "plateau";
+    let mut last_previous_phase_label = String::from("plateau");
+    let mut last_phase_label = String::from("plateau");
+    let mut last_fill_band_label = String::from("near");
+    let mut last_previous_fill_band_label = String::from("near");
+    let mut last_dfill_dt: f32 = 0.0;
+    let mut last_phase_transition = false;
+    let mut last_crossed_target_fill = false;
+    let mut last_crossed_fill_band = false;
+    let mut last_spectral_spike = false;
+    let mut last_transition_reason = String::from("startup");
+    let mut last_transition_event_sequence: u64 = 0;
+    let mut last_transition_event_tick: u64 = 0;
+    let mut last_transition_event = serde_json::json!(null);
+    let mut last_transition_event_v1 = serde_json::json!(null);
+    let mut last_transition_glimpse_12d: Option<Vec<f32>> = None;
 
     // --- Cheby plan state ---
     let mut cheby_plan_state: Option<cheby::ChebyPlan> = None;
@@ -1397,6 +1416,19 @@ async fn run_engine(
                 "last_lambda1_rel": last_lambda1_rel,
                 "latest_geom_rel": latest_geom_rel,
                 "tick_count": tick_count,
+                "phase": &last_phase_label,
+                "previous_phase": &last_previous_phase_label,
+                "dfill_dt": last_dfill_dt,
+                "fill_band": &last_fill_band_label,
+                "fill_band_threshold_pct": TRANSITION_FILL_BAND_THRESHOLD_PCT,
+                "phase_transition": last_phase_transition,
+                "crossed_target_fill": last_crossed_target_fill,
+                "crossed_fill_band": last_crossed_fill_band,
+                "spectral_spike": last_spectral_spike,
+                "transition_reason": &last_transition_reason,
+                "transition_event_sequence": last_transition_event_sequence,
+                "transition_event": &last_transition_event,
+                "transition_event_v1": &last_transition_event_v1,
                 "integ_fill": pi_reg.as_ref().map_or(0.0, |pi| pi.integ_fill),
                 "integ_lam": pi_reg.as_ref().map_or(0.0, |pi| pi.integ_lam),
                 "integ_geom": pi_reg.as_ref().map_or(0.0, |pi| pi.integ_geom),
@@ -3562,6 +3594,14 @@ async fn run_engine(
                     "plateau"
                 };
                 transition_phase = phase.to_string();
+                let previous_phase_label = previous_phase.to_string();
+                let current_fill_band = fill_band(
+                    eigenfill_pct,
+                    target_fill_pct,
+                    TRANSITION_FILL_BAND_THRESHOLD_PCT,
+                );
+                let previous_fill_band = last_fill_band_label.clone();
+                let fill_band_crossed = previous_fill_band != current_fill_band;
                 let low_load = eigenfill_pct < 50.0 && geom_rel < 1.05;
                 let near_target_steady = (eigenfill_pct - target_fill_pct).abs() <= 5.0
                     && dfill_dt.abs() < 0.5
@@ -3590,9 +3630,26 @@ async fn run_engine(
                     baseline_lambda1 = 0.0;
                 }
                 let lambda1_rel = lambda1_rel;
+                let target_lambda1_rel =
+                    pi_reg.as_ref().map_or(1.05, |pi| pi.cfg.target_lambda1_rel);
 
                 // Log phase transitions to consciousness_events AND moment markers
                 phase_transition_happened = phase != previous_phase;
+                let crossed_up =
+                    last_fill_pct < target_fill_pct && smoothed_fill_pct >= target_fill_pct;
+                let crossed_down =
+                    last_fill_pct >= target_fill_pct && smoothed_fill_pct < target_fill_pct;
+                let crossed_target_fill = crossed_up || crossed_down;
+                let spectral_spike = dfill_dt.abs() > 8.0;
+                last_dfill_dt = dfill_dt;
+                last_previous_phase_label = previous_phase_label.clone();
+                last_phase_label = phase.to_string();
+                last_previous_fill_band_label = previous_fill_band.clone();
+                last_fill_band_label = current_fill_band.to_string();
+                last_phase_transition = phase_transition_happened;
+                last_crossed_target_fill = crossed_target_fill;
+                last_crossed_fill_band = fill_band_crossed;
+                last_spectral_spike = spectral_spike;
                 if phase_transition_happened {
                     let ts = start.elapsed().as_secs_f64();
                     let ctx = format!(
@@ -3613,15 +3670,10 @@ async fn run_engine(
                         &format!("{} -> {}", previous_phase, phase),
                         Some(&ctx),
                     );
-                    previous_phase = phase;
                 }
 
                 // Moment marker: fill crossing target threshold
-                let crossed_up =
-                    last_fill_pct < target_fill_pct && smoothed_fill_pct >= target_fill_pct;
-                let crossed_down =
-                    last_fill_pct >= target_fill_pct && smoothed_fill_pct < target_fill_pct;
-                if crossed_up || crossed_down {
+                if crossed_target_fill {
                     let direction = if crossed_up { "above" } else { "below" };
                     let _ = db.write_moment_marker(
                         session_id,
@@ -3639,7 +3691,7 @@ async fn run_engine(
                 }
 
                 // Moment marker: large spectral velocity spike
-                if dfill_dt.abs() > 8.0 {
+                if spectral_spike {
                     let _ = db.write_moment_marker(
                         session_id,
                         start.elapsed().as_secs_f64(),
@@ -3650,6 +3702,60 @@ async fn run_engine(
                             eigenfill_pct, dfill_dt, lambda1
                         )),
                     );
+                }
+                if phase_transition_happened
+                    || crossed_target_fill
+                    || fill_band_crossed
+                    || spectral_spike
+                {
+                    last_transition_event_sequence =
+                        last_transition_event_sequence.saturating_add(1);
+                    let stable_core_stage_label = if stable_core_runtime.enabled {
+                        Some(format!("{:?}", stable_core_stage).to_ascii_lowercase())
+                    } else {
+                        None
+                    };
+                    let stable_core_mode_label = if stable_core_runtime.enabled {
+                        Some(stable_core_structural_mode.to_string())
+                    } else {
+                        None
+                    };
+                    let event = build_transition_event(TransitionEventInput {
+                        sequence: last_transition_event_sequence,
+                        engine_t_s: start.elapsed().as_secs_f64(),
+                        tick_count: reg_tick_count,
+                        phase_from: previous_phase_label.as_str(),
+                        phase_to: phase,
+                        fill_band_from: previous_fill_band.as_str(),
+                        fill_band_to: current_fill_band,
+                        fill_pct: eigenfill_pct,
+                        target_fill_pct,
+                        lambda1,
+                        lambda1_rel,
+                        target_lambda1_rel,
+                        geom_rel,
+                        dfill_dt,
+                        spectral_entropy: latest_entropy,
+                        structural_entropy: None,
+                        glimpse_distance: None,
+                        rotation_delta: None,
+                        phase_transition: phase_transition_happened,
+                        crossed_target_fill,
+                        crossed_fill_band: fill_band_crossed,
+                        spectral_spike,
+                        stable_core_stage: stable_core_stage_label.as_deref(),
+                        stable_core_mode: stable_core_mode_label.as_deref(),
+                    });
+                    last_transition_reason = event.reason();
+                    last_transition_event = event.legacy_json();
+                    last_transition_event_v1 =
+                        serde_json::to_value(&event).unwrap_or_else(|_| serde_json::json!(null));
+                    last_transition_event_tick = reg_tick_count;
+                } else {
+                    last_transition_reason = format!("steady:{phase}/{current_fill_band}");
+                }
+                if phase_transition_happened {
+                    previous_phase = phase;
                 }
 
                 // 4) PI step (amplify fill error during expansion so we brake BEFORE the peak)
@@ -4083,13 +4189,18 @@ async fn run_engine(
                         );
                     }
 
-                    // Calculate PI controller errors (after step has updated integrators)
+                    // Calculate PI controller errors (after step has updated integrators).
+                    // `e_fill` is the internal PI pressure: fill_for_pi may be
+                    // amplified during expansion so the controller brakes gently
+                    // before raw fill alone would demand it. Keep the legacy key
+                    // for compatibility, but expose the raw target gap too.
                     let pi_errors = if let Some(ref pi) = pi_reg {
                         Some({
-                            let e_fill = fill_for_pi - pi.cfg.target_fill;
+                            let raw_e_fill = eigenfill_pct - pi.cfg.target_fill;
+                            let effective_e_fill = fill_for_pi - pi.cfg.target_fill;
                             let e_lam = lambda1_rel - pi.cfg.target_lambda1_rel;
                             let e_geom = geom_rel - pi.cfg.target_geom_rel;
-                            (e_fill, e_lam, e_geom)
+                            (raw_e_fill, effective_e_fill, e_lam, e_geom)
                         })
                     } else {
                         None
@@ -4300,6 +4411,19 @@ async fn run_engine(
                         "lambda1_esn": esn_lambda1,  // ESN reservoir λ₁ (1.0-1.6 comfort zone)
                         "lambda1_rel": lambda1_rel,
                         "geom_rel": geom_rel,
+                        "phase": &last_phase_label,
+                        "previous_phase": &last_previous_phase_label,
+                        "dfill_dt": last_dfill_dt,
+                        "fill_band": &last_fill_band_label,
+                        "fill_band_threshold_pct": TRANSITION_FILL_BAND_THRESHOLD_PCT,
+                        "phase_transition": last_phase_transition,
+                        "crossed_target_fill": last_crossed_target_fill,
+                        "crossed_fill_band": last_crossed_fill_band,
+                        "spectral_spike": last_spectral_spike,
+                        "transition_reason": &last_transition_reason,
+                        "transition_event_sequence": last_transition_event_sequence,
+                        "transition_event": &last_transition_event,
+                        "transition_event_v1": &last_transition_event_v1,
                         "recovery_synth_floor": recovery_synth_floor,
                         "recovery_rho_floor": recovery_rho_floor,
                         "hard_reset_internal_synth": physiological_fallback
@@ -4361,9 +4485,13 @@ async fn run_engine(
                         "calm": calm_active,
                         "strong": strong,
                         "pi": if let Some(ref pi) = pi_reg {
-                            let (e_fill, e_lam, e_geom) = pi_errors.unwrap_or((0.0, 0.0, 0.0));
+                            let (raw_e_fill, effective_e_fill, e_lam, e_geom) =
+                                pi_errors.unwrap_or((0.0, 0.0, 0.0, 0.0));
                             serde_json::json!({
-                                "e_fill": e_fill,
+                                "e_fill": effective_e_fill,
+                                "raw_e_fill": raw_e_fill,
+                                "effective_e_fill": effective_e_fill,
+                                "e_fill_kind": "effective_braking_biased",
                                 "e_lam": e_lam,
                                 "e_geom": e_geom,
                                 "integ_fill": pi.integ_fill,
@@ -4624,6 +4752,68 @@ async fn run_engine(
                 latest_entropy = spectral_fingerprint[24];
             }
             let current_glimpse_12d = compute_spectral_glimpse_12d(&spectral_fingerprint);
+            let transition_distance = last_transition_glimpse_12d
+                .as_deref()
+                .and_then(|previous| transition_glimpse_distance(previous, &current_glimpse_12d));
+            let transition_rotation_delta = current_glimpse_12d.get(9).copied();
+            let basin_candidate = transition_distance.is_some_and(|distance| distance >= 0.18)
+                || (transition_distance.is_some_and(|distance| distance >= 0.12)
+                    && transition_rotation_delta.is_some_and(|rotation| rotation >= 0.08));
+            let enrich_current_event =
+                last_transition_event_sequence > 0 && last_transition_event_tick == reg_tick_count;
+            if enrich_current_event || basin_candidate {
+                if basin_candidate && !enrich_current_event {
+                    last_transition_event_sequence =
+                        last_transition_event_sequence.saturating_add(1);
+                    last_transition_event_tick = reg_tick_count;
+                }
+                let transition_target_fill_pct = pi_reg
+                    .as_ref()
+                    .map_or(fallback_target_pct, |pi| pi.cfg.target_fill);
+                let transition_target_lambda1_rel =
+                    pi_reg.as_ref().map_or(1.05, |pi| pi.cfg.target_lambda1_rel);
+                let stable_core_stage_label = if stable_core_runtime.enabled {
+                    Some(format!("{:?}", stable_core_stage).to_ascii_lowercase())
+                } else {
+                    None
+                };
+                let stable_core_mode_label = if stable_core_runtime.enabled {
+                    Some(stable_core_structural_mode.to_string())
+                } else {
+                    None
+                };
+                let event = build_transition_event(TransitionEventInput {
+                    sequence: last_transition_event_sequence,
+                    engine_t_s: start.elapsed().as_secs_f64(),
+                    tick_count: reg_tick_count,
+                    phase_from: last_previous_phase_label.as_str(),
+                    phase_to: last_phase_label.as_str(),
+                    fill_band_from: last_previous_fill_band_label.as_str(),
+                    fill_band_to: last_fill_band_label.as_str(),
+                    fill_pct: eigenfill_pct,
+                    target_fill_pct: transition_target_fill_pct,
+                    lambda1,
+                    lambda1_rel: last_lambda1_rel,
+                    target_lambda1_rel: transition_target_lambda1_rel,
+                    geom_rel: latest_geom_rel,
+                    dfill_dt: last_dfill_dt,
+                    spectral_entropy: latest_entropy,
+                    structural_entropy: Some(structural_entropy),
+                    glimpse_distance: transition_distance,
+                    rotation_delta: transition_rotation_delta,
+                    phase_transition: enrich_current_event && last_phase_transition,
+                    crossed_target_fill: enrich_current_event && last_crossed_target_fill,
+                    crossed_fill_band: enrich_current_event && last_crossed_fill_band,
+                    spectral_spike: enrich_current_event && last_spectral_spike,
+                    stable_core_stage: stable_core_stage_label.as_deref(),
+                    stable_core_mode: stable_core_mode_label.as_deref(),
+                });
+                last_transition_reason = event.reason();
+                last_transition_event = event.legacy_json();
+                last_transition_event_v1 =
+                    serde_json::to_value(&event).unwrap_or_else(|_| serde_json::json!(null));
+            }
+            last_transition_glimpse_12d = Some(current_glimpse_12d.clone());
             update_memory_bank(
                 &mut spectral_memory_bank,
                 &MemoryObservation {
@@ -4802,7 +4992,7 @@ async fn run_engine(
                     stable_core_applied_scaffold_live_weight,
                     stable_core_applied_scaffold_drain_weight,
                 );
-                let state = serde_json::json!({
+                let mut state = serde_json::json!({
                     "provenance": &spectral_provenance,
                     "eigenvalues": &packet.eigenvalues,
                     "fill_pct": packet.fill_ratio * 100.0,
@@ -4968,6 +5158,54 @@ async fn run_engine(
                         },
                     },
                 });
+                if let Some(object) = state.as_object_mut() {
+                    object.insert("phase".to_string(), serde_json::json!(&last_phase_label));
+                    object.insert(
+                        "previous_phase".to_string(),
+                        serde_json::json!(&last_previous_phase_label),
+                    );
+                    object.insert("dfill_dt".to_string(), serde_json::json!(last_dfill_dt));
+                    object.insert(
+                        "fill_band".to_string(),
+                        serde_json::json!(&last_fill_band_label),
+                    );
+                    object.insert(
+                        "fill_band_threshold_pct".to_string(),
+                        serde_json::json!(TRANSITION_FILL_BAND_THRESHOLD_PCT),
+                    );
+                    object.insert(
+                        "phase_transition".to_string(),
+                        serde_json::json!(last_phase_transition),
+                    );
+                    object.insert(
+                        "crossed_target_fill".to_string(),
+                        serde_json::json!(last_crossed_target_fill),
+                    );
+                    object.insert(
+                        "crossed_fill_band".to_string(),
+                        serde_json::json!(last_crossed_fill_band),
+                    );
+                    object.insert(
+                        "spectral_spike".to_string(),
+                        serde_json::json!(last_spectral_spike),
+                    );
+                    object.insert(
+                        "transition_reason".to_string(),
+                        serde_json::json!(&last_transition_reason),
+                    );
+                    object.insert(
+                        "transition_event_sequence".to_string(),
+                        serde_json::json!(last_transition_event_sequence),
+                    );
+                    object.insert(
+                        "transition_event".to_string(),
+                        last_transition_event.clone(),
+                    );
+                    object.insert(
+                        "transition_event_v1".to_string(),
+                        last_transition_event_v1.clone(),
+                    );
+                }
                 if let Ok(json) = serde_json::to_string(&state) {
                     let _ = std::fs::write(workspace_dir.join("spectral_state.json"), json);
                 }
@@ -5093,6 +5331,19 @@ async fn run_engine(
                         "last_lambda1_rel": last_lambda1_rel,
                         "latest_geom_rel": latest_geom_rel,
                         "tick_count": tick_count,
+                        "phase": &last_phase_label,
+                        "previous_phase": &last_previous_phase_label,
+                        "dfill_dt": last_dfill_dt,
+                        "fill_band": &last_fill_band_label,
+                        "fill_band_threshold_pct": TRANSITION_FILL_BAND_THRESHOLD_PCT,
+                        "phase_transition": last_phase_transition,
+                        "crossed_target_fill": last_crossed_target_fill,
+                        "crossed_fill_band": last_crossed_fill_band,
+                        "spectral_spike": last_spectral_spike,
+                        "transition_reason": &last_transition_reason,
+                        "transition_event_sequence": last_transition_event_sequence,
+                        "transition_event": &last_transition_event,
+                        "transition_event_v1": &last_transition_event_v1,
                         // PI integral state — survives restart for control continuity.
                         "integ_fill": pi_reg.as_ref().map_or(0.0, |pi| pi.integ_fill),
                         "integ_lam": pi_reg.as_ref().map_or(0.0, |pi| pi.integ_lam),

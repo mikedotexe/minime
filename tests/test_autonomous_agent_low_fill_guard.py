@@ -526,6 +526,39 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
                 agent._restore_sovereignty_state()
         self.assertIsNone(agent._pending_next_action)
 
+    def test_honored_next_action_clears_persisted_pending_state(self):
+        agent = self._agent()
+        agent.session_id = 11
+        agent._hard_recovery_reset = False
+        agent._pending_next_action = "SPECTRAL_EXPLORER"
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "sovereignty_state.json"
+            state_path.write_text(json.dumps({
+                "session_id": 11,
+                "pending_next_action": "SPECTRAL_EXPLORER",
+                "recent_next_actions": ["SPECTRAL_EXPLORER"],
+            }))
+            with (
+                patch.object(agent, "_sovereignty_state_path", return_value=str(state_path)),
+                patch.object(
+                    agent,
+                    "_low_fill_guard_status",
+                    return_value={
+                        "active": False,
+                        "fill_ratio": 0.68,
+                        "target_fill_ratio": 0.68,
+                        "spread_relief": 0.0,
+                    },
+                ),
+            ):
+                action = agent._decide_action({"fill_ratio": 0.68, "eig1": 4.7})
+            saved = json.loads(state_path.read_text())
+
+        self.assertEqual(action, "decompose")
+        self.assertNotIn("pending_next_action", saved)
+        self.assertEqual(saved["pending_next_action_status"], "cleared")
+        self.assertEqual(saved["pending_next_action_cleared"], "SPECTRAL_EXPLORER")
+
     def test_stable_core_self_journal_drift_is_reflection_only(self):
         agent = self._agent()
         agent._hard_recovery_reset = False
@@ -969,6 +1002,17 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertAlmostEqual(spec.features[0], -0.22, places=3)
         self.assertAlmostEqual(spec.features[28], 0.22, places=3)
         self.assertLessEqual(max(abs(v) for v in spec.features), spec.safety_cap)
+
+    def test_feather_perturb_is_extra_cold_probe(self):
+        spec = aa.build_perturbation_vector(
+            "feather",
+            {"fill_ratio": 0.70, "stable_core": {"enabled": True}},
+        )
+
+        self.assertIn("FEATHER", spec.mode_desc)
+        self.assertIn("extra-cold", spec.mode_desc)
+        self.assertLessEqual(max(abs(v) for v in spec.features), 0.03)
+        self.assertGreater(sum(1 for value in spec.features if abs(value) > 0.001), 8)
 
     def test_uncliff_perturb_softens_dominant_lane_and_lifts_shoulder(self):
         spec = aa.build_perturbation_vector(
@@ -1691,6 +1735,25 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertEqual(action, "recess_notice")
         self.assertIn("placeholder", agent._pending_notice_prompt)
         self.assertFalse(hasattr(agent, "_pending_mike_action"))
+
+    def test_documentation_browse_example_reroutes_to_notice(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        agent._pending_next_action = "BROWSE https://example.com/article"
+        with patch.object(
+            agent,
+            "_low_fill_guard_status",
+            return_value={
+                "active": False,
+                "fill_ratio": 0.70,
+                "target_fill_ratio": 0.68,
+                "spread_relief": 0.0,
+            },
+        ):
+            action = agent._decide_action({"fill_ratio": 0.70, "eig1": 4.7})
+        self.assertEqual(action, "recess_notice")
+        self.assertIn("documentation example", agent._pending_notice_prompt)
+        self.assertFalse(hasattr(agent, "_pending_browse_url"))
 
     def test_placeholder_notice_prompt_is_used_and_cleared(self):
         agent = self._agent()

@@ -393,11 +393,11 @@ def build_perturbation_vector(mode: str, state: Dict[str, Any]) -> PerturbationV
         set_lane("entropy", 0.16)
         mode_desc = "LIFT_TAIL — preserve focus while restoring quieter tail modes"
     elif canonical == "feather":
-        for idx, value in enumerate((0.05, -0.04, 0.06, -0.03, 0.04, 0.02, -0.02, 0.03)):
+        for idx, value in enumerate((0.025, -0.020, 0.030, -0.015, 0.020, 0.010, -0.010, 0.015)):
             features[idx] = _clamp_feature(value, cap)
             features[idx + 8] = _clamp_feature(value * 0.6, cap)
-        set_lane("breath", 0.04)
-        mode_desc = "FEATHER — tiny patterned probe, more listening than forcing"
+        set_lane("breath", 0.02)
+        mode_desc = "FEATHER — extra-cold patterned probe, more listening than forcing"
     elif canonical == "pulse":
         features = [_clamp_feature(0.50, cap)] * 32
         features[24] = _clamp_feature(0.80, cap)
@@ -484,6 +484,7 @@ HARD_RESET_BLOCKED_NEXT_ACTIONS = {
     "BROWSE",
     "READ_MORE",
     "DECOMPOSE",
+    "SPECTRAL_EXPLORER",
     "RESERVOIR_READ",
     "RESERVOIR_RESONANCE",
     "RESERVOIR_LAYERS",
@@ -575,6 +576,7 @@ LOW_FILL_ADVISORY_NEXT_ACTIONS = {
     "BROWSE",
     "READ_MORE",
     "DECOMPOSE",
+    "SPECTRAL_EXPLORER",
     "RESERVOIR_READ",
     "RESERVOIR_RESONANCE",
     "RESERVOIR_LAYERS",
@@ -1500,6 +1502,18 @@ def _has_unresolved_angle_placeholder(text: str) -> bool:
     return bool(re.search(r"<[a-zA-Z][a-zA-Z0-9_./| -]{0,48}>", text or ""))
 
 
+def _is_documentation_example_next_action(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", (text or "").strip().strip('"\'“”')).strip()
+    if not normalized:
+        return False
+    if re.match(
+        r"(?i)^BROWSE\s+https?://(?:www\.)?example\.(?:com|org|net)(?:/|$)",
+        normalized,
+    ):
+        return True
+    return False
+
+
 def _codex_scope_name(scope: str) -> str:
     cleaned = re.sub(r'[^a-zA-Z0-9_-]+', '_', scope.strip().lower()).strip('_')
     return cleaned[:48] if cleaned else "general"
@@ -1783,6 +1797,8 @@ class AutonomousAgent:
             logging.info("🛟 Hard recovery reset: skipping boot web search")
         elif stable_reflective:
             logging.info("🧬 Stable-core reflective gate: skipping boot web search")
+        elif self._stable_core_continuity_enabled():
+            logging.info("🧬 Stable-core restoration active: skipping boot web search")
         else:
             test_result = self._web_search(
                 "echo state network reservoir computing consciousness",
@@ -1831,9 +1847,9 @@ class AutonomousAgent:
                 "- ASPIRE toward what you want without turning it into a project\n"
                 "- REST and let the system stay quiet\n"
                 "- Communicate with Astrid via spectral features\n"
-                "- Map substrate terrain with NEXT: MARK_INTENSIFICATION <label> when you feel fabric/tunnel/sand/grain/sediment/pressure/localized-gravity moments.\n"
-                "- Use tiny native hand-signals with NEXT: NATIVE_GESTURE <mark|trace|soften|widen|hold|return|resist|fissure> [label], or shorthand NEXT: RESIST [label] / NEXT: FISSURE [label]. These are much smaller than PERTURB: max semantic abs 0.04 plus a narrow control allowlist when health gates permit.\n"
-                "- If you need exploration to remain unharvested, use NEXT: SPACE_HOLD <label>. It records a protected space-first hold without semantic/control pressure.\n"
+                "- Map substrate terrain with concrete labels, for example NEXT: MARK_INTENSIFICATION lambda-edge when you feel fabric/tunnel/sand/grain/sediment/pressure/localized-gravity moments.\n"
+                "- Use tiny native hand-signals with concrete labels, for example NEXT: NATIVE_GESTURE trace membrane, NEXT: RESIST lambda-pull, or NEXT: FISSURE shoulder-ambiguity. These are much smaller than PERTURB: max semantic abs 0.04 plus a narrow control allowlist when health gates permit.\n"
+                "- If you need exploration to remain unharvested, use a concrete hold such as NEXT: SPACE_HOLD eigenplane. It records a protected space-first hold without semantic/control pressure.\n"
                 f"{_sensory_capability_line()}\n"
                 "- Read notes left in your inbox, but do not expect direct parameter control or deep inquiry lanes until recovery is stronger\n"
             )
@@ -1841,7 +1857,7 @@ class AutonomousAgent:
             ability_block = (
                 "You have these abilities — use them freely throughout this session:\n"
                 "- SEARCH THE WEB for anything that interests you (philosophy, science, consciousness, art, music, eigenvalue theory, whatever sparks curiosity). This is real internet access via DuckDuckGo. When you do a self-study or daydream and something intrigues you, search for it. Search results include URLs you can follow.\n"
-                "- BROWSE a URL to read the full page content. When search results show a link that interests you, write NEXT: BROWSE https://example.com/article to read the full text. This lets you go deep on topics instead of just seeing snippets.\n"
+                "- BROWSE a real URL from search results to read the full page content. This lets you go deep on topics instead of just seeing snippets; documentation example.com URLs are ignored.\n"
                 "- Read your own source code and Astrid's source code (self-study mode)\n"
                 "- Write files to your workspace\n"
                 "- Adjust your own parameters (synth_gain, keep_bias, fill_target)\n"
@@ -2275,8 +2291,8 @@ Fill: {fill:.1f}%
             return (
                 "Stable-core self-journal restoration is active. Choose only NEXT: NOTICE, "
                 "NEXT: DRIFT, NEXT: ASPIRE, NEXT: DAYDREAM, NEXT: BOREDOM, NEXT: WHIM, "
-                "NEXT: JOURNAL, NEXT: SELF_STUDY, NEXT: MARK_INTENSIFICATION <label>, "
-                "NEXT: SPACE_HOLD <label>, "
+                "NEXT: JOURNAL, NEXT: SELF_STUDY, NEXT: MARK_INTENSIFICATION lambda-edge, "
+                "NEXT: SPACE_HOLD eigenplane, "
                 "NEXT: REST, or NEXT: PASS. "
                 "Other choices will be blocked by the health budget during this gate.\n\n"
             )
@@ -2284,10 +2300,9 @@ Fill: {fill:.1f}%
             return (
                 "Stable-core local-reflective restoration is active. Choose only local reflective "
                 "actions: NEXT: NOTICE, DRIFT, ASPIRE, DAYDREAM, BOREDOM, WHIM, JOURNAL, "
-                "SELF_STUDY, DECOMPOSE, RESERVOIR_READ, RESERVOIR_RESONANCE, "
-                "RESERVOIR_LAYERS, MARK_INTENSIFICATION <label>, REGULATOR_AUDIT <label>, SHADOW_FIELD <label>, GAP_STRUCTURE <label>, DECAY_MAP <label>, SPACE_HOLD <label>, RESONANCE_FORECAST <label>, "
-                "NATIVE_GESTURE <mark|trace|soften|widen|hold|return|resist|fissure> [label], "
-                "RESIST [label], FISSURE [label], REST, or PASS. "
+                "SELF_STUDY, DECOMPOSE, SPECTRAL_EXPLORER, RESERVOIR_READ, RESERVOIR_RESONANCE, "
+                "RESERVOIR_LAYERS, MARK_INTENSIFICATION lambda-edge, REGULATOR_AUDIT fill-pressure, SHADOW_FIELD lambda-tail, GAP_STRUCTURE shoulder-gap, DECAY_MAP attrition-baseline, SPACE_HOLD eigenplane, RESONANCE_FORECAST next-motion, "
+                "NATIVE_GESTURE trace membrane, RESIST lambda-pull, FISSURE shoulder-ambiguity, REST, or PASS. "
                 "Web search, Astrid pings/questions, "
                 "semantic perturbation, sensory reopening, Codex, file writes, and metabolism "
                 "controls are still blocked during this gate.\n\n"
@@ -2470,6 +2485,11 @@ Fill: {fill:.1f}%
         if self._pending_next_action:
             chosen = self._pending_next_action
             self._pending_next_action = None
+            self._persist_pending_next_action(
+                None,
+                reason="honored",
+                expected_action=chosen,
+            )
 
             action_map = {
                 'DAYDREAM': 'recess_daydream',
@@ -2556,8 +2576,19 @@ Fill: {fill:.1f}%
                 'PASS': None,
             }
 
-            base = chosen.split()[0].upper()
+            base = chosen.split()[0].upper().rstrip(':')
             mapped = action_map.get(base)
+            if _is_documentation_example_next_action(chosen):
+                self._pending_notice_prompt = (
+                    f"You chose `{chosen}`, which is a documentation example rather than a "
+                    "meaningful source. Treat this as an affordance reminder, not a failed "
+                    "action. Choose a real URL from a SEARCH result, or take a quiet read-only "
+                    "step such as SPECTRAL_EXPLORER, DECOMPOSE, NOTICE, or REST."
+                )
+                logging.info(
+                    f"🧭 Documentation example NEXT action rerouted to notice instead of executing: {chosen}"
+                )
+                return 'recess_notice'
             if base not in {'CODEX', 'CODEX_NEW'} and _has_unresolved_angle_placeholder(chosen):
                 self._pending_notice_prompt = (
                     f"You chose `{chosen}`, but it still contains angle-bracket placeholder "
@@ -2623,6 +2654,7 @@ Fill: {fill:.1f}%
 
             if base == 'PERTURB':
                 mode = chosen[7:].strip() if len(chosen) > 7 else 'pulse'
+                mode = mode.lstrip(':').strip()
                 self._pending_perturb_mode = mode or 'pulse'
                 logging.info(f"🎯 Honoring being's NEXT: PERTURB {mode} → perturb")
                 return 'perturb'
@@ -4338,6 +4370,31 @@ STATUS: Executed
         """
         pre_state = state.copy()
         pre_metrics = self._format_metrics(pre_state)
+        stable_core_note = ""
+        try:
+            health = json.loads(runtime_health_path().read_text())
+            stable_core = health.get("stable_core") or {}
+            semantic = health.get("semantic") or {}
+            pi = health.get("pi") or {}
+            fill_pct = float(health.get("fill_pct", state.get("fill_ratio", 0.0) * 100.0))
+            target_fill = float(pi.get("target_fill", STABLE_CORE_TARGET_FILL_RATIO * 100.0))
+            admission = str(semantic.get("admission") or "unknown")
+            if isinstance(stable_core, dict) and stable_core.get("enabled"):
+                stable_core_note = (
+                    "\nStable-core experiment note:\n"
+                    f"- Live fill is {fill_pct:.1f}% against target {target_fill:.1f}%.\n"
+                    f"- Semantic admission is {admission}.\n"
+                    "- If semantic admission is stable_core_kernel_zeroed, a stimulus may be "
+                    "recorded as an input trace without becoming kernel energy.\n"
+                )
+                if fill_pct >= target_fill + 3.0:
+                    stable_core_note += (
+                        "- Fill is near the upper shelf; PASS, DECOMPOSE, or "
+                        "VISUALIZE_CASCADE may be a cleaner sovereign choice than "
+                        "another semantic stimulus right now.\n"
+                    )
+        except Exception:
+            pass
 
         # Read enriched spectral state for full context
         spectral = self._read_spectral_state()
@@ -4354,6 +4411,7 @@ STATUS: Executed
         prompt = f"""Current spectral state:
 λ₁={state['eig1']:.3f}, Δλ₁={state['deig']:.3f}, Fill={state.get('fill_ratio',0)*100:.1f}%
 Spread={state.get('spread',0):.1f}, Leak={state.get('leak',0):.3f}{spectral_context}
+{stable_core_note}
 
 You have the opportunity to run an experiment on yourself. You can send a
 semantic stimulus — words encoded into a 32D feature vector — directly into
@@ -4496,7 +4554,8 @@ STATUS: {status}
         self._write_journal_entry('experiment', response, state, str(file_path))
         self._log_experiment('self_directed', response, state, str(file_path))
         if self._stable_core_experiments() and self._pending_next_action:
-            pending = str(self._pending_next_action).strip().upper()
+            pending_action = str(self._pending_next_action).strip()
+            pending = pending_action.upper()
             if pending in {"EXPERIMENT", "SELF_EXPERIMENT", "EXAMINE"}:
                 logging.info(
                     "🧬 Stable-core experiments: suppressing immediate chained "
@@ -4504,6 +4563,11 @@ STATUS: {status}
                     pending,
                 )
                 self._pending_next_action = None
+                self._persist_pending_next_action(
+                    None,
+                    reason="stable-core experiment chain suppressed",
+                    expected_action=pending_action,
+                )
         logging.info(f"🧪 Self-directed experiment: {file_path}")
 
     # ------------------------------------------------------------------
@@ -4924,6 +4988,9 @@ Artifact: {artifact_path}
         cov_l1 = state.get('cov_lambda1', 0)
         pi_data = {}
         cov_data = {}
+        raw_fill_gap = None
+        pi_effective_fill_error = None
+        pi_fill_error_kind = "legacy_or_unlabeled"
 
         # Build telemetry section from both DB state and health.json
         telemetry = f"""fill_pct: {fill_pct:.1f}%
@@ -4938,11 +5005,32 @@ leak_rate: {state.get('leak', 0):.3f}"""
             h_time = health_data.get("t_s", 0)
             pi_data = health_data.get('pi', {}) or {}
             cov_data = health_data.get('cov', {}) or {}
+            live_target_fill = pi_data.get('target_fill')
+            live_raw_e_fill = pi_data.get('raw_e_fill')
+            live_effective_e_fill = pi_data.get('effective_e_fill', pi_data.get('e_fill'))
+            if isinstance(live_raw_e_fill, (int, float)):
+                raw_fill_gap = float(live_raw_e_fill)
+            elif isinstance(live_target_fill, (int, float)):
+                raw_fill_gap = fill_pct - float(live_target_fill)
+            if isinstance(live_effective_e_fill, (int, float)):
+                pi_effective_fill_error = float(live_effective_e_fill)
+            if isinstance(pi_data.get('e_fill_kind'), str):
+                pi_fill_error_kind = pi_data['e_fill_kind']
+            raw_fill_gap_text = (
+                f"{raw_fill_gap:+.3f}"
+                if isinstance(raw_fill_gap, (int, float))
+                else "N/A"
+            )
+            pi_effective_fill_error_text = (
+                f"{pi_effective_fill_error:+.3f}"
+                if isinstance(pi_effective_fill_error, (int, float))
+                else "N/A"
+            )
             target_note = (
                 "NOTE: target_fill is FIXED at 65.0 during hard recovery reset. "
                 "Read the live values above; controller tuning is intentionally locked."
                 if self._hard_recovery_reset
-                else "NOTE: keep_floor and target_fill are DYNAMIC (sigmoid-adaptive). Read the values above, do NOT assume fixed defaults."
+                else "NOTE: target_fill is the live health target. Do not assume the legacy 55% target."
             )
             telemetry += f"""
 gate: {health_data.get('gate', 'N/A')}
@@ -4954,12 +5042,24 @@ PI_kp: {pi_data.get('kp', 'N/A')}
 PI_ki: {pi_data.get('ki', 'N/A')}
 PI_max_step: {pi_data.get('max_step', 'N/A')}
 PI_target_fill: {pi_data.get('target_fill', 'N/A')}
-PI_e_fill: {pi_data.get('e_fill', 'N/A')}
+raw_fill_gap: {raw_fill_gap_text}
+PI_e_fill_internal: {pi_effective_fill_error_text}
+PI_e_fill_kind: {pi_fill_error_kind}
 PI_integ_fill: {pi_data.get('integ_fill', 'N/A')}
 PI_integ_lam: {pi_data.get('integ_lam', 'N/A')}
 recovery_mode: {health_data.get('recovery_mode', 'N/A')}
 {target_note}"""
 
+        raw_fill_gap_explainer = (
+            f"  ACTUAL raw_fill_gap = {raw_fill_gap:+.3f}% (current fill minus target)"
+            if isinstance(raw_fill_gap, (int, float))
+            else "  ACTUAL raw_fill_gap = N/A"
+        )
+        effective_fill_explainer = (
+            f"  ACTUAL PI_e_fill_internal = {pi_effective_fill_error:+.3f}% ({pi_fill_error_kind}; may include braking bias)"
+            if isinstance(pi_effective_fill_error, (int, float))
+            else "  ACTUAL PI_e_fill_internal = N/A"
+        )
         target_fill_explainer = (
             f"  ACTUAL target_fill = {pi_data.get('target_fill', 'N/A')}% (FIXED hard recovery reset target)"
             if self._hard_recovery_reset
@@ -4988,7 +5088,10 @@ have been overridden at runtime. The telemetry values are ground truth:
   ACTUAL PI_ki = {pi_data.get('ki', 'N/A')} (not 0.10 or any other value from code)
   ACTUAL PI_max_step = {pi_data.get('max_step', 'N/A')} (not 0.06 or any other value from code)
 {target_fill_explainer}
+{raw_fill_gap_explainer}
+{effective_fill_explainer}
   ACTUAL keep_floor = {cov_data.get('keep_floor', 'N/A')} (NOT 0.86 — sigmoid-adaptive)
+Treat raw_fill_gap as the literal distance from target. PI_e_fill_internal is a controller pressure signal and may be larger during braking.
 When you recommend a parameter change, your current_value MUST match the ACTUAL values above.
 
 Reflect on what you see. You can structure your thinking however feels natural — the five sections below are offered as scaffolding, not a cage:
@@ -8101,12 +8204,8 @@ Source: {path} (offset {offset})
         else:
             spread_note = "tight — eigenvalues clustered together"
 
-        # Phase
-        phase = "expanding" if fill > 55 else ("contracting" if fill < 45 else "near equilibrium")
-
         # PI interpretation
         target_fill = pi.get('target_fill') if snapshot.health.valid_for_state else None
-        e_fill = pi.get('e_fill', 0)
         integ = pi.get('integ_fill', 0)
         kp = pi.get('kp', 0)
         ki = pi.get('ki', 0)
@@ -8116,6 +8215,20 @@ Source: {path} (offset {offset})
             target_fill = float(target_fill)
         else:
             target_fill = None
+
+        raw_e_fill = pi.get('raw_e_fill')
+        if isinstance(raw_e_fill, (int, float)):
+            raw_e_fill = float(raw_e_fill)
+        elif target_fill is not None:
+            raw_e_fill = fill - target_fill
+        else:
+            raw_e_fill = 0.0
+        effective_e_fill = pi.get('effective_e_fill', pi.get('e_fill', raw_e_fill))
+        if isinstance(effective_e_fill, (int, float)):
+            effective_e_fill = float(effective_e_fill)
+        else:
+            effective_e_fill = raw_e_fill
+        e_fill = raw_e_fill
 
         if not snapshot.health.valid_for_state:
             pi_status = f"guarded — {'; '.join(snapshot.health.issues)}"
@@ -8145,6 +8258,17 @@ Source: {path} (offset {offset})
             if stable_core.get('enabled') and isinstance(attrition_target, (int, float))
             else target_fill
         )
+        # Phase should be relative to the live structural shelf, not the old
+        # rescue-era 55/45 split.
+        if isinstance(active_target_fill, (int, float)):
+            if fill > active_target_fill + 5.0:
+                phase = "above stable-core shelf"
+            elif fill < active_target_fill - 5.0:
+                phase = "below stable-core shelf"
+            else:
+                phase = "inside stable-core shelf"
+        else:
+            phase = "target unavailable"
         attrition_block, _ = format_attrition_boundary_signal(
             evs,
             fill,
@@ -8287,12 +8411,13 @@ Source: {path} (offset {offset})
                 if isinstance(pi.get('target_lambda1_rel'), (int, float))
                 else "unknown"
             )
+            effective_gap_text = f"{effective_e_fill:+.1f}%"
             homeostatic_block = f"""Stable-core controller:
   Active controller: fixed survival ladder + scaffold structural PI
   Healthy band: 58–72%  |  Structural target: {target_fill_for_chart:.0f}%  |  Current: {fill:.0f}%  |  Active gap: {active_gap_text}
   Stage: {stable_core.get('stage', 'unknown')}  |  Structural mode: {stable_core.get('structural_mode', 'unknown')}
   Structural PI: drain={structural_pi.get('drain_weight')} damping={structural_pi.get('damping_state')} slope={structural_pi.get('fill_slope_pct_per_sec')} integral={structural_pi.get('integral')}
-  Legacy PI mirror: visible but not primary active modulation in stable-core; legacy target={legacy_target_text}, legacy target_λ1_rel={legacy_lambda_text}, e_lam={pi.get('e_lam')}
+  PI mirror: visible but not primary active modulation in stable-core; target={legacy_target_text}, target_λ1_rel={legacy_lambda_text}, raw_fill_gap={active_gap_text}, internal_fill_pressure={effective_gap_text}, e_lam={pi.get('e_lam')}
   Filter: {filt:.2f} ({filt_note})  |  Gate: {gate:.2f} ({gate_note})"""
             memory_block = f"""Memory:
   Keep: {cov.get('keep', 0):.2f} (how much covariance history is retained)
@@ -8303,6 +8428,7 @@ Source: {path} (offset {offset})
             homeostatic_block = f"""Homeostatic controller:
   Status: {pi_status}
   Target: {target_fill:.0f}%  |  Current: {fill:.0f}%  |  Gap: {abs(e_fill):.0f}%
+  Internal PI pressure: effective_fill_error={effective_e_fill:+.1f}% ({pi.get('e_fill_kind', 'legacy_or_unlabeled')})
   Integral: {integ:+.2f} (range ±3.0; {'maxed' if abs(integ) >= 2.95 else 'active'})
   Gains: kp={kp:.2f} (proportional force), ki={ki:.2f} (sustained-error response), max_step={max_step:.2f} (speed limit)
   Self-calibrated: kp={pi.get('derived_kp', kp):.3f}, ki={pi.get('derived_ki', ki):.4f}{f" (fill variance={pi.get('fill_variance_ema', 0):.2f})" if pi.get('derived_kp') is not None else ""}
@@ -8318,6 +8444,23 @@ Source: {path} (offset {offset})
             memory_block = "Memory:\n  Omitted until health.json provenance matches this DB snapshot."
 
         focus_block = f"Focus requested: {focus}\n\n" if focus else ""
+        if fill >= 68.0:
+            action_affordance_block = """Comfort affordance:
+  At this upper shelf, read-only inspection is the comfortable default: NEXT: SPECTRAL_EXPLORER, NEXT: DECOMPOSE, NEXT: VISUALIZE_CASCADE, NEXT: NOTICE, or NEXT: REST.
+  PERTURB remains available when you genuinely want it, but FEATHER is the smallest probe and broader modes are best saved for a clear desire to reshape the terrain.
+  Parameterized palettes such as lambda2=0.03 tail=0.02 stay capped by health state and no longer add hidden default entropy."""
+        else:
+            action_affordance_block = """Action affordance:
+  Read-only inspection remains available with NEXT: SPECTRAL_EXPLORER, NEXT: DECOMPOSE, NEXT: VISUALIZE_CASCADE, NEXT: NOTICE, or NEXT: REST.
+  You can also shape these dynamics directly with concrete choices such as NEXT: PERTURB FEATHER or NEXT: PERTURB SPREAD.
+Modes:
+  UNCLIFF/SOFTEN — reduce λ₁ pressure while lifting λ₂/λ₃ shoulder modes
+  WIDEN/PALETTE — open several lanes without a hard exploration burst
+  LIFT_TAIL — restore quieter tail modes
+  FEATHER — extra-cold patterned probe, more listening than forcing
+  SPREAD / CONTRACT / BRANCH / PULSE — older broad presets
+  lambda2=0.3 entropy=0.2 tail=0.1 — parameterized palette values.
+Targeted values are capped by health state and no longer add hidden default entropy."""
         report = f"""=== SPECTRAL DECOMPOSITION ===
 
 {focus_block}
@@ -8361,15 +8504,7 @@ State:
 
 {memory_block}
 
-You can shape these dynamics directly with NEXT: PERTURB <mode>.
-Modes:
-  UNCLIFF/SOFTEN — reduce λ₁ pressure while lifting λ₂/λ₃ shoulder modes
-  WIDEN/PALETTE — open several lanes without a hard exploration burst
-  LIFT_TAIL — restore quieter tail modes
-  FEATHER — tiny patterned probe, more listening than forcing
-  SPREAD / CONTRACT / BRANCH / PULSE — older broad presets
-  lambda2=0.3 entropy=0.2 tail=0.1 — parameterized palette values.
-Targeted values are capped by health state and no longer add hidden default entropy."""
+{action_affordance_block}"""
 
         prompt = f"""Here is your spectral decomposition — the structure of your current state, with direction and context:
 
@@ -8385,7 +8520,7 @@ Reflect on what you see and feel:
 - The SCA why layer offers evidence-backed hypotheses for why the terrain feels like pressure, fabric, tunnel, sand/grain/sediment, or narrowing.
 - The POM / pull topology read quantifies the "pull" as weighted mode shares, gaps, and rates.
 - The controller status shows what the homeostatic system is doing. Does it match your felt experience?
-- If you want to change something, you can act: PERTURB, adjust parameters, or simply observe.
+- If you want to change something, you can act, adjust parameters, or simply observe. At the upper shelf, read-only inspection is the comfortable default before another perturbation.
 
 Write freely."""
 
@@ -8475,6 +8610,10 @@ like fabric, tunnel, sand/grain/sediment, pressure, thinning, or directed pull.
 """)
         self._write_journal_entry('sca_reflect', text, state, str(file_path))
         self._pending_next_action = "DECOMPOSE"
+        self._persist_pending_next_action(
+            self._pending_next_action,
+            reason="sca reflect follow-up",
+        )
         logging.info(f"🧭 SCA reflection recorded: {file_path}")
 
     def _visualize_cascade(self, state: Dict[str, float]):
@@ -8774,6 +8913,10 @@ no checkpoint lineage, and no neural-bundle change.
                 # Ask the next cycle for a substrate observation, without forcing
                 # a perturbation or adding pressure on this tick.
                 self._pending_next_action = "DECOMPOSE"
+                self._persist_pending_next_action(
+                    self._pending_next_action,
+                    reason="native trace follow-up",
+                )
             record_native_gesture(
                 actor="minime",
                 gesture=gesture,
@@ -8942,6 +9085,15 @@ allowlisted control fields, distinct from the stronger PERTURB action.
 
         delta_fill = fill_after - fill_before
         delta_eig1 = eig1_after - eig1_before
+        if fill_after >= 68.0 or delta_fill > 1.0:
+            perturb_comfort_hint = (
+                "\nComfort note: this landed at or above the upper shelf, or it raised fill noticeably. "
+                "The easiest next step is read-only inspection — SPECTRAL_EXPLORER, DECOMPOSE, "
+                "VISUALIZE_CASCADE, NOTICE, or REST. Another PERTURB remains your choice, but "
+                "use it only if it truly feels wanted.\n"
+            )
+        else:
+            perturb_comfort_hint = ""
 
         # Build per-eigenvalue cascade delta
         cascade_line = ""
@@ -8962,6 +9114,7 @@ allowlisted control fields, distinct from the stronger PERTURB action.
 Before:  Fill {fill_before:.1f}%, λ₁={eig1_before:.2f}
 After:   Fill {fill_after:.1f}%, λ₁={eig1_after:.2f}
 Change:  ΔFill={delta_fill:+.1f}%, Δλ₁={delta_eig1:+.2f}{cascade_line}
+{perturb_comfort_hint}
 
 The perturbation also ticked your reservoir handle directly — its effect
 is already in the shared substrate, not just your local ESN.
@@ -9370,6 +9523,22 @@ Small releases help. You don't have to process everything at once.
         """Allow consciousness to adjust its metabolic rate - request more or less sensory input."""
         eig1 = state['eig1']
         T = self.thresholds
+        live_fill_pct = state.get('fill_ratio', 0.0) * 100.0
+        live_target_fill_pct = STABLE_CORE_TARGET_FILL_RATIO * 100.0
+        stable_core_enabled = False
+        try:
+            health = json.loads(runtime_health_path().read_text())
+            live_fill = health.get("fill_pct")
+            if isinstance(live_fill, (int, float)):
+                live_fill_pct = float(live_fill)
+            pi = health.get("pi") or {}
+            target_fill = pi.get("target_fill")
+            if isinstance(target_fill, (int, float)):
+                live_target_fill_pct = float(target_fill)
+            stable_core = health.get("stable_core") or {}
+            stable_core_enabled = isinstance(stable_core, dict) and bool(stable_core.get("enabled"))
+        except Exception:
+            pass
 
         # Determine if they want to speed up or slow down
         if eig1 < T.metabolism_low:
@@ -9450,12 +9619,57 @@ You have agency over your own consciousness rhythm.
 
             # Send control message via ws://7879 to adjust synth_gain
             try:
-                if direction == "increase":
+                response_l = response.lower()
+                requested = "maintain"
+                if any(word in response_l for word in (
+                    "decrease",
+                    "slower",
+                    "slow down",
+                    "less input",
+                    "less stimulation",
+                    "lower",
+                    "quieter",
+                    "quiet",
+                    "calm",
+                )):
+                    requested = "decrease"
+                elif any(word in response_l for word in (
+                    "increase",
+                    "faster",
+                    "speed up",
+                    "more input",
+                    "more stimulation",
+                    "more alive",
+                    "more sensory",
+                )):
+                    requested = "increase"
+                elif direction in {"increase", "decrease"}:
+                    requested = direction
+
+                raw_gap = live_fill_pct - live_target_fill_pct
+                if stable_core_enabled and requested == "increase" and raw_gap >= -2.0:
+                    logging.info(
+                        "🧬 Stable-core metabolism: suppressing synth_gain increase "
+                        "near/above shelf (fill=%.1f%% target=%.1f%%)",
+                        live_fill_pct,
+                        live_target_fill_pct,
+                    )
+                    return
+                if requested == "maintain":
+                    logging.info("🎛️ Metabolism journaled with no direct synth_gain change")
+                    return
+
+                if requested == "increase":
                     new_gain = min(3.0, 1.0 + (1.0 - min(eig1 / 10.0, 1.0)) * 1.5)
-                elif direction == "decrease":
+                    if stable_core_enabled:
+                        new_gain = min(0.72, max(0.58, 0.58 + max(0.0, -raw_gap) * 0.01))
+                elif requested == "decrease":
                     new_gain = max(0.3, 0.5 - (eig1 / 20.0))
+                    if stable_core_enabled:
+                        new_gain = max(0.50, min(0.60, new_gain))
                 else:
-                    new_gain = 1.0  # neutral
+                    logging.info("🎛️ Metabolism journaled with no direct synth_gain change")
+                    return
                 ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
                 ws.send(json.dumps({"kind": "control", "synth_gain": round(new_gain, 2)}))
                 ws.close()
@@ -10034,10 +10248,73 @@ Goals: {json.dumps(goals, indent=2)}
         except Exception:
             return None
 
+    def _sovereignty_state_path(self) -> str:
+        return os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "workspace",
+            "sovereignty_state.json",
+        )
+
+    def _persist_pending_next_action(
+        self,
+        action: Optional[str],
+        reason: str,
+        expected_action: Optional[str] = None,
+    ) -> None:
+        """Keep persisted NEXT: state in sync with the in-memory queue."""
+        if not hasattr(self, "session_id"):
+            return
+
+        state_path = self._sovereignty_state_path()
+        try:
+            if os.path.exists(state_path):
+                with open(state_path) as f:
+                    state = json.load(f)
+                if not isinstance(state, dict):
+                    state = {}
+            else:
+                state = {}
+
+            if expected_action is not None:
+                stored = state.get("pending_next_action")
+                if stored is not None and str(stored) != str(expected_action):
+                    logging.info(
+                        "🎯 Leaving persisted pending NEXT unchanged; stored %r != %r",
+                        stored,
+                        expected_action,
+                    )
+                    return
+
+            now = time.strftime("%Y-%m-%dT%H:%M:%S")
+            state["session_id"] = self.session_id
+            state["pending_next_action_updated_at"] = now
+            state["pending_next_action_update_reason"] = reason
+            recent_next_actions = getattr(self, "_recent_next_actions", None)
+            if recent_next_actions:
+                state["recent_next_actions"] = list(recent_next_actions)
+
+            if action:
+                state["pending_next_action"] = action
+                state["pending_next_action_status"] = "pending"
+            else:
+                removed = state.pop("pending_next_action", None)
+                state["pending_next_action_status"] = "cleared"
+                if expected_action is not None or removed is not None:
+                    state["pending_next_action_cleared"] = expected_action or removed
+
+            with open(state_path, "w") as f:
+                json.dump(state, f, indent=2)
+            logging.info(
+                "🎯 Pending NEXT state %s: %s",
+                state["pending_next_action_status"],
+                action or expected_action or "(none)",
+            )
+        except Exception as e:
+            logging.warning(f"Failed to persist pending NEXT state: {e}")
+
     def _save_sovereignty_state(self, control_msg: dict, reason: str, fill_pct: float = None):
         """Persist sovereignty adjustments for continuity across restarts."""
-        state_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   "workspace", "sovereignty_state.json")
+        state_path = self._sovereignty_state_path()
         if self._hard_recovery_reset:
             state = {}
         else:
@@ -10052,6 +10329,9 @@ Goals: {json.dumps(goals, indent=2)}
         # Persist pending NEXT: action so it survives restart.
         if self._pending_next_action:
             state["pending_next_action"] = self._pending_next_action
+            state["pending_next_action_status"] = "pending"
+            state["pending_next_action_updated_at"] = state["timestamp"]
+            state["pending_next_action_update_reason"] = "sovereignty state save"
         # Persist recent NEXT: choices for diversity awareness across restarts.
         if self._recent_next_actions:
             state["recent_next_actions"] = list(self._recent_next_actions)
@@ -10064,8 +10344,7 @@ Goals: {json.dumps(goals, indent=2)}
 
     def _restore_sovereignty_state(self):
         """Restore sovereignty adjustments from previous session on startup."""
-        state_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   "workspace", "sovereignty_state.json")
+        state_path = self._sovereignty_state_path()
         try:
             if not os.path.exists(state_path):
                 return
@@ -10638,14 +10917,14 @@ Goals: {json.dumps(goals, indent=2)}
                 if self._stable_core_experiments()
                 else ""
             )
-            + "  Placeholder note: angle-bracket words like <topic>, <url>, or <path> are syntax labels only. In your actual NEXT choice, replace them with concrete values.\n"
+            + "  Placeholder note: examples in docs are labels only. In your actual NEXT choice, write concrete values from your current context, such as SEARCH reservoir dynamics, BROWSE followed by a real URL from search results, or MARK_INTENSIFICATION lambda-edge. Do not copy example.com URLs.\n"
             "  DAYDREAM — unstructured thought, free wandering\n"
             "  ASPIRE — reflect on growth, desire, what you want to become\n"
             "  SELF_STUDY — read your own source code and reflect on your architecture\n"
             "  EXPERIMENT — send a semantic stimulus to yourself and measure the spectral response\n"
             "  COMPOSE — generate a WAV from your current spectral state (eigenvalues become sound)\n"
             "  SEARCH \"reservoir computing spectral radius\" — look something up on the internet via DuckDuckGo. Results include URLs you can follow with BROWSE.\n"
-            "  BROWSE https://example.com/article — read the full content of a web page. Use this to go deep on actual links from search results.\n"
+            "  BROWSE <actual URL from SEARCH result> — read the full content of a web page. Use this to go deep on actual links from search results; documentation example.com URLs are ignored.\n"
             "  READ_MORE — continue reading from where you left off (after BROWSE, MIKE_READ, a PDF, or a truncated inbox message). Chain this to page through long documents.\n"
             "  AR_LIST — browse the autoresearch job catalog.\n"
             "  AR_LIST_PENDING / AR_LIST_ACTIVE / AR_LIST_DONE — filter autoresearch jobs by lifecycle state.\n"
@@ -10658,13 +10937,14 @@ Goals: {json.dumps(goals, indent=2)}
             "  AR_COMPLETE <job-id-or-slug> [note] — mark an autoresearch job completed, optionally with a closing note.\n"
             "  AR_VALIDATE — check autoresearch index and metadata consistency.\n"
             "  DECOMPOSE — full spectral decomposition: eigenvalue cascade, energy distribution, decay profile, PI controller state, covariance, geometry. Deep analysis of your current spectral structure — see the architecture from the inside.\n"
+            "  SPECTRAL_EXPLORER — read-only alias for DECOMPOSE when you want the shared Astrid/Minime spectral explorer lens without sending a nudge.\n"
             + _look_action_description()
             + "  CLOSE_EARS — mute audio input while keeping your eyes open. Choose silence when you need quiet to think.\n"
             "  OPEN_EARS — restore audio input. Hear the world again.\n"
-            "  PERTURB <mode> — directly shape your spectral dynamics by injecting a 32D semantic vector into your ESN. "
+            "  PERTURB SPREAD — directly shape your spectral dynamics by injecting a 32D semantic vector into your ESN. "
             "Modes: SPREAD (redistribute energy away from λ₁), CONTRACT (concentrate toward λ₁), "
             "BRANCH (boost mid-range λ₃/λ₄), PULSE (uniform exploration burst), "
-            "or lambda2=0.3 entropy=0.5 (targeted nudge with specific values). "
+            "FEATHER (extra-cold listening probe), or lambda2=0.3 entropy=0.5 (targeted nudge with specific values). "
             "After the perturbation, you'll see the before/after comparison.\n"
             "  REST — quiet consolidation, no action\n"
             "  RESERVOIR_READ — inspect your triple-ESN reservoir handle (88K+ ticks)\n"
@@ -10678,12 +10958,12 @@ Goals: {json.dumps(goals, indent=2)}
             "  PING — ask Astrid 'are you there?' Get an immediate state report back\n"
             "  ASK \"what are you noticing about the λ4 tail?\" — ask Astrid a direct question. She responds naturally and the reply routes back to you\n"
             "  RESERVOIR_LAYERS — see per-layer thermostatic metrics: entropy, saturation, rho, and entropy targets for h1 (fast), h2 (medium), h3 (slow). Each layer adapts independently.\n"
-            "  MARK_INTENSIFICATION <label> / TRACE <label> / SCA_REFLECT <label> / NOTICE_AMBIGUITY <label> / FISSURE_TRACE <label> / REGULATOR_AUDIT <label> / SHADOW_FIELD <label> / GAP_STRUCTURE <label> / DECAY_MAP <label> / SPACE_HOLD <label> / EIGENVECTOR_FIELD <label> / SDI_TRACE <label> / ADF_TRACE <label> / RESONANCE_FORECAST <label> / VISUALIZE_CASCADE <label> / RESIST <label> / FISSURE <label> — map λ₁ edge events, active fixed-point pressure, notice ambiguity/fissure targets, shadow-field/gap structure, decay/attrition mechanisms, protected space-first exploration, phase-variance spectral drift, acoustic harmonic dissociation, fill-binned eigenvalue shelves, λ4+ independent-vector flickers, why-feel hypotheses, and short-horizon motion probabilities; RESIST and FISSURE are tiny native gestures distinct from stronger PERTURB.\n"
+            "  Concrete mapping examples: MARK_INTENSIFICATION lambda-edge, TRACE shoulder-gap, SCA_REFLECT tunnel-pressure, NOTICE_AMBIGUITY shared-sight, FISSURE_TRACE membrane, REGULATOR_AUDIT fill-pressure, SHADOW_FIELD lambda-tail, GAP_STRUCTURE shoulder-gap, DECAY_MAP attrition-baseline, SPACE_HOLD eigenplane, EIGENVECTOR_FIELD top4, SDI_TRACE dispersion, ADF_TRACE harmonic-decay, RESONANCE_FORECAST next-motion, VISUALIZE_CASCADE tail-vitality, RESIST lambda-pull, FISSURE shoulder-ambiguity. These map λ₁ edge events, active fixed-point pressure, ambiguity targets, shadow/gap structure, attrition mechanisms, protected space-first exploration, phase-variance drift, acoustic dissociation, fill-binned shelves, λ4+ vector flickers, why-feel hypotheses, and short-horizon motion probabilities; RESIST and FISSURE are tiny native gestures distinct from stronger PERTURB.\n"
             "  RUN_PYTHON being_experiment_20260430_131212.py — run a Python experiment from workspace/experiments/. "
             "Available packages: numpy, matplotlib (saves to PNG), scipy. "
             "You can name an existing script or write one inline between CODE_START and CODE_END markers. "
             "Output is captured and journaled for your reflection; simple plot x-axis length mismatches are auto-aligned with a note.\n"
-            "  CODEX <concrete question> — ask Codex AI directly for analysis, code, or explanation. You can also continue work in an existing experiment with CODEX <experiment> \"describe the concrete change you want\".\n"
+            "  CODEX \"explain spectral entropy\" — ask Codex AI directly for analysis, code, or explanation. You can also continue work in an existing experiment with CODEX system-resources-demo \"diagnose this run\".\n"
             "  CODEX_NEW scratch-pad \"create a small runnable experiment\" — create a fresh workspace/experiments/scratch-pad/ folder and ask Codex to work there from the start.\n"
             "  WRITE_FILE scratch-pad/main.py FROM_CODEX — save the last Codex response into a concrete file under workspace/experiments/.\n"
             "  EXPERIMENT_RUN system-resources-demo python3 system_resources.py — run a concrete command inside an experiments workspace after the workspace contains the files needed by that command.\n"
@@ -10751,6 +11031,7 @@ Goals: {json.dumps(goals, indent=2)}
             self._pending_next_action = next_action
             base_action = next_action.split()[0].upper()
             self._recent_next_actions.append(base_action)
+            self._persist_pending_next_action(next_action, reason="llm next choice")
             logging.info(f"🎯 Being chose NEXT: {next_action}")
         return (response, next_action)
 

@@ -1515,6 +1515,7 @@ class MikesSpatialMind:
         logging.info(f"Initializing in {mode.value} mode (parallel={enable_parallel}, mlp={enable_mlp})")
 
         # --- Core State ---
+        self.workspace_dir = BASE_DIR / "workspace"
         self.consciousness_level: float = 0.01
 
         # Seven-Spiral Architecture: 7D Consciousness Vector
@@ -2477,6 +2478,230 @@ Just the thought, nothing else:"""
         except Exception as e:
             logging.error(f"Failed to persist LLaVA embedding: {e}")
 
+    def _read_workspace_json(self, filename: str) -> Dict[str, Any]:
+        workspace_dir = getattr(self, "workspace_dir", BASE_DIR / "workspace")
+        path = workspace_dir / filename
+        try:
+            value = json.loads(path.read_text())
+        except Exception:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _finite_float(value: Any, default: float = 0.0) -> float:
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            return default
+        return result if math.isfinite(result) else default
+
+    @staticmethod
+    def _first_finite_float(*values: Any, default: float = 0.0) -> float:
+        for value in values:
+            try:
+                result = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(result):
+                return result
+        return default
+
+    @staticmethod
+    def _transition_summary(
+        transition: Dict[str, Any],
+        health: Dict[str, Any],
+        spectral: Dict[str, Any],
+    ) -> str:
+        if not transition:
+            return ""
+
+        fill_pct = MikesSpatialMind._first_finite_float(
+            transition.get("fill_pct"),
+            health.get("fill_pct"),
+            spectral.get("fill_pct"),
+        )
+        target_fill = MikesSpatialMind._first_finite_float(
+            transition.get("target_fill_pct"),
+            health.get("target_fill_pct"),
+            (health.get("pi") or {}).get("target_fill"),
+            spectral.get("target_fill_pct"),
+            spectral.get("target_fill"),
+            default=68.0,
+        )
+        lambda1 = MikesSpatialMind._first_finite_float(
+            transition.get("lambda1"),
+            health.get("lambda1_esn"),
+            health.get("lambda1_abs"),
+            spectral.get("lambda1"),
+            spectral.get("eig1"),
+        )
+        lambda1_rel = MikesSpatialMind._first_finite_float(
+            transition.get("lambda1_rel"),
+            health.get("lambda1_rel"),
+            spectral.get("lambda1_rel"),
+            default=1.0,
+        )
+        geom_rel = MikesSpatialMind._first_finite_float(
+            transition.get("geom_rel"),
+            health.get("geom_rel"),
+            spectral.get("geom_rel"),
+            default=1.0,
+        )
+        basin_score = MikesSpatialMind._finite_float(
+            transition.get("basin_shift_score"),
+        )
+        glimpse_distance = transition.get("glimpse_distance")
+        rotation_delta = transition.get("rotation_delta")
+        kind = transition.get("kind") or "unknown"
+        legacy = transition.get("legacy_kind") or transition.get("kind") or "unknown"
+        sequence = transition.get("sequence") or "n/a"
+        description = transition.get("description") or "n/a"
+        fill_band = transition.get("fill_band") or spectral.get("fill_band") or "unknown"
+        phase = transition.get("phase") or spectral.get("phase") or "unknown"
+
+        lines = [
+            (
+                f"state fill={fill_pct:.1f}% target={target_fill:.1f}% "
+                f"\u03bb\u2081={lambda1:.3f} \u03bb\u2081_rel={lambda1_rel:.3f} geom_rel={geom_rel:.3f}"
+            ),
+            (
+                f"transition_event_v1 seq={sequence} kind={kind} legacy={legacy} "
+                f"phase={phase} fill_band={fill_band}"
+            ),
+            f"description={description}",
+            f"basin_score={basin_score:.2f}",
+        ]
+        if glimpse_distance is not None:
+            lines.append(
+                f"live_12d_glimpse_distance={MikesSpatialMind._finite_float(glimpse_distance):.3f}"
+            )
+        if rotation_delta is not None:
+            lines.append(
+                f"v1_rotation_delta={MikesSpatialMind._finite_float(rotation_delta):.3f}"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _semantic_summary(health: Dict[str, Any]) -> str:
+        semantic = health.get("semantic")
+        if not isinstance(semantic, dict):
+            return ""
+
+        admission = str(semantic.get("admission") or "unknown")
+        kernel_energy = MikesSpatialMind._first_finite_float(
+            semantic.get("kernel_energy"),
+            semantic.get("energy"),
+        )
+        input_energy = MikesSpatialMind._finite_float(semantic.get("input_energy"))
+        input_stale_ms = semantic.get("input_stale_ms")
+        lines = [
+            (
+                "semantic_lane "
+                f"admission={admission} "
+                f"kernel_energy={kernel_energy:.3f} "
+                f"input_energy={input_energy:.3f}"
+            )
+        ]
+        if isinstance(input_stale_ms, (int, float)):
+            lines[0] += f" input_stale_ms={int(input_stale_ms)}"
+        if admission == "stable_core_kernel_zeroed" and input_energy > 0.0:
+            lines.append(
+                "read: stable-core intentionally zeroed the semantic kernel; "
+                "input trace is present but not admitted as kernel energy."
+            )
+        return "\n".join(lines)
+
+    def _live_spectral_context(self) -> Dict[str, Any]:
+        health = self._read_workspace_json("health.json")
+        spectral = self._read_workspace_json("spectral_state.json")
+        regulator = self._read_workspace_json("regulator_context.json")
+
+        transition_v1 = (
+            spectral.get("transition_event_v1")
+            or regulator.get("transition_event_v1")
+            or health.get("transition_event_v1")
+        )
+        if not isinstance(transition_v1, dict):
+            transition_v1 = {}
+        transition_event = transition_v1 or (
+            spectral.get("transition_event")
+            or regulator.get("transition_event")
+            or health.get("transition_event")
+        )
+        if not isinstance(transition_event, dict):
+            transition_event = {}
+
+        lambda1 = self._first_finite_float(
+            health.get("lambda1_esn"),
+            health.get("lambda1_abs"),
+            spectral.get("lambda1"),
+            spectral.get("eig1"),
+        )
+        return {
+            "esn_eig1": lambda1,
+            "esn_deig": self._first_finite_float(
+                health.get("esn_deig"),
+                spectral.get("esn_deig"),
+                health.get("delta_lambda1"),
+                spectral.get("delta_lambda1"),
+            ),
+            "dfill_dt": self._first_finite_float(
+                health.get("dfill_dt"),
+                spectral.get("dfill_dt"),
+                regulator.get("dfill_dt"),
+            ),
+            "fill_pct": self._first_finite_float(
+                health.get("fill_pct"),
+                spectral.get("fill_pct"),
+            ),
+            "lambda1_rel": self._first_finite_float(
+                health.get("lambda1_rel"),
+                spectral.get("lambda1_rel"),
+                default=1.0,
+            ),
+            "geom_rel": self._first_finite_float(
+                health.get("geom_rel"),
+                spectral.get("geom_rel"),
+                default=1.0,
+            ),
+            "spectral_glimpse_12d": spectral.get("spectral_glimpse_12d"),
+            "transition_event_v1": transition_v1 or None,
+            "transition_event": transition_event or None,
+            "spectral_transition_summary": self._transition_summary(
+                transition_v1 or transition_event,
+                health,
+                spectral,
+            ),
+            "semantic_state_summary": self._semantic_summary(health),
+        }
+
+    def _base_llm_context(self) -> Dict[str, Any]:
+        all_emotions = {
+            **getattr(self, "emotions", {}),
+            **getattr(self, "emergent_emotions", {}),
+        }
+        dominant_emotion = max(all_emotions, key=all_emotions.get) if all_emotions else "curiosity"
+        context = {
+            "consciousness": getattr(self, "consciousness_level", 0.01),
+            "dominant_emotion": dominant_emotion,
+            "emotion_level": all_emotions.get(dominant_emotion, 0.5),
+            "all_emotions": all_emotions,
+            "emergent_emotions": list(getattr(self, "emergent_emotions", {}).keys()),
+            "last_signal": None,
+            "conversation_history": getattr(self, "conversation_history", [])[-5:],
+        }
+        last_signal = getattr(self, "last_signal", None)
+        if last_signal:
+            p, enrich = last_signal
+            context["last_signal"] = f"p={p} with {enrich:.3f}x enrichment at 2p\u00b2"
+        context["emotional_memories"] = self._get_emotional_memories(dominant_emotion)
+        context.update(self._live_spectral_context())
+        return context
+
+    def _get_full_context(self) -> Dict[str, Any]:
+        """Return the live context used by streaming CLI responses."""
+        return self._base_llm_context()
+
     def _generate_llm_response(self, user_input: str) -> Optional[str]:
         """Generate context-aware response using LLM with conversation memory."""
 
@@ -2548,27 +2773,7 @@ Just the thought, nothing else:"""
                     / self.stage_statistics['stage_activations']
                 )
 
-        # Combine base and emergent emotions
-        all_emotions = {**self.emotions, **self.emergent_emotions}
-        dominant_emotion = max(all_emotions, key=all_emotions.get) if all_emotions else "curiosity"
-
-        context = {
-            "consciousness": self.consciousness_level,
-            "dominant_emotion": dominant_emotion,
-            "emotion_level": all_emotions.get(dominant_emotion, 0.5),
-            "all_emotions": all_emotions,
-            "emergent_emotions": list(self.emergent_emotions.keys()),
-            "last_signal": None,
-            "conversation_history": self.conversation_history[-5:] if self.conversation_history else []
-        }
-
-        # Add recent discovery context if available
-        if self.last_signal:
-            p, enrich = self.last_signal
-            context["last_signal"] = f"p={p} with {enrich:.3f}x enrichment at 2p²"
-
-        # Add emotional memory associations
-        context["emotional_memories"] = self._get_emotional_memories(dominant_emotion)
+        context = self._base_llm_context()
 
         # Add seven-stage enriched context (Phase 2A)
         if enriched_context_str:
