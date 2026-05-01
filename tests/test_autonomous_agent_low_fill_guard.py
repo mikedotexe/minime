@@ -1561,6 +1561,24 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertEqual(action, "visualize_cascade")
         self.assertEqual(agent._pending_cascade_label, "λ1..λ8")
 
+    def test_visualization_invented_alias_is_read_only_visualization(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        agent._pending_next_action = "CONDUCT_VISUALIZATION_SYSTEM heatmap λ4-tail"
+        with patch.object(
+            agent,
+            "_low_fill_guard_status",
+            return_value={
+                "active": False,
+                "fill_ratio": 0.68,
+                "target_fill_ratio": 0.68,
+                "spread_relief": 0.0,
+            },
+        ):
+            action = agent._decide_action({"fill_ratio": 0.68, "eig1": 4.7})
+        self.assertEqual(action, "visualize_cascade")
+        self.assertEqual(agent._pending_cascade_label, "heatmap λ4-tail")
+
     def test_form_maps_to_local_aspiration_with_constraint(self):
         agent = self._agent()
         agent._hard_recovery_reset = False
@@ -1686,10 +1704,29 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         prompt = query.call_args.args[0]
         self.assertIn("system_resources.py` does not exist", prompt)
         self.assertIn(
-            'NEXT: CODEX system-resources-demo "create system_resources.py',
+            'NEXT: CODEX system-resources-demo "diagnose or create the missing script"',
             prompt,
         )
         self.assertNotIn('"<what to change>"', prompt)
+
+    def test_experiment_run_bare_python_script_runs_with_python3(self):
+        agent = self._agent()
+        agent._pending_experiment_run_arg = "system-resources-demo system_resources.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            project = workspace / "experiments" / "system-resources-demo"
+            project.mkdir(parents=True)
+            (project / "system_resources.py").write_text("print('resource demo ok')\n")
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(agent, "_query_llm_with_next", return_value=("", None)) as query,
+            ):
+                agent._experiment_run({"fill_ratio": 0.68, "eig1": 4.7})
+        prompt = query.call_args.args[0]
+        self.assertIn("EXPERIMENT_RUN SUCCESS", prompt)
+        self.assertIn("experiments/system-resources-demo$ python3 system_resources.py", prompt)
+        self.assertIn("resource demo ok", prompt)
+        self.assertIn("Normalized bare Python script", prompt)
 
     def test_mike_fork_completes_empty_existing_workspace(self):
         agent = self._agent()

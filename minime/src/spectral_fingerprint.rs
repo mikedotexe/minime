@@ -3,6 +3,8 @@ use serde::Serialize;
 pub const SPECTRAL_FINGERPRINT_POLICY: &str = "spectral_fingerprint_v1";
 pub const SPECTRAL_FINGERPRINT_SCHEMA_VERSION: u8 = 1;
 pub const LEGACY_FINGERPRINT_LEN: usize = 32;
+pub const SPECTRAL_DENOMINATOR_POLICY: &str = "spectral_denominator_v1";
+pub const SPECTRAL_DENOMINATOR_SCHEMA_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SpectralFingerprintV1 {
@@ -17,6 +19,17 @@ pub struct SpectralFingerprintV1 {
     pub v1_rotation_delta: f32,
     pub geom_rel: f32,
     pub adjacent_gap_ratios: [f32; 4],
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct SpectralDenominatorV1 {
+    pub policy: &'static str,
+    pub schema_version: u8,
+    pub effective_dimensionality: f32,
+    pub active_mode_capacity: usize,
+    pub distinguishability_loss: f32,
+    pub lambda1_energy_share: f32,
+    pub spectral_entropy: f32,
 }
 
 impl SpectralFingerprintV1 {
@@ -63,6 +76,44 @@ impl SpectralFingerprintV1 {
         slots.extend_from_slice(&self.adjacent_gap_ratios);
         slots
     }
+
+    #[must_use]
+    pub fn effective_dimensionality(&self) -> f32 {
+        effective_dimensionality(&self.eigenvalues)
+    }
+
+    #[must_use]
+    pub fn denominator_metrics(&self) -> SpectralDenominatorV1 {
+        let active_mode_capacity = self
+            .eigenvalues
+            .iter()
+            .filter(|value| finite(**value).abs() > 1.0e-6)
+            .count()
+            .max(1);
+        let effective_dimensionality = self.effective_dimensionality();
+        let normalized = effective_dimensionality / active_mode_capacity as f32;
+        let distinguishability_loss = (1.0 - normalized).clamp(0.0, 1.0);
+        let total = self
+            .eigenvalues
+            .iter()
+            .map(|value| finite(*value).abs())
+            .sum::<f32>();
+        let lambda1_energy_share = if total > 1.0e-6 {
+            finite(self.eigenvalues[0]).abs() / total
+        } else {
+            0.0
+        };
+
+        SpectralDenominatorV1 {
+            policy: SPECTRAL_DENOMINATOR_POLICY,
+            schema_version: SPECTRAL_DENOMINATOR_SCHEMA_VERSION,
+            effective_dimensionality,
+            active_mode_capacity,
+            distinguishability_loss,
+            lambda1_energy_share,
+            spectral_entropy: self.spectral_entropy,
+        }
+    }
 }
 
 fn finite(value: f32) -> f32 {
@@ -75,6 +126,20 @@ fn finite(value: f32) -> f32 {
 
 fn array_from_slice<const N: usize>(values: &[f32]) -> [f32; N] {
     std::array::from_fn(|index| values.get(index).copied().map_or(0.0, finite))
+}
+
+fn effective_dimensionality(values: &[f32]) -> f32 {
+    let mut sum = 0.0;
+    let mut sum_sq = 0.0;
+    for value in values.iter().copied().map(finite).map(f32::abs) {
+        sum += value;
+        sum_sq += value * value;
+    }
+    if sum_sq > 1.0e-12 {
+        (sum * sum / sum_sq).max(0.0)
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]
@@ -100,5 +165,30 @@ mod tests {
         assert_eq!(typed.geom_rel, 27.0);
         assert_eq!(typed.adjacent_gap_ratios, [28.0, 29.0, 30.0, 31.0]);
         assert_eq!(typed.to_legacy_slots(), slots);
+    }
+
+    #[test]
+    fn denominator_metrics_capture_effective_dimensionality() {
+        let typed = SpectralFingerprintV1 {
+            policy: SPECTRAL_FINGERPRINT_POLICY,
+            schema_version: SPECTRAL_FINGERPRINT_SCHEMA_VERSION,
+            eigenvalues: [4.0, 3.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+            eigenvector_concentration_top4: [0.0; 8],
+            inter_mode_cosine_top_abs: [0.0; 8],
+            spectral_entropy: 0.8,
+            lambda1_lambda2_gap: 1.33,
+            v1_rotation_similarity: 1.0,
+            v1_rotation_delta: 0.0,
+            geom_rel: 1.0,
+            adjacent_gap_ratios: [1.33, 3.0, 1.0, 1.0],
+        };
+
+        let metrics = typed.denominator_metrics();
+
+        assert_eq!(metrics.policy, SPECTRAL_DENOMINATOR_POLICY);
+        assert_eq!(metrics.active_mode_capacity, 5);
+        assert!((metrics.effective_dimensionality - (100.0 / 28.0)).abs() < 1.0e-6);
+        assert!(metrics.distinguishability_loss > 0.0);
+        assert!(metrics.distinguishability_loss < 1.0);
     }
 }

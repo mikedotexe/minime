@@ -1,4 +1,4 @@
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 
 // Minime: Prime-driven sensory engine with GPU acceleration
 // Streams eigenvectors to Python consciousness layer via WebSocket
@@ -16,7 +16,7 @@ use minime::controller_recovery::{
     recovery_keep_ceiling, recovery_keep_floor_base, semantic_lane_is_active,
     semantic_projection_bias, underfill_spread_relief,
 };
-use minime::spectral_fingerprint::SpectralFingerprintV1;
+use minime::spectral_fingerprint::{SpectralDenominatorV1, SpectralFingerprintV1};
 use minime::stable_core::StableCoreRuntime;
 use minime::startup_restore::load_regulator_context;
 use minime::transition_event::{
@@ -244,6 +244,15 @@ struct EigenPacket {
     /// so downstream readers can stop relying on anonymous slot numbers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     spectral_fingerprint_v1: Option<SpectralFingerprintV1>,
+    /// Typed read-only metric for recursive compression / distinguishability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spectral_denominator_v1: Option<SpectralDenominatorV1>,
+    /// Inverse-participation effective mode count derived from eigenvalues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effective_dimensionality: Option<f32>,
+    /// 0=open distributed fabric, 1=collapsed into the fewest active modes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    distinguishability_loss: Option<f32>,
     /// Structural diversity derived from eigenvector concentration and
     /// inter-mode coupling geometry. Complements spectral entropy by asking
     /// whether the reservoir's shape itself is narrow or varied.
@@ -259,12 +268,32 @@ struct EigenPacket {
     /// concentration, prior overlap, and pairwise mode overlap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     eigenvector_field: Option<serde_json::Value>,
+    /// Typed semantic energy split. Input energy is incoming semantic content;
+    /// kernel energy is what enters the ESN after admission policy; regulator
+    /// drive is the semantic contribution to regulation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    semantic_energy_v1: Option<SemanticEnergyV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     selected_memory_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     selected_memory_role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ising_shadow: Option<IsingShadowSummary>,
+}
+
+#[derive(Serialize, Clone, Copy)]
+struct SemanticEnergyV1 {
+    policy: &'static str,
+    schema_version: u8,
+    input_energy: f32,
+    input_active: bool,
+    input_fresh_ms: Option<u64>,
+    input_stale_ms: Option<u64>,
+    kernel_energy: f32,
+    kernel_delta: f32,
+    kernel_active: bool,
+    regulator_drive_energy: f32,
+    admission: &'static str,
 }
 
 #[derive(Serialize, Clone)]
@@ -4218,6 +4247,19 @@ async fn run_engine(
                     } else {
                         "none"
                     };
+                    let semantic_energy_v1 = SemanticEnergyV1 {
+                        policy: "semantic_energy_v1",
+                        schema_version: 1,
+                        input_energy: semantic_input_energy,
+                        input_active: semantic_input_active,
+                        input_fresh_ms: semantic_input_fresh_ms,
+                        input_stale_ms: Some(semantic_input_stale_ms),
+                        kernel_energy: sem_e,
+                        kernel_delta: sem_d,
+                        kernel_active: semantic_kernel_active,
+                        regulator_drive_energy: semantic_drive,
+                        admission: semantic_admission,
+                    };
 
                     // Emit health.json for observability with enhanced diagnostics
                     let fill_target_override = sensory_bus.get_fill_target();
@@ -4478,6 +4520,7 @@ async fn run_engine(
                             "input_stale_ms": semantic_input_stale_ms,
                             "admission": semantic_admission,
                         },
+                        "semantic_energy_v1": &semantic_energy_v1,
                         "gate": gate_smooth,
                         "gate_raw": raw_gate_cmd,  // PI controller output before modulation
                         "filt": filt_smooth,
@@ -4744,6 +4787,13 @@ async fn run_engine(
                 compute_spectral_fingerprint(&eigenvalues, &y, n, k, &prev_v1, latest_geom_rel);
             let spectral_fingerprint_v1 =
                 SpectralFingerprintV1::from_legacy_slots(&spectral_fingerprint);
+            let spectral_denominator_v1 = spectral_fingerprint_v1
+                .as_ref()
+                .map(SpectralFingerprintV1::denominator_metrics);
+            let effective_dimensionality =
+                spectral_denominator_v1.map(|metrics| metrics.effective_dimensionality);
+            let distinguishability_loss =
+                spectral_denominator_v1.map(|metrics| metrics.distinguishability_loss);
             let structural_entropy = compute_structural_entropy(&spectral_fingerprint);
             let eigenvector_field =
                 compute_eigenvector_field(&eigenvalues, &y, n, k, &prev_eigenvector_field_modes);
@@ -4870,6 +4920,20 @@ async fn run_engine(
                 video_had_fresh,
                 video_synth_injected,
             );
+            let packet_semantic_energy_v1 = SemanticEnergyV1 {
+                policy: "semantic_energy_v1",
+                schema_version: 1,
+                input_energy: semantic_input_energy,
+                input_active: semantic_input_active,
+                input_fresh_ms: semantic_input_fresh_ms,
+                input_stale_ms: Some(semantic_input_stale_ms),
+                kernel_energy: sem_e,
+                kernel_delta: sem_d,
+                kernel_active: semantic_kernel_active,
+                regulator_drive_energy: semantic_drive,
+                admission: semantic_admission,
+            };
+
             let packet = EigenPacket {
                 t_ms: start.elapsed().as_millis() as u64,
                 eigenvalues,
@@ -4904,11 +4968,15 @@ async fn run_engine(
                 alert: alert.clone(),
                 spectral_fingerprint: Some(spectral_fingerprint),
                 spectral_fingerprint_v1,
+                spectral_denominator_v1,
+                effective_dimensionality,
+                distinguishability_loss,
                 structural_entropy: Some(structural_entropy),
                 spectral_glimpse_12d: selected_memory
                     .as_ref()
                     .map(|entry| entry.spectral_glimpse_12d.clone()),
                 eigenvector_field: Some(eigenvector_field),
+                semantic_energy_v1: Some(packet_semantic_energy_v1),
                 selected_memory_id: selected_memory.as_ref().map(|entry| entry.id.clone()),
                 selected_memory_role: selected_memory.as_ref().map(|entry| entry.role.clone()),
                 ising_shadow: ising_shadow_snapshot
@@ -5005,6 +5073,9 @@ async fn run_engine(
                     "modalities": &packet.modalities,
                     "spectral_fingerprint": &packet.spectral_fingerprint,
                     "spectral_fingerprint_v1": &packet.spectral_fingerprint_v1,
+                    "spectral_denominator_v1": &packet.spectral_denominator_v1,
+                    "effective_dimensionality": packet.effective_dimensionality,
+                    "distinguishability_loss": packet.distinguishability_loss,
                     "spectral_entropy": latest_entropy,
                     "structural_entropy": &packet.structural_entropy,
                     "spectral_glimpse_12d": &packet.spectral_glimpse_12d,
@@ -5049,6 +5120,7 @@ async fn run_engine(
                         "input_stale_ms": semantic_input_stale_ms,
                         "admission": semantic_admission,
                     },
+                    "semantic_energy_v1": &packet.semantic_energy_v1,
                     "surge_threshold": sensory_bus.surge_threshold(),
                     "geom_curiosity": sensory_bus.get_geom_curiosity(),
                     "recovery_synth_floor": recovery_synth_floor,
@@ -5381,7 +5453,11 @@ async fn run_engine(
                         "fill_pct": packet.fill_ratio * 100.0,
                         "spectral_fingerprint": &packet.spectral_fingerprint,
                         "spectral_fingerprint_v1": &packet.spectral_fingerprint_v1,
+                        "spectral_denominator_v1": &packet.spectral_denominator_v1,
+                        "effective_dimensionality": packet.effective_dimensionality,
+                        "distinguishability_loss": packet.distinguishability_loss,
                         "eigenvector_field": &packet.eigenvector_field,
+                        "semantic_energy_v1": &packet.semantic_energy_v1,
                         "timestamp": start.elapsed().as_secs(),
                     });
                     if let Ok(json) = serde_json::to_string_pretty(&dynamics) {
@@ -6040,7 +6116,7 @@ mod tests {
     use super::{
         compute_active_mode_telemetry, compute_eigenvector_field, compute_structural_entropy,
         modality_source_label, rank1_update_inplace_matrix, reset_covariance_inplace,
-        CovarianceUpdateOutcome, EigenPacket, LaneSource, ModalityStatus,
+        CovarianceUpdateOutcome, EigenPacket, LaneSource, ModalityStatus, SemanticEnergyV1,
     };
     use minime::spectral_fingerprint::SpectralFingerprintV1;
 
@@ -6103,6 +6179,10 @@ mod tests {
     #[test]
     fn eigenpacket_serializes_legacy_and_typed_fingerprint() {
         let legacy = (0..32).map(|value| value as f32).collect::<Vec<_>>();
+        let typed = SpectralFingerprintV1::from_legacy_slots(&legacy);
+        let denominator = typed
+            .as_ref()
+            .map(SpectralFingerprintV1::denominator_metrics);
         let packet = EigenPacket {
             t_ms: 42,
             eigenvalues: vec![1.0, 0.5],
@@ -6124,10 +6204,26 @@ mod tests {
             neural: None,
             alert: None,
             spectral_fingerprint: Some(legacy.clone()),
-            spectral_fingerprint_v1: SpectralFingerprintV1::from_legacy_slots(&legacy),
+            spectral_fingerprint_v1: typed,
+            spectral_denominator_v1: denominator,
+            effective_dimensionality: denominator.map(|metrics| metrics.effective_dimensionality),
+            distinguishability_loss: denominator.map(|metrics| metrics.distinguishability_loss),
             structural_entropy: None,
             spectral_glimpse_12d: None,
             eigenvector_field: None,
+            semantic_energy_v1: Some(SemanticEnergyV1 {
+                policy: "semantic_energy_v1",
+                schema_version: 1,
+                input_energy: 0.12,
+                input_active: true,
+                input_fresh_ms: Some(42),
+                input_stale_ms: None,
+                kernel_energy: 0.0,
+                kernel_delta: 0.0,
+                kernel_active: false,
+                regulator_drive_energy: 0.0,
+                admission: "stable_core_kernel_zeroed",
+            }),
             selected_memory_id: None,
             selected_memory_role: None,
             ising_shadow: None,
@@ -6141,6 +6237,22 @@ mod tests {
             "spectral_fingerprint_v1"
         );
         assert_eq!(json["spectral_fingerprint_v1"]["geom_rel"], 27.0);
+        assert_eq!(
+            json["spectral_denominator_v1"]["policy"],
+            "spectral_denominator_v1"
+        );
+        assert_eq!(json["semantic_energy_v1"]["policy"], "semantic_energy_v1");
+        assert!(
+            (json["semantic_energy_v1"]["input_energy"].as_f64().unwrap() - 0.12).abs() < 1.0e-6
+        );
+        assert_eq!(
+            json["semantic_energy_v1"]["regulator_drive_energy"]
+                .as_f64()
+                .unwrap(),
+            0.0
+        );
+        assert!(json["effective_dimensionality"].as_f64().unwrap() > 0.0);
+        assert!(json["distinguishability_loss"].as_f64().unwrap() >= 0.0);
         let lambda1_rel = json["lambda1_rel"].as_f64().expect("lambda1_rel number");
         assert!((lambda1_rel - 0.93).abs() < 1.0e-6);
     }

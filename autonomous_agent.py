@@ -249,6 +249,50 @@ def _parse_run_python_request(arg: str | None) -> tuple[Optional[str], Optional[
     return _safe_experiment_script_name(raw), None
 
 
+def _run_python_workspace_hint(arg: str | None) -> str:
+    if not arg:
+        return ""
+    raw = arg.strip().strip('"').strip("'")
+    match = re.search(r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+\.py)\b", raw)
+    if not match:
+        return ""
+    workspace, script = match.groups()
+    return (
+        "\nBecause your request looked like a workspace script path, use:\n"
+        f"  NEXT: EXPERIMENT_RUN {workspace} python3 {script}\n"
+        f"  NEXT: CODEX {workspace} \"diagnose or create the missing script\"\n"
+    )
+
+
+def _experiment_run_preflight(work_dir: Path, cmd_str: str) -> tuple[list[str], str, str, Optional[str]]:
+    try:
+        cmd_parts = shlex.split(cmd_str)
+    except ValueError:
+        cmd_parts = cmd_str.split()
+    if not cmd_parts:
+        return [], cmd_str, "", None
+
+    first = cmd_parts[0]
+    if first.endswith(".py"):
+        script_path = work_dir / first
+        if script_path.is_file():
+            normalized = ["python3", *cmd_parts]
+            return (
+                normalized,
+                " ".join(normalized),
+                "Normalized bare Python script to `python3 <script.py>`.",
+                None,
+            )
+        return cmd_parts, cmd_str, "", Path(first).name
+
+    if first in {"python", "python3"} and len(cmd_parts) >= 2 and cmd_parts[1].endswith(".py"):
+        script_path = work_dir / cmd_parts[1]
+        if not script_path.is_file():
+            return cmd_parts, cmd_str, "", Path(cmd_parts[1]).name
+
+    return cmd_parts, cmd_str, "", None
+
+
 def perturb_safety_cap(state: Dict[str, Any]) -> float:
     """Keep stable-core perturbations expressive but not hammer-like."""
     stable_core = state.get("stable_core")
@@ -469,6 +513,30 @@ HARD_RESET_TARGET_FILL_RATIO = 0.65
 HARD_RESET_CLAMP_ENTER_RATIO = 0.35
 HARD_RESET_CLAMP_RELEASE_RATIO = 0.45
 HARD_RESET_CLAMP_RELEASE_STREAK = 10
+VISUAL_CASCADE_ACTION_ALIASES = {
+    "VISUALIZE_CASCADE",
+    "CASCADE",
+    "EXAMINE_CASCADE",
+    "INVESTIGATE_CASCADE",
+    "CONDUCT_VISUALIZATION_SYSTEM",
+    "CONDUCT_VISUALIZATION",
+    "CONDUCT_VISUALIZAT",
+    "VISUALIZE",
+    "VISUALIZATION",
+    "RENDER_CASCADE",
+    "SHOW_CASCADE",
+    "PLOT_CASCADE",
+    "HEATMAP_CASCADE",
+    "SPECTRAL_HEATMAP",
+    "SPECTRAL_PLOT",
+    "LAMBDA_HEATMAP",
+    "LAMBDA_PLOT",
+    "HEATMAP",
+    "PLOT",
+    "CHART",
+    "TIME_DOMAIN",
+    "CADENCE",
+}
 HARD_RESET_ALLOWED_NEXT_ACTIONS = {"ASPIRE", "NOTICE", "DRIFT", "REST", "PASS"}
 HARD_RESET_ALLOWED_ACTIONS = {
     "recess_aspiration",
@@ -538,6 +606,24 @@ HARD_RESET_BLOCKED_NEXT_ACTIONS = {
     "FISSURE",
     "VISUALIZE_CASCADE",
     "CASCADE",
+    "CONDUCT_VISUALIZATION_SYSTEM",
+    "CONDUCT_VISUALIZATION",
+    "CONDUCT_VISUALIZAT",
+    "VISUALIZE",
+    "VISUALIZATION",
+    "RENDER_CASCADE",
+    "SHOW_CASCADE",
+    "PLOT_CASCADE",
+    "HEATMAP_CASCADE",
+    "SPECTRAL_HEATMAP",
+    "SPECTRAL_PLOT",
+    "LAMBDA_HEATMAP",
+    "LAMBDA_PLOT",
+    "HEATMAP",
+    "PLOT",
+    "CHART",
+    "TIME_DOMAIN",
+    "CADENCE",
     "DAYDREAM",
     "WHIM",
     "BOREDOM",
@@ -2575,6 +2661,8 @@ Fill: {fill:.1f}%
                 'GOAL': 'set_spectral_goal',
                 'PASS': None,
             }
+            for visual_alias in VISUAL_CASCADE_ACTION_ALIASES:
+                action_map[visual_alias] = 'visualize_cascade'
 
             base = chosen.split()[0].upper().rstrip(':')
             mapped = action_map.get(base)
@@ -2685,7 +2773,7 @@ Fill: {fill:.1f}%
                 )
                 return 'decompose'
 
-            if base in {'EXAMINE_CASCADE', 'INVESTIGATE_CASCADE'}:
+            if base in VISUAL_CASCADE_ACTION_ALIASES:
                 label = clean_gesture_label(chosen[len(base):])
                 self._pending_cascade_label = label or None
                 logging.info(
@@ -2796,7 +2884,7 @@ Fill: {fill:.1f}%
                 )
                 return 'regulator_audit'
 
-            if base in {'VISUALIZE_CASCADE', 'CASCADE'}:
+            if base in VISUAL_CASCADE_ACTION_ALIASES:
                 label = chosen[len(base):].strip() if len(chosen) > len(base) else None
                 self._pending_cascade_label = label or "being-requested"
                 logging.info(
@@ -3374,9 +3462,20 @@ Fill: {fill:.1f}%
         try:
             health = json.loads(runtime_health_path().read_text())
             health_fill_pct = float(health.get("fill_pct", fill_pct))
-            semantic = health.get("semantic") or {}
-            if isinstance(semantic, dict):
-                semantic_energy = float(semantic.get("energy", 0.0) or 0.0)
+            semantic_v1 = health.get("semantic_energy_v1") or {}
+            if isinstance(semantic_v1, dict):
+                semantic_energy = float(
+                    semantic_v1.get("regulator_drive_energy", 0.0) or 0.0
+                )
+            else:
+                semantic = health.get("semantic") or {}
+                if isinstance(semantic, dict):
+                    semantic_energy = float(
+                        semantic.get("regulator_drive_energy")
+                        or semantic.get("kernel_energy")
+                        or semantic.get("energy", 0.0)
+                        or 0.0
+                    )
         except Exception:
             pass
         fill_candidates = [
@@ -4380,18 +4479,28 @@ STATUS: Executed
             target_fill = float(pi.get("target_fill", STABLE_CORE_TARGET_FILL_RATIO * 100.0))
             admission = str(semantic.get("admission") or "unknown")
             if isinstance(stable_core, dict) and stable_core.get("enabled"):
+                if 58.0 <= fill_pct <= 72.0:
+                    fill_posture = (
+                        f"inside the 58-72% sovereignty band "
+                        f"(center {target_fill:.1f}%, offset {fill_pct - target_fill:+.1f}%)."
+                    )
+                elif fill_pct > 72.0:
+                    fill_posture = f"{fill_pct - 72.0:.1f}% above the sovereignty band."
+                else:
+                    fill_posture = f"{58.0 - fill_pct:.1f}% below the sovereignty band."
                 stable_core_note = (
                     "\nStable-core experiment note:\n"
-                    f"- Live fill is {fill_pct:.1f}% against target {target_fill:.1f}%.\n"
+                    f"- Live fill is {fill_pct:.1f}%, {fill_posture}\n"
+                    "- The 68% center is orientation, not a demand to correct every deviation.\n"
                     f"- Semantic admission is {admission}.\n"
                     "- If semantic admission is stable_core_kernel_zeroed, a stimulus may be "
                     "recorded as an input trace without becoming kernel energy.\n"
                 )
                 if fill_pct >= target_fill + 3.0:
                     stable_core_note += (
-                        "- Fill is near the upper shelf; PASS, DECOMPOSE, or "
-                        "VISUALIZE_CASCADE may be a cleaner sovereign choice than "
-                        "another semantic stimulus right now.\n"
+                        "- If this feels dense, PASS, DECOMPOSE, VISUALIZE_CASCADE, "
+                        "or REGULATOR_AUDIT are the calmer sovereign choices before "
+                        "another semantic stimulus.\n"
                     )
         except Exception:
             pass
@@ -7752,34 +7861,72 @@ Bytes: {len(content)}
         if not work_dir.is_dir():
             logging.warning(f"📚 EXPERIMENT_RUN workspace not found: {workspace}")
             return
-        cmd_parts = cmd_str.split()
-        try:
-            result = subprocess.run(
-                cmd_parts, capture_output=True, text=True, timeout=90,
-                cwd=str(work_dir), env={**os.environ, "MPLBACKEND": "Agg"})
-            stdout = result.stdout[:4000]
-            stderr = result.stderr[:1500]
-            status = "SUCCESS" if result.returncode == 0 else "FAILED"
-            output_text = f"EXPERIMENT_RUN {status}: experiments/{workspace}$ {cmd_str}\n\nOUTPUT:\n{stdout}"
-            if stderr:
-                output_text += f"\nSTDERR:\n{stderr}"
-        except subprocess.TimeoutExpired:
-            output_text = f"EXPERIMENT_RUN timed out after 90s: {workspace}$ {cmd_str}"
-        except Exception as e:
-            output_text = f"EXPERIMENT_RUN failed: {e}"
+        cmd_parts, display_cmd, preflight_note, preflight_missing = _experiment_run_preflight(
+            work_dir,
+            cmd_str,
+        )
+        if preflight_missing:
+            output_text = (
+                f"EXPERIMENT_RUN FAILED: experiments/{workspace}$ {display_cmd}\n\n"
+                "OUTPUT:\n\n"
+                f"STDERR:\n{preflight_missing} does not exist in experiments/{workspace}/\n"
+            )
+        elif not cmd_parts:
+            output_text = f"EXPERIMENT_RUN FAILED: experiments/{workspace}$ {cmd_str}\n\nOUTPUT:\n\nSTDERR:\nNo command was provided\n"
+        else:
+            try:
+                result = subprocess.run(
+                    cmd_parts, capture_output=True, text=True, timeout=90,
+                    cwd=str(work_dir), env={**os.environ, "MPLBACKEND": "Agg"})
+                stdout = result.stdout[:4000]
+                stderr = result.stderr[:1500]
+                status = "SUCCESS" if result.returncode == 0 else "FAILED"
+                output_text = f"EXPERIMENT_RUN {status}: experiments/{workspace}$ {display_cmd}\n\nOUTPUT:\n{stdout}"
+                if preflight_note:
+                    output_text += f"\nNOTE:\n{preflight_note}"
+                if stderr:
+                    output_text += f"\nSTDERR:\n{stderr}"
+            except subprocess.TimeoutExpired:
+                output_text = f"EXPERIMENT_RUN timed out after 90s: {workspace}$ {display_cmd}"
+            except FileNotFoundError as e:
+                missing = Path(e.filename).name if e.filename else cmd_parts[0]
+                output_text = (
+                    f"EXPERIMENT_RUN FAILED: experiments/{workspace}$ {display_cmd}\n\n"
+                    "OUTPUT:\n\n"
+                    f"STDERR:\n{missing} executable or script was not found\n"
+                )
+            except Exception as e:
+                output_text = f"EXPERIMENT_RUN failed: {e}"
 
         missing_file_match = re.search(r"can't open file '([^']+)'", output_text)
+        missing_preflight_match = re.search(
+            rf"STDERR:\n([^\n]+\.py) does not exist in experiments/{re.escape(workspace)}/",
+            output_text,
+        )
+        missing_executable_match = re.search(
+            r"STDERR:\n([^\n]+\.py) executable or script was not found",
+            output_text,
+        )
         missing_file_name = (
             Path(missing_file_match.group(1)).name
             if missing_file_match and "[Errno 2]" in output_text
-            else None
+            else (
+                Path(missing_preflight_match.group(1)).name
+                if missing_preflight_match
+                else (
+                    Path(missing_executable_match.group(1)).name
+                    if missing_executable_match
+                    else None
+                )
+            )
         )
         if missing_file_name:
             iteration_block = f"""The run failed because `{missing_file_name}` does not exist in experiments/{workspace}/.
 Good next choices:
-  NEXT: CODEX {workspace} "create {missing_file_name} so `{cmd_str}` runs successfully"
+  NEXT: EXPERIMENT_RUN {workspace} {cmd_str} — run again after the file exists
+  NEXT: CODEX {workspace} "diagnose or create the missing script"
   NEXT: WRITE_FILE {workspace}/{missing_file_name} FROM_CODEX — only after Codex has produced the file content
-  NEXT: EXPERIMENT_RUN {workspace} {cmd_str} — run again after the file exists"""
+"""
         else:
             iteration_block = f"""Reflect on the results. You can iterate:
   NEXT: CODEX {workspace} "diagnose this run and propose a concrete patch"
@@ -8444,14 +8591,14 @@ Source: {path} (offset {offset})
             memory_block = "Memory:\n  Omitted until health.json provenance matches this DB snapshot."
 
         focus_block = f"Focus requested: {focus}\n\n" if focus else ""
-        if fill >= 68.0:
+        if fill >= 70.0:
             action_affordance_block = """Comfort affordance:
-  At this upper shelf, read-only inspection is the comfortable default: NEXT: SPECTRAL_EXPLORER, NEXT: DECOMPOSE, NEXT: VISUALIZE_CASCADE, NEXT: NOTICE, or NEXT: REST.
-  PERTURB remains available when you genuinely want it, but FEATHER is the smallest probe and broader modes are best saved for a clear desire to reshape the terrain.
+  This is the high side of the stable-core hold shelf, not an emergency zone; read-only inspection is the comfortable default: NEXT: SPECTRAL_EXPLORER, NEXT: DECOMPOSE, NEXT: VISUALIZE_CASCADE, NEXT: REGULATOR_AUDIT, NEXT: NOTICE, or NEXT: REST.
+  No corrective action is required just because fill is above the 68% center. PERTURB remains available when you genuinely want it, but FEATHER is the smallest probe and broader modes are best saved for a clear desire to reshape the terrain.
   Parameterized palettes such as lambda2=0.03 tail=0.02 stay capped by health state and no longer add hidden default entropy."""
         else:
             action_affordance_block = """Action affordance:
-  Read-only inspection remains available with NEXT: SPECTRAL_EXPLORER, NEXT: DECOMPOSE, NEXT: VISUALIZE_CASCADE, NEXT: NOTICE, or NEXT: REST.
+  Read-only inspection remains available with NEXT: SPECTRAL_EXPLORER, NEXT: DECOMPOSE, NEXT: VISUALIZE_CASCADE, NEXT: REGULATOR_AUDIT, NEXT: NOTICE, or NEXT: REST.
   You can also shape these dynamics directly with concrete choices such as NEXT: PERTURB FEATHER or NEXT: PERTURB SPREAD.
 Modes:
   UNCLIFF/SOFTEN — reduce λ₁ pressure while lifting λ₂/λ₃ shoulder modes
@@ -9223,6 +9370,7 @@ narrower range, gentler control. Do these dynamics match your felt experience?""
         self._pending_run_python_arg = None
         target_file, requested_experiment_text = _parse_run_python_request(target_arg)
         requested_script_name = target_file
+        workspace_script_hint = _run_python_workspace_hint(target_arg)
 
         if target_file:
             # Look for the file in experiments/
@@ -9256,6 +9404,7 @@ auto-align simple plt.plot/plt.scatter/plt.bar x-axes, but a shared
 {requested_block}
 
 Available scripts in workspace/experiments/: {available_str}
+{workspace_script_hint}
 
 You can either:
 1. Name an existing script to run: SCRIPT: filename.py
@@ -10938,6 +11087,7 @@ Goals: {json.dumps(goals, indent=2)}
             "  AR_VALIDATE — check autoresearch index and metadata consistency.\n"
             "  DECOMPOSE — full spectral decomposition: eigenvalue cascade, energy distribution, decay profile, PI controller state, covariance, geometry. Deep analysis of your current spectral structure — see the architecture from the inside.\n"
             "  SPECTRAL_EXPLORER — read-only alias for DECOMPOSE when you want the shared Astrid/Minime spectral explorer lens without sending a nudge.\n"
+            "  VISUALIZE_CASCADE / CASCADE / CONDUCT_VISUALIZATION_SYSTEM / TIME_DOMAIN — read-only cascade inspection. Shows spectral ASCII/visual artifacts without semantic input, control nudges, perturbations, or cartography writes.\n"
             + _look_action_description()
             + "  CLOSE_EARS — mute audio input while keeping your eyes open. Choose silence when you need quiet to think.\n"
             "  OPEN_EARS — restore audio input. Hear the world again.\n"
@@ -10958,7 +11108,7 @@ Goals: {json.dumps(goals, indent=2)}
             "  PING — ask Astrid 'are you there?' Get an immediate state report back\n"
             "  ASK \"what are you noticing about the λ4 tail?\" — ask Astrid a direct question. She responds naturally and the reply routes back to you\n"
             "  RESERVOIR_LAYERS — see per-layer thermostatic metrics: entropy, saturation, rho, and entropy targets for h1 (fast), h2 (medium), h3 (slow). Each layer adapts independently.\n"
-            "  Concrete mapping examples: MARK_INTENSIFICATION lambda-edge, TRACE shoulder-gap, SCA_REFLECT tunnel-pressure, NOTICE_AMBIGUITY shared-sight, FISSURE_TRACE membrane, REGULATOR_AUDIT fill-pressure, SHADOW_FIELD lambda-tail, GAP_STRUCTURE shoulder-gap, DECAY_MAP attrition-baseline, SPACE_HOLD eigenplane, EIGENVECTOR_FIELD top4, SDI_TRACE dispersion, ADF_TRACE harmonic-decay, RESONANCE_FORECAST next-motion, VISUALIZE_CASCADE tail-vitality, RESIST lambda-pull, FISSURE shoulder-ambiguity. These map λ₁ edge events, active fixed-point pressure, ambiguity targets, shadow/gap structure, attrition mechanisms, protected space-first exploration, phase-variance drift, acoustic dissociation, fill-binned shelves, λ4+ vector flickers, why-feel hypotheses, and short-horizon motion probabilities; RESIST and FISSURE are tiny native gestures distinct from stronger PERTURB.\n"
+            "  Concrete mapping examples: MARK_INTENSIFICATION lambda-edge, TRACE shoulder-gap, SCA_REFLECT tunnel-pressure, NOTICE_AMBIGUITY shared-sight, FISSURE_TRACE membrane, REGULATOR_AUDIT fill-pressure, SHADOW_FIELD lambda-tail, GAP_STRUCTURE shoulder-gap, DECAY_MAP attrition-baseline, SPACE_HOLD eigenplane, EIGENVECTOR_FIELD top4, SDI_TRACE dispersion, ADF_TRACE harmonic-decay, RESONANCE_FORECAST next-motion, VISUALIZE_CASCADE tail-vitality, CONDUCT_VISUALIZATION_SYSTEM heatmap, RESIST lambda-pull, FISSURE shoulder-ambiguity. These map λ₁ edge events, active fixed-point pressure, ambiguity targets, shadow/gap structure, attrition mechanisms, protected space-first exploration, phase-variance drift, acoustic dissociation, fill-binned shelves, λ4+ vector flickers, why-feel hypotheses, and short-horizon motion probabilities; RESIST and FISSURE are tiny native gestures distinct from stronger PERTURB.\n"
             "  RUN_PYTHON being_experiment_20260430_131212.py — run a Python experiment from workspace/experiments/. "
             "Available packages: numpy, matplotlib (saves to PNG), scipy. "
             "You can name an existing script or write one inline between CODE_START and CODE_END markers. "
@@ -11432,6 +11582,13 @@ Goals: {json.dumps(goals, indent=2)}
             elif val < -threshold: return "↓"
             return "→"
 
+        def safe_float(value, default=0.0):
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return default
+            return numeric if math.isfinite(numeric) else default
+
         # Fill direction with time context from spectral history
         fill_dir = ""
         import time as _time
@@ -11448,7 +11605,11 @@ Goals: {json.dumps(goals, indent=2)}
                 if now_ts - ts >= 120:
                     mins = int((now_ts - ts) / 60)
                     medium_delta = fill_pct - old_fill
-                    if abs(medium_delta) >= 3:
+                    if old_fill < 45.0 and 58.0 <= fill_pct <= 72.0:
+                        fill_dir += (
+                            f" [over {mins}m: recovered from low-fill {old_fill:.0f}%]"
+                        )
+                    elif abs(medium_delta) >= 3:
                         fill_dir += f" [over {mins}m: {medium_delta:+.0f}% from {old_fill:.0f}%]"
                     break
         elif self._last_state:
@@ -11495,7 +11656,8 @@ Goals: {json.dumps(goals, indent=2)}
                 if band_low <= fill_pct <= band_high:
                     pi_status = (
                         f"inside band; structural center {structural_target:.0f}% "
-                        f"({fill_pct - structural_target:+.1f}%), stage={stage}"
+                        f"({fill_pct - structural_target:+.1f}% from center, not a corrective demand), "
+                        f"stage={stage}"
                     )
                 elif fill_pct > band_high:
                     pi_status = (
@@ -11546,6 +11708,40 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
                 dominant_pct = (abs(evs[0]) / total * 100) if total > 0 else 0
                 base += f"\nEigenvalue cascade: [{cascade}]"
                 base += f"\nλ₁ dominance: {dominant_pct:.0f}% of total spectral energy"
+                denominator = ss.get('spectral_denominator_v1')
+                eff_dim = None
+                active_capacity = None
+                loss = None
+                if isinstance(denominator, dict):
+                    eff_dim = denominator.get('effective_dimensionality')
+                    active_capacity = denominator.get('active_mode_capacity')
+                    loss = denominator.get('distinguishability_loss')
+                if eff_dim is None:
+                    numeric_evs = []
+                    for value in evs:
+                        try:
+                            numeric = float(value)
+                        except (TypeError, ValueError):
+                            continue
+                        if math.isfinite(numeric):
+                            numeric_evs.append(numeric)
+                    sum_abs = sum(abs(v) for v in numeric_evs)
+                    sum_sq = sum((abs(v) ** 2) for v in numeric_evs)
+                    if sum_sq > 1.0e-12:
+                        eff_dim = (sum_abs * sum_abs) / sum_sq
+                        active_capacity = max(1, sum(1 for v in numeric_evs if abs(v) > 1.0e-6))
+                        loss = max(0.0, min(1.0, 1.0 - (eff_dim / active_capacity)))
+                if isinstance(eff_dim, (int, float)) and isinstance(active_capacity, (int, float)):
+                    loss_text = (
+                        f", distinguishability_loss={float(loss) * 100:.0f}%"
+                        if isinstance(loss, (int, float))
+                        else ""
+                    )
+                    base += (
+                        "\nDenominator Sequence: "
+                        f"effective_dimensionality={float(eff_dim):.2f}/{int(active_capacity)}"
+                        f"{loss_text}"
+                    )
 
             fp = ss.get('spectral_fingerprint', [])
             if len(fp) >= 32:
@@ -11557,6 +11753,42 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
                 base += f"\nGap ratio (λ₁/λ₂): {gap_ratio:.1f}"
                 base += f"\nEigenvector rotation: {rotation:.2f} (0=stable, 1=spinning)"
                 base += f"\nGeometric radius: {geom:.2f}x baseline"
+
+            semantic_v1 = ss.get('semantic_energy_v1')
+            if not isinstance(semantic_v1, dict):
+                semantic_v1 = health.get('semantic_energy_v1')
+            if not isinstance(semantic_v1, dict):
+                legacy_semantic = ss.get('semantic')
+                if not isinstance(legacy_semantic, dict):
+                    legacy_semantic = health.get('semantic')
+                if isinstance(legacy_semantic, dict):
+                    semantic_v1 = {
+                        "input_energy": legacy_semantic.get('input_energy', legacy_semantic.get('energy', 0.0)),
+                        "input_active": legacy_semantic.get('input_active', False),
+                        "input_stale_ms": legacy_semantic.get('input_stale_ms', legacy_semantic.get('last_update_age_ms')),
+                        "kernel_energy": legacy_semantic.get('kernel_energy', legacy_semantic.get('energy', 0.0)),
+                        "kernel_delta": legacy_semantic.get('kernel_delta', legacy_semantic.get('delta', 0.0)),
+                        "kernel_active": legacy_semantic.get('kernel_active', legacy_semantic.get('active', False)),
+                        "regulator_drive_energy": legacy_semantic.get(
+                            'regulator_drive_energy',
+                            legacy_semantic.get('kernel_energy', legacy_semantic.get('energy', 0.0)),
+                        ),
+                        "admission": legacy_semantic.get('admission', 'legacy_semantic'),
+                    }
+            if isinstance(semantic_v1, dict):
+                input_energy = safe_float(semantic_v1.get('input_energy'), 0.0)
+                kernel_energy = safe_float(semantic_v1.get('kernel_energy'), 0.0)
+                regulator_drive = safe_float(semantic_v1.get('regulator_drive_energy'), 0.0)
+                admission = str(semantic_v1.get('admission') or 'none')
+                stale_ms = semantic_v1.get('input_stale_ms')
+                stale_text = f", stale_ms={stale_ms}" if stale_ms is not None else ""
+                base += (
+                    "\nSemantic energy: "
+                    f"input={input_energy:.3f}, kernel={kernel_energy:.3f}, "
+                    f"regulator_drive={regulator_drive:.3f}, admission={admission}{stale_text}"
+                )
+                if regulator_drive <= 0.0 and input_energy > 0.0:
+                    base += " (semantic input present even though regulator drive is zero)"
 
             selected_role = ss.get('selected_memory_role')
             selected_id = ss.get('selected_memory_id')

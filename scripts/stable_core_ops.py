@@ -971,6 +971,9 @@ def capture_spectral_fingerprint(
     fingerprint_v1 = spectral_state.get("spectral_fingerprint_v1")
     if not isinstance(fingerprint_v1, dict):
         fingerprint_v1 = None
+    denominator_v1 = spectral_state.get("spectral_denominator_v1")
+    if not isinstance(denominator_v1, dict):
+        denominator_v1 = None
     legacy_fingerprint = spectral_state.get("spectral_fingerprint")
     if not isinstance(legacy_fingerprint, list):
         legacy_fingerprint = None
@@ -989,6 +992,8 @@ def capture_spectral_fingerprint(
         "geom_rel": spectral_state.get("geom_rel", health.get("geom_rel")),
         "active_mode_count": spectral_state.get("active_mode_count"),
         "active_mode_energy_ratio": spectral_state.get("active_mode_energy_ratio"),
+        "effective_dimensionality": spectral_state.get("effective_dimensionality"),
+        "distinguishability_loss": spectral_state.get("distinguishability_loss"),
         "spectral_entropy": spectral_state.get("spectral_entropy"),
         "structural_entropy": spectral_state.get("structural_entropy"),
     }
@@ -1011,6 +1016,9 @@ def capture_spectral_fingerprint(
         },
         "present_state": present_state,
         "semantic": spectral_state.get("semantic") or health.get("semantic") or {},
+        "semantic_energy_v1": spectral_state.get("semantic_energy_v1")
+        or health.get("semantic_energy_v1")
+        or {},
         "stable_core": spectral_state.get("stable_core") or health.get("stable_core") or {},
         "rescue_status": rescue_status,
         "rescue_profile": {
@@ -1026,6 +1034,7 @@ def capture_spectral_fingerprint(
         "spectral_glimpse_12d": spectral_state.get("spectral_glimpse_12d"),
         "eigenvalues": eigenvalues or [],
         "fingerprint": fingerprint_v1,
+        "spectral_denominator_v1": denominator_v1,
         "legacy_spectral_fingerprint": legacy_fingerprint,
     }
     write_json(capture_path, payload)
@@ -1773,17 +1782,20 @@ def build_status() -> dict[str, Any]:
     )
     stable_core_health = health.get("stable_core") if isinstance(health, dict) else {}
     stable_core_enabled = bool(profile.get("stable_core_enabled"))
+    semantic_v1 = health.get("semantic_energy_v1") if isinstance(health, dict) else {}
     semantic = health.get("semantic") if isinstance(health, dict) else {}
     if stable_core_enabled and not isinstance(semantic, dict):
         semantic = {"energy": 0.0, "active": False}
     elif not isinstance(semantic, dict):
         semantic = {}
-    semantic_energy = semantic.get("energy")
-    semantic_kernel_energy = semantic.get("kernel_energy", semantic_energy)
-    semantic_input_energy = semantic.get("input_energy", semantic_energy)
-    semantic_active = semantic.get("active", False)
-    semantic_kernel_active = semantic.get("kernel_active", semantic_active)
-    semantic_input_active = semantic.get("input_active", False)
+    if not isinstance(semantic_v1, dict):
+        semantic_v1 = {}
+    semantic_energy = semantic_v1.get("regulator_drive_energy", semantic.get("energy"))
+    semantic_kernel_energy = semantic_v1.get("kernel_energy", semantic.get("kernel_energy", semantic_energy))
+    semantic_input_energy = semantic_v1.get("input_energy", semantic.get("input_energy", semantic_energy))
+    semantic_active = semantic_v1.get("kernel_active", semantic.get("active", False))
+    semantic_kernel_active = semantic_v1.get("kernel_active", semantic_active)
+    semantic_input_active = semantic_v1.get("input_active", semantic.get("input_active", False))
     configured_stage = agency.get("stage") if isinstance(agency, dict) else None
     configured_budget = agency.get("agent_budget_mode") if isinstance(agency, dict) else None
     profile_stage = profile.get("stable_core_agency_stage")

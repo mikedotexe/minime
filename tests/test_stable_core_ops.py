@@ -38,11 +38,31 @@ class TestStableCoreOps(unittest.TestCase):
                     "lambda1_rel": 0.11,
                     "geom_rel": 0.97,
                     "active_mode_count": 8,
+                    "effective_dimensionality": 7.4,
+                    "distinguishability_loss": 0.075,
                     "spectral_fingerprint": [0.1] * 32,
                     "spectral_fingerprint_v1": typed,
+                    "spectral_denominator_v1": {
+                        "policy": "spectral_denominator_v1",
+                        "schema_version": 1,
+                        "effective_dimensionality": 7.4,
+                        "active_mode_capacity": 8,
+                        "distinguishability_loss": 0.075,
+                    },
                     "semantic": {
                         "input_energy": 0.12,
                         "kernel_energy": 0.0,
+                        "admission": "stable_core_kernel_zeroed",
+                    },
+                    "semantic_energy_v1": {
+                        "policy": "semantic_energy_v1",
+                        "schema_version": 1,
+                        "input_energy": 0.12,
+                        "input_active": True,
+                        "kernel_energy": 0.0,
+                        "kernel_delta": 0.0,
+                        "kernel_active": False,
+                        "regulator_drive_energy": 0.0,
                         "admission": "stable_core_kernel_zeroed",
                     },
                     "stable_core": {"stage": "hold"},
@@ -84,7 +104,16 @@ class TestStableCoreOps(unittest.TestCase):
             self.assertEqual(capture["fingerprint"]["policy"], "spectral_fingerprint_v1")
             self.assertEqual(capture["legacy_spectral_fingerprint"], [0.1] * 32)
             self.assertEqual(capture["present_state"]["lambda1"], 0.6)
+            self.assertEqual(capture["present_state"]["effective_dimensionality"], 7.4)
+            self.assertEqual(
+                capture["spectral_denominator_v1"]["policy"],
+                "spectral_denominator_v1",
+            )
             self.assertEqual(capture["semantic"]["input_energy"], 0.12)
+            self.assertEqual(
+                capture["semantic_energy_v1"]["policy"],
+                "semantic_energy_v1",
+            )
             self.assertEqual(latest["path"], result["path"])
 
     def test_stage_set_writes_agency_surface_and_patches_profile(self) -> None:
