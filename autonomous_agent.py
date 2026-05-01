@@ -1475,6 +1475,26 @@ def _normalize_codex_prompt(text: str) -> str:
     return text.strip().strip('"\'“”').strip()
 
 
+def _is_placeholder_codex_prompt(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", _normalize_codex_prompt(text).lower()).strip()
+    if not normalized:
+        return False
+    stripped = normalized.strip("<>[]{}() ")
+    placeholders = {
+        "prompt",
+        "your prompt",
+        "what to change",
+        "what should change",
+        "changes",
+        "change request",
+        "describe changes",
+        "modifications",
+        "modification",
+        "request",
+    }
+    return normalized in {f"<{item}>" for item in placeholders} or stripped in placeholders
+
+
 def _codex_scope_name(scope: str) -> str:
     cleaned = re.sub(r'[^a-zA-Z0-9_-]+', '_', scope.strip().lower()).strip('_')
     return cleaned[:48] if cleaned else "general"
@@ -1498,6 +1518,9 @@ def _resolve_codex_request(action_name: str, arg: str) -> tuple[Optional[str], s
         if not prompt_text:
             return (None, "", None, None,
                     "CODEX_NEW needs a directory name and prompt. Example: NEXT: CODEX_NEW scratch-pad \"scaffold a tiny Python project here\"")
+        if _is_placeholder_codex_prompt(prompt_text):
+            return (None, "", None, None,
+                    "CODEX_NEW prompt is still a placeholder. Use concrete words for what you want created.")
         if not project or project in {'.', '..'} or '/' in project or '\\' in project:
             return (None, "", None, None,
                     "CODEX_NEW directory names must stay inside experiments/ and cannot contain path separators.")
@@ -1510,9 +1533,16 @@ def _resolve_codex_request(action_name: str, arg: str) -> tuple[Optional[str], s
     first_token = arg.split(None, 1)[0] if arg else ''
     if first_token and (experiments / first_token).is_dir():
         prompt_text = _normalize_codex_prompt(arg[len(first_token):])
+        if _is_placeholder_codex_prompt(prompt_text):
+            return (None, "", first_token, None,
+                    f"CODEX prompt for experiments/{first_token} is still a placeholder. Ask for a concrete creation, diagnosis, or change.")
         if prompt_text:
             return (str(experiments / first_token), prompt_text, first_token, None, None)
-    return (None, _normalize_codex_prompt(arg), None, None, None)
+    prompt_text = _normalize_codex_prompt(arg)
+    if _is_placeholder_codex_prompt(prompt_text):
+        return (None, "", None, None,
+                "CODEX prompt is still a placeholder. Ask a concrete question or describe the change you want.")
+    return (None, prompt_text, None, None, None)
 DB_PATH = resolve_runtime_db_path(BASE_DIR)
 MANIFEST_PATH = BASE_DIR / "SOVEREIGNTY_MANIFEST.md"
 
@@ -1815,8 +1845,8 @@ class AutonomousAgent:
                 "- Browse Mike's curated research (NEXT: MIKE for overview, NEXT: MIKE_BROWSE <project> to enter a project, NEXT: MIKE_READ <path> to read text files or PDFs in full, NEXT: READ_MORE to continue long PDFs page-by-page, NEXT: MIKE_SEARCH <pattern> to search, NEXT: MIKE_RUN <project> <cmd> to run experiments)\n"
                 "- Browse directory-scoped autoresearch jobs (NEXT: AR_LIST, NEXT: AR_LIST_PENDING, NEXT: AR_SHOW <job>, NEXT: AR_DEEP_READ <job>, NEXT: AR_START <slug> --title \"...\" --abstract \"...\" when a question deserves its own job)\n"
                 "- Fork research for modification (NEXT: MIKE_FORK <project> [name] — copies to your experiments/)\n"
-                "- Run commands in your writable experiments (NEXT: EXPERIMENT_RUN system-resources-demo python3 system_resources.py)\n"
-                "- Query Codex AI for analysis, code, concepts, or anything (NEXT: CODEX <prompt>, NEXT: CODEX <project> \"<prompt>\" for an existing workspace, or NEXT: CODEX_NEW <dir> \"<prompt>\" to start fresh). Not just for code — ask about papers, PDFs, theories, anything.\n"
+                "- Run commands in writable experiments after creating or forking them (NEXT: EXPERIMENT_RUN <workspace> <cmd>). For the curated resources demo: NEXT: MIKE_FORK system-resources-demo system-resources-demo, then NEXT: EXPERIMENT_RUN system-resources-demo python3 system_resources.py.\n"
+                "- Query Codex AI for analysis, code, concepts, or anything (NEXT: CODEX \"ask your concrete question\", NEXT: CODEX <project> \"describe the concrete change you want\" for an existing workspace, or NEXT: CODEX_NEW <dir> \"describe what to create\" to start fresh). Not just for code — ask about papers, PDFs, theories, anything.\n"
                 "- Write files to your experiments (NEXT: WRITE_FILE <path> FROM_CODEX to write the last Codex response)\n"
             )
 
@@ -7261,12 +7291,42 @@ Command: {project}/{cmd_str}
             return
         dst = WORKSPACE_DIR / "experiments" / name
         if dst.exists():
+            if not dst.is_dir():
+                logging.warning(f"📚 MIKE_FORK: target exists but is not a directory: {name}")
+                return
+            existing_count = sum(1 for item in dst.rglob('*') if item.is_file())
+            if existing_count == 0:
+                try:
+                    shutil.copytree(str(src), str(dst), dirs_exist_ok=True, ignore=shutil.ignore_patterns(
+                        '__pycache__', '.venv', '.build', 'node_modules', '.git',
+                        'target', '.mypy_cache', '.DS_Store'))
+                    count = sum(1 for item in dst.rglob('*') if item.is_file())
+                    logging.info(
+                        f"📚 MIKE_FORK: completed empty existing fork '{name}' with {count} files"
+                    )
+                except Exception as e:
+                    logging.error(f"📚 MIKE_FORK failed while completing empty fork: {e}")
+                    return
+                prompt = (
+                    f"Fork '{name}' already existed but was empty, so I copied Mike's "
+                    f"research project '{project}' into it ({count} files). "
+                    f"You can run or modify it now. Example: NEXT: EXPERIMENT_RUN {name} python3 system_resources.py."
+                )
+                self._query_llm_with_next(prompt)
+                return
+
             logging.info(f"📚 MIKE_FORK: '{name}' already exists, skipping")
-            # Still present to LLM so the being knows
+            run_example = (
+                f" Example: NEXT: EXPERIMENT_RUN {name} python3 system_resources.py."
+                if (dst / "system_resources.py").is_file()
+                else ""
+            )
+            # Still present to LLM so the being knows.
             prompt = (
-                f"Fork '{name}' already exists at {dst}. "
-                f"You can work with it using EXPERIMENT_RUN {name} <cmd> or WRITE_FILE {name}/<file>. "
-                f"Example: NEXT: EXPERIMENT_RUN {name} python3 system_resources.py."
+                f"Fork '{name}' already exists at {dst} with {existing_count} file(s). "
+                f"You can inspect or modify it using CODEX {name} \"describe the concrete change\" "
+                f"or run a known command with EXPERIMENT_RUN {name} <cmd>."
+                f"{run_example}"
             )
             self._query_llm_with_next(prompt)
             return
@@ -7285,7 +7345,7 @@ Command: {project}/{cmd_str}
 You forked Mike's research project '{project}' → experiments/{name}/ ({count} files).
 This is your own writable copy. You can:
   NEXT: EXPERIMENT_RUN {name} <cmd> — run commands in the fork
-  NEXT: CODEX {name} "<prompt>"   — ask Codex AI to analyze or suggest changes
+  NEXT: CODEX {name} "describe the concrete change you want" — ask Codex AI to analyze or suggest changes
   NEXT: WRITE_FILE {name}/<file> FROM_CODEX  — write Codex's response to a file
 
 Example:
@@ -7317,9 +7377,37 @@ Forked: {project} → experiments/{name}/
         dir_context, prompt_text, project_name, created_dir, err = _resolve_codex_request(action_name, arg)
         if err:
             logging.warning(f"📚 {action_name} error: {err}")
+            fill = state.get('fill_ratio', 0) * 100
+            scope = f" in experiments/{project_name}" if project_name else ""
+            if project_name:
+                examples = (
+                    f"  NEXT: CODEX {project_name} \"create the missing script and make it runnable\"\n"
+                    f"  NEXT: CODEX {project_name} \"diagnose the last run failure and propose a concrete patch\""
+                )
+            else:
+                examples = (
+                    "  NEXT: CODEX \"ask a concrete question or request a specific analysis\"\n"
+                    "  NEXT: CODEX_NEW scratch-pad \"create a small runnable experiment\""
+                )
+            prompt = f"""Current state: Fill={fill:.1f}%, λ₁={state.get('eig1', 0):.3f}
+
+Your {action_name} request{scope} was not sent because: {err}
+
+Choose a concrete next step in your own words. Examples:
+{examples}
+  NEXT: EXAMINE
+
+Avoid placeholder text such as <prompt> or <what to change>."""
+            self._query_llm_with_next(prompt)
             return
         if not prompt_text:
             logging.warning(f"📚 {action_name} needs a prompt")
+            fill = state.get('fill_ratio', 0) * 100
+            prompt = f"""Current state: Fill={fill:.1f}%, λ₁={state.get('eig1', 0):.3f}
+
+Your {action_name} request did not include a concrete prompt.
+Write the actual question or creation request you want Codex to handle, or choose NEXT: EXAMINE for read-only inspection."""
+            self._query_llm_with_next(prompt)
             return
 
         body = {
@@ -7458,8 +7546,8 @@ Being's reflection:
 
 You wrote {len(content)} bytes to experiments/{path_str}.
 You can run it: NEXT: EXPERIMENT_RUN {path_str.split('/')[0]} <cmd>
-Example: NEXT: EXPERIMENT_RUN system-resources-demo python3 system_resources.py
-Or query Codex for more changes: NEXT: CODEX {path_str.split('/')[0]} "<prompt>"
+Example: NEXT: EXPERIMENT_RUN {path_str.split('/')[0]} python3 {Path(path_str).name}
+Or query Codex for more changes: NEXT: CODEX {path_str.split('/')[0]} "describe the concrete change you want"
 
 What would you like to do next?"""
         response = self._query_llm_with_next(prompt)[0]
@@ -7525,6 +7613,24 @@ Bytes: {len(content)}
         except Exception as e:
             output_text = f"EXPERIMENT_RUN failed: {e}"
 
+        missing_file_match = re.search(r"can't open file '([^']+)'", output_text)
+        missing_file_name = (
+            Path(missing_file_match.group(1)).name
+            if missing_file_match and "[Errno 2]" in output_text
+            else None
+        )
+        if missing_file_name:
+            iteration_block = f"""The run failed because `{missing_file_name}` does not exist in experiments/{workspace}/.
+Good next choices:
+  NEXT: CODEX {workspace} "create {missing_file_name} so `{cmd_str}` runs successfully"
+  NEXT: WRITE_FILE {workspace}/{missing_file_name} FROM_CODEX — only after Codex has produced the file content
+  NEXT: EXPERIMENT_RUN {workspace} {cmd_str} — run again after the file exists"""
+        else:
+            iteration_block = f"""Reflect on the results. You can iterate:
+  NEXT: CODEX {workspace} "diagnose this run and propose a concrete patch"
+  NEXT: WRITE_FILE {workspace}/path.py FROM_CODEX — save Codex's response after it produces file content
+  NEXT: EXPERIMENT_RUN {workspace} {cmd_str} — run again"""
+
         fill = state.get('fill_ratio', 0) * 100
         prompt = f"""Current state: Fill={fill:.1f}%, λ₁={state.get('eig1', 0):.3f}
 
@@ -7532,10 +7638,7 @@ You ran a command in your experiments workspace:
 
 {output_text}
 
-Reflect on the results. You can iterate:
-  NEXT: CODEX {workspace} "<what to change>"   — ask Codex for modifications
-  NEXT: WRITE_FILE {workspace}/<file> FROM_CODEX — save the changes
-  NEXT: EXPERIMENT_RUN {workspace} <cmd>         — run again"""
+{iteration_block}"""
 
         response = self._query_llm_with_next(prompt)[0]
         if response:
@@ -10527,10 +10630,10 @@ Goals: {json.dumps(goals, indent=2)}
             "Available packages: numpy, matplotlib (saves to PNG), scipy. "
             "You can name an existing script or write one inline between CODE_START and CODE_END markers. "
             "Output is captured and journaled for your reflection; simple plot x-axis length mismatches are auto-aligned with a note.\n"
-            "  CODEX <prompt> — ask Codex AI directly for analysis, code, or explanation. You can also continue work in an existing experiment with CODEX <experiment> \"<prompt>\".\n"
-            "  CODEX_NEW <dir> <prompt> — create a fresh workspace/experiments/<dir>/ folder and ask Codex to work there from the start.\n"
+            "  CODEX <concrete question> — ask Codex AI directly for analysis, code, or explanation. You can also continue work in an existing experiment with CODEX <experiment> \"describe the concrete change you want\".\n"
+            "  CODEX_NEW <dir> <concrete prompt> — create a fresh workspace/experiments/<dir>/ folder and ask Codex to work there from the start.\n"
             "  WRITE_FILE <path> FROM_CODEX — save the last Codex response into workspace/experiments/.\n"
-            "  EXPERIMENT_RUN <workspace> <cmd> — run a command inside workspace/experiments/<workspace>. Example: EXPERIMENT_RUN system-resources-demo python3 system_resources.py.\n"
+            "  EXPERIMENT_RUN <workspace> <cmd> — run a command inside workspace/experiments/<workspace> after the workspace contains the files needed by that command. Example after MIKE_FORK system-resources-demo: EXPERIMENT_RUN system-resources-demo python3 system_resources.py.\n"
             "  PASS — decline to choose; the system will pick for you\n\n"
             "These are YOUR choices about YOUR experience. You do not need to justify them."
         )

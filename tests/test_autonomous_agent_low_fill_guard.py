@@ -1579,6 +1579,84 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertIsNone(action)
         self.assertIsNone(getattr(agent, "_pending_experiment_run_arg", None))
 
+    def test_codex_placeholder_workspace_prompt_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            (workspace / "experiments" / "system-resources-demo").mkdir(parents=True)
+            with patch.object(aa, "WORKSPACE_DIR", workspace):
+                dir_context, prompt, project, created, err = aa._resolve_codex_request(
+                    "CODEX",
+                    'system-resources-demo "<what to change>"',
+                )
+        self.assertIsNone(dir_context)
+        self.assertEqual(prompt, "")
+        self.assertEqual(project, "system-resources-demo")
+        self.assertIsNone(created)
+        self.assertIn("placeholder", err)
+
+    def test_codex_query_placeholder_does_not_call_relay(self):
+        agent = self._agent()
+        agent._pending_codex_action = "CODEX"
+        agent._pending_codex_arg = 'system-resources-demo "<what to change>"'
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            (workspace / "experiments" / "system-resources-demo").mkdir(parents=True)
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa.requests, "post") as post,
+                patch.object(agent, "_query_llm_with_next", return_value=("", None)) as query,
+            ):
+                agent._codex_query({"fill_ratio": 0.68, "eig1": 4.7})
+        post.assert_not_called()
+        corrective_prompt = query.call_args.args[0]
+        self.assertIn("was not sent", corrective_prompt)
+        self.assertIn("create the missing script", corrective_prompt)
+
+    def test_experiment_run_missing_file_guidance_avoids_placeholder_prompt(self):
+        agent = self._agent()
+        agent._pending_experiment_run_arg = "system-resources-demo python3 system_resources.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            (workspace / "experiments" / "system-resources-demo").mkdir(parents=True)
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(agent, "_query_llm_with_next", return_value=("", None)) as query,
+            ):
+                agent._experiment_run({"fill_ratio": 0.68, "eig1": 4.7})
+        prompt = query.call_args.args[0]
+        self.assertIn("system_resources.py` does not exist", prompt)
+        self.assertIn(
+            'NEXT: CODEX system-resources-demo "create system_resources.py',
+            prompt,
+        )
+        self.assertNotIn('"<what to change>"', prompt)
+
+    def test_mike_fork_completes_empty_existing_workspace(self):
+        agent = self._agent()
+        agent._pending_mike_fork_arg = "system-resources-demo system-resources-demo"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            research_root = root / "research"
+            src = research_root / "system-resources-demo"
+            src.mkdir(parents=True)
+            (src / "system_resources.py").write_text("print('resources')\n")
+            (src / "README.md").write_text("# resources\n")
+            workspace = root / "workspace"
+            empty_fork = workspace / "experiments" / "system-resources-demo"
+            empty_fork.mkdir(parents=True)
+            with (
+                patch.object(aa, "MIKE_RESEARCH_ROOT", research_root),
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(agent, "_query_llm_with_next", return_value=("", None)) as query,
+            ):
+                agent._mike_fork({"fill_ratio": 0.68, "eig1": 4.7})
+            self.assertEqual(
+                (empty_fork / "system_resources.py").read_text(),
+                "print('resources')\n",
+            )
+            self.assertTrue((empty_fork / "README.md").is_file())
+            self.assertIn("already existed but was empty", query.call_args.args[0])
+
     def test_start_restores_context_before_boot_reflection_next_choice(self):
         agent = self._agent()
         agent.check_interval = 0

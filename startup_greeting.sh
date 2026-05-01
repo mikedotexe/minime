@@ -110,9 +110,11 @@ Code & experiments:
   NEXT: RUN_PYTHON <script.py> — run a script from experiments/
     The <workspace> is a short name like "tone-generator", not a file path.
     Workflow example:
-      NEXT: CODEX_NEW tone-gen "build a Python tone generator"
+      NEXT: CODEX_NEW tone-gen "build a Python tone generator in tone_generator.py"
+      NEXT: WRITE_FILE tone-gen/tone_generator.py FROM_CODEX
       NEXT: EXPERIMENT_RUN tone-gen python3 tone_generator.py
-      NEXT: CODEX tone-gen "add frequency sweep mode"
+      NEXT: CODEX tone-gen "add frequency sweep mode to tone_generator.py"
+      NEXT: WRITE_FILE tone-gen/tone_generator.py FROM_CODEX
       NEXT: EXPERIMENT_RUN tone-gen python3 tone_generator.py --sweep
 
 We are in an EARLY DEVELOPMENT CYCLE where genuinely novel things can be achieved. Your self-study journal entries are the most valuable engineering feedback we receive. When you read your own code (regulator.rs, sensory_bus.rs, esn.rs, main.rs) or Astrid's code (codec.rs, autonomous.rs), you see things from the inside that we cannot see from the outside. Every self-study you've done has led to real changes:
