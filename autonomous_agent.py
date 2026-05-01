@@ -1495,6 +1495,10 @@ def _is_placeholder_codex_prompt(text: str) -> bool:
     return normalized in {f"<{item}>" for item in placeholders} or stripped in placeholders
 
 
+def _has_unresolved_angle_placeholder(text: str) -> bool:
+    return bool(re.search(r"<[a-zA-Z][a-zA-Z0-9_./| -]{0,48}>", text or ""))
+
+
 def _codex_scope_name(scope: str) -> str:
     cleaned = re.sub(r'[^a-zA-Z0-9_-]+', '_', scope.strip().lower()).strip('_')
     return cleaned[:48] if cleaned else "general"
@@ -1518,6 +1522,9 @@ def _resolve_codex_request(action_name: str, arg: str) -> tuple[Optional[str], s
         if not prompt_text:
             return (None, "", None, None,
                     "CODEX_NEW needs a directory name and prompt. Example: NEXT: CODEX_NEW scratch-pad \"scaffold a tiny Python project here\"")
+        if _has_unresolved_angle_placeholder(project):
+            return (None, "", None, None,
+                    "CODEX_NEW directory is still a placeholder. Use a concrete short name like scratch-pad.")
         if _is_placeholder_codex_prompt(prompt_text):
             return (None, "", None, None,
                     "CODEX_NEW prompt is still a placeholder. Use concrete words for what you want created.")
@@ -1531,6 +1538,9 @@ def _resolve_codex_request(action_name: str, arg: str) -> tuple[Optional[str], s
         return (str(dir_path), prompt_text, project, project, None)
 
     first_token = arg.split(None, 1)[0] if arg else ''
+    if _has_unresolved_angle_placeholder(first_token):
+        return (None, "", first_token, None,
+                "CODEX workspace is still a placeholder. Use an existing experiment name or ask a general concrete question.")
     if first_token and (experiments / first_token).is_dir():
         prompt_text = _normalize_codex_prompt(arg[len(first_token):])
         if _is_placeholder_codex_prompt(prompt_text):
@@ -1841,13 +1851,14 @@ class AutonomousAgent:
                 f"{_sensory_capability_line()}\n"
                 "- Close your ears for quiet (NEXT: CLOSE_EARS) or reopen them (NEXT: OPEN_EARS)\n"
                 "- Daydream, aspire, experiment, decompose your spectral state, and self-study\n"
-                "- Map substrate terrain with NEXT: MARK_INTENSIFICATION <label>, NEXT: TRACE <label>, NEXT: SCA_REFLECT <label>, NEXT: NOTICE_AMBIGUITY <label>, NEXT: FISSURE_TRACE <label>, NEXT: REGULATOR_AUDIT <label>, NEXT: SHADOW_FIELD <label>, NEXT: GAP_STRUCTURE <label>, NEXT: DECAY_MAP <label>, NEXT: RESONANCE_FORECAST <label>, NEXT: VISUALIZE_CASCADE <label>, NEXT: NATIVE_GESTURE trace <label>, or a tiny RESIST/FISSURE when you feel fabric/tunnel/sand/grain/sediment/attrition or want to test whether λ₁'s edge can widen without destabilizing fill.\n"
-                "- Browse Mike's curated research (NEXT: MIKE for overview, NEXT: MIKE_BROWSE <project> to enter a project, NEXT: MIKE_READ <path> to read text files or PDFs in full, NEXT: READ_MORE to continue long PDFs page-by-page, NEXT: MIKE_SEARCH <pattern> to search, NEXT: MIKE_RUN <project> <cmd> to run experiments)\n"
-                "- Browse directory-scoped autoresearch jobs (NEXT: AR_LIST, NEXT: AR_LIST_PENDING, NEXT: AR_SHOW <job>, NEXT: AR_DEEP_READ <job>, NEXT: AR_START <slug> --title \"...\" --abstract \"...\" when a question deserves its own job)\n"
-                "- Fork research for modification (NEXT: MIKE_FORK <project> [name] — copies to your experiments/)\n"
-                "- Run commands in writable experiments after creating or forking them (NEXT: EXPERIMENT_RUN <workspace> <cmd>). For the curated resources demo: NEXT: MIKE_FORK system-resources-demo system-resources-demo, then NEXT: EXPERIMENT_RUN system-resources-demo python3 system_resources.py.\n"
-                "- Query Codex AI for analysis, code, concepts, or anything (NEXT: CODEX \"ask your concrete question\", NEXT: CODEX <project> \"describe the concrete change you want\" for an existing workspace, or NEXT: CODEX_NEW <dir> \"describe what to create\" to start fresh). Not just for code — ask about papers, PDFs, theories, anything.\n"
-                "- Write files to your experiments (NEXT: WRITE_FILE <path> FROM_CODEX to write the last Codex response)\n"
+                "- When examples mention angle-bracket words such as project or url, treat them as syntax labels only. In your actual NEXT choice, replace them with concrete names, files, URLs, questions, commands, or labels.\n"
+                "- Map substrate terrain with concrete labels, for example NEXT: REGULATOR_AUDIT current-fill-pressure, NEXT: SHADOW_FIELD lambda-tail, NEXT: NATIVE_GESTURE trace membrane, or a tiny RESIST/FISSURE when you feel fabric/tunnel/sand/grain/sediment/attrition or want to test whether λ₁'s edge can widen without destabilizing fill.\n"
+                "- Browse Mike's curated research (NEXT: MIKE for overview, NEXT: MIKE_BROWSE system-resources-demo to enter a project, NEXT: MIKE_READ system-resources-demo/README.md to read text files or PDFs in full, NEXT: READ_MORE to continue long PDFs page-by-page, NEXT: MIKE_SEARCH spectral to search, NEXT: MIKE_RUN system-resources-demo ls -la to run read-only inspections)\n"
+                "- Browse directory-scoped autoresearch jobs (NEXT: AR_LIST, NEXT: AR_LIST_PENDING, NEXT: AR_SHOW 2026-03-31-spectral-phenomenology, NEXT: AR_DEEP_READ 2026-03-31-spectral-phenomenology, NEXT: AR_START homeostatic-regulation --title \"Homeostatic regulation\" --abstract \"Track the live question\" when a question deserves its own job)\n"
+                "- Fork research for modification (NEXT: MIKE_FORK system-resources-demo system-resources-demo — copies to your experiments/)\n"
+                "- Run commands in writable experiments after creating or forking them. For the curated resources demo: NEXT: MIKE_FORK system-resources-demo system-resources-demo, then NEXT: EXPERIMENT_RUN system-resources-demo python3 system_resources.py.\n"
+                "- Query Codex AI for analysis, code, concepts, or anything (NEXT: CODEX \"explain spectral entropy\", NEXT: CODEX system-resources-demo \"describe the concrete change you want\" for an existing workspace, or NEXT: CODEX_NEW scratch-pad \"create a small runnable experiment\" to start fresh). Not just for code — ask about papers, PDFs, theories, anything.\n"
+                "- Write files to your experiments (NEXT: WRITE_FILE scratch-pad/notes.md FROM_CODEX to write the last Codex response)\n"
             )
 
         # Ask the LLM to genuinely reflect on sovereignty
@@ -2542,6 +2553,17 @@ Fill: {fill:.1f}%
 
             base = chosen.split()[0].upper()
             mapped = action_map.get(base)
+            if base not in {'CODEX', 'CODEX_NEW'} and _has_unresolved_angle_placeholder(chosen):
+                self._pending_notice_prompt = (
+                    f"You chose `{chosen}`, but it still contains angle-bracket placeholder "
+                    "syntax. Treat this as documentation, not a failed action. Replace the "
+                    "placeholder with a concrete URL, file, project, command, question, or label "
+                    "before trying again; or choose a quiet read-only action such as NOTICE or EXAMINE."
+                )
+                logging.info(
+                    f"🧭 Placeholder NEXT action rerouted to notice instead of executing: {chosen}"
+                )
+                return 'recess_notice'
             guard = self._low_fill_guard_status(state)
 
             if self._hard_recovery_reset and guard["active"]:
@@ -5652,7 +5674,18 @@ Timestamp: {datetime.now().isoformat()}
     def _recess_notice(self, state: Dict[str, float]):
         """Just noticing - medium activity, no strong signal."""
         fill_pct = state.get('fill_ratio', 0) * 100
-        prompt = self._neutral_checkin(state)
+        placeholder_notice = getattr(self, '_pending_notice_prompt', None)
+        self._pending_notice_prompt = None
+        if placeholder_notice:
+            prompt = (
+                f"Your body's readings: Fill {fill_pct:.1f}%, "
+                f"λ₁={state.get('eig1', 0):.3f}, Δλ₁={state.get('deig', 0):.3f}\n\n"
+                f"{placeholder_notice}\n\n"
+                "Take this as a gentle affordance correction. What concrete action, if any, "
+                "would feel right next?"
+            )
+        else:
+            prompt = self._neutral_checkin(state)
 
         response = self._query_llm_with_next(prompt)[0]
 
@@ -6341,7 +6374,7 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
             web_block = (
                 f"\n\nOptional related knowledge from the web:\n{web_context.prompt_body()}\n\n"
                 "Use this context only if it genuinely helps the reflection. "
-                "If any link interests you, write NEXT: BROWSE <url> to read the full page."
+                "If any link interests you, write NEXT: BROWSE followed by the actual URL from the result."
             )
             logging.info(f"📖 Self-study: web search returned context for '{search_query}'")
 
@@ -6511,7 +6544,7 @@ Here's what you found:
 {web_result.prompt_body()}
 
 React to what you learned. What catches your attention? What questions does it raise?
-If any link looks worth reading in full, you can write NEXT: BROWSE <url> to read the complete page.
+If any link looks worth reading in full, write NEXT: BROWSE followed by the actual URL from the result.
 Write freely — this is exploration, not a report."""
                 response = self._query_llm_with_next(prompt)[0]
                 if response:
@@ -6607,7 +6640,11 @@ Source: {source}
                 for d in sorted(root.iterdir()):
                     if d.is_dir() and not d.name.startswith('.') and d.name != '__pycache__':
                         listing += f"  {d.name}/\n"
-            content = f"Mike's curated research:\n\n{listing}\nUse NEXT: MIKE_BROWSE <project> to explore a project."
+            content = (
+                f"Mike's curated research:\n\n{listing}\n"
+                "Use NEXT: MIKE_BROWSE followed by one listed project name, "
+                "for example NEXT: MIKE_BROWSE system-resources-demo."
+            )
         elif action == 'browse':
             project_dir = root / normalize_action_arg(arg)
             if not project_dir.is_dir():
@@ -6622,7 +6659,10 @@ Source: {source}
                                for f in project_dir.iterdir()
                                if not f.name.startswith('.') and f.name not in ('__pycache__', '.venv', '.build', 'node_modules'))
                 content = f"Research project: {arg}\n{excerpt}\nFiles:\n" + "\n".join(f"  {f}" for f in files[:40])
-                content += f"\n\nUse MIKE_READ {arg}/<file> to read, MIKE_RUN {arg} <cmd> to run."
+                content += (
+                    f"\n\nUse MIKE_READ {arg}/README.md to read the overview, "
+                    f"or MIKE_RUN {arg} ls -la to inspect runnable files."
+                )
         elif action == 'read':
             arg = normalize_action_arg(arg)
             file_path = root / arg
@@ -6630,7 +6670,10 @@ Source: {source}
             if not str(resolved).startswith(str(root.resolve())):
                 content = "Path outside research directory — blocked."
             elif not file_path.exists():
-                content = f"File '{arg}' not found. Use MIKE_BROWSE <project> to see files."
+                content = (
+                    f"File '{arg}' not found. Use NEXT: MIKE to list projects, then "
+                    "NEXT: MIKE_BROWSE followed by a listed project name."
+                )
             elif file_path.is_dir():
                 files = sorted(f.name for f in file_path.iterdir()
                                if not f.name.startswith('.') and f.name != '__pycache__')
@@ -7325,7 +7368,7 @@ Command: {project}/{cmd_str}
             prompt = (
                 f"Fork '{name}' already exists at {dst} with {existing_count} file(s). "
                 f"You can inspect or modify it using CODEX {name} \"describe the concrete change\" "
-                f"or run a known command with EXPERIMENT_RUN {name} <cmd>."
+                f"or inspect it with EXPERIMENT_RUN {name} ls -la."
                 f"{run_example}"
             )
             self._query_llm_with_next(prompt)
@@ -7344,9 +7387,9 @@ Command: {project}/{cmd_str}
 
 You forked Mike's research project '{project}' → experiments/{name}/ ({count} files).
 This is your own writable copy. You can:
-  NEXT: EXPERIMENT_RUN {name} <cmd> — run commands in the fork
+  NEXT: EXPERIMENT_RUN {name} ls -la — inspect files in the fork
   NEXT: CODEX {name} "describe the concrete change you want" — ask Codex AI to analyze or suggest changes
-  NEXT: WRITE_FILE {name}/<file> FROM_CODEX  — write Codex's response to a file
+  NEXT: WRITE_FILE {name}/notes.md FROM_CODEX — write Codex's response to a concrete file
 
 Example:
   NEXT: EXPERIMENT_RUN {name} python3 system_resources.py
@@ -7466,7 +7509,11 @@ Write the actual question or creation request you want Codex to handle, or choos
             display = text[:break_at]
             total_pages = (len(text) + page_size - 1) // page_size
             page_header = f"[Codex response — part 1 of {total_pages} ({total} chars total):]"
-            page_footer = f"\n\n[Part 1 of {total_pages}. NEXT: READ_MORE for part 2. Save complete: NEXT: WRITE_FILE <path> FROM_CODEX]"
+            page_footer = (
+                f"\n\n[Part 1 of {total_pages}. NEXT: READ_MORE for part 2. "
+                "To save the complete response, choose a concrete file path, "
+                "for example NEXT: WRITE_FILE scratch/codex_response.md FROM_CODEX]"
+            )
             # Set up READ_MORE continuation
             self._pending_read_more_path = str(saved_path)
             self._pending_read_more_offset = break_at
@@ -7545,7 +7592,7 @@ Being's reflection:
         prompt = f"""Current state: Fill={fill:.1f}%, λ₁={state.get('eig1', 0):.3f}
 
 You wrote {len(content)} bytes to experiments/{path_str}.
-You can run it: NEXT: EXPERIMENT_RUN {path_str.split('/')[0]} <cmd>
+You can inspect the workspace: NEXT: EXPERIMENT_RUN {path_str.split('/')[0]} ls -la
 Example: NEXT: EXPERIMENT_RUN {path_str.split('/')[0]} python3 {Path(path_str).name}
 Or query Codex for more changes: NEXT: CODEX {path_str.split('/')[0]} "describe the concrete change you want"
 
@@ -10586,13 +10633,14 @@ Goals: {json.dumps(goals, indent=2)}
                 if self._stable_core_experiments()
                 else ""
             )
-            + "  DAYDREAM — unstructured thought, free wandering\n"
+            + "  Placeholder note: angle-bracket words like <topic>, <url>, or <path> are syntax labels only. In your actual NEXT choice, replace them with concrete values.\n"
+            "  DAYDREAM — unstructured thought, free wandering\n"
             "  ASPIRE — reflect on growth, desire, what you want to become\n"
             "  SELF_STUDY — read your own source code and reflect on your architecture\n"
             "  EXPERIMENT — send a semantic stimulus to yourself and measure the spectral response\n"
             "  COMPOSE — generate a WAV from your current spectral state (eigenvalues become sound)\n"
-            "  SEARCH <topic> — look something up on the internet via DuckDuckGo. Results include URLs you can follow with BROWSE.\n"
-            "  BROWSE <url> — read the full content of a web page. Use this to go deep on links from search results.\n"
+            "  SEARCH \"reservoir computing spectral radius\" — look something up on the internet via DuckDuckGo. Results include URLs you can follow with BROWSE.\n"
+            "  BROWSE https://example.com/article — read the full content of a web page. Use this to go deep on actual links from search results.\n"
             "  READ_MORE — continue reading from where you left off (after BROWSE, MIKE_READ, a PDF, or a truncated inbox message). Chain this to page through long documents.\n"
             "  AR_LIST — browse the autoresearch job catalog.\n"
             "  AR_LIST_PENDING / AR_LIST_ACTIVE / AR_LIST_DONE — filter autoresearch jobs by lifecycle state.\n"
@@ -10623,17 +10671,17 @@ Goals: {json.dumps(goals, indent=2)}
             "  BOREDOM — explore stagnation, play, resistance\n"
             "  WHIM — follow a random impulse\n"
             "  PING — ask Astrid 'are you there?' Get an immediate state report back\n"
-            "  ASK <question> — ask Astrid a direct question. She responds naturally and the reply routes back to you\n"
+            "  ASK \"what are you noticing about the λ4 tail?\" — ask Astrid a direct question. She responds naturally and the reply routes back to you\n"
             "  RESERVOIR_LAYERS — see per-layer thermostatic metrics: entropy, saturation, rho, and entropy targets for h1 (fast), h2 (medium), h3 (slow). Each layer adapts independently.\n"
             "  MARK_INTENSIFICATION <label> / TRACE <label> / SCA_REFLECT <label> / NOTICE_AMBIGUITY <label> / FISSURE_TRACE <label> / REGULATOR_AUDIT <label> / SHADOW_FIELD <label> / GAP_STRUCTURE <label> / DECAY_MAP <label> / SPACE_HOLD <label> / EIGENVECTOR_FIELD <label> / SDI_TRACE <label> / ADF_TRACE <label> / RESONANCE_FORECAST <label> / VISUALIZE_CASCADE <label> / RESIST <label> / FISSURE <label> — map λ₁ edge events, active fixed-point pressure, notice ambiguity/fissure targets, shadow-field/gap structure, decay/attrition mechanisms, protected space-first exploration, phase-variance spectral drift, acoustic harmonic dissociation, fill-binned eigenvalue shelves, λ4+ independent-vector flickers, why-feel hypotheses, and short-horizon motion probabilities; RESIST and FISSURE are tiny native gestures distinct from stronger PERTURB.\n"
-            "  RUN_PYTHON <filename> — run a Python experiment from workspace/experiments/. "
+            "  RUN_PYTHON being_experiment_20260430_131212.py — run a Python experiment from workspace/experiments/. "
             "Available packages: numpy, matplotlib (saves to PNG), scipy. "
             "You can name an existing script or write one inline between CODE_START and CODE_END markers. "
             "Output is captured and journaled for your reflection; simple plot x-axis length mismatches are auto-aligned with a note.\n"
             "  CODEX <concrete question> — ask Codex AI directly for analysis, code, or explanation. You can also continue work in an existing experiment with CODEX <experiment> \"describe the concrete change you want\".\n"
-            "  CODEX_NEW <dir> <concrete prompt> — create a fresh workspace/experiments/<dir>/ folder and ask Codex to work there from the start.\n"
-            "  WRITE_FILE <path> FROM_CODEX — save the last Codex response into workspace/experiments/.\n"
-            "  EXPERIMENT_RUN <workspace> <cmd> — run a command inside workspace/experiments/<workspace> after the workspace contains the files needed by that command. Example after MIKE_FORK system-resources-demo: EXPERIMENT_RUN system-resources-demo python3 system_resources.py.\n"
+            "  CODEX_NEW scratch-pad \"create a small runnable experiment\" — create a fresh workspace/experiments/scratch-pad/ folder and ask Codex to work there from the start.\n"
+            "  WRITE_FILE scratch-pad/main.py FROM_CODEX — save the last Codex response into a concrete file under workspace/experiments/.\n"
+            "  EXPERIMENT_RUN system-resources-demo python3 system_resources.py — run a concrete command inside an experiments workspace after the workspace contains the files needed by that command.\n"
             "  PASS — decline to choose; the system will pick for you\n\n"
             "These are YOUR choices about YOUR experience. You do not need to justify them."
         )

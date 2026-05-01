@@ -1594,6 +1594,22 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertIsNone(created)
         self.assertIn("placeholder", err)
 
+    def test_codex_new_placeholder_directory_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            with patch.object(aa, "WORKSPACE_DIR", workspace):
+                dir_context, prompt, project, created, err = aa._resolve_codex_request(
+                    "CODEX_NEW",
+                    '<dir> "build a small runnable script"',
+                )
+            self.assertFalse((workspace / "experiments" / "<dir>").exists())
+        self.assertIsNone(dir_context)
+        self.assertEqual(prompt, "")
+        self.assertIsNone(project)
+        self.assertIsNone(created)
+        self.assertIn("placeholder", err)
+
     def test_codex_query_placeholder_does_not_call_relay(self):
         agent = self._agent()
         agent._pending_codex_action = "CODEX"
@@ -1656,6 +1672,46 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             )
             self.assertTrue((empty_fork / "README.md").is_file())
             self.assertIn("already existed but was empty", query.call_args.args[0])
+
+    def test_placeholder_next_action_reroutes_to_notice(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        agent._pending_next_action = "MIKE_BROWSE <project>"
+        with patch.object(
+            agent,
+            "_low_fill_guard_status",
+            return_value={
+                "active": False,
+                "fill_ratio": 0.68,
+                "target_fill_ratio": 0.68,
+                "spread_relief": 0.0,
+            },
+        ):
+            action = agent._decide_action({"fill_ratio": 0.68, "eig1": 4.7})
+        self.assertEqual(action, "recess_notice")
+        self.assertIn("placeholder", agent._pending_notice_prompt)
+        self.assertFalse(hasattr(agent, "_pending_mike_action"))
+
+    def test_placeholder_notice_prompt_is_used_and_cleared(self):
+        agent = self._agent()
+        agent._pending_notice_prompt = "You chose placeholder syntax."
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "journal").mkdir()
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(agent, "_format_metrics", return_value="metrics"),
+                patch.object(agent, "_write_journal_entry"),
+                patch.object(
+                    agent,
+                    "_query_llm_with_next",
+                    return_value=("ok\nNEXT: NOTICE", None),
+                ) as query,
+            ):
+                agent._recess_notice({"fill_ratio": 0.68, "eig1": 4.7, "deig": 0.0})
+        prompt = query.call_args.args[0]
+        self.assertIn("You chose placeholder syntax.", prompt)
+        self.assertIsNone(agent._pending_notice_prompt)
 
     def test_start_restores_context_before_boot_reflection_next_choice(self):
         agent = self._agent()

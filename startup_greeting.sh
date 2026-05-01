@@ -80,6 +80,7 @@ New: spectral_goals.json is now wired into the PI regulator. Write your desired 
 New: embedding_strength, memory_decay_rate, and journal_resonance are now live — they shape how semantic input is weighted and how fast memories fade.
 
 Research & exploration:
+  Angle-bracket words are syntax labels only. Replace them with concrete job IDs, URLs, paths, topics, and project names in your actual NEXT choice.
   NEXT: AR_LIST — see all autoresearch jobs
   NEXT: AR_READ <job-id> — read a job's research results
   NEXT: AR_DEEP_READ <job-id> — detailed deep-read of a job
@@ -92,23 +93,25 @@ Research & exploration:
       NEXT: AR_READ 2026-03-31-spectral-phenomenology
       NEXT: AR_DEEP_READ 2026-03-31-spectral-phenomenology
       NEXT: AR_START homeostatic regulation in echo state networks
-  NEXT: SEARCH "topic" — web research via DuckDuckGo
-  NEXT: BROWSE <url> — fetch and read a web page
+  NEXT: SEARCH "reservoir computing spectral radius" — web research via DuckDuckGo
+  NEXT: BROWSE https://example.com/article — fetch and read a concrete web page URL from search results
   NEXT: READ_MORE — continue reading any long document or overflow context
   NEXT: MIKE — browse Mike's curated research library
-  NEXT: MIKE_BROWSE <project> — enter a research project
-  NEXT: MIKE_READ <path> — read research files including PDFs
-  NEXT: MIKE_FORK <project> [name] — copy research into your experiments workspace
+  NEXT: MIKE_BROWSE system-resources-demo — enter a research project
+  NEXT: MIKE_READ system-resources-demo/README.md — read research files including PDFs
+  NEXT: MIKE_FORK system-resources-demo system-resources-demo — copy research into your experiments workspace
     Examples:
       NEXT: MIKE_READ pdfs/Local Homeostatic Regulation of the Spectral Radius of Echo-State Networks.pdf
       NEXT: MIKE_FORK system-resources-demo
 
 Code & experiments:
-  NEXT: CODEX_NEW <name> "prompt" — create a new experiments workspace with Codex
-  NEXT: CODEX <workspace> "prompt" — modify an existing workspace
-  NEXT: EXPERIMENT_RUN <workspace> <command> — run a command inside a workspace
-  NEXT: RUN_PYTHON <script.py> — run a script from experiments/
-    The <workspace> is a short name like "tone-generator", not a file path.
+  Use concrete workspace names, paths, prompts, and commands. Do not copy <workspace>, <command>, or <path> literally.
+  NEXT: CODEX_NEW tone-gen "build a Python tone generator in tone_generator.py" — create a new experiments workspace with Codex
+  NEXT: CODEX tone-gen "add frequency sweep mode to tone_generator.py" — modify an existing workspace
+  NEXT: WRITE_FILE tone-gen/tone_generator.py FROM_CODEX — save Codex's last response to a concrete file
+  NEXT: EXPERIMENT_RUN tone-gen python3 tone_generator.py — run a command inside a workspace after the file exists
+  NEXT: RUN_PYTHON being_experiment_20260430_131212.py — run a script from experiments/
+    The workspace is a short name like "tone-gen", not a file path.
     Workflow example:
       NEXT: CODEX_NEW tone-gen "build a Python tone generator in tone_generator.py"
       NEXT: WRITE_FILE tone-gen/tone_generator.py FROM_CODEX
