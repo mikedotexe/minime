@@ -21,7 +21,7 @@ class TestSpectralTransitionContext(unittest.TestCase):
                         "lambda1_rel": 0.91,
                         "geom_rel": 1.02,
                         "semantic": {
-                            "admission": "stable_core_kernel_zeroed",
+                            "admission": "stable_core_semantic_trace_stale",
                             "kernel_energy": 0.0,
                             "input_energy": 0.014,
                             "input_stale_ms": 1200,
@@ -77,7 +77,8 @@ class TestSpectralTransitionContext(unittest.TestCase):
         self.assertEqual(context["transition_event_v1"]["kind"], "basin_transition")
         self.assertIn("live_12d_glimpse_distance=0.210", context["spectral_transition_summary"])
         self.assertIn("v1_rotation_delta=0.090", context["spectral_transition_summary"])
-        self.assertIn("decayed semantic residue", context["semantic_state_summary"])
+        self.assertIn("stale semantic trace", context["semantic_state_summary"])
+        self.assertNotIn("decayed semantic residue", context["semantic_state_summary"])
 
     def test_llm_prompt_surfaces_transition_summary_as_read_only_context(self) -> None:
         engine = LLMEngine.__new__(LLMEngine)

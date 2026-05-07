@@ -21,6 +21,7 @@ class SurfaceSnapshot:
     data: Dict[str, Any] = field(default_factory=dict)
     valid_for_state: bool = False
     issues: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -118,7 +119,12 @@ def capture_report_snapshot(
         session_id=session_id,
         state_timestamp=state_ts,
         require_provenance=False,
-        compare_later_than_db=True,
+        compare_later_than_db=False,
+    )
+    _apply_later_than_db_policy(
+        health=health,
+        spectral=spectral,
+        state_timestamp=state_ts,
     )
 
     merged_state = dict(base_state)
@@ -139,6 +145,8 @@ def format_snapshot_provenance(snapshot: ReportSnapshot) -> str:
         lines.append(f"- {surface.source_name}: {status}")
         if surface.issues:
             lines.append(f"  issues: {'; '.join(surface.issues)}")
+        if surface.notes:
+            lines.append(f"  notes: {'; '.join(surface.notes)}")
         provenance = surface.data.get("provenance") if isinstance(surface.data, dict) else None
         if isinstance(provenance, dict):
             session = provenance.get("session_id")
@@ -161,14 +169,20 @@ def format_snapshot_provenance(snapshot: ReportSnapshot) -> str:
 def format_snapshot_summary(snapshot: ReportSnapshot) -> str:
     """Compact one-line summary for report footers and agent surfaces."""
 
-    health_guard = "ok" if snapshot.health.valid_for_state else "; ".join(snapshot.health.issues)
-    spectral_guard = (
-        "ok" if snapshot.spectral.valid_for_state else "; ".join(snapshot.spectral.issues)
-    )
+    health_guard = _surface_summary(snapshot.health)
+    spectral_guard = _surface_summary(snapshot.spectral)
     return (
         f"Snapshot guard={snapshot.health.source_name}:{health_guard}; "
         f"{snapshot.spectral.source_name}:{spectral_guard}"
     )
+
+
+def _surface_summary(surface: SurfaceSnapshot) -> str:
+    if surface.valid_for_state:
+        if surface.notes:
+            return f"ok ({'; '.join(surface.notes)})"
+        return "ok"
+    return "; ".join(surface.issues)
 
 
 def _safe_workspace_json(base_dir: Path, workspace_dir: Path, file_name: str) -> Dict[str, Any]:
@@ -188,6 +202,83 @@ def _surface_path(base_dir: Path, workspace_dir: Path, file_name: str) -> Path:
         if path.exists():
             return path
     return workspace_dir / file_name
+
+
+def _apply_later_than_db_policy(
+    *,
+    health: SurfaceSnapshot,
+    spectral: SurfaceSnapshot,
+    state_timestamp: Optional[float],
+) -> None:
+    """Accept a newer live spectral surface only when health corroborates it.
+
+    The DB row can lag the live workspace surfaces during journal formatting.
+    Treating every live-ahead surface as invalid made entries drop the cascade
+    even when health.json and spectral_state.json were from the same fresh engine
+    tick. Keep the old guard when health cannot corroborate the newer surface.
+    """
+
+    if not spectral.valid_for_state:
+        return
+    lead_s = _surface_leads_state_by(spectral.data, state_timestamp)
+    if lead_s is None or lead_s <= MAX_SNAPSHOT_SKEW_S:
+        return
+
+    if _live_surfaces_are_aligned(health, spectral):
+        spectral.notes.append(f"DB state refreshed from live surface by {lead_s:.1f}s")
+        return
+
+    spectral.issues.append(f"later than DB state by {lead_s:.1f}s")
+    spectral.valid_for_state = False
+
+
+def _surface_leads_state_by(
+    data: Dict[str, Any],
+    state_timestamp: Optional[float],
+) -> Optional[float]:
+    if state_timestamp is None:
+        return None
+    provenance = data.get("provenance") if isinstance(data, dict) else None
+    if isinstance(provenance, dict):
+        engine_t_s = _as_float(provenance.get("engine_t_s"))
+        if engine_t_s is not None:
+            return engine_t_s - state_timestamp
+    surface_ts = _as_float(data.get("timestamp")) if isinstance(data, dict) else None
+    if surface_ts is not None:
+        return surface_ts - state_timestamp
+    return None
+
+
+def _live_surfaces_are_aligned(
+    health: SurfaceSnapshot,
+    spectral: SurfaceSnapshot,
+) -> bool:
+    if not health.valid_for_state:
+        return False
+
+    health_provenance = (
+        health.data.get("provenance") if isinstance(health.data, dict) else None
+    )
+    spectral_provenance = (
+        spectral.data.get("provenance") if isinstance(spectral.data, dict) else None
+    )
+    if not isinstance(health_provenance, dict) or not isinstance(spectral_provenance, dict):
+        return False
+
+    health_session = health_provenance.get("session_id")
+    spectral_session = spectral_provenance.get("session_id")
+    if (
+        health_session is not None
+        and spectral_session is not None
+        and health_session != spectral_session
+    ):
+        return False
+
+    health_engine_t_s = _as_float(health_provenance.get("engine_t_s"))
+    spectral_engine_t_s = _as_float(spectral_provenance.get("engine_t_s"))
+    if health_engine_t_s is None or spectral_engine_t_s is None:
+        return False
+    return abs(health_engine_t_s - spectral_engine_t_s) <= MAX_SNAPSHOT_SKEW_S
 
 
 def _validate_surface(

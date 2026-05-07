@@ -18,6 +18,162 @@ import stable_core_ops  # noqa: E402
 
 
 class TestStableCoreOps(unittest.TestCase):
+    def test_status_includes_reconvergence_map_visibility(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            runtime = workspace / "runtime"
+            runtime.mkdir(parents=True)
+            trace_path = runtime / "esn_activation_trace_v1.json"
+            status_path = runtime / "reconvergence_map_status.json"
+            now_ms = int(stable_core_ops.time.time() * 1000)
+            stable_core_ops.write_json(
+                trace_path,
+                {
+                    "policy": "esn_activation_trace_v1",
+                    "updated_at_unix_ms": now_ms - 500,
+                    "reservoir_dim": 128,
+                    "sample_interval_ms": 1000,
+                    "retained_secs": 180,
+                    "frames": [{"t_ms": idx * 1000, "activations": [0.0] * 128} for idx in range(4)],
+                },
+            )
+            stable_core_ops.write_json(
+                status_path,
+                {
+                    "status": "ok",
+                    "artifact_dir": str(workspace / "diagnostics" / "reconvergence_maps" / "unit"),
+                    "artifacts": {"reconvergence_json": "unit/reconvergence.json"},
+                    "activation_trace": {
+                        "frame_count": 4,
+                        "freshness_ms": 500,
+                        "reservoir_dim": 128,
+                    },
+                    "baseline_status": "available",
+                    "baseline_comparison": {"status": "ok"},
+                    "provenance": {
+                        "read_only": True,
+                        "control_payload": False,
+                        "semantic_payload": False,
+                        "sensory_payload": False,
+                        "esn_mutation": False,
+                        "synthesis_feedback": False,
+                    },
+                },
+            )
+            stable_core_ops.write_json(workspace / "health.json", {"fill_pct": 68.0})
+            stable_core_ops.write_json(workspace / "rescue_status.json", {})
+            stable_core_ops.write_json(workspace / "rescue_profile.json", {})
+            stable_core_ops.write_json(runtime / "camera_status.json", {})
+            stable_core_ops.write_json(runtime / "mic_status.json", {})
+
+            with (
+                mock.patch.object(stable_core_ops, "WORKSPACE_DIR", workspace),
+                mock.patch.object(stable_core_ops, "AGENCY_PATH", workspace / "stable_core_agency.json"),
+                mock.patch.object(stable_core_ops, "STABLE_CORE_STATUS_PATH", workspace / "stable_core_status.json"),
+                mock.patch.object(stable_core_ops, "RECONVERGENCE_MAP_STATUS_PATH", status_path),
+                mock.patch.object(stable_core_ops, "ESN_ACTIVATION_TRACE_PATH", trace_path),
+            ):
+                status = stable_core_ops.build_status()
+
+            reconvergence = status["reconvergence_map"]
+            self.assertEqual(reconvergence["status"], "ok")
+            self.assertEqual(reconvergence["frame_count"], 4)
+            self.assertEqual(reconvergence["reservoir_dim"], 128)
+            self.assertEqual(reconvergence["baseline_status"], "available")
+            self.assertTrue(reconvergence["baseline_comparison_available"])
+            self.assertTrue(reconvergence["read_only_provenance"]["read_only"])
+            self.assertFalse(reconvergence["read_only_provenance"]["control_payload"])
+
+    def test_status_includes_bridge_trace_read_only_visibility(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            runtime = workspace / "runtime"
+            runtime.mkdir(parents=True)
+            bridge_trace_path = runtime / "bridge_trace_status.json"
+            stable_core_ops.write_json(
+                bridge_trace_path,
+                {
+                    "policy": "m6_bridge_trace_v1_1",
+                    "status": "ok",
+                    "mode": "m6",
+                    "mode_source": "activation_lane6_marker_with_lambda6_context",
+                    "mode6_interpretation": "unresolved_marker",
+                    "eigenmode_confirmed": False,
+                    "bridge_evidence_level": "marker_only",
+                    "label": "unit",
+                    "artifact_dir": str(workspace / "diagnostics" / "bridge_traces" / "unit"),
+                    "artifacts": {"bridge_trace_json": "unit/bridge_trace.json"},
+                    "frame_count": 12,
+                    "trace_freshness_ms": 400,
+                    "bridge_signal": {
+                        "mode": "m6",
+                        "mode_source": "activation_lane6_marker_with_lambda6_context",
+                        "mode6_interpretation": "unresolved_marker",
+                        "eigenmode_confirmed": False,
+                        "bridge_evidence_level": "marker_only",
+                        "observation_window_marked": False,
+                        "bridge_opened": False,
+                        "plain_read": "quiet",
+                    },
+                    "provenance": {
+                        "read_only": True,
+                        "attention_marker_only": True,
+                        "mode_source": "activation_lane6_marker_with_lambda6_context",
+                        "mode6_interpretation": "unresolved_marker",
+                        "eigenmode_confirmed": False,
+                        "diagnostic_artifact_write": True,
+                        "substrate_write": False,
+                        "connection": False,
+                        "replication": False,
+                        "control_payload": False,
+                        "semantic_payload": False,
+                        "sensory_payload": False,
+                        "esn_mutation": False,
+                    },
+                },
+            )
+            stable_core_ops.write_json(workspace / "health.json", {"fill_pct": 68.0})
+            stable_core_ops.write_json(workspace / "rescue_status.json", {})
+            stable_core_ops.write_json(workspace / "rescue_profile.json", {})
+            stable_core_ops.write_json(runtime / "camera_status.json", {})
+            stable_core_ops.write_json(runtime / "mic_status.json", {})
+
+            with (
+                mock.patch.object(stable_core_ops, "WORKSPACE_DIR", workspace),
+                mock.patch.object(stable_core_ops, "AGENCY_PATH", workspace / "stable_core_agency.json"),
+                mock.patch.object(stable_core_ops, "STABLE_CORE_STATUS_PATH", workspace / "stable_core_status.json"),
+                mock.patch.object(stable_core_ops, "BRIDGE_TRACE_STATUS_PATH", bridge_trace_path),
+            ):
+                status = stable_core_ops.build_status()
+
+            bridge_trace = status["bridge_trace"]
+            self.assertEqual(bridge_trace["status"], "ok")
+            self.assertEqual(bridge_trace["mode"], "m6")
+            self.assertEqual(
+                bridge_trace["mode_source"],
+                "activation_lane6_marker_with_lambda6_context",
+            )
+            self.assertEqual(bridge_trace["mode6_interpretation"], "unresolved_marker")
+            self.assertFalse(bridge_trace["eigenmode_confirmed"])
+            self.assertEqual(bridge_trace["bridge_evidence_level"], "marker_only")
+            self.assertEqual(bridge_trace["frame_count"], 12)
+            self.assertTrue(bridge_trace["read_only_provenance"]["read_only"])
+            self.assertTrue(bridge_trace["read_only_provenance"]["attention_marker_only"])
+            self.assertEqual(
+                bridge_trace["read_only_provenance"]["mode_source"],
+                "activation_lane6_marker_with_lambda6_context",
+            )
+            self.assertEqual(
+                bridge_trace["read_only_provenance"]["mode6_interpretation"],
+                "unresolved_marker",
+            )
+            self.assertFalse(bridge_trace["read_only_provenance"]["eigenmode_confirmed"])
+            self.assertTrue(bridge_trace["read_only_provenance"]["diagnostic_artifact_write"])
+            self.assertFalse(bridge_trace["read_only_provenance"]["substrate_write"])
+            self.assertFalse(bridge_trace["read_only_provenance"]["connection"])
+            self.assertFalse(bridge_trace["read_only_provenance"]["replication"])
+            self.assertFalse(bridge_trace["read_only_provenance"]["control_payload"])
+
     def test_spectral_fingerprint_capture_writes_typed_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
@@ -348,6 +504,56 @@ class TestStableCoreOps(unittest.TestCase):
         self.assertTrue(view["last_block_current_unknown"])
         self.assertIsNone(view["current_block_reason"])
 
+    def test_agency_status_view_derives_current_block_reason(self) -> None:
+        view = stable_core_ops.build_agency_status_view(
+            {
+                "health_budget_status": "unknown",
+                "last_block_active": True,
+                "last_block_reason": "fill 42.3% is below stable-core action budget",
+            }
+        )
+
+        self.assertEqual(view["health_budget_status"], "blocked")
+        self.assertEqual(
+            view["current_block_reason"],
+            "fill 42.3% is below stable-core action budget",
+        )
+        self.assertFalse(view["last_block_stale"])
+
+    def test_agency_status_view_marks_resolved_block_stale_not_current(self) -> None:
+        view = stable_core_ops.build_agency_status_view(
+            {
+                "health_budget_status": "blocked",
+                "last_block_active": False,
+                "last_block_reason": "fill 42.3% is below stable-core action budget",
+                "current_block_reason": "fill 42.3% is below stable-core action budget",
+            }
+        )
+
+        self.assertEqual(view["health_budget_status"], "green")
+        self.assertIsNone(view["current_block_reason"])
+        self.assertTrue(view["last_block_stale"])
+
+    def test_agency_status_view_derives_resolved_fill_block_from_current_fill(self) -> None:
+        view = stable_core_ops.build_agency_status_view(
+            {
+                "health_budget_status": "blocked",
+                "last_block_active": True,
+                "last_block_reason": "fill 12.8% is below stable-core action budget",
+                "current_block_reason": "fill 12.8% is below stable-core action budget",
+            },
+            current_fill_pct=69.0,
+        )
+
+        self.assertEqual(view["health_budget_status"], "green")
+        self.assertFalse(view["last_block_active"])
+        self.assertIsNone(view["current_block_reason"])
+        self.assertTrue(view["last_block_stale"])
+        self.assertEqual(
+            view["derived_resolution"],
+            "current_fill_back_inside_action_budget",
+        )
+
     def test_engine_target_set_aligns_stable_core_profile_to_wider_shelf(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
@@ -479,6 +685,26 @@ class TestStableCoreOps(unittest.TestCase):
                     "host_frame_path": str(runtime / "host_frame.jpg"),
                 },
             )
+            stable_core_ops.write_json(
+                runtime / "attractor_fatigue_status.json",
+                {
+                    "policy": "attractor_fatigue_v1",
+                    "motifs": {
+                        "motif:lambda-pressure": {
+                            "signature": "motif:lambda-pressure",
+                            "label": "lambda-pressure",
+                            "themes": ["lambda", "pressure"],
+                            "status": "cooling",
+                            "cooldown_class": "internal_topology",
+                            "prompt_replay_suppressed": True,
+                            "cooldown_until_unix_s": stable_core_ops.now_unix_s() + 120.0,
+                            "last_source": "journal_similarity_gate",
+                            "repeat_window_count": 3,
+                        }
+                    },
+                    "memory_decay_control": {"last_sent_rate": 0.18},
+                },
+            )
 
             with (
                 mock.patch.object(stable_core_ops, "WORKSPACE_DIR", workspace),
@@ -490,6 +716,25 @@ class TestStableCoreOps(unittest.TestCase):
             self.assertEqual(payload["agency_status"]["entry_count"], 3)
             self.assertEqual(payload["sensory_sources"]["active"]["video"], "physical")
             self.assertTrue(payload["sensory_sources"]["physical"]["camera_healthy"])
+            self.assertEqual(payload["feeders"]["camera"]["active_source"], "physical")
+            self.assertEqual(payload["feeders"]["mic"]["active_source"], "physical")
+            self.assertEqual(payload["attractor_fatigue"]["active_count"], 1)
+            self.assertEqual(
+                payload["attractor_fatigue"]["active_motifs"][0]["label"],
+                "lambda-pressure",
+            )
+            self.assertEqual(payload["attractor_fatigue"]["strong_internal_topology_count"], 1)
+            self.assertEqual(
+                payload["attractor_fatigue"]["active_motifs"][0]["cooldown_class"],
+                "internal_topology",
+            )
+            self.assertTrue(
+                payload["attractor_fatigue"]["active_motifs"][0]["prompt_replay_suppressed"]
+            )
+            self.assertEqual(
+                payload["attractor_fatigue"]["memory_decay_control"]["last_sent_rate"],
+                0.18,
+            )
 
     def test_sensory_fallback_reports_host_when_physical_is_unhealthy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -518,6 +763,74 @@ class TestStableCoreOps(unittest.TestCase):
             self.assertEqual(payload["active"]["audio"], "host")
             self.assertTrue(payload["synthetic_host"]["video_ready"])
             self.assertTrue(payload["synthetic_host"]["audio_ready"])
+
+    def test_status_feeders_show_active_host_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            runtime = workspace / "runtime"
+            runtime.mkdir(parents=True)
+            now_ms = int(stable_core_ops.now_unix_s() * 1000)
+            stable_core_ops.write_json(
+                workspace / "health.json",
+                {
+                    "fill_pct": 66.0,
+                    "semantic": {"energy": 0.0, "active": False},
+                    "stable_core": {"stage": "hold"},
+                },
+            )
+            stable_core_ops.write_json(workspace / "rescue_status.json", {})
+            stable_core_ops.write_json(
+                workspace / "rescue_profile.json",
+                {
+                    "profile": "stable_core_v1",
+                    "runtime_profile": "stable_core_v1",
+                    "stable_core_enabled": True,
+                },
+            )
+            stable_core_ops.write_json(
+                runtime / "camera_status.json",
+                {"ts_ms": now_ms, "state": "capture_error", "healthy": False, "connected": True},
+            )
+            stable_core_ops.write_json(
+                runtime / "mic_status.json",
+                {"ts_ms": now_ms, "state": "capture_error", "healthy": False, "connected": True},
+            )
+            stable_core_ops.write_json(
+                runtime / "sensory_source.json",
+                {
+                    "mode": "auto",
+                    "updated_at_ms": now_ms,
+                    "video": {
+                        "source": "host",
+                        "physical_healthy": False,
+                        "reason": "camera capture unhealthy",
+                    },
+                    "audio": {
+                        "source": "host",
+                        "physical_healthy": False,
+                        "reason": "mic capture unhealthy",
+                    },
+                    "host_frame_path": str(runtime / "host_frame.jpg"),
+                },
+            )
+            stable_core_ops.write_json(runtime / "host_telemetry.json", {"updated_at_ms": now_ms})
+            (runtime / "host_frame.jpg").write_bytes(b"jpeg")
+
+            with (
+                mock.patch.object(stable_core_ops, "WORKSPACE_DIR", workspace),
+                mock.patch.object(stable_core_ops, "AGENCY_PATH", workspace / "stable_core_agency.json"),
+                mock.patch.object(stable_core_ops, "STABLE_CORE_STATUS_PATH", workspace / "stable_core_status.json"),
+            ):
+                payload = stable_core_ops.build_status()
+
+            self.assertEqual(payload["sensory_sources"]["active"]["video"], "host")
+            self.assertEqual(payload["sensory_sources"]["active"]["audio"], "host")
+            self.assertEqual(payload["feeders"]["camera"]["active_source"], "host")
+            self.assertEqual(payload["feeders"]["mic"]["active_source"], "host")
+            self.assertTrue(payload["feeders"]["camera"]["synthetic_host_ready"])
+            self.assertTrue(payload["feeders"]["mic"]["synthetic_host_ready"])
+            self.assertEqual(payload["feeders"]["camera"]["fallback_reason"], "camera capture unhealthy")
+            self.assertEqual(payload["feeders"]["mic"]["fallback_reason"], "mic capture unhealthy")
 
     def test_checkpoint_sanitize_writes_diagonal_quarantine_seed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -807,7 +1120,8 @@ class TestStableCoreOps(unittest.TestCase):
             self.assertEqual(profile["limited_write_feature_scale"], 0.035)
             self.assertEqual(profile["limited_write_max_abs"], 0.08)
             self.assertEqual(profile["limited_write_rollback_adverse_count"], 1)
-            self.assertTrue(profile["limited_write_block_terms_always"])
+            self.assertFalse(profile["limited_write_block_terms_always"])
+            self.assertFalse(profile["limited_write_block_terms_on_rising"])
             self.assertIn("dialogue_fallback", profile["limited_write_allowed_modes"])
             self.assertIsNone(profile["rollback_reason"])
             self.assertEqual(profile["previous_rollback_reason"], "previous pressure rollback")
@@ -1124,7 +1438,7 @@ class TestStableCoreOps(unittest.TestCase):
             self.assertEqual(payload["profile"], "full_presence_v1")
             self.assertEqual(profile["rescue_live_audio_divisor"], 12)
             self.assertEqual(profile["rescue_live_video_divisor"], 12)
-            self.assertEqual(profile["rescue_live_intake_stages"], ["hold"])
+            self.assertEqual(profile["rescue_live_intake_stages"], ["hold", "elevated"])
             self.assertEqual(profile["stable_core_sensory_presence_profile"], "full_presence_v1")
             self.assertEqual(mute["active_until_unix_s"], 0.0)
 

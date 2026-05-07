@@ -39,6 +39,7 @@ class TestDecomposeModeSections(unittest.TestCase):
         self.assertEqual(summary["classification"], "distributed_attrition")
         self.assertIn("distributed attrition", block)
         self.assertIn("Fill pressure: +8.0%", block)
+        self.assertEqual(summary["fill_posture_label"], "above_center_pressure")
         self.assertIn("not monopolizing", block)
         self.assertIn("Suggested next", block)
 
@@ -53,6 +54,24 @@ class TestDecomposeModeSections(unittest.TestCase):
 
         self.assertEqual(summary["classification"], "distributed_open")
         self.assertIn("distributed open field", block)
+        self.assertIn("Center offset: -6.0%", block)
+        self.assertIn("not a corrective demand", block)
+        self.assertNotIn("Fill pressure: -", block)
+        self.assertEqual(summary["fill_posture_label"], "below_center_hold_shelf")
+
+    def test_attrition_boundary_names_recovery_offset_without_lack_language(self):
+        block, summary = format_attrition_boundary_signal(
+            [5.0, 4.0, 3.0, 2.0],
+            fill_pct=54.0,
+            target_fill_pct=68.0,
+            drain_weight=0.0,
+            damping_state="recovery",
+        )
+
+        self.assertIn("Recovery offset: -14.0%", block)
+        self.assertIn("read stage/slope", block)
+        self.assertNotIn("Fill pressure: -", block)
+        self.assertEqual(summary["fill_posture_label"], "below_hold_recovery")
 
     def test_pull_topology_names_collapsing_pull(self):
         block, summary = format_pull_topology_signal(
@@ -105,6 +124,19 @@ class TestDecomposeModeSections(unittest.TestCase):
         self.assertEqual(summary["edge_state"], "opposed_branch_surviving")
         self.assertGreater(summary["shoulder_rate"], 0.0)
         self.assertIn("shoulder/tail motion is holding", block)
+
+    def test_lambda_edge_trace_explains_mixed_edge(self):
+        block, summary = format_lambda_edge_trace_signal(
+            [5.0, 3.6, 3.0, 2.0],
+            previous_eigenvalues=[5.0, 3.6, 3.0, 2.0],
+            fill_slope_pct_per_sec=0.2,
+        )
+
+        self.assertEqual(summary["edge_state"], "mixed_edge")
+        self.assertIn("λ1/noise evidence is split", block)
+        self.assertIn("Edge story: mixed because", block)
+        self.assertTrue(summary["mixed_edge_reasons"])
+        self.assertIn("selection_components", summary)
 
     def test_controller_topology_separates_stable_core_from_legacy_pi(self):
         block, summary = format_controller_topology_signal(

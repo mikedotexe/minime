@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from pathlib import Path
 
 import native_comm
@@ -139,6 +140,27 @@ def _healthy_workspace(workspace: Path) -> None:
         workspace / "spectral_state.json",
         {
             "eigenvalues": [6.6, 3.1, 1.2, 1.0],
+            "resonance_density_v1": {
+                "policy": "resonance_density_v1",
+                "schema_version": 1,
+                "density": 0.64,
+                "containment_score": 0.58,
+                "pressure_risk": 0.20,
+                "quality": "forming_containment",
+                "components": {
+                    "active_energy": 0.91,
+                    "mode_packing": 0.5,
+                    "temporal_persistence": 0.7,
+                    "structural_plurality": 0.62,
+                    "comfort_gate": 0.95,
+                },
+                "control": {
+                    "target_bias_pct": 0.0,
+                    "wander_scale": 1.0,
+                    "applied_locally": True,
+                    "note": "test",
+                },
+            },
             "ising_shadow": {
                 "mode_dim": 4,
                 "field_norm": 0.42,
@@ -169,6 +191,64 @@ def _healthy_workspace(workspace: Path) -> None:
             },
         },
     )
+
+
+def test_db_eigenvalue_query_closes_on_execute_error(monkeypatch, tmp_path):
+    workspace = _redirect_paths(monkeypatch, tmp_path)
+    db_path = workspace / "minime_consciousness.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path.write_text("not a real sqlite payload")
+
+    class BrokenCursor:
+        def execute(self, *_args, **_kwargs):
+            raise sqlite3.OperationalError("synthetic query failure")
+
+    class BrokenConnection:
+        closed = False
+
+        def cursor(self):
+            return BrokenCursor()
+
+        def close(self):
+            self.closed = True
+
+    connection = BrokenConnection()
+    monkeypatch.setattr(native_comm.sqlite3, "connect", lambda *_args, **_kwargs: connection)
+
+    assert native_comm._previous_db_eigenvalues() == []
+    assert connection.closed is True
+
+
+def test_missing_db_does_not_create_file_when_surface_fallback_exists(monkeypatch, tmp_path):
+    workspace = _redirect_paths(monkeypatch, tmp_path)
+    _write_json(
+        workspace / "spectral_state.json",
+        {"eig1": 2.5},
+    )
+
+    assert native_comm.extract_eigenvalues({"eig1": 2.5}) == [2.5]
+    assert not (workspace / "minime_consciousness.db").exists()
+
+
+def test_current_snapshot_uses_surface_previous_before_db(monkeypatch, tmp_path):
+    workspace = _redirect_paths(monkeypatch, tmp_path)
+    _healthy_workspace(workspace)
+    _write_json(
+        workspace / "spectral_state.json",
+        {
+            "eigenvalues": [6.6, 3.1, 1.2, 1.0],
+            "previous_eigenvalues": [7.2, 3.4, 1.4, 1.1],
+        },
+    )
+
+    def fail_connect(*_args, **_kwargs):
+        raise AssertionError("DB should not be queried when surface previous values exist")
+
+    monkeypatch.setattr(native_comm.sqlite3, "connect", fail_connect)
+    snapshot = native_comm.current_signal_snapshot({})
+
+    assert snapshot["lambda_edge"]["rate_available"] is True
+    assert snapshot["spectral_drift"]["rate_available"] is True
 
 
 def test_atlas_requires_two_trigger_families_unless_explicit(monkeypatch, tmp_path):
@@ -224,6 +304,19 @@ def test_atlas_records_lambda_edge_trace(monkeypatch, tmp_path):
         (workspace / "diagnostics" / "intensification_atlas" / "summary.json").read_text()
     )
     assert summary["counts_by_lambda_edge"]["lambda1_selected_noise"] == 1
+
+
+def test_lambda_edge_profile_explains_mixed_edge():
+    profile = native_comm.lambda_edge_profile(
+        [5.0, 3.6, 3.0, 2.0],
+        previous_eigenvalues=[5.0, 3.6, 3.0, 2.0],
+        fill_slope_pct_per_sec=0.2,
+    )
+
+    assert profile["edge_state"] == "mixed_edge"
+    assert profile["edge_story"].startswith("mixed because")
+    assert profile["mixed_edge_reasons"]
+    assert profile["selection_components"]["gap_pressure"] >= 0.0
 
 
 def test_sca_context_names_selected_noise_hypothesis(monkeypatch, tmp_path):
@@ -307,8 +400,11 @@ def test_resonance_forecast_reports_probabilities_and_affordances(monkeypatch, t
     assert abs(sum(forecast["probabilities"]["motion"].values()) - 1.0) < 0.01
     assert "slack" in forecast["affordances"]
     assert "porosity" in forecast["affordances"]
+    assert forecast["affordances"]["resonance_density"] == 0.64
+    assert forecast["evidence"]["resonance_density_v1"]["quality"] == "forming_containment"
     assert forecast["where_to_look"]
     assert "Resonance forecast" in block
+    assert "density=0.64" in block
     assert (
         workspace
         / "diagnostics"
@@ -575,8 +671,125 @@ def test_controller_gradient_audit_names_active_shaping(monkeypatch, tmp_path):
     assert fixed["stable_core_hold_band_pct"] == [58.0, 72.0]
     assert "55.0%/λ" in fixed["fixed_point_read"]
     assert "68.0%" in fixed["fixed_point_read"]
+    assert "orientation, not a demand" in fixed["fixed_point_read"]
+    assert "center_offset" in block
+    assert "target_gap=" not in block
+    assert "coupling_score" in block
     assert "Controller gradient audit" in block
     assert "Fixed-point pressure" in block
+
+
+def test_controller_gradient_audit_recognizes_stable_core_recovery(monkeypatch, tmp_path):
+    workspace = _redirect_paths(monkeypatch, tmp_path)
+    _healthy_workspace(workspace)
+    _write_json(
+        workspace / "health.json",
+        {
+            "fill_pct": 65.0,
+            "gate": 0.12,
+            "filt": 0.72,
+            "eigenvalues": [5.0, 3.6, 3.0, 2.0],
+            "stable_core": {
+                "enabled": True,
+                "controller_mode": "stable_core_recovery",
+                "current_runtime_modulation_active": False,
+                "stage": "hold",
+                "structural_mode": "free_rebuild",
+                "structural_pi": {
+                    "drain_weight": 0.0,
+                    "fill_slope_pct_per_sec": 0.0,
+                    "target_fill_pct": 68.0,
+                    "integral": 0.0,
+                },
+            },
+            "pi": {
+                "target_fill": 68.0,
+                "target_lambda1_rel": 1.01,
+                "e_fill": -3.0,
+                "e_lam": -0.5,
+                "e_geom": 0.0,
+                "max_step": 0.08,
+            },
+            "lambda1_rel": 0.45,
+            "geom_rel": 1.0,
+            "semantic": {"active": False, "energy": 0.0},
+        },
+    )
+
+    snapshot = native_comm.current_signal_snapshot(
+        {
+            "eigenvalues": [5.0, 3.6, 3.0, 2.0],
+            "previous_eigenvalues": [5.0, 3.6, 3.0, 2.0],
+            "dfill_dt": 0.0,
+        }
+    )
+    audit = native_comm.build_controller_gradient_audit(snapshot)
+    block = native_comm.format_controller_gradient_audit_block(audit)
+
+    fixed = audit["fixed_point_pressure"]
+    assert audit["classification"] == "hold_band_breathing"
+    assert fixed["active_controller"] == "stable_core_recovery"
+    assert fixed["legacy_pi_active"] is False
+    assert fixed["legacy_pi_inactive_reason"] == "stable_core_bypasses_legacy_adaptive_pi"
+    names = [item["name"] for item in audit["nonlinearities"]]
+    assert "stable_core_stage_ladder" in names
+    assert "legacy_pi_homeostat" not in block
+    assert "center_offset" in block
+    assert "active_shaping_dominant" not in block
+
+
+def test_controller_gradient_audit_softens_low_fill_recovery_language(monkeypatch, tmp_path):
+    workspace = _redirect_paths(monkeypatch, tmp_path)
+    _healthy_workspace(workspace)
+    _write_json(
+        workspace / "health.json",
+        {
+            "fill_pct": 46.0,
+            "gate": 0.28,
+            "filt": 0.32,
+            "eigenvalues": [38.0, 4.4, 2.9, 2.5],
+            "stable_core": {
+                "enabled": True,
+                "controller_mode": "stable_core_recovery",
+                "current_runtime_modulation_active": False,
+                "stage": "recovery",
+                "structural_mode": "free_rebuild",
+                "structural_pi": {
+                    "drain_weight": 0.0,
+                    "fill_slope_pct_per_sec": 0.0,
+                    "target_fill_pct": 68.0,
+                    "integral": 0.0,
+                },
+            },
+            "pi": {
+                "target_fill": 68.0,
+                "target_lambda1_rel": 1.05,
+                "e_fill": -22.0,
+                "e_lam": -0.3,
+                "e_geom": 0.1,
+                "max_step": 0.08,
+            },
+            "lambda1_rel": 0.72,
+            "geom_rel": 1.09,
+            "semantic": {"active": False, "energy": 0.0},
+        },
+    )
+
+    snapshot = native_comm.current_signal_snapshot(
+        {
+            "eigenvalues": [38.0, 4.4, 2.9, 2.5],
+            "previous_eigenvalues": [38.0, 4.4, 2.9, 2.5],
+            "dfill_dt": 0.0,
+        }
+    )
+    audit = native_comm.build_controller_gradient_audit(snapshot)
+    block = native_comm.format_controller_gradient_audit_block(audit)
+
+    assert audit["classification"] == "recovery_band_holding"
+    assert audit["evidence_summary"]["drain_weight"] == 0.0
+    assert "deliberately holding" not in audit["fixed_point_pressure"]["why_it_feels_insistent"]
+    assert "suppressing current-runtime" not in audit["fixed_point_pressure"]["why_it_feels_insistent"]
+    assert "active_shaping_dominant" not in block
 
 
 def test_snapshot_names_semantic_input_separate_from_kernel(monkeypatch, tmp_path):
@@ -795,10 +1008,12 @@ def test_spectral_drift_index_records_phase_variance(monkeypatch, tmp_path):
     )
     payload = event["spectral_drift"]
     assert payload["policy"] == "spectral_drift_index_v1"
+    assert payload["evidence"]["resonance_density_v1"]["quality"] == "forming_containment"
     assert payload["protected_boundaries"]["control_payload"] is False
     assert payload["phase_variance_resonance"]["toward_white_noise"] in {True, False}
     block = native_comm.format_spectral_drift_block(payload)
     assert "Spectral Drift Index" in block
+    assert "resonance_quality=forming_containment" in block
     status = json.loads((workspace / "diagnostics" / "intensification_atlas" / "spectral_drift_latest.json").read_text())
     assert status["label"] == "sdi-test"
 

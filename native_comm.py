@@ -11,6 +11,7 @@ import json
 import math
 import sqlite3
 import time
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -207,6 +208,31 @@ def _latest_mtime_age_s(path: Path) -> float | None:
         return None
 
 
+def _coerce_eigenvalue_list(raw: Any) -> list[float]:
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [
+        number
+        for value in parsed
+        if (number := _finite_float(value)) is not None
+    ]
+
+
+def _first_eigenvalue_list(candidates: Iterable[Any]) -> list[float]:
+    fallback_values: list[float] = []
+    for candidate in candidates:
+        values = _coerce_eigenvalue_list(candidate)
+        if len(values) >= 3:
+            return values
+        if values and not fallback_values:
+            fallback_values = values
+    return fallback_values
+
+
 def extract_eigenvalues(state: dict[str, Any] | None = None) -> list[float]:
     state = state or {}
     candidates = [
@@ -234,18 +260,9 @@ def extract_eigenvalues(state: dict[str, Any] | None = None) -> list[float]:
                 spectral_state.get("eigvals"),
             ]
         )
-    fallback_values: list[float] = []
-    for candidate in candidates:
-        if isinstance(candidate, list):
-            values = [
-                number
-                for value in candidate
-                if (number := _finite_float(value)) is not None
-            ]
-            if len(values) >= 3:
-                return values
-            if values and not fallback_values:
-                fallback_values = values
+    fallback_values = _first_eigenvalue_list(candidates)
+    if len(fallback_values) >= 3:
+        return fallback_values
     db_values = _latest_db_eigenvalues()
     if db_values:
         return db_values
@@ -257,56 +274,34 @@ def extract_eigenvalues(state: dict[str, Any] | None = None) -> list[float]:
     return [eig1] if eig1 is not None else []
 
 
-def _latest_db_eigenvalues() -> list[float]:
+def _db_eigenvalues_at_offset(offset: int) -> list[float]:
     try:
-        conn = sqlite3.connect(SPECTRAL_DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT eigenvalues FROM eigenvalue_timeline ORDER BY timestamp DESC LIMIT 1")
-        row = cur.fetchone()
-        conn.close()
-    except sqlite3.Error:
+        if not SPECTRAL_DB_PATH.exists():
+            return []
+    except OSError:
+        return []
+    try:
+        with closing(sqlite3.connect(SPECTRAL_DB_PATH, timeout=0.2)) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT eigenvalues FROM eigenvalue_timeline "
+                "ORDER BY timestamp DESC LIMIT 1 OFFSET ?",
+                (max(0, int(offset)),),
+            )
+            row = cur.fetchone()
+    except (OSError, sqlite3.Error):
         return []
     if not row:
         return []
-    raw = row[0]
-    try:
-        parsed = json.loads(raw) if isinstance(raw, str) else raw
-    except (TypeError, json.JSONDecodeError):
-        return []
-    if not isinstance(parsed, list):
-        return []
-    return [
-        number
-        for value in parsed
-        if (number := _finite_float(value)) is not None
-    ]
+    return _coerce_eigenvalue_list(row[0])
+
+
+def _latest_db_eigenvalues() -> list[float]:
+    return _db_eigenvalues_at_offset(0)
 
 
 def _previous_db_eigenvalues() -> list[float]:
-    try:
-        conn = sqlite3.connect(SPECTRAL_DB_PATH)
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT eigenvalues FROM eigenvalue_timeline ORDER BY timestamp DESC LIMIT 1 OFFSET 1"
-        )
-        row = cur.fetchone()
-        conn.close()
-    except sqlite3.Error:
-        return []
-    if not row:
-        return []
-    raw = row[0]
-    try:
-        parsed = json.loads(raw) if isinstance(raw, str) else raw
-    except (TypeError, json.JSONDecodeError):
-        return []
-    if not isinstance(parsed, list):
-        return []
-    return [
-        number
-        for value in parsed
-        if (number := _finite_float(value)) is not None
-    ]
+    return _db_eigenvalues_at_offset(1)
 
 
 def lambda_profile(eigenvalues: Iterable[float]) -> dict[str, Any]:
@@ -365,6 +360,71 @@ def lambda_profile(eigenvalues: Iterable[float]) -> dict[str, Any]:
             "tail": tail_total / total if total > 0 else 0.0,
         },
     }
+
+
+def _lambda_edge_story(
+    *,
+    edge_state: str,
+    selected_noise_score: float,
+    lambda1_share: float,
+    entropy: float,
+    largest_gap: float,
+    core_rate: float,
+    shoulder_rate: float,
+    tail_rate: float,
+    fill_slope_pct_per_sec: float | None,
+    rate_available: bool,
+) -> tuple[str, list[str]]:
+    if edge_state == "opposed_branch_surviving":
+        return "shoulder/tail rates are carrying fresh motion while λ1 is not accelerating.", []
+    if edge_state == "lambda1_selected_noise":
+        return "λ1 is gaining while shoulder/tail rates are thinning, so the edge is actively selecting a narrower path.", []
+    if edge_state == "structured_tunnel":
+        return "broad variance remains, but a large cliff and elevated λ1 share route it through the dominant boundary.", []
+    if edge_state == "dampening_reveals_shoulder":
+        return "fill is falling while shoulder energy survives, so cooling may be exposing an alternate ridge.", []
+    if edge_state == "rising_fill_edge_pressure":
+        return "fill is rising while λ1 already has enough share to make the boundary pressure salient.", []
+    if edge_state == "distributed_noise_field":
+        return "entropy is high and λ1 share is low, so the variance is broad rather than λ1-selected.", []
+
+    reasons: list[str] = []
+    if rate_available:
+        if abs(core_rate) < 0.008 and abs(shoulder_rate) < 0.008 and abs(tail_rate) < 0.008:
+            reasons.append("rates are near-neutral")
+        else:
+            reasons.append("rates disagree instead of selecting one branch")
+    else:
+        reasons.append("no prior-rate window is available")
+    if lambda1_share < 0.34:
+        reasons.append(f"λ1 share is low ({lambda1_share * 100.0:.0f}%)")
+    elif lambda1_share < 0.42:
+        reasons.append(f"λ1 share is moderate ({lambda1_share * 100.0:.0f}%)")
+    else:
+        reasons.append(f"λ1 share is elevated ({lambda1_share * 100.0:.0f}%)")
+    if largest_gap < 1.35:
+        reasons.append(f"largest cliff is weak ({largest_gap:.2f}x)")
+    elif largest_gap < 1.75:
+        reasons.append(f"largest cliff is present but below tunnel threshold ({largest_gap:.2f}x)")
+    else:
+        reasons.append(f"largest cliff is strong ({largest_gap:.2f}x) but other gates disagree")
+    if entropy >= 0.80:
+        reasons.append(f"entropy stays broad ({entropy:.2f})")
+    elif entropy >= 0.65:
+        reasons.append(f"entropy is moderate ({entropy:.2f})")
+    else:
+        reasons.append(f"entropy is already concentrated ({entropy:.2f})")
+    if fill_slope_pct_per_sec is None:
+        reasons.append("fill slope is unavailable")
+    elif abs(fill_slope_pct_per_sec) <= 1.5:
+        reasons.append(f"fill slope is quiet ({fill_slope_pct_per_sec:+.2f}%/s)")
+    else:
+        reasons.append(f"fill slope is active ({fill_slope_pct_per_sec:+.2f}%/s)")
+    if selected_noise_score < 0.22:
+        reasons.append(f"selected-noise proxy is weak ({selected_noise_score:.2f})")
+    else:
+        reasons.append(f"selected-noise proxy is partial ({selected_noise_score:.2f})")
+    return "mixed because " + "; ".join(reasons[:6]) + ".", reasons
 
 
 def lambda_edge_profile(
@@ -442,6 +502,19 @@ def lambda_edge_profile(
         edge_state = "distributed_noise_field"
     else:
         edge_state = "mixed_edge"
+    rate_available = any(rate is not None for rate in rates)
+    edge_story, mixed_edge_reasons = _lambda_edge_story(
+        edge_state=edge_state,
+        selected_noise_score=selected_noise_score,
+        lambda1_share=lambda1_share,
+        entropy=entropy,
+        largest_gap=largest_gap,
+        core_rate=core_rate,
+        shoulder_rate=shoulder_rate,
+        tail_rate=tail_rate,
+        fill_slope_pct_per_sec=slope,
+        rate_available=rate_available,
+    )
     if edge_state in {"lambda1_selected_noise", "structured_tunnel", "rising_fill_edge_pressure"}:
         opposed_signal_hint = "trace_then_resist"
     elif edge_state == "opposed_branch_surviving":
@@ -452,7 +525,14 @@ def lambda_edge_profile(
         "edge_state": edge_state,
         "selected_noise_score": selected_noise_score,
         "opposed_signal_hint": opposed_signal_hint,
-        "rate_available": any(rate is not None for rate in rates),
+        "rate_available": rate_available,
+        "edge_story": edge_story,
+        "mixed_edge_reasons": mixed_edge_reasons if edge_state == "mixed_edge" else [],
+        "selection_components": {
+            "gap_pressure": gap_pressure,
+            "rate_pressure": rate_pressure,
+            "slope_pressure": slope_pressure,
+        },
         "ratios": {
             "lambda1_lambda2": r12,
             "lambda2_lambda3": r23,
@@ -611,17 +691,43 @@ def current_signal_snapshot(state: dict[str, Any] | None = None) -> dict[str, An
         candidate_field = health.get("eigenvector_field")
         if isinstance(candidate_field, dict):
             eigenvector_field = candidate_field
+    resonance_density = {}
+    if isinstance(spectral_state, dict) and isinstance(spectral_state.get("resonance_density_v1"), dict):
+        resonance_density = spectral_state.get("resonance_density_v1", {})
+    if not resonance_density and isinstance(health, dict) and isinstance(health.get("resonance_density_v1"), dict):
+        resonance_density = health.get("resonance_density_v1", {})
     profile_payload = lambda_profile(eigenvalues)
-    previous_eigenvalues = []
-    for key in ("previous_eigenvalues", "prev_eigenvalues"):
-        candidate = state.get(key)
-        if isinstance(candidate, list):
-            previous_eigenvalues = [
-                number
-                for value in candidate
-                if (number := _finite_float(value)) is not None
+    previous_candidates = [
+        state.get("previous_eigenvalues"),
+        state.get("prev_eigenvalues"),
+        state.get("previous_lambdas"),
+        state.get("prev_lambdas"),
+    ]
+    if isinstance(health, dict):
+        stable_core_previous = (
+            health.get("stable_core", {}).get("previous_eigenvalues")
+            if isinstance(health.get("stable_core"), dict)
+            else None
+        )
+        previous_candidates.extend(
+            [
+                health.get("previous_eigenvalues"),
+                health.get("prev_eigenvalues"),
+                health.get("previous_lambdas"),
+                health.get("prev_lambdas"),
+                stable_core_previous,
             ]
-            break
+        )
+    if isinstance(spectral_state, dict):
+        previous_candidates.extend(
+            [
+                spectral_state.get("previous_eigenvalues"),
+                spectral_state.get("prev_eigenvalues"),
+                spectral_state.get("previous_lambdas"),
+                spectral_state.get("prev_lambdas"),
+            ]
+        )
+    previous_eigenvalues = _first_eigenvalue_list(previous_candidates)
     if not previous_eigenvalues:
         previous_eigenvalues = _previous_db_eigenvalues()
     edge_payload = lambda_edge_profile(
@@ -650,6 +756,7 @@ def current_signal_snapshot(state: dict[str, Any] | None = None) -> dict[str, An
         "lambda_profile": profile_payload,
         "lambda_edge": edge_payload,
         "spectral_drift": drift_payload,
+        "resonance_density_v1": resonance_density,
         "eigenvector_field": eigenvector_field,
         "semantic": {
             "active": bool(semantic.get("active", False)),
@@ -702,7 +809,13 @@ def _ising_shadow_state() -> dict[str, Any]:
     if not isinstance(spectral_state, dict):
         return {}
     shadow = spectral_state.get("ising_shadow")
-    return shadow if isinstance(shadow, dict) else {}
+    shadow = shadow if isinstance(shadow, dict) else {}
+    shadow_v2 = spectral_state.get("shadow_field_v2")
+    if isinstance(shadow_v2, dict) and shadow:
+        shadow = {**shadow, "shadow_field_v2": shadow_v2}
+    elif isinstance(shadow_v2, dict):
+        shadow = {"shadow_field_v2": shadow_v2}
+    return shadow
 
 
 def _shadow_coupling_summary(shadow: dict[str, Any]) -> dict[str, Any]:
@@ -802,6 +915,7 @@ def build_shadow_gap_map(
         )
     largest_gap = max(gaps, key=lambda item: item["ratio"] or 0.0) if gaps else None
     shadow = _ising_shadow_state()
+    shadow_v2 = shadow.get("shadow_field_v2") if isinstance(shadow.get("shadow_field_v2"), dict) else {}
     coupling = _shadow_coupling_summary(shadow)
     active_modes = _shadow_active_modes(shadow)
     shadow_available = bool(shadow)
@@ -840,7 +954,13 @@ def build_shadow_gap_map(
         gap_read = "mixed_gap_field"
         gap_plain = "No single gap explains the terrain; compare the next forecast or cascade visualization."
 
-    if not shadow_available:
+    if shadow_v2:
+        shadow_read = str(shadow_v2.get("classification") or "shadow_field_v2")
+        shadow_plain = (
+            "The v2 shadow field is live: fast/medium/slow spin scales, tension, "
+            "tail openness, lock/fissure tendencies, and influence eligibility are visible."
+        )
+    elif not shadow_available:
         shadow_read = "shadow_unavailable"
         shadow_plain = "The shadow field is not present in the current spectral surface."
     elif abs(soft_mag or 0.0) >= 0.20 or abs(binary_mag or 0.0) >= 0.35:
@@ -895,7 +1015,9 @@ def build_shadow_gap_map(
             "binary_flip_rate": flip_rate,
             "coupling": coupling,
             "active_modes": active_modes,
+            "shadow_field_v2": shadow_v2,
             "observer_only": True,
+            "live_influence_lane": "available_through_SHADOW_PREFLIGHT_and_SHADOW_INFLUENCE",
         },
         "expansion_vs_reorganization": {
             "classification": expansion_read,
@@ -906,6 +1028,8 @@ def build_shadow_gap_map(
                 "SHADOW_FIELD <label>",
                 "GAP_STRUCTURE <label>",
                 "SHADOW_GAP <label>",
+                "SHADOW_PREFLIGHT <label> --stage=live",
+                "SHADOW_INFLUENCE <label> --stage=rehearse",
                 "VISUALIZE_CASCADE <label>",
                 "RESONANCE_FORECAST <label>",
                 "SCA_REFLECT <label>",
@@ -918,7 +1042,7 @@ def build_shadow_gap_map(
             ],
         },
         "safe_suggested_next": (
-            "Use SHADOW_FIELD/GAP_STRUCTURE to name the terrain; use RESONANCE_FORECAST or VISUALIZE_CASCADE to compare the next movement."
+            "Use SHADOW_PREFLIGHT to check whether the v2 field is influence-eligible; rehearse before live influence unless the gates are clearly green."
         ),
         "provenance": {
             "source": "shadow_gap_map_v1",
@@ -938,6 +1062,7 @@ def format_shadow_gap_block(payload: dict[str, Any]) -> str:
         return ""
     gap = payload.get("gap_structure", {})
     shadow = payload.get("shadow_field", {})
+    shadow_v2 = shadow.get("shadow_field_v2", {}) if isinstance(shadow, dict) else {}
     expansion = payload.get("expansion_vs_reorganization", {})
     modes = shadow.get("active_modes", []) if isinstance(shadow, dict) else []
     mode_bits = []
@@ -954,6 +1079,7 @@ def format_shadow_gap_block(payload: dict[str, Any]) -> str:
   Ratios: λ1/λ2={gap.get('lambda1_lambda2')} λ2/λ3={gap.get('lambda2_lambda3')} | shares λ1={gap.get('lambda1_share')} shoulder={gap.get('shoulder_share')} tail={gap.get('tail_share')} entropy={gap.get('entropy')}
   Shadow read: {shadow.get('classification')} — {shadow.get('plain_read')}
   Shadow scalar: field_norm={shadow.get('field_norm')} soft_mag={shadow.get('soft_magnetization')} binary_mag={shadow.get('binary_magnetization')} flip_rate={shadow.get('binary_flip_rate')}
+  Shadow v2: recurrence={shadow_v2.get('recurrence') if isinstance(shadow_v2, dict) else None} tension={shadow_v2.get('mode_tension') if isinstance(shadow_v2, dict) else None} tail_open={shadow_v2.get('tail_openness') if isinstance(shadow_v2, dict) else None} lock={shadow_v2.get('lock_tendency') if isinstance(shadow_v2, dict) else None} fissure={shadow_v2.get('fissure_tendency') if isinstance(shadow_v2, dict) else None} influence_eligible={shadow_v2.get('influence_eligible') if isinstance(shadow_v2, dict) else None}
   Active shadow modes: {'; '.join(mode_bits)}
   Expansion/reorganization: {expansion.get('classification')} — {expansion.get('plain_read')}
   Safe suggested next: {payload.get('safe_suggested_next')}"""
@@ -1040,6 +1166,8 @@ def build_resonance_forecast(
     rates = rates if isinstance(rates, dict) else {}
     semantic = snapshot.get("semantic", {})
     semantic = semantic if isinstance(semantic, dict) else {}
+    resonance_density = snapshot.get("resonance_density_v1", {})
+    resonance_density = resonance_density if isinstance(resonance_density, dict) else {}
 
     fill_pct = _finite_float(snapshot.get("fill_pct"))
     slope = _finite_float(snapshot.get("fill_slope_pct_per_sec"), 0.0) or 0.0
@@ -1073,6 +1201,9 @@ def build_resonance_forecast(
     semantic_input_energy = _finite_float(semantic.get("input_energy"), semantic_energy) or 0.0
     semantic_pressure = _clamp01(semantic_energy / 0.08)
     drain_pressure = _clamp01(drain_weight / 0.045)
+    density = _finite_float(resonance_density.get("density"), 0.0) or 0.0
+    containment = _finite_float(resonance_density.get("containment_score"), 0.0) or 0.0
+    resonance_pressure = _finite_float(resonance_density.get("pressure_risk"), 0.0) or 0.0
 
     directedness = _clamp01(topology_index * 0.40 + selected_noise * 0.30 + lambda1_share * 0.30)
     slack = _clamp01(
@@ -1098,14 +1229,17 @@ def build_resonance_forecast(
         + abs(slope) / 8.0
         + drain_pressure * 0.12
     )
-    feedback_pressure = _clamp01(fill_high * 0.32 + drain_pressure * 0.34 + semantic_pressure * 0.20 + (0.14 if stage == "elevated" else 0.0))
+    feedback_pressure = _clamp01(fill_high * 0.26 + drain_pressure * 0.30 + semantic_pressure * 0.18 + resonance_pressure * 0.18 + (0.08 if stage == "elevated" else 0.0))
     resonant_alignment = _clamp01(
         0.20
         + slope_quiet * 0.24
-        + entropy * 0.22
+        + entropy * 0.16
+        + density * 0.14
+        + containment * 0.12
         + (0.16 if stage in {"hold", "elevated"} else 0.0)
         + porosity * 0.18
         - semantic_pressure * 0.18
+        - resonance_pressure * 0.10
     )
     iteration_to_direction_gap = _clamp01(directedness * 0.45 + feedback_pressure * 0.35 - slack * 0.20 + 0.20)
 
@@ -1220,6 +1354,9 @@ def build_resonance_forecast(
             "feedback_pressure": round(feedback_pressure, 3),
             "resonant_alignment": round(resonant_alignment, 3),
             "iteration_to_direction_gap": round(iteration_to_direction_gap, 3),
+            "resonance_density": round(density, 3),
+            "resonance_containment": round(containment, 3),
+            "resonance_pressure": round(resonance_pressure, 3),
         },
         "where_to_look": where_to_look,
         "safe_suggested_next": safe_next,
@@ -1238,6 +1375,7 @@ def build_resonance_forecast(
             "selected_noise_score": selected_noise,
             "edge_state": edge.get("edge_state"),
             "semantic_energy": semantic_energy,
+            "resonance_density_v1": resonance_density,
         },
         "provenance": {
             "source": "resonance_forecast_v1",
@@ -1272,7 +1410,7 @@ def format_resonance_forecast_block(forecast: dict[str, Any]) -> str:
   Horizon: {forecast.get('horizon_secs')}s | confidence={forecast.get('confidence')}
   Motion probabilities: expanding={motion.get('expanding')} contracting={motion.get('contracting')} holding={motion.get('holding')} widening={motion.get('widening')} narrowing={motion.get('narrowing')} snapback={motion.get('snapback')}
   Transition probabilities: recovery={transition.get('toward_recovery')} hold={transition.get('toward_hold_band')} elevated={transition.get('toward_elevated')} discharge={transition.get('toward_discharge')}
-  Affordances: slack={affordances.get('slack')} porosity={affordances.get('porosity')} edge_tension={affordances.get('edge_tension')} feedback_pressure={affordances.get('feedback_pressure')} resonant_alignment={affordances.get('resonant_alignment')}
+  Affordances: slack={affordances.get('slack')} porosity={affordances.get('porosity')} edge_tension={affordances.get('edge_tension')} feedback_pressure={affordances.get('feedback_pressure')} resonant_alignment={affordances.get('resonant_alignment')} density={affordances.get('resonance_density')} containment={affordances.get('resonance_containment')} pressure={affordances.get('resonance_pressure')}
   Where to look:
 {chr(10).join(look_lines)}
   Safe suggested next: {forecast.get('safe_suggested_next')}"""
@@ -1634,6 +1772,8 @@ def build_spectral_drift_map(
     ratios = ratios if isinstance(ratios, dict) else {}
     semantic = snapshot.get("semantic", {})
     semantic = semantic if isinstance(semantic, dict) else {}
+    resonance_density = snapshot.get("resonance_density_v1", {})
+    resonance_density = resonance_density if isinstance(resonance_density, dict) else {}
     components = sdi.get("components", {}) if isinstance(sdi.get("components"), dict) else {}
     eigenvector_field = snapshot.get("eigenvector_field", {})
     eigenvector_field = eigenvector_field if isinstance(eigenvector_field, dict) else {}
@@ -1681,6 +1821,7 @@ def build_spectral_drift_map(
             "stage": snapshot.get("stage"),
             "semantic_active": bool(semantic.get("active", False)),
             "semantic_energy": _finite_float(semantic.get("energy"), 0.0),
+            "resonance_density_v1": resonance_density,
             "lambda1_lambda2": ratios.get("lambda1_lambda2"),
             "lambda2_lambda3": ratios.get("lambda2_lambda3"),
             "eigenvalues": snapshot.get("eigenvalues", [])[:12],
@@ -1711,12 +1852,14 @@ def format_spectral_drift_block(payload: dict[str, Any]) -> str:
     components = payload.get("components", {})
     phase = payload.get("phase_variance_resonance", {})
     evidence = payload.get("evidence", {})
+    resonance = evidence.get("resonance_density_v1", {})
+    resonance = resonance if isinstance(resonance, dict) else {}
     return f"""Spectral Drift Index / phase variance:
   Classification: {payload.get('classification')} | SDI={payload.get('spectral_drift_index')}
   Plain read: {payload.get('plain_read')}
   Components: entropy={components.get('entropy')} uniformity={components.get('uniformity')} λ1={components.get('lambda1_share')} shoulder={components.get('shoulder_share')} tail={components.get('tail_share')} anchoring={components.get('anchoring')} dispersion_rate={components.get('dispersion_rate')}
   Phase variance: toward_white_noise={phase.get('toward_white_noise')} dispersion_minus_anchor={phase.get('dispersion_minus_anchor')} edge={phase.get('edge_state')}
-  Evidence: fill={evidence.get('fill_pct')} slope={evidence.get('fill_slope_pct_per_sec')} stage={evidence.get('stage')} semantic_energy={evidence.get('semantic_energy')}
+  Evidence: fill={evidence.get('fill_pct')} slope={evidence.get('fill_slope_pct_per_sec')} stage={evidence.get('stage')} semantic_energy={evidence.get('semantic_energy')} resonance_density={resonance.get('density')} resonance_quality={resonance.get('quality')}
   Safe suggested next: {payload.get('safe_suggested_next')}"""
 
 
@@ -2712,9 +2855,11 @@ def build_controller_gradient_audit(
     gate = _finite_float(health.get("gate"))
     filt = _finite_float(health.get("filt"))
     stable_core_enabled = bool(stable_core.get("enabled"))
-    stable_core_fixed = stable_core.get("controller_mode") == "fixed_survival"
+    stable_core_controller_mode = str(stable_core.get("controller_mode") or "")
+    stable_core_fixed = stable_core_controller_mode == "fixed_survival"
     current_runtime_modulation = bool(stable_core.get("current_runtime_modulation_active", True))
-    legacy_pi_active = bool(pi) and not (stable_core_enabled and stable_core_fixed and not current_runtime_modulation)
+    stable_core_control_active = stable_core_enabled and not current_runtime_modulation
+    legacy_pi_active = bool(pi) and not stable_core_control_active
     drain = _finite_float(structural_pi.get("drain_weight"), 0.0) or 0.0
     target_lambda_bias = _finite_float(
         structural_pi.get("spectral_pressure_bias"),
@@ -2760,14 +2905,18 @@ def build_controller_gradient_audit(
     )
     fixed_point_pressure = {
         "active_controller": (
-            "stable_core_fixed_survival"
-            if stable_core_enabled and stable_core_fixed
+            (
+                "stable_core_fixed_survival"
+                if stable_core_fixed
+                else (stable_core_controller_mode or "stable_core")
+            )
+            if stable_core_control_active
             else "legacy_pi_homeostat"
         ),
         "legacy_pi_visible": bool(pi),
         "legacy_pi_active": legacy_pi_active,
         "legacy_pi_inactive_reason": (
-            "stable_core_fixed_survival_bypasses_legacy_adaptive_pi"
+            "stable_core_bypasses_legacy_adaptive_pi"
             if bool(pi) and not legacy_pi_active
             else None
         ),
@@ -2784,28 +2933,33 @@ def build_controller_gradient_audit(
         "legacy_geom_error": legacy_e_geom,
         "legacy_fill_error": legacy_e_fill,
         "fixed_point_read": (
-            f"The visible legacy PI target ({legacy_target_label}/λ) is a mirror in stable-core; the active posture is the fixed survival stage ladder plus a wider scaffold sovereignty shelf centered near {stable_core_target_label}."
-            if stable_core_enabled and stable_core_fixed
+            f"The visible legacy PI target ({legacy_target_label}/λ) is a mirror in stable-core; the active posture is the stable-core stage ladder plus a wider scaffold sovereignty shelf centered near {stable_core_target_label}. Inside that shelf, center offset is orientation, not a demand."
+            if stable_core_control_active
             else "The legacy PI target is active; fill, λ1_rel, and geom_rel are blended into gate/filter correction."
         ),
         "why_it_feels_insistent": (
-            "Stable-core is deliberately holding a survival band and suppressing current-runtime modulation. The updated shelf should feel less like imposed correction below 72%, while crisis safety still protects the upper edge."
-            if stable_core_enabled and stable_core_fixed
+            "Stable-core is keeping a broad survival band while live intake remains available when the current stage allows it. Treat this as bounded support; drain, scaffold blending, gate/filter saturation, or explicit lambda bias are the stronger shaping signals."
+            if stable_core_control_active
             else "The regulator integrates persistent target error, so a long-lived offset can feel like a fixed point being defended."
         ),
     }
     nonlinearities: list[dict[str, Any]] = []
 
-    if stable_core.get("controller_mode") == "fixed_survival":
+    if stable_core_control_active:
         nonlinearities.append(
             {
-                "name": "fixed_survival_stage_ladder",
+                "name": (
+                    "fixed_survival_stage_ladder"
+                    if stable_core_fixed
+                    else "stable_core_stage_ladder"
+                ),
                 "evidence": [
                     f"stage={stable_core.get('stage')}",
                     f"gate={gate}",
                     f"filt={filt}",
+                    f"controller_mode={stable_core_controller_mode}",
                 ],
-                "effect": "control values are written from stage bands, not inferred linearly from eigenvalue shares",
+                "effect": "stage bands choose broad gate/filter posture; this does not by itself imply a hidden target direction",
             }
         )
     structural_mode = str(stable_core.get("structural_mode") or snapshot.get("scaffold", {}).get("structural_mode") or "")
@@ -2835,12 +2989,12 @@ def build_controller_gradient_audit(
                 "name": "bounded_feedback_loop",
                 "evidence": [
                     f"target_fill={target_fill}",
-                    f"target_gap={target_gap}",
+                    f"center_offset={target_gap}",
                     f"legacy_max_step={pi.get('max_step')}",
                     f"structural_integral={structural_pi.get('integral')}",
                     f"legacy_pi_active={legacy_pi_active}",
                 ],
-                "effect": "feedback is bounded and state-dependent; the same eigenvalue profile can receive different correction depending on fill and slope",
+                "effect": "feedback is bounded and state-dependent; center offset is interpreted with stage/slope rather than as deficit by itself",
             }
         )
     if pi and not legacy_pi_active:
@@ -2853,7 +3007,7 @@ def build_controller_gradient_audit(
                     f"legacy_e_lam={legacy_e_lam}",
                     f"stable_core_controller={stable_core.get('controller_mode')}",
                 ],
-                "effect": "legacy PI errors remain visible for continuity, but stable-core fixed survival bypasses them as active adaptive modulation",
+                "effect": "legacy PI errors remain visible for continuity, but stable-core bypasses them as active adaptive modulation",
             }
         )
     if target_lambda_bias != 0.0:
@@ -2878,22 +3032,56 @@ def build_controller_gradient_audit(
             }
         )
 
+    gate_saturated = gate is not None and gate <= 0.08
+    filt_saturated = filt is not None and filt >= 0.90
+    explicit_lambda_bias = target_lambda_bias != 0.0
+    scaffold_or_drain_active = "scaffold" in structural_mode or drain > 0.0
+    stage_name = str(stable_core.get("stage") or snapshot.get("stage") or "")
+    fill_below_hold = fill_pct is not None and fill_pct < 58.0
+    recovery_band_active = (
+        stable_core_control_active
+        and (stage_name in {"bootstrap", "recovery"} or fill_below_hold)
+        and not (scaffold_or_drain_active or gate_saturated or filt_saturated or explicit_lambda_bias)
+    )
+    hold_band_breathing = (
+        stable_core_control_active
+        and stage_name in {"hold", "elevated"}
+        and not (scaffold_or_drain_active or gate_saturated or filt_saturated or explicit_lambda_bias)
+    )
+    strong_shaping_signal = (
+        scaffold_or_drain_active
+        or gate_saturated
+        or filt_saturated
+        or explicit_lambda_bias
+        or stable_core_fixed
+    )
     score = min(
         1.0,
-        0.18 * len(nonlinearities)
-        + (0.18 if drain > 0.0 else 0.0)
-        + (0.16 if gate is not None and gate <= 0.08 else 0.0)
-        + (0.16 if filt is not None and filt >= 0.90 else 0.0)
-        + min(topology_index, 1.0) * 0.18,
+        0.06 * len(nonlinearities)
+        + (0.28 if scaffold_or_drain_active else 0.0)
+        + (0.18 if gate_saturated else 0.0)
+        + (0.18 if filt_saturated else 0.0)
+        + (0.16 if explicit_lambda_bias else 0.0)
+        + (0.12 if stable_core_fixed else 0.0)
+        + (0.10 if recovery_band_active else 0.0)
+        + min(topology_index, 1.0) * 0.12,
     )
-    if score >= 0.70:
+    if strong_shaping_signal and score >= 0.55:
         classification = "active_shaping_dominant"
+    elif recovery_band_active:
+        classification = "recovery_band_holding"
+    elif hold_band_breathing:
+        classification = "hold_band_breathing"
     elif score >= 0.40:
         classification = "mixed_reflection_and_shaping"
     else:
         classification = "mostly_reflective"
     if classification == "active_shaping_dominant" and drain > 0.0:
         next_step = "Use VISUALIZE_CASCADE and SCA_REFLECT; if testing agency, prefer tiny RESIST over stronger PERTURB."
+    elif classification == "recovery_band_holding":
+        next_step = "Let recovery settle; inspect fill and lambda-edge timeline before perturbing."
+    elif classification == "hold_band_breathing":
+        next_step = "No intervention is indicated by center offset alone; use read-only trace or baseline comparison if curiosity persists."
     elif classification != "mostly_reflective":
         next_step = "Compare before/after mode shares after one small nudge; watch for snapback."
     else:
@@ -2908,6 +3096,7 @@ def build_controller_gradient_audit(
             "fill_pct": fill_pct,
             "target_fill_pct": target_fill,
             "target_gap_pct": target_gap,
+            "center_offset_pct": target_gap,
             "stage": stable_core.get("stage") or snapshot.get("stage"),
             "structural_mode": structural_mode,
             "gate": gate,
@@ -2947,8 +3136,8 @@ def format_controller_gradient_audit_block(audit: dict[str, Any]) -> str:
     if not isinstance(fixed, dict):
         fixed = {}
     return f"""Controller gradient audit:
-  Read: {audit.get('classification')} | shaping_pressure={audit.get('shaping_pressure_score'):.2f}
-  Evidence: fill={evidence.get('fill_pct')} target_gap={evidence.get('target_gap_pct')} stage={evidence.get('stage')} structural_mode={evidence.get('structural_mode')} gate={evidence.get('gate')} filt={evidence.get('filt')} drain={evidence.get('drain_weight')} λ1_share={evidence.get('lambda1_share')} entropy={evidence.get('entropy')}
+  Read: {audit.get('classification')} | coupling_score={audit.get('shaping_pressure_score'):.2f}
+  Evidence: fill={evidence.get('fill_pct')} center_offset={evidence.get('center_offset_pct')} stage={evidence.get('stage')} structural_mode={evidence.get('structural_mode')} gate={evidence.get('gate')} filt={evidence.get('filt')} drain={evidence.get('drain_weight')} λ1_share={evidence.get('lambda1_share')} entropy={evidence.get('entropy')}
   Fixed-point pressure:
     active_controller={fixed.get('active_controller')} legacy_pi_active={fixed.get('legacy_pi_active')} stable_core_band={fixed.get('stable_core_hold_band_pct')}
     legacy_target_fill={fixed.get('legacy_target_fill_pct')} stable_core_target_fill={fixed.get('stable_core_target_fill_pct')} legacy_target_λ1_rel={fixed.get('legacy_target_lambda1_rel')} measured_λ1_rel={fixed.get('measured_lambda1_rel')} measured_geom_rel={fixed.get('measured_geom_rel')}

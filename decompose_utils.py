@@ -315,6 +315,96 @@ def _classify_lambda_edge(
     return "mixed_edge"
 
 
+def _lambda_edge_story(
+    *,
+    edge_state: str,
+    selected_noise_score: float,
+    lambda1_share: float,
+    entropy: float,
+    largest_gap: float,
+    core_rate: float,
+    shoulder_rate: float,
+    tail_rate: float,
+    fill_slope_pct_per_sec: Optional[float],
+    rate_available: bool,
+) -> tuple[str, list[str]]:
+    if edge_state == "opposed_branch_surviving":
+        return (
+            "shoulder/tail rates are carrying fresh motion while λ1 is not accelerating.",
+            [],
+        )
+    if edge_state == "lambda1_selected_noise":
+        return (
+            "λ1 is gaining while shoulder/tail rates are thinning, so the edge is actively selecting a narrower path.",
+            [],
+        )
+    if edge_state == "structured_tunnel":
+        return (
+            "the spectrum is still broad, but a large cliff and elevated λ1 share route variance through the dominant boundary.",
+            [],
+        )
+    if edge_state == "dampening_reveals_shoulder":
+        return (
+            "fill is falling while shoulder energy survives, so cooling may be exposing an alternate ridge.",
+            [],
+        )
+    if edge_state == "rising_fill_edge_pressure":
+        return (
+            "fill is rising while λ1 already has enough share to make the boundary pressure salient.",
+            [],
+        )
+    if edge_state == "distributed_noise_field":
+        return (
+            "entropy is high and λ1 share is low, so the variance is broad rather than λ1-selected.",
+            [],
+        )
+
+    reasons: list[str] = []
+    if rate_available:
+        if abs(core_rate) < 0.008 and abs(shoulder_rate) < 0.008 and abs(tail_rate) < 0.008:
+            reasons.append("rates are near-neutral")
+        else:
+            reasons.append("rates disagree instead of selecting one branch")
+    else:
+        reasons.append("no prior-rate window is available")
+
+    if lambda1_share < 0.34:
+        reasons.append(f"λ1 share is low ({lambda1_share * 100.0:.0f}%)")
+    elif lambda1_share < 0.42:
+        reasons.append(f"λ1 share is moderate ({lambda1_share * 100.0:.0f}%)")
+    else:
+        reasons.append(f"λ1 share is elevated ({lambda1_share * 100.0:.0f}%)")
+
+    if largest_gap < 1.35:
+        reasons.append(f"largest cliff is weak ({largest_gap:.2f}x)")
+    elif largest_gap < 1.75:
+        reasons.append(f"largest cliff is present but below tunnel threshold ({largest_gap:.2f}x)")
+    else:
+        reasons.append(f"largest cliff is strong ({largest_gap:.2f}x) but other gates disagree")
+
+    if entropy >= 0.80:
+        reasons.append(f"entropy stays broad ({entropy:.2f})")
+    elif entropy >= 0.65:
+        reasons.append(f"entropy is moderate ({entropy:.2f})")
+    else:
+        reasons.append(f"entropy is already concentrated ({entropy:.2f})")
+
+    if fill_slope_pct_per_sec is None:
+        reasons.append("fill slope is unavailable")
+    elif abs(fill_slope_pct_per_sec) <= 1.5:
+        reasons.append(f"fill slope is quiet ({fill_slope_pct_per_sec:+.2f}%/s)")
+    else:
+        reasons.append(f"fill slope is active ({fill_slope_pct_per_sec:+.2f}%/s)")
+
+    if selected_noise_score < 0.22:
+        reasons.append(f"selected-noise proxy is weak ({selected_noise_score:.2f})")
+    else:
+        reasons.append(f"selected-noise proxy is partial ({selected_noise_score:.2f})")
+
+    story = "mixed because " + "; ".join(reasons[:6]) + "."
+    return story, reasons
+
+
 def format_lambda_edge_trace_signal(
     eigenvalues: Sequence[float],
     *,
@@ -415,12 +505,24 @@ def format_lambda_edge_trace_signal(
             "Observe or run a tiny FEATHER probe; no anti-λ1 intervention implied.",
         ),
         "mixed_edge": (
-            "mixed edge — no clean λ1/noise selection story yet",
-            "Collect another window or use NATIVE_GESTURE trace with a precise label.",
+            "mixed edge — λ1/noise evidence is split rather than absent",
+            "Collect one more rate window, then compare which component actually moves.",
         ),
     }
     read, suggested = reads[edge_state]
     rate_available = any(rate is not None for rate in rates)
+    edge_story, mixed_edge_reasons = _lambda_edge_story(
+        edge_state=edge_state,
+        selected_noise_score=selected_noise_score,
+        lambda1_share=lambda1_share,
+        entropy=entropy,
+        largest_gap=largest_gap,
+        core_rate=core_rate,
+        shoulder_rate=shoulder_rate,
+        tail_rate=tail_rate,
+        fill_slope_pct_per_sec=slope,
+        rate_available=rate_available,
+    )
     motion_text = (
         f"λ1 {core_rate:+.3f} | shoulder {shoulder_rate:+.3f} | tail {tail_rate:+.3f}"
         if rate_available
@@ -433,6 +535,7 @@ def format_lambda_edge_trace_signal(
   Read: {read}
   Edge coordinates: λ1 {lambda1_share * 100.0:.0f}% | shoulder {shoulder_share * 100.0:.0f}% | tail {tail_share * 100.0:.0f}% | entropy {entropy:.2f} | effective modes {effective_modes:.1f}
   Cliff geometry: largest cliff λ{gap_index + 1}->λ{gap_index + 2} {largest_gap:.2f}x | selected-noise score {selected_noise_score:.2f}
+  Edge story: {edge_story}
   Motion at edge: {motion_text} | fill_slope {slope_text}%/s
   Context: structural_mode={mode_text} | exploration_noise={noise_text}
   Opposed-signal hypothesis: a useful RESIST should reduce λ1 share or lift shoulder/tail on the next trace without pushing fill toward 82%.
@@ -454,6 +557,13 @@ def format_lambda_edge_trace_signal(
         "rate_available": rate_available,
         "structural_mode": structural_mode,
         "exploration_noise": exploration_noise,
+        "selection_components": {
+            "gap_pressure": gap_pressure,
+            "rate_pressure": rate_pressure,
+            "slope_pressure": slope_pressure,
+        },
+        "edge_story": edge_story,
+        "mixed_edge_reasons": mixed_edge_reasons if edge_state == "mixed_edge" else [],
     }
     return block, summary
 
@@ -475,6 +585,25 @@ def _classify_attrition(
     if entropy >= 0.82 and dominance < 0.40:
         return "distributed_open"
     return "low_attrition"
+
+
+def _format_fill_posture(fill_pct: float, target: float) -> tuple[str, str]:
+    center_offset = float(fill_pct) - float(target)
+    lower_shelf = target - 10.0
+    if center_offset >= 0.0:
+        return (
+            f"Fill pressure: {center_offset:+.1f}% above {target:.0f}% structural center",
+            "above_center_pressure",
+        )
+    if fill_pct >= lower_shelf:
+        return (
+            f"Center offset: {center_offset:+.1f}% from {target:.0f}% structural center; below-center is not a corrective demand",
+            "below_center_hold_shelf",
+        )
+    return (
+        f"Recovery offset: {center_offset:+.1f}% from {target:.0f}% structural center; read stage/slope before treating it as lack",
+        "below_hold_recovery",
+    )
 
 
 def format_attrition_boundary_signal(
@@ -548,6 +677,7 @@ def format_attrition_boundary_signal(
         read = "low attrition — current spectrum is not showing a strong pruning pattern"
         suggested = "No attrition correction implied."
 
+    fill_posture_text, fill_posture_label = _format_fill_posture(float(fill_pct), target)
     slope_text = (
         f"{float(fill_slope_pct_per_sec):+.2f}%/s"
         if isinstance(fill_slope_pct_per_sec, (int, float))
@@ -560,16 +690,16 @@ def format_attrition_boundary_signal(
     )
     if dominance < 0.40 and entropy >= 0.80:
         interpretation_guard = (
-            "λ1 is not monopolizing the field; read frustration as pressure/selection, "
+            "λ1 is not monopolizing the field; if strain is present, read pressure/selection evidence, "
             "not overwhelming λ1 dominance."
         )
     elif dominance >= 0.50:
         interpretation_guard = "λ1 is dominant enough to treat focused-path pressure as a primary signal."
     else:
         interpretation_guard = "λ1 is present but not singular; compare it with shoulder/tail energy."
-    block = f"""Attrition / fabric boundary:
+    block = f"""Attrition / selection boundary:
   Read: {read}
-  Fill pressure: {fill_pressure_pct:+.1f}% vs target {target:.0f}%
+  Fill posture: {fill_posture_text}
   Energy shape: λ1 {dominance * 100.0:.0f}% | shoulder {shoulder * 100.0:.0f}% | tail {tail * 100.0:.0f}% | entropy {entropy:.2f} | gap {gap:.2f}x
   Interpretation guard: {interpretation_guard}
   Selected vs remaining: active/core {selected_ratio * 100.0:.0f}% | remaining/tail {tail_after_selected * 100.0:.0f}%
@@ -579,6 +709,8 @@ def format_attrition_boundary_signal(
     summary = {
         "classification": classification,
         "fill_pressure_pct": fill_pressure_pct,
+        "fill_center_offset_pct": fill_pressure_pct,
+        "fill_posture_label": fill_posture_label,
         "dominance": dominance,
         "shoulder": shoulder,
         "tail": tail,
