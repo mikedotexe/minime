@@ -154,6 +154,64 @@ impl ConsciousnessDB {
             CREATE INDEX IF NOT EXISTS idx_journal_session ON sovereignty_journal(session_id);
             CREATE INDEX IF NOT EXISTS idx_journal_type ON sovereignty_journal(entry_type);
             CREATE INDEX IF NOT EXISTS idx_journal_time ON sovereignty_journal(timestamp);
+
+            CREATE TABLE IF NOT EXISTS action_threads (
+                thread_id TEXT PRIMARY KEY,
+                updated_at REAL NOT NULL,
+                payload TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_action_threads_updated
+                ON action_threads(updated_at);
+
+            CREATE TABLE IF NOT EXISTS action_events (
+                action_id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                system TEXT NOT NULL,
+                canonical_action TEXT NOT NULL,
+                route TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_action_events_thread
+                ON action_events(thread_id, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_action_events_action
+                ON action_events(canonical_action, timestamp);
+
+            CREATE TABLE IF NOT EXISTS observation_windows (
+                action_id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                payload TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_observation_windows_thread
+                ON observation_windows(thread_id, timestamp);
+
+            CREATE TABLE IF NOT EXISTS artifact_links (
+                artifact_id TEXT PRIMARY KEY,
+                action_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                payload TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_artifact_links_action
+                ON artifact_links(action_id, timestamp);
+
+            CREATE TABLE IF NOT EXISTS resonance_density_timeline (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                density REAL NOT NULL,
+                containment_score REAL NOT NULL,
+                pressure_risk REAL NOT NULL,
+                quality TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_resonance_density_session
+                ON resonance_density_timeline(session_id, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_resonance_density_quality
+                ON resonance_density_timeline(quality, timestamp);
         "#)?;
 
         // Migration: add geometry columns to esn_metrics (safe to re-run)
@@ -428,6 +486,34 @@ impl ConsciousnessDB {
                 esn_baseline,
                 esn_geom_radius,
                 esn_geom_rel,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Record the typed resonance-density telemetry mirror.
+    pub fn save_resonance_density(
+        &self,
+        session_id: i64,
+        timestamp: f64,
+        density: f32,
+        containment_score: f32,
+        pressure_risk: f32,
+        quality: &str,
+        payload: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"INSERT INTO resonance_density_timeline
+               (session_id, timestamp, density, containment_score, pressure_risk, quality, payload)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+            params![
+                session_id,
+                timestamp,
+                density,
+                containment_score,
+                pressure_risk,
+                quality,
+                payload,
             ],
         )?;
         Ok(())
@@ -731,4 +817,50 @@ pub struct EigenvaluePoint {
     pub spread: f32,
     pub fill_ratio: f32,
     pub phase: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConsciousnessDB;
+
+    #[test]
+    fn saves_resonance_density_mirror() {
+        let db = ConsciousnessDB::open(":memory:").expect("db");
+        let session_id = db
+            .start_session("active", 0.5, "resonance density test")
+            .expect("session");
+        db.save_resonance_density(
+            session_id,
+            12.0,
+            0.64,
+            0.58,
+            0.22,
+            "rich_containment",
+            r#"{"policy":"resonance_density_v1"}"#,
+        )
+        .expect("save resonance density");
+
+        let row: (f32, f32, f32, String, String) = db
+            .conn
+            .query_row(
+                "SELECT density, containment_score, pressure_risk, quality, payload FROM resonance_density_timeline",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("row");
+
+        assert!((row.0 - 0.64).abs() < 1.0e-6);
+        assert!((row.1 - 0.58).abs() < 1.0e-6);
+        assert!((row.2 - 0.22).abs() < 1.0e-6);
+        assert_eq!(row.3, "rich_containment");
+        assert!(row.4.contains("resonance_density_v1"));
+    }
 }

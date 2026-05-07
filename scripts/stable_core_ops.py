@@ -41,6 +41,7 @@ from native_comm import (
     build_spectral_drift_status,
 )
 from spectral_cascade_visuals import render_spectral_cascade_visuals
+from reconvergence_maps import render_bridge_trace, render_reconvergence_map
 
 WORKSPACE_DIR = PROJECT_DIR / "workspace"
 STABLE_CORE_DIR = WORKSPACE_DIR / "stable_core"
@@ -54,6 +55,9 @@ STABLE_CORE_SENSORY_MUTE_PATH = WORKSPACE_DIR / "runtime" / "stable_core_sensory
 FULL_SOVEREIGNTY_SNAPSHOT_DIR = WORKSPACE_DIR / "runtime" / "full_sovereignty_snapshots"
 LINEAGE_CANARY_DIR = WORKSPACE_DIR / "diagnostics" / "lineage_canaries"
 LINEAGE_CANARY_STATUS_PATH = WORKSPACE_DIR / "runtime" / "lineage_canary_status.json"
+RECONVERGENCE_MAP_STATUS_PATH = WORKSPACE_DIR / "runtime" / "reconvergence_map_status.json"
+ESN_ACTIVATION_TRACE_PATH = WORKSPACE_DIR / "runtime" / "esn_activation_trace_v1.json"
+BRIDGE_TRACE_STATUS_PATH = WORKSPACE_DIR / "runtime" / "bridge_trace_status.json"
 FULL_SOVEREIGNTY_SAVEPOINT_DOC = (
     PROJECT_DIR / "docs" / "full_sovereignty_savepoint_status_2026_04_30.md"
 )
@@ -178,7 +182,8 @@ BRIDGE_WRITE_STAGES = {
         "limited_write_require_zero_live_divisors": False,
         "limited_write_require_dampen_inquiry_text": True,
         "limited_write_block_structural_dump_language": True,
-        "limited_write_block_terms_always": True,
+        "limited_write_block_terms_always": False,
+        "limited_write_block_terms_on_rising": False,
         "limited_write_block_terms": [
             "localized gravity",
             "compaction",
@@ -341,8 +346,8 @@ BRIDGE_WRITE_STAGES = {
         "limited_write_peak_fill_max_pct": 78.0,
         "limited_write_allowed_stages": ["hold", "elevated"],
         "limited_write_post_send_eval_secs": 120,
-        "limited_write_adverse_fill_rise_pct": 10.0,
-        "limited_write_adverse_cooldown_secs": 600,
+        "limited_write_adverse_fill_rise_pct": 14.0,
+        "limited_write_adverse_cooldown_secs": 180,
         "limited_write_rollback_target": "bridge_observe_only",
         "limited_write_rollback_fill_pct": 82.0,
         "limited_write_rollback_adverse_count": 2,
@@ -350,7 +355,8 @@ BRIDGE_WRITE_STAGES = {
         "limited_write_require_zero_live_divisors": False,
         "limited_write_require_dampen_inquiry_text": False,
         "limited_write_block_structural_dump_language": False,
-        "limited_write_block_terms_always": True,
+        "limited_write_block_terms_always": False,
+        "limited_write_block_terms_on_rising": False,
         "limited_write_block_terms": [
             "localized gravity",
             "compaction",
@@ -371,6 +377,10 @@ BRIDGE_WRITE_STAGES = {
             "initiate",
             "introspect",
             "experiment",
+            "probe",
+            "gesture",
+            "native_gesture",
+            "perturb",
             "evolve",
             "self_study",
             "research_note",
@@ -435,6 +445,10 @@ BRIDGE_WRITE_STAGES = {
             "initiate",
             "introspect",
             "experiment",
+            "probe",
+            "gesture",
+            "native_gesture",
+            "perturb",
             "evolve",
             "self_study",
             "research_note",
@@ -453,7 +467,7 @@ SENSORY_PRESENCE_PROFILES = {
         "stable_core_sensory_presence_profile": "full_presence_v1",
         "rescue_live_audio_divisor": 12,
         "rescue_live_video_divisor": 12,
-        "rescue_live_intake_stages": ["hold"],
+        "rescue_live_intake_stages": ["hold", "elevated"],
         "clear_semantic_mute": True,
     },
     "muted_v1": {
@@ -522,6 +536,223 @@ def build_bridge_write_status_view(bridge_status: dict[str, Any]) -> dict[str, A
     view["last_block_stale"] = bool(reason) and last_block_active is False
     view["last_block_current_unknown"] = bool(reason) and last_block_active is None
     return view
+
+
+def _fill_budget_block_resolved_by_current_fill(
+    reason: Any,
+    current_fill_pct: Any,
+    *,
+    underfill_pct: float = SAFE_MEMORY_MIN_FILL_PCT,
+    overfill_pct: float = ENGINE_TARGET_MAX_FILL_PCT,
+) -> bool:
+    if not isinstance(reason, str) or "stable-core action budget" not in reason:
+        return False
+    if "fill " not in reason or (
+        " below " not in reason and " exceeds " not in reason
+    ):
+        return False
+    if not isinstance(current_fill_pct, (int, float)):
+        return False
+    fill = float(current_fill_pct)
+    if not math.isfinite(fill):
+        return False
+    return underfill_pct < fill < overfill_pct
+
+
+def build_agency_status_view(
+    agent_status: dict[str, Any],
+    *,
+    current_fill_pct: float | None = None,
+) -> dict[str, Any]:
+    view = dict(agent_status)
+    last_block_active = view.get("last_block_active")
+    last_block_reason = view.get("last_block_reason")
+    current_block_reason = view.get("current_block_reason")
+
+    if last_block_active is True and _fill_budget_block_resolved_by_current_fill(
+        current_block_reason or last_block_reason,
+        current_fill_pct,
+    ):
+        last_block_active = False
+        view["last_block_active"] = False
+        view["current_block_reason"] = None
+        view["health_budget_status"] = "green"
+        view["derived_resolution"] = "current_fill_back_inside_action_budget"
+
+    if last_block_active is True:
+        if current_block_reason is None and last_block_reason:
+            current_block_reason = last_block_reason
+        view["current_block_reason"] = current_block_reason
+        if current_block_reason and view.get("health_budget_status") in (None, "unknown"):
+            view["health_budget_status"] = "blocked"
+    elif last_block_active is False:
+        view["current_block_reason"] = None
+        if view.get("health_budget_status") == "blocked":
+            view["health_budget_status"] = "green"
+    else:
+        view["current_block_reason"] = current_block_reason if current_block_reason else None
+
+    view["last_block_stale"] = bool(last_block_reason) and last_block_active is False
+    view["last_block_current_unknown"] = bool(last_block_reason) and last_block_active is None
+    return view
+
+
+def build_attractor_fatigue_status() -> dict[str, Any]:
+    payload = load_json(WORKSPACE_DIR / "runtime" / "attractor_fatigue_status.json", {})
+    if not isinstance(payload, dict):
+        return {}
+    now = now_unix_s()
+    motifs = payload.get("motifs")
+    active: list[dict[str, Any]] = []
+    if isinstance(motifs, dict):
+        for motif in motifs.values():
+            if not isinstance(motif, dict) or motif.get("status") != "cooling":
+                continue
+            cooldown_until = motif.get("cooldown_until_unix_s")
+            if not isinstance(cooldown_until, (int, float)):
+                continue
+            remaining_s = max(0.0, float(cooldown_until) - now)
+            if remaining_s <= 0.0:
+                continue
+            active.append({
+                "signature": motif.get("signature"),
+                "label": motif.get("label"),
+                "themes": motif.get("themes", []),
+                "cooldown_class": motif.get("cooldown_class", "standard"),
+                "prompt_replay_suppressed": bool(motif.get("prompt_replay_suppressed", False)),
+                "repeat_window_count": motif.get("repeat_window_count"),
+                "cooldown_remaining_s": round(remaining_s, 3),
+                "last_source": motif.get("last_source"),
+                "novel_signal": motif.get("novel_signal"),
+            })
+    active.sort(key=lambda item: item.get("cooldown_remaining_s", 0.0), reverse=True)
+    strong_internal_topology_count = sum(
+        1
+        for motif in active
+        if motif.get("cooldown_class") == "internal_topology"
+    )
+    return {
+        "policy": payload.get("policy", "attractor_fatigue_v2"),
+        "active_count": len(active),
+        "active_motifs": active[:8],
+        "strong_internal_topology_count": strong_internal_topology_count,
+        "memory_decay_control": payload.get("memory_decay_control", {}),
+        "updated_at_unix_s": payload.get("updated_at_unix_s"),
+    }
+
+
+def build_reconvergence_map_status() -> dict[str, Any]:
+    status = load_json(RECONVERGENCE_MAP_STATUS_PATH, {})
+    if not isinstance(status, dict):
+        status = {}
+    trace = load_json(ESN_ACTIVATION_TRACE_PATH, {})
+    if not isinstance(trace, dict):
+        trace = {}
+
+    now_ms = int(time.time() * 1000)
+    trace_updated = trace.get("updated_at_unix_ms")
+    trace_freshness_ms = None
+    if isinstance(trace_updated, (int, float)):
+        trace_freshness_ms = max(0, now_ms - int(trace_updated))
+    trace_frames = trace.get("frames")
+    trace_frame_count = len(trace_frames) if isinstance(trace_frames, list) else 0
+
+    activation_trace = status.get("activation_trace")
+    if not isinstance(activation_trace, dict):
+        activation_trace = {}
+    artifacts = status.get("artifacts")
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+    provenance = status.get("provenance")
+    if not isinstance(provenance, dict):
+        provenance = {}
+    reported_trace_freshness_ms = (
+        trace_freshness_ms
+        if trace_frame_count > 0
+        else activation_trace.get("freshness_ms")
+    )
+
+    return {
+        "status": status.get("status", "unavailable" if not status else None),
+        "created_at": status.get("created_at"),
+        "label": status.get("label"),
+        "artifact_dir": status.get("artifact_dir"),
+        "artifacts": artifacts,
+        "frame_count": activation_trace.get("frame_count", trace_frame_count),
+        "trace_frame_count": trace_frame_count,
+        "reservoir_dim": activation_trace.get("reservoir_dim", trace.get("reservoir_dim")),
+        "trace_path": activation_trace.get("trace_path", str(ESN_ACTIVATION_TRACE_PATH)),
+        "trace_freshness_ms": reported_trace_freshness_ms,
+        "sample_interval_ms": activation_trace.get(
+            "sample_interval_ms",
+            trace.get("sample_interval_ms"),
+        ),
+        "retained_secs": activation_trace.get("retained_secs", trace.get("retained_secs")),
+        "baseline_status": status.get("baseline_status", "unavailable"),
+        "baseline_comparison_available": bool(status.get("baseline_comparison")),
+        "baseline_comparison": status.get("baseline_comparison"),
+        "saved_baseline": status.get("saved_baseline"),
+        "read_only_provenance": {
+            "read_only": provenance.get("read_only", True),
+            "control_payload": provenance.get("control_payload", False),
+            "semantic_payload": provenance.get("semantic_payload", False),
+            "sensory_payload": provenance.get("sensory_payload", False),
+            "esn_mutation": provenance.get("esn_mutation", False),
+            "synthesis_feedback": provenance.get("synthesis_feedback", False),
+        },
+    }
+
+
+def build_bridge_trace_status() -> dict[str, Any]:
+    status = load_json(BRIDGE_TRACE_STATUS_PATH, {})
+    if not isinstance(status, dict):
+        status = {}
+    provenance = status.get("provenance")
+    if not isinstance(provenance, dict):
+        provenance = {}
+    bridge_signal = status.get("bridge_signal")
+    if not isinstance(bridge_signal, dict):
+        bridge_signal = {}
+    return {
+        "status": status.get("status", "unavailable" if not status else None),
+        "policy": status.get("policy"),
+        "created_at": status.get("created_at"),
+        "label": status.get("label"),
+        "mode": status.get("mode"),
+        "mode_source": status.get("mode_source") or bridge_signal.get("mode_source"),
+        "mode6_interpretation": status.get("mode6_interpretation")
+        or bridge_signal.get("mode6_interpretation"),
+        "eigenmode_confirmed": status.get("eigenmode_confirmed")
+        if status.get("eigenmode_confirmed") is not None
+        else bridge_signal.get("eigenmode_confirmed"),
+        "bridge_evidence_level": status.get("bridge_evidence_level")
+        or bridge_signal.get("bridge_evidence_level"),
+        "artifact_dir": status.get("artifact_dir"),
+        "artifacts": status.get("artifacts", {}),
+        "frame_count": status.get("frame_count"),
+        "trace_freshness_ms": status.get("trace_freshness_ms"),
+        "bridge_signal": bridge_signal,
+        "read_only_provenance": {
+            "read_only": provenance.get("read_only", True),
+            "attention_marker_only": provenance.get("attention_marker_only", True),
+            "mode_source": provenance.get("mode_source")
+            or bridge_signal.get("mode_source"),
+            "mode6_interpretation": provenance.get("mode6_interpretation")
+            or bridge_signal.get("mode6_interpretation"),
+            "eigenmode_confirmed": provenance.get(
+                "eigenmode_confirmed",
+                bridge_signal.get("eigenmode_confirmed", False),
+            ),
+            "diagnostic_artifact_write": provenance.get("diagnostic_artifact_write", True),
+            "substrate_write": provenance.get("substrate_write", False),
+            "connection": provenance.get("connection", False),
+            "replication": provenance.get("replication", False),
+            "control_payload": provenance.get("control_payload", False),
+            "semantic_payload": provenance.get("semantic_payload", False),
+            "sensory_payload": provenance.get("sensory_payload", False),
+            "esn_mutation": provenance.get("esn_mutation", False),
+        },
+    }
 
 
 def activate_stable_core(*, notes: str | None = None) -> dict[str, Any]:
@@ -1740,6 +1971,8 @@ def build_native_communication_parity_status() -> dict[str, Any]:
             "gradient-audit",
             "native-parity-status",
             "visualize-cascade --label <label>",
+            "reconvergence-map --label <label>",
+            "bridge-trace --mode m6 --label <label>  # activation lane 6 marker; eigenmode unconfirmed",
             "lane-synopsis --send-inbox",
         ],
         "known_asymmetry": (
@@ -1758,6 +1991,7 @@ def build_status() -> dict[str, Any]:
     bridge_status = load_json(WORKSPACE_DIR / "runtime" / "bridge_limited_write_status.json", {})
     lineage_canary_status = load_json(LINEAGE_CANARY_STATUS_PATH, {})
     agent_status = load_json(WORKSPACE_DIR / "stable_core_agent_status.json", {})
+    attractor_fatigue = build_attractor_fatigue_status()
     camera = load_json(WORKSPACE_DIR / "runtime" / "camera_status.json", {})
     mic = load_json(WORKSPACE_DIR / "runtime" / "mic_status.json", {})
     sensory = build_sensory_fallback_status()
@@ -1775,10 +2009,23 @@ def build_status() -> dict[str, Any]:
     gradient_audit = build_controller_gradient_audit()
     native_gestures = build_native_gesture_status()
     native_parity = build_native_communication_parity_status()
+    reconvergence_map = build_reconvergence_map_status()
+    bridge_trace = build_bridge_trace_status()
     spectral_pressure = load_json(WORKSPACE_DIR / "runtime" / "spectral_pressure_status.json", {})
     cascade_visuals = load_json(
         WORKSPACE_DIR / "runtime" / "spectral_cascade_visual_status.json",
         {},
+    )
+    sensory_active = sensory.get("active") if isinstance(sensory.get("active"), dict) else {}
+    sensory_fallback_reason = (
+        sensory.get("fallback_reason")
+        if isinstance(sensory.get("fallback_reason"), dict)
+        else {}
+    )
+    synthetic_host = (
+        sensory.get("synthetic_host")
+        if isinstance(sensory.get("synthetic_host"), dict)
+        else {}
     )
     stable_core_health = health.get("stable_core") if isinstance(health, dict) else {}
     stable_core_enabled = bool(profile.get("stable_core_enabled"))
@@ -1861,7 +2108,13 @@ def build_status() -> dict[str, Any]:
         "semantic_admission": semantic.get("admission"),
         "stable_core": stable_core_health if isinstance(stable_core_health, dict) else {},
         "agency": effective_agency,
-        "agency_status": agent_status if isinstance(agent_status, dict) else {},
+        "agency_status": build_agency_status_view(
+            agent_status,
+            current_fill_pct=health.get("fill_pct") if isinstance(health, dict) else None,
+        )
+        if isinstance(agent_status, dict)
+        else {},
+        "attractor_fatigue": attractor_fatigue,
         "bridge": build_bridge_write_status_view(bridge_status)
         if isinstance(bridge_status, dict)
         else {},
@@ -1880,6 +2133,8 @@ def build_status() -> dict[str, Any]:
         "native_communication_parity": native_parity,
         "spectral_pressure": spectral_pressure if isinstance(spectral_pressure, dict) else {},
         "spectral_cascade_visuals": cascade_visuals if isinstance(cascade_visuals, dict) else {},
+        "reconvergence_map": reconvergence_map,
+        "bridge_trace": bridge_trace,
         "lineage": {
             "mode": profile.get("checkpoint_lineage_restore_mode", "quarantined"),
             "checkpoint_lineage_enabled": lineage_checkpoint_enabled,
@@ -1925,12 +2180,18 @@ def build_status() -> dict[str, Any]:
                 "healthy": camera.get("healthy"),
                 "connected": camera.get("connected"),
                 "consecutive_failures": camera.get("consecutive_failures"),
+                "active_source": sensory_active.get("video"),
+                "synthetic_host_ready": synthetic_host.get("video_ready"),
+                "fallback_reason": sensory_fallback_reason.get("video"),
             },
             "mic": {
                 "state": mic.get("state"),
                 "healthy": mic.get("healthy"),
                 "connected": mic.get("connected"),
                 "consecutive_failures": mic.get("consecutive_failures"),
+                "active_source": sensory_active.get("audio"),
+                "synthetic_host_ready": synthetic_host.get("audio_ready"),
+                "fallback_reason": sensory_fallback_reason.get("audio"),
             },
         },
         "updated_at_unix_s": now_unix_s(),
@@ -2378,6 +2639,15 @@ def parse_args() -> argparse.Namespace:
     visualize = sub.add_parser("visualize-cascade")
     visualize.add_argument("--limit", type=int, default=240)
     visualize.add_argument("--label")
+    reconvergence = sub.add_parser("reconvergence-map")
+    reconvergence.add_argument("--label")
+    reconvergence.add_argument("--window-secs", type=int, default=180)
+    reconvergence.add_argument("--save-baseline")
+    reconvergence.add_argument("--compare-baseline")
+    bridge_trace = sub.add_parser("bridge-trace")
+    bridge_trace.add_argument("--mode", default="m6")
+    bridge_trace.add_argument("--label")
+    bridge_trace.add_argument("--window-secs", type=int, default=60)
     lane_synopsis = sub.add_parser("lane-synopsis")
     lane_synopsis.add_argument("--send-inbox", action="store_true")
     fingerprint_capture = sub.add_parser("spectral-fingerprint-capture")
@@ -2487,6 +2757,32 @@ def main() -> None:
     elif args.command == "visualize-cascade":
         payload = render_spectral_cascade_visuals(limit=args.limit, label=args.label)
         payload.pop("samples", None)
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    elif args.command == "reconvergence-map":
+        payload = render_reconvergence_map(
+            label=args.label,
+            window_secs=args.window_secs,
+            save_baseline=args.save_baseline,
+            compare_baseline=args.compare_baseline,
+        )
+        activation_trace = payload.get("activation_trace")
+        if isinstance(activation_trace, dict):
+            activation_trace = dict(activation_trace)
+            activation_trace.pop("frames", None)
+            payload["activation_trace"] = activation_trace
+        landscape_artifact = payload.get("landscape_artifact")
+        if isinstance(landscape_artifact, dict):
+            landscape_artifact = dict(landscape_artifact)
+            landscape_artifact.pop("samples", None)
+            payload["landscape_artifact"] = landscape_artifact
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    elif args.command == "bridge-trace":
+        payload = render_bridge_trace(
+            mode=args.mode,
+            label=args.label,
+            window_secs=args.window_secs,
+        )
+        payload.pop("frames", None)
         print(json.dumps(payload, indent=2, sort_keys=True))
     elif args.command == "lane-synopsis":
         if args.send_inbox:

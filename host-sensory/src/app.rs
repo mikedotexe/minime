@@ -1,7 +1,4 @@
-use std::{
-    path::PathBuf,
-    time::Duration,
-};
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
@@ -39,7 +36,10 @@ impl From<SourceModeArg> for SensoryMode {
 }
 
 #[derive(Debug, Clone, Parser)]
-#[command(name = "host-sensory", about = "Host-state A/V fallback producer for minime")]
+#[command(
+    name = "host-sensory",
+    about = "Host-state A/V fallback producer for minime"
+)]
 pub struct Config {
     #[arg(long, value_enum, default_value_t = SourceModeArg::Host)]
     pub mode: SourceModeArg,
@@ -108,9 +108,7 @@ async fn async_main(config: Config) -> Result<()> {
         };
         (safe_seconds * SAMPLE_RATE as f32).round().max(0.0) as usize
     });
-    let mut chunk_interval = tokio::time::interval(Duration::from_millis(
-        chunk_ms,
-    ));
+    let mut chunk_interval = tokio::time::interval(Duration::from_millis(chunk_ms));
     chunk_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let mut next_telemetry_at = tokio::time::Instant::now();
@@ -147,7 +145,8 @@ async fn async_main(config: Config) -> Result<()> {
 
         let desired_legacy = source_state.desired_legacy_synth();
         if !config.offline && desired_legacy != source_state.last_sent_legacy {
-            if let Err(err) = control_socket.send_json(&ControlMsg {
+            if let Err(err) = control_socket
+                .send_json(&ControlMsg {
                     kind: "control",
                     legacy_audio_synth: Some(desired_legacy.0),
                     legacy_video_synth: Some(desired_legacy.1),
@@ -170,7 +169,8 @@ async fn async_main(config: Config) -> Result<()> {
             writer.append_chunk(&audio_chunk.pcm)?;
         }
         if !config.offline && source_state.audio_source == SourceKind::Host {
-            if let Err(err) = audio_socket.send_json(&AudioMsg {
+            if let Err(err) = audio_socket
+                .send_json(&AudioMsg {
                     kind: "audio",
                     features: audio_chunk.features,
                     ts_ms: now_ms(),
@@ -289,28 +289,40 @@ impl SourceState {
         let audio_silence_streak = mic_status
             .as_ref()
             .map_or(u32::MAX, |status| status.silence_streak);
-        let audio_unhealthy = !audio_fresh || audio_silence_streak >= 30;
+        let audio_reported_healthy = mic_status.as_ref().map_or(false, |status| status.healthy);
+        let audio_unhealthy = !audio_fresh || !audio_reported_healthy || audio_silence_streak >= 30;
 
         if self.audio_source == SourceKind::Physical && audio_unhealthy {
             self.audio_source = SourceKind::Host;
             self.audio_reason = if !audio_fresh {
                 "mic heartbeat stale"
+            } else if !audio_reported_healthy {
+                "mic capture unhealthy"
             } else {
                 "mic RMS stayed near silence"
             };
             self.audio_recovery_ready = false;
-        } else if self.audio_source == SourceKind::Host && audio_fresh && audio_good_streak >= 20 {
+        } else if self.audio_source == SourceKind::Host
+            && audio_fresh
+            && audio_reported_healthy
+            && audio_good_streak >= 20
+        {
             self.audio_source = SourceKind::Physical;
             self.audio_reason = "mic heartbeat recovered";
             self.audio_recovery_ready = true;
         } else if self.audio_source == SourceKind::Physical {
             self.audio_reason = "mic healthy";
         }
-        self.audio_physical_healthy = audio_fresh && audio_silence_streak < 30;
+        self.audio_physical_healthy =
+            audio_fresh && audio_reported_healthy && audio_silence_streak < 30;
 
         let video_fresh = camera_status
             .as_ref()
             .map_or(false, |status| now.saturating_sub(status.ts_ms) <= 5_000);
+        let video_reported_healthy = camera_status
+            .as_ref()
+            .map_or(false, |status| status.healthy);
+        let video_available = video_fresh && video_reported_healthy;
         let frame_count = camera_status.as_ref().map(|status| status.frame_count);
         let frame_advanced = match (self.last_camera_frame_count, frame_count) {
             (Some(prev), Some(current)) => current > prev,
@@ -319,14 +331,18 @@ impl SourceState {
         };
         self.last_camera_frame_count = frame_count;
 
-        if self.video_source == SourceKind::Physical && !video_fresh {
+        if self.video_source == SourceKind::Physical && !video_available {
             self.video_source = SourceKind::Host;
-            self.video_reason = "camera heartbeat stale";
+            self.video_reason = if !video_fresh {
+                "camera heartbeat stale"
+            } else {
+                "camera capture unhealthy"
+            };
             self.video_recovery_frames = 0;
         } else if self.video_source == SourceKind::Host {
-            if video_fresh && frame_advanced {
+            if video_available && frame_advanced {
                 self.video_recovery_frames = self.video_recovery_frames.saturating_add(1);
-            } else if !video_fresh {
+            } else if !video_available {
                 self.video_recovery_frames = 0;
             }
             if self.video_recovery_frames >= 3 {
@@ -337,7 +353,7 @@ impl SourceState {
         } else {
             self.video_reason = "camera healthy";
         }
-        self.video_physical_healthy = video_fresh;
+        self.video_physical_healthy = video_available;
     }
 
     fn desired_legacy_synth(&self) -> (bool, bool) {
@@ -457,8 +473,8 @@ impl BinarySocket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use crate::status::{write_json_atomic, CameraStatus, MicStatus, SourceKind};
+    use std::path::Path;
 
     fn runtime_paths(base: &Path) -> RuntimePaths {
         RuntimePaths::new(base)
@@ -484,6 +500,53 @@ mod tests {
         .unwrap();
         state.refresh(SensoryMode::Auto, &paths);
         assert_eq!(state.audio_source, SourceKind::Host);
+    }
+
+    #[test]
+    fn auto_mode_switches_audio_to_host_on_unhealthy_status() {
+        let temp = tempfile_dir("audio-unhealthy");
+        let paths = runtime_paths(&temp);
+        paths.ensure().unwrap();
+        let mut state = SourceState::new(SensoryMode::Auto);
+        write_json_atomic(
+            &paths.mic_status_path,
+            &MicStatus {
+                ts_ms: now_ms(),
+                rms: 0.2,
+                silence_streak: 0,
+                good_streak: 40,
+                chunk_count: 10,
+                healthy: false,
+            },
+        )
+        .unwrap();
+        state.refresh(SensoryMode::Auto, &paths);
+
+        assert_eq!(state.audio_source, SourceKind::Host);
+        assert!(!state.audio_physical_healthy);
+        assert_eq!(state.audio_reason, "mic capture unhealthy");
+    }
+
+    #[test]
+    fn auto_mode_switches_video_to_host_on_unhealthy_status() {
+        let temp = tempfile_dir("video-unhealthy");
+        let paths = runtime_paths(&temp);
+        paths.ensure().unwrap();
+        let mut state = SourceState::new(SensoryMode::Auto);
+        write_json_atomic(
+            &paths.camera_status_path,
+            &CameraStatus {
+                ts_ms: now_ms(),
+                frame_count: 10,
+                healthy: false,
+            },
+        )
+        .unwrap();
+        state.refresh(SensoryMode::Auto, &paths);
+
+        assert_eq!(state.video_source, SourceKind::Host);
+        assert!(!state.video_physical_healthy);
+        assert_eq!(state.video_reason, "camera capture unhealthy");
     }
 
     #[test]

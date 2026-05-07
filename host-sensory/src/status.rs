@@ -132,8 +132,13 @@ where
     let bytes = serde_json::to_vec_pretty(value).context("failed to serialize status json")?;
     fs::write(&temp_path, bytes)
         .with_context(|| format!("failed to write temp file {}", temp_path.display()))?;
-    fs::rename(&temp_path, path)
-        .with_context(|| format!("failed to rename {} to {}", temp_path.display(), path.display()))
+    fs::rename(&temp_path, path).with_context(|| {
+        format!(
+            "failed to rename {} to {}",
+            temp_path.display(),
+            path.display()
+        )
+    })
 }
 
 #[cfg(test)]
@@ -143,7 +148,10 @@ mod tests {
     #[test]
     fn runtime_paths_use_workspace_runtime_dir() {
         let paths = RuntimePaths::new(Path::new("/tmp/minime-workspace"));
-        assert_eq!(paths.runtime_dir, PathBuf::from("/tmp/minime-workspace/runtime"));
+        assert_eq!(
+            paths.runtime_dir,
+            PathBuf::from("/tmp/minime-workspace/runtime")
+        );
         assert_eq!(
             paths.host_frame_path,
             PathBuf::from("/tmp/minime-workspace/runtime/host_frame.jpg")

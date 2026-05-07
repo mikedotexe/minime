@@ -1346,6 +1346,16 @@ impl ESN {
         self.x[..n.min(self.res_size)].to_vec()
     }
 
+    /// Deterministic compact fingerprint of the live reservoir state.
+    pub fn state_fingerprint_16(&self) -> [f32; 16] {
+        state_fingerprint_16_from_slice(&self.x)
+    }
+
+    /// RMS norm of the live reservoir state.
+    pub fn state_rms(&self) -> f32 {
+        state_rms_from_slice(&self.x)
+    }
+
     /// Get current top eigenvalue (spectral pressure)
     pub fn get_eig(&self) -> f32 {
         self.sr.eig()
@@ -1506,4 +1516,51 @@ fn vv_dot(a: &[f32], b: &[f32]) -> f32 {
 
 fn l2_norm(x: &[f32]) -> f32 {
     (x.iter().map(|v| v * v).sum::<f32>()).sqrt().max(1e-12)
+}
+
+pub fn state_rms_from_slice(x: &[f32]) -> f32 {
+    if x.is_empty() {
+        return 0.0;
+    }
+    (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt()
+}
+
+pub fn state_fingerprint_16_from_slice(x: &[f32]) -> [f32; 16] {
+    let mut out = [0.0f32; 16];
+    if x.is_empty() {
+        return out;
+    }
+    let scale = (1.0 / x.len() as f32).sqrt();
+    for (dim, slot) in out.iter_mut().enumerate() {
+        let mut acc = 0.0f32;
+        for (idx, value) in x.iter().enumerate() {
+            let phase =
+                ((idx + 1) as f32 * (dim + 3) as f32 * 0.137) + ((idx ^ (dim * 31)) as f32 * 0.011);
+            let weight = (phase.sin() + 0.5 * phase.cos()).clamp(-1.5, 1.5);
+            acc += *value * weight;
+        }
+        *slot = (acc * scale).tanh();
+    }
+    out
+}
+
+#[cfg(test)]
+mod attractor_fingerprint_tests {
+    use super::{state_fingerprint_16_from_slice, state_rms_from_slice};
+
+    #[test]
+    fn state_fingerprint_16_is_deterministic_bounded_and_sensitive() {
+        let first_state = vec![0.25f32; 128];
+        let mut second_state = first_state.clone();
+        second_state[17] = -0.5;
+        let first = state_fingerprint_16_from_slice(&first_state);
+        let repeated = state_fingerprint_16_from_slice(&first_state);
+        let second = state_fingerprint_16_from_slice(&second_state);
+
+        assert_eq!(first.len(), 16);
+        assert_eq!(first, repeated);
+        assert_ne!(first, second);
+        assert!(first.iter().all(|value| value.abs() <= 1.0));
+        assert!(state_rms_from_slice(&first_state) > 0.0);
+    }
 }

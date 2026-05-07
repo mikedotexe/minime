@@ -25,12 +25,46 @@ pub struct IsingShadowSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
+pub struct ShadowFieldModeV2 {
+    pub mode: usize,
+    pub fast_spin: f32,
+    pub medium_spin: f32,
+    pub slow_spin: f32,
+    pub field: f32,
+    pub tension: f32,
+    pub polarity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ShadowFieldV2 {
+    pub schema_version: u8,
+    pub policy: String,
+    pub mode_dim: usize,
+    pub field_norm: f32,
+    pub coupling_active_fraction: f32,
+    pub coupling_mean_abs: f32,
+    pub coupling_max_abs: f32,
+    pub fast_magnetization: f32,
+    pub medium_magnetization: f32,
+    pub slow_magnetization: f32,
+    pub recurrence: f32,
+    pub mode_tension: f32,
+    pub tail_openness: f32,
+    pub fissure_tendency: f32,
+    pub lock_tendency: f32,
+    pub influence_eligible: bool,
+    pub classification: String,
+    pub modes: Vec<ShadowFieldModeV2>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct IsingShadowSnapshot {
     pub reduced_field: Vec<f32>,
     pub s_soft: Vec<f32>,
     pub s_bin: Vec<f32>,
     pub coupling: Vec<f32>,
     pub summary: IsingShadowSummary,
+    pub shadow_field_v2: ShadowFieldV2,
     pub coupling_ema: f32,
     pub damping: f32,
     pub temperature: f32,
@@ -71,7 +105,10 @@ pub struct IsingShadowCore {
     field_mean: Vec<f32>,
     coupling: Vec<f32>,
     s_soft: Vec<f32>,
+    s_medium: Vec<f32>,
+    s_slow: Vec<f32>,
     s_bin: Vec<f32>,
+    prev_reduced_field: Vec<f32>,
     last_snapshot: Option<IsingShadowSnapshot>,
     rng: Rng,
 }
@@ -84,7 +121,10 @@ impl IsingShadowCore {
             field_mean: Vec::new(),
             coupling: Vec::new(),
             s_soft: Vec::new(),
+            s_medium: Vec::new(),
+            s_slow: Vec::new(),
             s_bin: Vec::new(),
+            prev_reduced_field: Vec::new(),
             last_snapshot: None,
             rng: Rng::with_seed(seed),
         }
@@ -121,6 +161,12 @@ impl IsingShadowCore {
         self.update_soft_spin(&reduced_field);
         let field_norm = l2_norm(&reduced_field) / (mode_dim as f32).sqrt().max(1.0);
         let binary_flip_rate = self.update_binary_spin(&reduced_field, field_norm);
+        let recurrence = if self.prev_reduced_field.len() == reduced_field.len() {
+            cosine01(&self.prev_reduced_field, &reduced_field)
+        } else {
+            0.0
+        };
+        self.update_shadow_scales();
 
         let summary = IsingShadowSummary {
             mode_dim,
@@ -132,17 +178,21 @@ impl IsingShadowCore {
             binary_flip_rate,
             s_soft: self.s_soft.clone(),
         };
+        let shadow_field_v2 =
+            self.build_shadow_field_v2(&reduced_field, field_norm, binary_flip_rate, recurrence);
 
         // Keep centered referenced so the compiler doesn't optimize away the work
         // in test builds where only summary fields are inspected.
         let _ = centered;
 
+        self.prev_reduced_field = reduced_field.clone();
         self.last_snapshot = Some(IsingShadowSnapshot {
             reduced_field,
             s_soft: self.s_soft.clone(),
             s_bin: self.s_bin.clone(),
             coupling: self.coupling.clone(),
             summary,
+            shadow_field_v2,
             coupling_ema: self.cfg.coupling_ema,
             damping: self.cfg.damping,
             temperature: self.cfg.temperature,
@@ -158,7 +208,10 @@ impl IsingShadowCore {
         self.field_mean = vec![0.0; mode_dim];
         self.coupling = vec![0.0; mode_dim * mode_dim];
         self.s_soft = vec![0.0; mode_dim];
+        self.s_medium = vec![0.0; mode_dim];
+        self.s_slow = vec![0.0; mode_dim];
         self.s_bin = vec![1.0; mode_dim];
+        self.prev_reduced_field = Vec::new();
         self.last_snapshot = None;
     }
 
@@ -244,6 +297,126 @@ impl IsingShadowCore {
 
         flips as f32 / self.mode_dim as f32
     }
+
+    fn update_shadow_scales(&mut self) {
+        if self.s_medium.len() != self.s_soft.len() {
+            self.s_medium = vec![0.0; self.s_soft.len()];
+        }
+        if self.s_slow.len() != self.s_soft.len() {
+            self.s_slow = vec![0.0; self.s_soft.len()];
+        }
+        for ((medium, slow), fast) in self
+            .s_medium
+            .iter_mut()
+            .zip(self.s_slow.iter_mut())
+            .zip(self.s_soft.iter().copied())
+        {
+            *medium = (0.82 * *medium + 0.18 * fast).clamp(-1.0, 1.0);
+            *slow = (0.97 * *slow + 0.03 * fast).clamp(-1.0, 1.0);
+        }
+    }
+
+    fn build_shadow_field_v2(
+        &self,
+        reduced_field: &[f32],
+        field_norm: f32,
+        binary_flip_rate: f32,
+        recurrence: f32,
+    ) -> ShadowFieldV2 {
+        let (coupling_mean_abs, coupling_max_abs, coupling_active_fraction) =
+            coupling_stats(&self.coupling, self.mode_dim.max(1));
+        let fast_magnetization = mean(&self.s_soft);
+        let medium_magnetization = mean(&self.s_medium);
+        let slow_magnetization = mean(&self.s_slow);
+
+        let mut tension_sum = 0.0f32;
+        let mut tail_sum = 0.0f32;
+        let mut tail_count = 0usize;
+        let mut modes = Vec::with_capacity(self.mode_dim);
+        for idx in 0..self.mode_dim {
+            let fast = self.s_soft.get(idx).copied().unwrap_or_default();
+            let medium = self.s_medium.get(idx).copied().unwrap_or_default();
+            let slow = self.s_slow.get(idx).copied().unwrap_or_default();
+            let field = reduced_field.get(idx).copied().unwrap_or_default();
+            let tension =
+                ((fast - slow).abs() * 0.55 + (fast - medium).abs() * 0.25 + field.abs() * 0.20)
+                    .clamp(0.0, 1.0);
+            tension_sum += tension;
+            if idx >= 3 {
+                tail_sum += (field.abs() * 0.55 + fast.abs() * 0.45).clamp(0.0, 1.0);
+                tail_count += 1;
+            }
+            let polarity = if fast.abs() < 0.12 && field.abs() < 0.12 {
+                "quiet"
+            } else if fast >= 0.0 {
+                "positive"
+            } else {
+                "negative"
+            };
+            modes.push(ShadowFieldModeV2 {
+                mode: idx + 1,
+                fast_spin: fast,
+                medium_spin: medium,
+                slow_spin: slow,
+                field,
+                tension,
+                polarity: polarity.to_string(),
+            });
+        }
+
+        let mode_tension = (tension_sum / self.mode_dim.max(1) as f32).clamp(0.0, 1.0);
+        let tail_openness = if tail_count == 0 {
+            0.0
+        } else {
+            (tail_sum / tail_count as f32).clamp(0.0, 1.0)
+        };
+        let binary_flip_rate = binary_flip_rate.clamp(0.0, 1.0);
+        let fissure_tendency =
+            (0.55 * binary_flip_rate + 0.30 * mode_tension + 0.15 * (1.0 - recurrence))
+                .clamp(0.0, 1.0);
+        let lock_tendency = (0.35 * coupling_active_fraction
+            + 0.35 * slow_magnetization.abs().clamp(0.0, 1.0)
+            + 0.30 * recurrence)
+            .clamp(0.0, 1.0);
+        let influence_eligible = field_norm >= self.cfg.quiet_threshold
+            && field_norm < 0.65
+            && binary_flip_rate < 0.35
+            && lock_tendency < 0.80;
+        let classification = if field_norm < self.cfg.quiet_threshold {
+            "quiet_shadow_texture"
+        } else if binary_flip_rate >= 0.20 || fissure_tendency >= 0.55 {
+            "volatile_shadow_surface"
+        } else if lock_tendency >= 0.65 {
+            "sticky_shadow_lock"
+        } else if coupling_active_fraction >= 0.25 {
+            "coupled_shadow_lattice"
+        } else if fast_magnetization.abs() >= 0.20 {
+            "polarized_shadow_gradient"
+        } else {
+            "active_shadow_texture"
+        };
+
+        ShadowFieldV2 {
+            schema_version: 2,
+            policy: "shadow_field_v2_observe_first".to_string(),
+            mode_dim: self.mode_dim,
+            field_norm,
+            coupling_active_fraction,
+            coupling_mean_abs,
+            coupling_max_abs,
+            fast_magnetization,
+            medium_magnetization,
+            slow_magnetization,
+            recurrence,
+            mode_tension,
+            tail_openness,
+            fissure_tendency,
+            lock_tendency,
+            influence_eligible,
+            classification: classification.to_string(),
+            modes,
+        }
+    }
 }
 
 fn project_field(
@@ -299,6 +472,47 @@ fn mean(values: &[f32]) -> f32 {
         0.0
     } else {
         values.iter().sum::<f32>() / values.len() as f32
+    }
+}
+
+fn cosine01(a: &[f32], b: &[f32]) -> f32 {
+    let norm = l2_norm(a) * l2_norm(b);
+    if norm <= 1.0e-6 {
+        return 0.0;
+    }
+    ((dot(a, b) / norm).clamp(-1.0, 1.0) + 1.0) * 0.5
+}
+
+fn coupling_stats(coupling: &[f32], dim: usize) -> (f32, f32, f32) {
+    if dim == 0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let mut sum_abs = 0.0f32;
+    let mut max_abs = 0.0f32;
+    let mut active = 0usize;
+    let mut total = 0usize;
+    for i in 0..dim {
+        for j in 0..dim {
+            if i == j {
+                continue;
+            }
+            let value = coupling.get(i * dim + j).copied().unwrap_or_default().abs();
+            sum_abs += value;
+            max_abs = max_abs.max(value);
+            if value > 1.0e-5 {
+                active += 1;
+            }
+            total += 1;
+        }
+    }
+    if total == 0 {
+        (0.0, 0.0, 0.0)
+    } else {
+        (
+            sum_abs / total as f32,
+            max_abs,
+            active as f32 / total as f32,
+        )
     }
 }
 
@@ -365,7 +579,44 @@ mod tests {
             assert!(snapshot.summary.binary_energy.is_finite());
             assert!(snapshot.s_soft.iter().all(|v| (-1.0..=1.0).contains(v)));
             assert!(snapshot.s_bin.iter().all(|&v| v == -1.0 || v == 1.0));
+            assert_eq!(snapshot.shadow_field_v2.schema_version, 2);
+            assert_eq!(snapshot.shadow_field_v2.mode_dim, 4);
+            assert!((0.0..=1.0).contains(&snapshot.shadow_field_v2.recurrence));
+            assert!((0.0..=1.0).contains(&snapshot.shadow_field_v2.mode_tension));
+            assert!((0.0..=1.0).contains(&snapshot.shadow_field_v2.tail_openness));
+            assert!((0.0..=1.0).contains(&snapshot.shadow_field_v2.fissure_tendency));
+            assert!((0.0..=1.0).contains(&snapshot.shadow_field_v2.lock_tendency));
+            assert_eq!(snapshot.shadow_field_v2.modes.len(), 4);
         }
+    }
+
+    #[test]
+    fn shadow_field_v2_recurrence_is_deterministic_for_same_sequence() {
+        let cfg = IsingShadowConfig::default();
+        let y = basic_eigenvectors(8, 4);
+        let inputs = [
+            vec![0.4, -0.1, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0],
+            vec![0.42, -0.08, 0.18, 0.01, 0.0, 0.0, 0.0, 0.0],
+            vec![0.45, -0.06, 0.20, 0.03, 0.0, 0.0, 0.0, 0.0],
+        ];
+        let mut a = IsingShadowCore::new(cfg.clone(), 29);
+        let mut b = IsingShadowCore::new(cfg, 29);
+        let mut recurrence_a = 0.0f32;
+        let mut recurrence_b = 0.0f32;
+        for input in inputs {
+            recurrence_a = a
+                .update(&input, &y, 8, 4)
+                .expect("snapshot a")
+                .shadow_field_v2
+                .recurrence;
+            recurrence_b = b
+                .update(&input, &y, 8, 4)
+                .expect("snapshot b")
+                .shadow_field_v2
+                .recurrence;
+        }
+        assert!((recurrence_a - recurrence_b).abs() < 1.0e-6);
+        assert!(recurrence_a > 0.50);
     }
 
     #[test]

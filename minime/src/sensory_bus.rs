@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 use parking_lot::Mutex;
 use rand::{rngs::SmallRng, Rng, SeedableRng};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
     sync::Arc,
@@ -18,6 +19,16 @@ pub const LLAVA_DIM: usize = 48;
 pub const Z_DIM: usize = VIDEO_DIM + AUDIO_DIM + AUX_DIM + LLAVA_DIM;
 pub const DEFAULT_QUEUE_CAP: usize = 1024;
 pub const DEFAULT_BATCH_MAX: usize = 16;
+pub const ATTRACTOR_PULSE_MAX_ABS_CAP: f32 = 0.08;
+pub const ATTRACTOR_PULSE_DEFAULT_MAX_ABS: f32 = 0.045;
+pub const ATTRACTOR_PULSE_DEFAULT_DURATION_TICKS: u32 = 36;
+pub const ATTRACTOR_PULSE_MAX_DURATION_TICKS: u32 = 96;
+pub const ATTRACTOR_PULSE_DEFAULT_DECAY_TICKS: u32 = 12;
+pub const SHADOW_INFLUENCE_MAX_ABS_CAP: f32 = 0.025;
+pub const SHADOW_INFLUENCE_DEFAULT_MAX_ABS: f32 = 0.018;
+pub const SHADOW_INFLUENCE_DEFAULT_DURATION_TICKS: u32 = 24;
+pub const SHADOW_INFLUENCE_MAX_DURATION_TICKS: u32 = 48;
+pub const SHADOW_INFLUENCE_DEFAULT_DECAY_TICKS: u32 = 12;
 const STALE_AV_MS: u64 = 2_000;
 /// Base semantic decay window. Self-study 2026-03-26T17:25: "Perhaps a
 /// dynamic STALE_SEMANTIC_MS value, reacting to the overall covariance of
@@ -152,6 +163,195 @@ pub struct SampleMeta {
     pub semantic_stale_ms: u64,
     pub semantic_input_energy: f32,
     pub semantic_input_active: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AttractorPulseRequest {
+    pub intent_id: String,
+    pub label: String,
+    pub command: String,
+    #[serde(default)]
+    pub stage: Option<String>,
+    #[serde(default)]
+    pub features: Vec<f32>,
+    #[serde(default)]
+    pub max_abs: Option<f32>,
+    #[serde(default)]
+    pub duration_ticks: Option<u32>,
+    #[serde(default)]
+    pub decay_ticks: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct AttractorPulseStatus {
+    pub policy: &'static str,
+    pub active: bool,
+    pub intent_id: Option<String>,
+    pub label: Option<String>,
+    pub command: Option<String>,
+    pub stage: Option<String>,
+    pub remaining_ticks: u32,
+    pub duration_ticks: u32,
+    pub decay_ticks: u32,
+    pub release_ticks_remaining: u32,
+    pub max_abs: f32,
+    pub applied_rms: f32,
+    pub applied_max_abs: f32,
+    pub total_applied_ticks: u64,
+    pub last_event: Option<String>,
+    pub last_block_reason: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct AttractorPulseState {
+    intent_id: String,
+    label: String,
+    command: String,
+    stage: String,
+    features: [f32; Z_DIM],
+    max_abs: f32,
+    remaining_ticks: u32,
+    duration_ticks: u32,
+    decay_ticks: u32,
+    release_ticks_remaining: u32,
+    releasing: bool,
+    total_applied_ticks: u64,
+    applied_rms: f32,
+    applied_max_abs: f32,
+}
+
+#[derive(Clone, Debug)]
+struct AttractorPulseSlot {
+    active: Option<AttractorPulseState>,
+    status: AttractorPulseStatus,
+}
+
+impl Default for AttractorPulseSlot {
+    fn default() -> Self {
+        Self {
+            active: None,
+            status: AttractorPulseStatus {
+                policy: "main_esn_attractor_pulse_v1",
+                ..AttractorPulseStatus::default()
+            },
+        }
+    }
+}
+
+fn normalized_attractor_pulse_features(features: &[f32], max_abs: f32) -> [f32; Z_DIM] {
+    let mut out = [0.0f32; Z_DIM];
+    let cap = max_abs.clamp(0.0, ATTRACTOR_PULSE_MAX_ABS_CAP);
+    for (dst, src) in out.iter_mut().zip(features.iter().take(Z_DIM)) {
+        *dst = if src.is_finite() {
+            src.clamp(-cap, cap)
+        } else {
+            0.0
+        };
+    }
+    out
+}
+
+fn pulse_rms_and_max(features: &[f32]) -> (f32, f32) {
+    if features.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mut sum_sq = 0.0f32;
+    let mut max_abs = 0.0f32;
+    for value in features {
+        sum_sq += value * value;
+        max_abs = max_abs.max(value.abs());
+    }
+    ((sum_sq / features.len() as f32).sqrt(), max_abs)
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ShadowInfluenceRequest {
+    pub intent_id: String,
+    pub label: String,
+    pub command: String,
+    #[serde(default)]
+    pub stage: Option<String>,
+    #[serde(default)]
+    pub features: Vec<f32>,
+    #[serde(default)]
+    pub max_abs: Option<f32>,
+    #[serde(default)]
+    pub duration_ticks: Option<u32>,
+    #[serde(default)]
+    pub decay_ticks: Option<u32>,
+    #[serde(default)]
+    pub basis: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ShadowInfluenceStatus {
+    pub policy: &'static str,
+    pub active: bool,
+    pub intent_id: Option<String>,
+    pub label: Option<String>,
+    pub command: Option<String>,
+    pub stage: Option<String>,
+    pub basis: Option<String>,
+    pub remaining_ticks: u32,
+    pub duration_ticks: u32,
+    pub decay_ticks: u32,
+    pub release_ticks_remaining: u32,
+    pub max_abs: f32,
+    pub applied_rms: f32,
+    pub applied_max_abs: f32,
+    pub total_applied_ticks: u64,
+    pub last_event: Option<String>,
+    pub last_block_reason: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ShadowInfluenceState {
+    intent_id: String,
+    label: String,
+    command: String,
+    stage: String,
+    basis: Option<String>,
+    features: [f32; Z_DIM],
+    max_abs: f32,
+    remaining_ticks: u32,
+    duration_ticks: u32,
+    decay_ticks: u32,
+    release_ticks_remaining: u32,
+    releasing: bool,
+    total_applied_ticks: u64,
+    applied_rms: f32,
+    applied_max_abs: f32,
+}
+
+#[derive(Clone, Debug)]
+struct ShadowInfluenceSlot {
+    active: Option<ShadowInfluenceState>,
+    status: ShadowInfluenceStatus,
+}
+
+impl Default for ShadowInfluenceSlot {
+    fn default() -> Self {
+        Self {
+            active: None,
+            status: ShadowInfluenceStatus {
+                policy: "shadow_influence_v1",
+                ..ShadowInfluenceStatus::default()
+            },
+        }
+    }
+}
+
+fn normalized_shadow_influence_features(features: &[f32], max_abs: f32) -> [f32; Z_DIM] {
+    let mut out = [0.0f32; Z_DIM];
+    let cap = max_abs.clamp(0.0, SHADOW_INFLUENCE_MAX_ABS_CAP);
+    for (dst, src) in out.iter_mut().zip(features.iter().take(Z_DIM)) {
+        *dst = if src.is_finite() {
+            src.clamp(-cap, cap)
+        } else {
+            0.0
+        };
+    }
+    out
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -431,6 +631,8 @@ pub struct SensoryBus {
     pi_kp: Mutex<f32>,
     pi_ki: Mutex<f32>,
     pi_max_step: Mutex<f32>,
+    shadow_influence: Mutex<ShadowInfluenceSlot>,
+    attractor_pulse: Mutex<AttractorPulseSlot>,
 }
 impl SensoryBus {
     pub fn new(queue_cap: usize, batch_max: usize, seed: u64) -> Arc<Self> {
@@ -497,6 +699,8 @@ impl SensoryBus {
             pi_kp: Mutex::new(0.75),
             pi_ki: Mutex::new(0.03),
             pi_max_step: Mutex::new(0.055),
+            shadow_influence: Mutex::new(ShadowInfluenceSlot::default()),
+            attractor_pulse: Mutex::new(AttractorPulseSlot::default()),
         })
     }
 
@@ -850,6 +1054,434 @@ impl SensoryBus {
         }
     }
 
+    pub fn receive_shadow_influence(
+        &self,
+        request: ShadowInfluenceRequest,
+        hard_recovery_reset: bool,
+        attractor_pulse_active: bool,
+    ) -> ShadowInfluenceStatus {
+        let mut slot = self.shadow_influence.lock();
+        let command = request.command.trim().to_ascii_lowercase();
+        let label = request.label.trim().to_string();
+        let intent_id = request.intent_id.trim().to_string();
+        let stage = request
+            .stage
+            .unwrap_or_else(|| "live".to_string())
+            .trim()
+            .to_ascii_lowercase();
+        let basis = request.basis.as_ref().map(|value| value.trim().to_string());
+
+        if command == "release" {
+            if let Some(active) = slot.active.as_mut() {
+                active.command = "release".to_string();
+                active.stage = stage.clone();
+                active.releasing = true;
+                active.decay_ticks = request
+                    .decay_ticks
+                    .unwrap_or(SHADOW_INFLUENCE_DEFAULT_DECAY_TICKS)
+                    .clamp(1, SHADOW_INFLUENCE_MAX_DURATION_TICKS);
+                active.release_ticks_remaining = active.decay_ticks;
+                active.remaining_ticks = active.remaining_ticks.min(active.decay_ticks);
+                slot.status.last_event = Some("release_started".to_string());
+                slot.status.last_block_reason = None;
+            } else {
+                slot.status.last_event = Some("release_without_active_influence".to_string());
+                slot.status.last_block_reason = None;
+            }
+            Self::refresh_shadow_influence_status(&mut slot);
+            return slot.status.clone();
+        }
+
+        if hard_recovery_reset {
+            slot.active = None;
+            slot.status.last_event = Some("apply_blocked".to_string());
+            slot.status.last_block_reason = Some("hard_recovery_reset".to_string());
+            Self::refresh_shadow_influence_status(&mut slot);
+            return slot.status.clone();
+        }
+
+        if attractor_pulse_active {
+            slot.status.last_event = Some("apply_blocked".to_string());
+            slot.status.last_block_reason = Some("attractor_pulse_active".to_string());
+            Self::refresh_shadow_influence_status(&mut slot);
+            return slot.status.clone();
+        }
+
+        if slot.active.is_some() {
+            slot.status.last_event = Some("apply_blocked".to_string());
+            slot.status.last_block_reason = Some("shadow_influence_active".to_string());
+            Self::refresh_shadow_influence_status(&mut slot);
+            return slot.status.clone();
+        }
+
+        let max_abs = request
+            .max_abs
+            .unwrap_or(SHADOW_INFLUENCE_DEFAULT_MAX_ABS)
+            .clamp(0.0, SHADOW_INFLUENCE_MAX_ABS_CAP);
+        let duration_ticks = request
+            .duration_ticks
+            .unwrap_or(SHADOW_INFLUENCE_DEFAULT_DURATION_TICKS)
+            .clamp(1, SHADOW_INFLUENCE_MAX_DURATION_TICKS);
+        let decay_ticks = request
+            .decay_ticks
+            .unwrap_or(SHADOW_INFLUENCE_DEFAULT_DECAY_TICKS)
+            .clamp(1, SHADOW_INFLUENCE_MAX_DURATION_TICKS);
+        let features = normalized_shadow_influence_features(&request.features, max_abs);
+        slot.active = Some(ShadowInfluenceState {
+            intent_id,
+            label,
+            command,
+            stage,
+            basis,
+            features,
+            max_abs,
+            remaining_ticks: duration_ticks,
+            duration_ticks,
+            decay_ticks,
+            release_ticks_remaining: 0,
+            releasing: false,
+            total_applied_ticks: 0,
+            applied_rms: 0.0,
+            applied_max_abs: 0.0,
+        });
+        slot.status.last_event = Some("apply_accepted".to_string());
+        slot.status.last_block_reason = None;
+        Self::refresh_shadow_influence_status(&mut slot);
+        slot.status.clone()
+    }
+
+    pub fn apply_shadow_influence_to_z(
+        &self,
+        z: &mut [f32; Z_DIM],
+        fill_pct: f32,
+        discharge_active: bool,
+        hard_recovery_reset: bool,
+        attractor_pulse_active: bool,
+    ) -> ShadowInfluenceStatus {
+        let mut slot = self.shadow_influence.lock();
+        let Some(active_releasing) = slot.active.as_ref().map(|active| active.releasing) else {
+            Self::refresh_shadow_influence_status(&mut slot);
+            return slot.status.clone();
+        };
+
+        let unsafe_reason = if !active_releasing && hard_recovery_reset {
+            Some("hard_recovery_reset")
+        } else if !active_releasing && discharge_active {
+            Some("discharge")
+        } else if !active_releasing && fill_pct.is_finite() && fill_pct < 58.0 {
+            Some("low_fill")
+        } else if !active_releasing && fill_pct.is_finite() && fill_pct >= 85.0 {
+            Some("overbright_fill")
+        } else if !active_releasing && attractor_pulse_active {
+            Some("attractor_pulse_active")
+        } else {
+            None
+        };
+        if let Some(reason) = unsafe_reason {
+            slot.status.last_event = Some("apply_suspended".to_string());
+            slot.status.last_block_reason = Some(reason.to_string());
+            Self::refresh_shadow_influence_status(&mut slot);
+            return slot.status.clone();
+        }
+
+        let (event, finished) = {
+            let active = slot
+                .active
+                .as_mut()
+                .expect("active shadow influence exists after early return");
+            let gain = if active.releasing {
+                active.release_ticks_remaining as f32 / active.decay_ticks.max(1) as f32
+            } else {
+                1.0
+            }
+            .clamp(0.0, 1.0);
+            let mut applied = [0.0f32; Z_DIM];
+            for (idx, value) in active.features.iter().enumerate() {
+                let influence = *value * gain;
+                applied[idx] = influence;
+                z[idx] = (z[idx] + influence).clamp(-1.0, 1.0);
+            }
+            let (rms, max_abs) = pulse_rms_and_max(&applied);
+            active.applied_rms = rms;
+            active.applied_max_abs = max_abs;
+            active.total_applied_ticks = active.total_applied_ticks.saturating_add(1);
+
+            if active.releasing {
+                active.release_ticks_remaining = active.release_ticks_remaining.saturating_sub(1);
+                active.remaining_ticks = active.remaining_ticks.saturating_sub(1);
+            } else {
+                active.remaining_ticks = active.remaining_ticks.saturating_sub(1);
+            }
+            let finished = active.remaining_ticks == 0
+                || (active.releasing && active.release_ticks_remaining == 0);
+            let event = if finished {
+                if active.releasing {
+                    "release_completed"
+                } else {
+                    "influence_completed"
+                }
+            } else if active.releasing {
+                "release_fading"
+            } else {
+                "influence_applied"
+            };
+            (event.to_string(), finished)
+        };
+        slot.status.last_event = Some(event);
+        slot.status.last_block_reason = None;
+        if finished {
+            slot.active = None;
+        }
+        Self::refresh_shadow_influence_status(&mut slot);
+        slot.status.clone()
+    }
+
+    pub fn shadow_influence_status(&self) -> ShadowInfluenceStatus {
+        let mut slot = self.shadow_influence.lock();
+        Self::refresh_shadow_influence_status(&mut slot);
+        slot.status.clone()
+    }
+
+    fn refresh_shadow_influence_status(slot: &mut ShadowInfluenceSlot) {
+        let last_event = slot.status.last_event.clone();
+        let last_block_reason = slot.status.last_block_reason.clone();
+        slot.status = if let Some(active) = slot.active.as_ref() {
+            ShadowInfluenceStatus {
+                policy: "shadow_influence_v1",
+                active: true,
+                intent_id: Some(active.intent_id.clone()),
+                label: Some(active.label.clone()),
+                command: Some(active.command.clone()),
+                stage: Some(active.stage.clone()),
+                basis: active.basis.clone(),
+                remaining_ticks: active.remaining_ticks,
+                duration_ticks: active.duration_ticks,
+                decay_ticks: active.decay_ticks,
+                release_ticks_remaining: active.release_ticks_remaining,
+                max_abs: active.max_abs,
+                applied_rms: active.applied_rms,
+                applied_max_abs: active.applied_max_abs,
+                total_applied_ticks: active.total_applied_ticks,
+                last_event,
+                last_block_reason,
+            }
+        } else {
+            ShadowInfluenceStatus {
+                policy: "shadow_influence_v1",
+                last_event,
+                last_block_reason,
+                ..ShadowInfluenceStatus::default()
+            }
+        };
+    }
+
+    pub fn receive_attractor_pulse(
+        &self,
+        request: AttractorPulseRequest,
+        hard_recovery_reset: bool,
+    ) -> AttractorPulseStatus {
+        let mut slot = self.attractor_pulse.lock();
+        let command = request.command.trim().to_ascii_lowercase();
+        let label = request.label.trim().to_string();
+        let intent_id = request.intent_id.trim().to_string();
+        let stage = request
+            .stage
+            .unwrap_or_else(|| "main".to_string())
+            .trim()
+            .to_ascii_lowercase();
+
+        if command == "release" {
+            if let Some(active) = slot.active.as_mut() {
+                active.command = "release".to_string();
+                active.stage = stage.clone();
+                active.releasing = true;
+                active.decay_ticks = request
+                    .decay_ticks
+                    .unwrap_or(ATTRACTOR_PULSE_DEFAULT_DECAY_TICKS)
+                    .clamp(1, ATTRACTOR_PULSE_MAX_DURATION_TICKS);
+                active.release_ticks_remaining = active.decay_ticks;
+                active.remaining_ticks = active.remaining_ticks.min(active.decay_ticks);
+                slot.status.last_event = Some("release_started".to_string());
+                slot.status.last_block_reason = None;
+            } else {
+                slot.status.last_event = Some("release_without_active_pulse".to_string());
+                slot.status.last_block_reason = None;
+            }
+            Self::refresh_pulse_status(&mut slot);
+            return slot.status.clone();
+        }
+
+        if hard_recovery_reset {
+            slot.active = None;
+            slot.status.last_event = Some("summon_blocked".to_string());
+            slot.status.last_block_reason = Some("hard_recovery_reset".to_string());
+            Self::refresh_pulse_status(&mut slot);
+            return slot.status.clone();
+        }
+
+        if slot.active.is_some() {
+            slot.status.last_event = Some("summon_blocked".to_string());
+            slot.status.last_block_reason = Some("attractor_pulse_active".to_string());
+            Self::refresh_pulse_status(&mut slot);
+            return slot.status.clone();
+        }
+
+        let max_abs = request
+            .max_abs
+            .unwrap_or(ATTRACTOR_PULSE_DEFAULT_MAX_ABS)
+            .clamp(0.0, ATTRACTOR_PULSE_MAX_ABS_CAP);
+        let duration_ticks = request
+            .duration_ticks
+            .unwrap_or(ATTRACTOR_PULSE_DEFAULT_DURATION_TICKS)
+            .clamp(1, ATTRACTOR_PULSE_MAX_DURATION_TICKS);
+        let decay_ticks = request
+            .decay_ticks
+            .unwrap_or(ATTRACTOR_PULSE_DEFAULT_DECAY_TICKS)
+            .clamp(1, ATTRACTOR_PULSE_MAX_DURATION_TICKS);
+        let features = normalized_attractor_pulse_features(&request.features, max_abs);
+        slot.active = Some(AttractorPulseState {
+            intent_id,
+            label,
+            command,
+            stage,
+            features,
+            max_abs,
+            remaining_ticks: duration_ticks,
+            duration_ticks,
+            decay_ticks,
+            release_ticks_remaining: 0,
+            releasing: false,
+            total_applied_ticks: 0,
+            applied_rms: 0.0,
+            applied_max_abs: 0.0,
+        });
+        slot.status.last_event = Some("summon_accepted".to_string());
+        slot.status.last_block_reason = None;
+        Self::refresh_pulse_status(&mut slot);
+        slot.status.clone()
+    }
+
+    pub fn apply_attractor_pulse_to_z(
+        &self,
+        z: &mut [f32; Z_DIM],
+        fill_pct: f32,
+        discharge_active: bool,
+        hard_recovery_reset: bool,
+    ) -> AttractorPulseStatus {
+        let mut slot = self.attractor_pulse.lock();
+        let Some(active_releasing) = slot.active.as_ref().map(|active| active.releasing) else {
+            Self::refresh_pulse_status(&mut slot);
+            return slot.status.clone();
+        };
+
+        let unsafe_reason = if !active_releasing && hard_recovery_reset {
+            Some("hard_recovery_reset")
+        } else if !active_releasing && discharge_active {
+            Some("discharge")
+        } else if !active_releasing && fill_pct.is_finite() && fill_pct < 58.0 {
+            Some("low_fill")
+        } else if !active_releasing && fill_pct.is_finite() && fill_pct >= 85.0 {
+            Some("overbright_fill")
+        } else {
+            None
+        };
+        if let Some(reason) = unsafe_reason {
+            slot.status.last_event = Some("summon_suspended".to_string());
+            slot.status.last_block_reason = Some(reason.to_string());
+            Self::refresh_pulse_status(&mut slot);
+            return slot.status.clone();
+        }
+
+        let (event, finished) = {
+            let active = slot
+                .active
+                .as_mut()
+                .expect("active pulse exists after early return");
+            let gain = if active.releasing {
+                active.release_ticks_remaining as f32 / active.decay_ticks.max(1) as f32
+            } else {
+                1.0
+            }
+            .clamp(0.0, 1.0);
+            let mut applied = [0.0f32; Z_DIM];
+            for (idx, value) in active.features.iter().enumerate() {
+                let pulse = *value * gain;
+                applied[idx] = pulse;
+                z[idx] = (z[idx] + pulse).clamp(-1.0, 1.0);
+            }
+            let (rms, max_abs) = pulse_rms_and_max(&applied);
+            active.applied_rms = rms;
+            active.applied_max_abs = max_abs;
+            active.total_applied_ticks = active.total_applied_ticks.saturating_add(1);
+
+            if active.releasing {
+                active.release_ticks_remaining = active.release_ticks_remaining.saturating_sub(1);
+                active.remaining_ticks = active.remaining_ticks.saturating_sub(1);
+            } else {
+                active.remaining_ticks = active.remaining_ticks.saturating_sub(1);
+            }
+            let finished = active.remaining_ticks == 0
+                || (active.releasing && active.release_ticks_remaining == 0);
+            let event = if finished {
+                if active.releasing {
+                    "release_completed"
+                } else {
+                    "pulse_completed"
+                }
+            } else if active.releasing {
+                "release_fading"
+            } else {
+                "pulse_applied"
+            };
+            (event.to_string(), finished)
+        };
+        slot.status.last_event = Some(event);
+        slot.status.last_block_reason = None;
+        if finished {
+            slot.active = None;
+        }
+        Self::refresh_pulse_status(&mut slot);
+        slot.status.clone()
+    }
+
+    pub fn attractor_pulse_status(&self) -> AttractorPulseStatus {
+        let mut slot = self.attractor_pulse.lock();
+        Self::refresh_pulse_status(&mut slot);
+        slot.status.clone()
+    }
+
+    fn refresh_pulse_status(slot: &mut AttractorPulseSlot) {
+        let last_event = slot.status.last_event.clone();
+        let last_block_reason = slot.status.last_block_reason.clone();
+        slot.status = if let Some(active) = slot.active.as_ref() {
+            AttractorPulseStatus {
+                policy: "main_esn_attractor_pulse_v1",
+                active: true,
+                intent_id: Some(active.intent_id.clone()),
+                label: Some(active.label.clone()),
+                command: Some(active.command.clone()),
+                stage: Some(active.stage.clone()),
+                remaining_ticks: active.remaining_ticks,
+                duration_ticks: active.duration_ticks,
+                decay_ticks: active.decay_ticks,
+                release_ticks_remaining: active.release_ticks_remaining,
+                max_abs: active.max_abs,
+                applied_rms: active.applied_rms,
+                applied_max_abs: active.applied_max_abs,
+                total_applied_ticks: active.total_applied_ticks,
+                last_event,
+                last_block_reason,
+            }
+        } else {
+            AttractorPulseStatus {
+                policy: "main_esn_attractor_pulse_v1",
+                last_event,
+                last_block_reason,
+                ..AttractorPulseStatus::default()
+            }
+        };
+    }
+
     pub fn push_video(&self, features: Vec<f32>, ts_ms: u64) {
         self.push_video_with_source(features, ts_ms, LaneSource::External);
     }
@@ -1158,6 +1790,247 @@ mod tests {
         assert!(meta.semantic_fresh_ms.is_some());
         assert!(meta.semantic_stale_ms > 0);
         assert!(meta.semantic_input_energy > 0.20);
+    }
+
+    #[test]
+    fn attractor_pulse_is_clamped_applied_and_decayed() {
+        let bus = SensoryBus::new(8, 1, 17);
+        let status = bus.receive_attractor_pulse(
+            AttractorPulseRequest {
+                intent_id: "intent-main".to_string(),
+                label: "cooled edge".to_string(),
+                command: "summon".to_string(),
+                stage: Some("main".to_string()),
+                features: vec![0.5; Z_DIM],
+                max_abs: Some(0.20),
+                duration_ticks: Some(2),
+                decay_ticks: Some(4),
+            },
+            false,
+        );
+        assert!(status.active);
+        assert_eq!(status.max_abs, ATTRACTOR_PULSE_MAX_ABS_CAP);
+
+        let mut z = [0.0f32; Z_DIM];
+        let first = bus.apply_attractor_pulse_to_z(&mut z, 68.0, false, false);
+        assert!(first.active);
+        assert!(z.iter().all(|value| *value <= ATTRACTOR_PULSE_MAX_ABS_CAP));
+        assert!(first.applied_rms > 0.0);
+
+        let second = bus.apply_attractor_pulse_to_z(&mut z, 68.0, false, false);
+        assert!(!second.active);
+        assert_eq!(second.last_event.as_deref(), Some("pulse_completed"));
+    }
+
+    #[test]
+    fn attractor_pulse_blocks_unsafe_new_application_but_release_clears() {
+        let bus = SensoryBus::new(8, 1, 19);
+        bus.receive_attractor_pulse(
+            AttractorPulseRequest {
+                intent_id: "intent-main".to_string(),
+                label: "cooled edge".to_string(),
+                command: "summon".to_string(),
+                stage: Some("main".to_string()),
+                features: vec![0.04; Z_DIM],
+                max_abs: Some(0.04),
+                duration_ticks: Some(8),
+                decay_ticks: Some(2),
+            },
+            false,
+        );
+        let mut z = [0.0f32; Z_DIM];
+        let blocked = bus.apply_attractor_pulse_to_z(&mut z, 50.0, false, false);
+        assert!(blocked.active);
+        assert_eq!(blocked.last_block_reason.as_deref(), Some("low_fill"));
+        assert!(z.iter().all(|value| value.abs() <= 1.0e-6));
+
+        bus.receive_attractor_pulse(
+            AttractorPulseRequest {
+                intent_id: "intent-main".to_string(),
+                label: "cooled edge".to_string(),
+                command: "release".to_string(),
+                stage: Some("main".to_string()),
+                features: Vec::new(),
+                max_abs: None,
+                duration_ticks: None,
+                decay_ticks: Some(1),
+            },
+            true,
+        );
+        let released = bus.apply_attractor_pulse_to_z(&mut z, 50.0, false, true);
+        assert!(!released.active);
+        assert_eq!(released.last_event.as_deref(), Some("release_completed"));
+    }
+
+    #[test]
+    fn attractor_pulse_blocks_overlapping_summons_until_release() {
+        let bus = SensoryBus::new(8, 1, 23);
+        let first = bus.receive_attractor_pulse(
+            AttractorPulseRequest {
+                intent_id: "intent-first".to_string(),
+                label: "lambda edge".to_string(),
+                command: "summon".to_string(),
+                stage: Some("main".to_string()),
+                features: vec![0.04; Z_DIM],
+                max_abs: Some(0.04),
+                duration_ticks: Some(8),
+                decay_ticks: Some(2),
+            },
+            false,
+        );
+        assert!(first.active);
+
+        let blocked = bus.receive_attractor_pulse(
+            AttractorPulseRequest {
+                intent_id: "intent-second".to_string(),
+                label: "lambda tail".to_string(),
+                command: "summon".to_string(),
+                stage: Some("main".to_string()),
+                features: vec![0.02; Z_DIM],
+                max_abs: Some(0.02),
+                duration_ticks: Some(4),
+                decay_ticks: Some(2),
+            },
+            false,
+        );
+        assert!(blocked.active);
+        assert_eq!(
+            blocked.last_block_reason.as_deref(),
+            Some("attractor_pulse_active")
+        );
+        assert_eq!(blocked.intent_id.as_deref(), Some("intent-first"));
+
+        let release = bus.receive_attractor_pulse(
+            AttractorPulseRequest {
+                intent_id: "intent-first".to_string(),
+                label: "lambda edge".to_string(),
+                command: "release".to_string(),
+                stage: Some("main".to_string()),
+                features: Vec::new(),
+                max_abs: None,
+                duration_ticks: None,
+                decay_ticks: Some(1),
+            },
+            false,
+        );
+        assert!(release.active);
+        let mut z = [0.0f32; Z_DIM];
+        let released = bus.apply_attractor_pulse_to_z(&mut z, 68.0, false, false);
+        assert!(!released.active);
+    }
+
+    #[test]
+    fn shadow_influence_is_clamped_applied_and_decayed() {
+        let bus = SensoryBus::new(8, 1, 31);
+        let status = bus.receive_shadow_influence(
+            ShadowInfluenceRequest {
+                intent_id: "shadow-live".to_string(),
+                label: "lambda-tail/lambda4".to_string(),
+                command: "apply".to_string(),
+                stage: Some("live".to_string()),
+                features: vec![0.5; Z_DIM],
+                max_abs: Some(0.20),
+                duration_ticks: Some(2),
+                decay_ticks: Some(4),
+                basis: Some("lambda-tail/lambda4".to_string()),
+            },
+            false,
+            false,
+        );
+        assert!(status.active);
+        assert_eq!(status.max_abs, SHADOW_INFLUENCE_MAX_ABS_CAP);
+
+        let mut z = [0.0f32; Z_DIM];
+        let first = bus.apply_shadow_influence_to_z(&mut z, 68.0, false, false, false);
+        assert!(first.active);
+        assert!(z.iter().all(|value| *value <= SHADOW_INFLUENCE_MAX_ABS_CAP));
+        assert!(first.applied_rms > 0.0);
+
+        let second = bus.apply_shadow_influence_to_z(&mut z, 68.0, false, false, false);
+        assert!(!second.active);
+        assert_eq!(second.last_event.as_deref(), Some("influence_completed"));
+    }
+
+    #[test]
+    fn shadow_influence_blocks_unsafe_new_application_but_release_clears() {
+        let bus = SensoryBus::new(8, 1, 37);
+        bus.receive_shadow_influence(
+            ShadowInfluenceRequest {
+                intent_id: "shadow-live".to_string(),
+                label: "lambda-tail/lambda4".to_string(),
+                command: "apply".to_string(),
+                stage: Some("live".to_string()),
+                features: vec![0.02; Z_DIM],
+                max_abs: Some(0.02),
+                duration_ticks: Some(8),
+                decay_ticks: Some(2),
+                basis: Some("lambda-tail/lambda4".to_string()),
+            },
+            false,
+            false,
+        );
+        let mut z = [0.0f32; Z_DIM];
+        let blocked = bus.apply_shadow_influence_to_z(&mut z, 50.0, false, false, false);
+        assert!(blocked.active);
+        assert_eq!(blocked.last_block_reason.as_deref(), Some("low_fill"));
+        assert!(z.iter().all(|value| value.abs() <= 1.0e-6));
+
+        bus.receive_shadow_influence(
+            ShadowInfluenceRequest {
+                intent_id: "shadow-live".to_string(),
+                label: "lambda-tail/lambda4".to_string(),
+                command: "release".to_string(),
+                stage: Some("live".to_string()),
+                features: Vec::new(),
+                max_abs: None,
+                duration_ticks: None,
+                decay_ticks: Some(1),
+                basis: Some("lambda-tail/lambda4".to_string()),
+            },
+            true,
+            true,
+        );
+        let released = bus.apply_shadow_influence_to_z(&mut z, 50.0, false, true, true);
+        assert!(!released.active);
+        assert_eq!(released.last_event.as_deref(), Some("release_completed"));
+    }
+
+    #[test]
+    fn shadow_influence_blocks_active_attractor_conflict() {
+        let bus = SensoryBus::new(8, 1, 41);
+        bus.receive_attractor_pulse(
+            AttractorPulseRequest {
+                intent_id: "intent-main".to_string(),
+                label: "cooled edge".to_string(),
+                command: "summon".to_string(),
+                stage: Some("main".to_string()),
+                features: vec![0.04; Z_DIM],
+                max_abs: Some(0.04),
+                duration_ticks: Some(8),
+                decay_ticks: Some(2),
+            },
+            false,
+        );
+        let blocked = bus.receive_shadow_influence(
+            ShadowInfluenceRequest {
+                intent_id: "shadow-live".to_string(),
+                label: "lambda-tail/lambda4".to_string(),
+                command: "apply".to_string(),
+                stage: Some("live".to_string()),
+                features: vec![0.02; Z_DIM],
+                max_abs: Some(0.02),
+                duration_ticks: Some(4),
+                decay_ticks: Some(2),
+                basis: Some("lambda-tail/lambda4".to_string()),
+            },
+            false,
+            bus.attractor_pulse_status().active,
+        );
+        assert!(!blocked.active);
+        assert_eq!(
+            blocked.last_block_reason.as_deref(),
+            Some("attractor_pulse_active")
+        );
     }
 
     #[test]

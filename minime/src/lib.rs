@@ -2,6 +2,7 @@
 //!
 //! Exposes core modules for testing and integration
 
+pub mod activation_trace;
 pub mod av_gpu;
 pub mod av_ws;
 pub mod buffer_pool;

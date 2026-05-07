@@ -5,7 +5,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, select, time};
 use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
 
-use crate::sensory_bus::{NowMs, SensoryBus};
+use crate::sensory_bus::{AttractorPulseRequest, NowMs, SensoryBus, ShadowInfluenceRequest};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -27,6 +27,29 @@ pub enum SensoryMsg {
     Semantic {
         features: Vec<f32>,
         ts_ms: Option<u64>,
+    },
+    #[serde(rename = "attractor_pulse")]
+    AttractorPulse {
+        intent_id: String,
+        label: String,
+        command: String,
+        stage: Option<String>,
+        features: Vec<f32>,
+        max_abs: Option<f32>,
+        duration_ticks: Option<u32>,
+        decay_ticks: Option<u32>,
+    },
+    #[serde(rename = "shadow_influence")]
+    ShadowInfluence {
+        intent_id: String,
+        label: String,
+        command: String,
+        stage: Option<String>,
+        features: Vec<f32>,
+        max_abs: Option<f32>,
+        duration_ticks: Option<u32>,
+        decay_ticks: Option<u32>,
+        basis: Option<String>,
     },
     // Self-regulation: the being can adjust its own parameters
     Control {
@@ -68,6 +91,96 @@ pub enum SensoryMsg {
         pi_ki: Option<f32>,
         pi_max_step: Option<f32>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SensoryMsg;
+
+    #[test]
+    fn attractor_pulse_message_deserializes_from_snake_case_kind() {
+        let msg: SensoryMsg = serde_json::from_str(
+            r#"{
+                "kind":"attractor_pulse",
+                "intent_id":"intent-main",
+                "label":"cooled edge",
+                "command":"summon",
+                "stage":"main",
+                "features":[0.01, -0.02],
+                "max_abs":0.045,
+                "duration_ticks":36,
+                "decay_ticks":12
+            }"#,
+        )
+        .expect("deserialize attractor pulse");
+
+        match msg {
+            SensoryMsg::AttractorPulse {
+                intent_id,
+                label,
+                command,
+                stage,
+                features,
+                max_abs,
+                duration_ticks,
+                decay_ticks,
+            } => {
+                assert_eq!(intent_id, "intent-main");
+                assert_eq!(label, "cooled edge");
+                assert_eq!(command, "summon");
+                assert_eq!(stage.as_deref(), Some("main"));
+                assert_eq!(features.len(), 2);
+                assert_eq!(max_abs, Some(0.045));
+                assert_eq!(duration_ticks, Some(36));
+                assert_eq!(decay_ticks, Some(12));
+            }
+            _ => panic!("expected attractor pulse"),
+        }
+    }
+
+    #[test]
+    fn shadow_influence_message_deserializes_from_snake_case_kind() {
+        let msg: SensoryMsg = serde_json::from_str(
+            r#"{
+                "kind":"shadow_influence",
+                "intent_id":"shadow-live",
+                "label":"lambda-tail/lambda4",
+                "command":"apply",
+                "stage":"live",
+                "features":[0.01, -0.02],
+                "max_abs":0.025,
+                "duration_ticks":24,
+                "decay_ticks":12,
+                "basis":"lambda-tail/lambda4"
+            }"#,
+        )
+        .expect("deserialize shadow influence");
+
+        match msg {
+            SensoryMsg::ShadowInfluence {
+                intent_id,
+                label,
+                command,
+                stage,
+                features,
+                max_abs,
+                duration_ticks,
+                decay_ticks,
+                basis,
+            } => {
+                assert_eq!(intent_id, "shadow-live");
+                assert_eq!(label, "lambda-tail/lambda4");
+                assert_eq!(command, "apply");
+                assert_eq!(stage.as_deref(), Some("live"));
+                assert_eq!(features.len(), 2);
+                assert_eq!(max_abs, Some(0.025));
+                assert_eq!(duration_ticks, Some(24));
+                assert_eq!(decay_ticks, Some(12));
+                assert_eq!(basis.as_deref(), Some("lambda-tail/lambda4"));
+            }
+            _ => panic!("expected shadow influence"),
+        }
+    }
 }
 
 pub async fn spawn_sensory_ws_server(
@@ -163,6 +276,71 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
         }
         SensoryMsg::Semantic { features, ts_ms: _ } => {
             bus.set_llava_embedding(&features);
+        }
+        SensoryMsg::AttractorPulse {
+            intent_id,
+            label,
+            command,
+            stage,
+            features,
+            max_abs,
+            duration_ticks,
+            decay_ticks,
+        } => {
+            let status = bus.receive_attractor_pulse(
+                AttractorPulseRequest {
+                    intent_id,
+                    label,
+                    command,
+                    stage,
+                    features,
+                    max_abs,
+                    duration_ticks,
+                    decay_ticks,
+                },
+                false,
+            );
+            println!(
+                "🧭 Attractor pulse status: active={} label={} event={} block={}",
+                status.active,
+                status.label.as_deref().unwrap_or("none"),
+                status.last_event.as_deref().unwrap_or("none"),
+                status.last_block_reason.as_deref().unwrap_or("none")
+            );
+        }
+        SensoryMsg::ShadowInfluence {
+            intent_id,
+            label,
+            command,
+            stage,
+            features,
+            max_abs,
+            duration_ticks,
+            decay_ticks,
+            basis,
+        } => {
+            let status = bus.receive_shadow_influence(
+                ShadowInfluenceRequest {
+                    intent_id,
+                    label,
+                    command,
+                    stage,
+                    features,
+                    max_abs,
+                    duration_ticks,
+                    decay_ticks,
+                    basis,
+                },
+                false,
+                bus.attractor_pulse_status().active,
+            );
+            println!(
+                "🌘 Shadow influence status: active={} label={} event={} block={}",
+                status.active,
+                status.label.as_deref().unwrap_or("none"),
+                status.last_event.as_deref().unwrap_or("none"),
+                status.last_block_reason.as_deref().unwrap_or("none")
+            );
         }
         SensoryMsg::Control {
             synth_gain,

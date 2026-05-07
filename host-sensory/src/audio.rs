@@ -147,7 +147,8 @@ impl Scene {
             self.voices[idx].target_weight = control.voice_weights[idx];
             self.voices[idx].target_cut_mul = control.voice_cut_mul[idx];
             self.voices[idx].target_pan = control.voice_pan[idx] * control.width;
-            let seed_mix = (control.seed_mix * (0.75 + control.voice_weights[idx])).clamp(0.0, 0.25);
+            let seed_mix =
+                (control.seed_mix * (0.75 + control.voice_weights[idx])).clamp(0.0, 0.25);
             self.voices[idx]
                 .source
                 .set_seed_drive(control.voice_seeds[idx], seed_mix);
@@ -178,8 +179,8 @@ impl Scene {
 
             let (white, pink) = voice.source.next();
             let colored = pink * (1.0 - self.current_air_mix) + white * self.current_air_mix;
-            let cutoff =
-                (self.current_cutoff_hz * voice.current_cut_mul).clamp(60.0, self.sample_rate * 0.45);
+            let cutoff = (self.current_cutoff_hz * voice.current_cut_mul)
+                .clamp(60.0, self.sample_rate * 0.45);
             let alpha = cutoff_to_alpha(cutoff, self.sample_rate);
             let sample = voice.filter.process(colored, alpha) * voice.current_weight;
 
@@ -202,7 +203,9 @@ impl Scene {
 
         left = self.dc_left.process(soft_clip(left * self.current_gain));
         right = self.dc_right.process(soft_clip(right * self.current_gain));
-        mono = self.dc_mono.process(soft_clip(mono * self.current_gain * 0.9));
+        mono = self
+            .dc_mono
+            .process(soft_clip(mono * self.current_gain * 0.9));
 
         (left, right, mono)
     }

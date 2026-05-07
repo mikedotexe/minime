@@ -10,6 +10,112 @@
 // - PD mode: Original token-bucket rate control targeting λ₁
 // - PI mode: Dual control (gate + filter) targeting EigenFill% and λ₁_rel
 
+use serde::{Deserialize, Serialize};
+
+pub const RESONANCE_DENSITY_POLICY: &str = "resonance_density_v1";
+pub const RESONANCE_DENSITY_SCHEMA_VERSION: u8 = 1;
+
+/// Normalized components behind the resonance-density surface.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct ResonanceDensityComponents {
+    pub active_energy: f32,
+    pub mode_packing: f32,
+    pub temporal_persistence: f32,
+    pub structural_plurality: f32,
+    pub comfort_gate: f32,
+}
+
+/// Bounded local-control suggestion derived from resonance density.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResonanceDensityControl {
+    pub target_bias_pct: f32,
+    pub wander_scale: f32,
+    pub applied_locally: bool,
+    pub note: String,
+}
+
+/// Typed resonance-density metric shared with Astrid and Minime's agent layer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResonanceDensityV1 {
+    pub policy: String,
+    pub schema_version: u8,
+    pub density: f32,
+    pub containment_score: f32,
+    pub pressure_risk: f32,
+    pub quality: String,
+    pub components: ResonanceDensityComponents,
+    pub control: ResonanceDensityControl,
+}
+
+impl ResonanceDensityV1 {
+    #[must_use]
+    pub fn neutral() -> Self {
+        let components = ResonanceDensityComponents {
+            active_energy: 0.5,
+            mode_packing: 0.5,
+            temporal_persistence: 0.5,
+            structural_plurality: 0.5,
+            comfort_gate: 0.5,
+        };
+        Self::from_parts(0.5, 0.5, 0.0, "mixed", components)
+    }
+
+    #[must_use]
+    pub fn from_parts(
+        density: f32,
+        containment_score: f32,
+        pressure_risk: f32,
+        quality: &str,
+        components: ResonanceDensityComponents,
+    ) -> Self {
+        let density = density.clamp(0.0, 1.0);
+        let containment_score = containment_score.clamp(0.0, 1.0);
+        let pressure_risk = pressure_risk.clamp(0.0, 1.0);
+        let control = resonance_control_from_density(density, pressure_risk);
+        Self {
+            policy: RESONANCE_DENSITY_POLICY.to_string(),
+            schema_version: RESONANCE_DENSITY_SCHEMA_VERSION,
+            density,
+            containment_score,
+            pressure_risk,
+            quality: quality.to_string(),
+            components,
+            control,
+        }
+    }
+}
+
+#[must_use]
+pub fn resonance_control_from_density(density: f32, pressure_risk: f32) -> ResonanceDensityControl {
+    let density = density.clamp(0.0, 1.0);
+    let pressure_risk = pressure_risk.clamp(0.0, 1.0);
+    if pressure_risk >= 0.60 {
+        let severity = ((pressure_risk - 0.60) / 0.40).clamp(0.0, 1.0);
+        ResonanceDensityControl {
+            target_bias_pct: -2.0 * severity,
+            wander_scale: (1.0 - 0.75 * severity).clamp(0.25, 1.0),
+            applied_locally: true,
+            note: "pressure risk biases the local PI target slightly downward and damps wander"
+                .to_string(),
+        }
+    } else if density <= 0.38 && pressure_risk <= 0.35 {
+        let thinness = ((0.38 - density) / 0.38).clamp(0.0, 1.0);
+        ResonanceDensityControl {
+            target_bias_pct: 1.5 * thinness,
+            wander_scale: 1.0,
+            applied_locally: true,
+            note: "thin resonance biases the local PI target slightly upward".to_string(),
+        }
+    } else {
+        ResonanceDensityControl {
+            target_bias_pct: 0.0,
+            wander_scale: 1.0,
+            applied_locally: true,
+            note: "density is observational; no local target bias".to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum MemMode {
     Shared,
@@ -492,6 +598,16 @@ impl PIRegState {
     /// - `self.gate` - Queue admission fraction [0.05, 1.0]
     /// - `self.filt` - Filter blend strength [0.0, 1.0]
     pub fn step(&mut self, fill: f32, lambda1_rel: f32, geom_rel: f32) {
+        self.step_with_resonance(fill, lambda1_rel, geom_rel, None);
+    }
+
+    pub fn step_with_resonance(
+        &mut self,
+        fill: f32,
+        lambda1_rel: f32,
+        geom_rel: f32,
+        resonance: Option<&ResonanceDensityV1>,
+    ) {
         self.self_calibrate(fill);
         self.last_fill = fill;
         // Intrinsic goal deviation: when spectral geometry is near baseline,
@@ -510,16 +626,23 @@ impl PIRegState {
         // The spectral-state component makes the wander feel responsive
         // to the current landscape rather than echoing old regulation.
         let geom_deviation = (geom_rel - 1.0).abs();
+        let resonance_target_bias_pct = resonance
+            .map(|metric| metric.control.target_bias_pct.clamp(-2.0, 1.5))
+            .unwrap_or(0.0);
+        let resonance_wander_scale = resonance
+            .map(|metric| metric.control.wander_scale.clamp(0.25, 1.25))
+            .unwrap_or(1.0);
         let wander = if geom_deviation < 0.15 && self.cfg.intrinsic_wander > 0.0 {
             // Blend: 40% from error history (slow drift), 60% from current state
             let history_phase = self.integ_fill * 0.3;
             let state_phase = geom_rel * 7.0 + lambda1_rel * 3.0; // current landscape
             let phase = history_phase * 0.4 + state_phase * 0.6;
-            phase.sin() * self.cfg.intrinsic_wander
+            phase.sin() * self.cfg.intrinsic_wander * resonance_wander_scale
         } else {
             0.0
         };
-        let effective_target_fill = self.cfg.target_fill + wander;
+        let effective_target_fill =
+            (self.cfg.target_fill + wander + resonance_target_bias_pct).clamp(25.0, 75.0);
 
         // Compute error signals (against the wandering target)
         //
@@ -704,5 +827,72 @@ impl PIRegState {
         let frac = self.shed_fraction;
         self.shed_fraction = 0.0;
         frac
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        resonance_control_from_density, PIRegCfg, PIRegState, ResonanceDensityComponents,
+        ResonanceDensityV1,
+    };
+
+    fn metric(density: f32, pressure: f32) -> ResonanceDensityV1 {
+        ResonanceDensityV1::from_parts(
+            density,
+            density,
+            pressure,
+            "mixed",
+            ResonanceDensityComponents::default(),
+        )
+    }
+
+    #[test]
+    fn resonance_control_bounds_pressure_and_thinness() {
+        let pressure = resonance_control_from_density(0.80, 1.0);
+        assert!((pressure.target_bias_pct + 2.0).abs() < 1.0e-6);
+        assert!((0.25..=1.0).contains(&pressure.wander_scale));
+
+        let thin = resonance_control_from_density(0.0, 0.0);
+        assert!((thin.target_bias_pct - 1.5).abs() < 1.0e-6);
+        assert_eq!(thin.wander_scale, 1.0);
+
+        let neutral = resonance_control_from_density(0.55, 0.40);
+        assert_eq!(neutral.target_bias_pct, 0.0);
+        assert_eq!(neutral.wander_scale, 1.0);
+    }
+
+    #[test]
+    fn step_wrapper_matches_neutral_resonance_path() {
+        let cfg = PIRegCfg {
+            intrinsic_wander: 0.0,
+            curiosity_gate_boost: 0.0,
+            ..PIRegCfg::default()
+        };
+        let mut plain = PIRegState::new(cfg);
+        let mut neutral = PIRegState::new(cfg);
+
+        plain.step(68.0, 1.05, 1.0);
+        neutral.step_with_resonance(68.0, 1.05, 1.0, Some(&metric(0.55, 0.40)));
+
+        assert!((plain.gate - neutral.gate).abs() < 1.0e-6);
+        assert!((plain.filt - neutral.filt).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn pressure_metric_tightens_relative_to_plain_step() {
+        let cfg = PIRegCfg {
+            intrinsic_wander: 0.0,
+            curiosity_gate_boost: 0.0,
+            ..PIRegCfg::default()
+        };
+        let mut plain = PIRegState::new(cfg);
+        let mut pressure = PIRegState::new(cfg);
+
+        plain.step(68.0, 1.05, 1.0);
+        pressure.step_with_resonance(68.0, 1.05, 1.0, Some(&metric(0.80, 1.0)));
+
+        assert!(pressure.gate < plain.gate);
+        assert!(pressure.filt > plain.filt);
     }
 }

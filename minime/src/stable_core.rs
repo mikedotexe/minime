@@ -9,12 +9,18 @@ use crate::sensory_bus::{AUDIO_DIM, AUX_DIM, VIDEO_DIM, Z_DIM};
 pub const STABLE_CORE_PROFILE: &str = "stable_core_v1";
 pub const DEFAULT_AGENCY_STAGE: &str = "off";
 pub const DEFAULT_AGENT_BUDGET_MODE: &str = "disabled";
-pub const PINNED_RESCUE_INPUT_PATH: &str = "pinned_rescue_aux_projection";
-pub const PINNED_RESCUE_ESN_PATH: &str = "pinned_rescue_direct";
+pub const STABLE_CORE_INPUT_PATH: &str = "stable_core_embodied_aux_projection";
+pub const STABLE_CORE_ESN_PATH: &str = "stable_core_direct_with_live_trickle";
+pub const PINNED_RESCUE_INPUT_PATH: &str = STABLE_CORE_INPUT_PATH;
+pub const PINNED_RESCUE_ESN_PATH: &str = STABLE_CORE_ESN_PATH;
 pub const LIVE_INTAKE_MAX_FILL_PCT: f32 = 70.0;
 pub const LIVE_INTAKE_MAX_RISING_SLOPE_PCT_PER_SEC: f32 = 1.0;
 pub const FULL_PRESENCE_PROFILE: &str = "full_presence_v1";
-pub const FULL_PRESENCE_MAX_FILL_PCT: f32 = 72.0;
+pub const FULL_PRESENCE_MAX_FILL_PCT: f32 = 74.0;
+pub const STABLE_CORE_SEMANTIC_TRICKLE_SCALE: f32 = 0.15;
+pub const STABLE_CORE_SEMANTIC_TRICKLE_MAX_ABS: f32 = 0.05;
+pub const STABLE_CORE_SEMANTIC_TRICKLE_MAX_INPUT_ENERGY: f32 = 0.30;
+pub const STABLE_CORE_SEMANTIC_TRICKLE_MAX_FILL_PCT: f32 = 82.0;
 pub const SEMANTIC_SENSORY_MUTE_FILE: &str = "stable_core_sensory_mute.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +76,42 @@ impl StableCoreSensoryMute {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StableCoreLiveIntakeDecision {
+    pub live_audio_divisor: u32,
+    pub live_video_divisor: u32,
+    pub reason: &'static str,
+}
+
+impl StableCoreLiveIntakeDecision {
+    #[must_use]
+    pub const fn admitted(
+        live_audio_divisor: u32,
+        live_video_divisor: u32,
+        reason: &'static str,
+    ) -> Self {
+        Self {
+            live_audio_divisor,
+            live_video_divisor,
+            reason,
+        }
+    }
+
+    #[must_use]
+    pub const fn suppressed(reason: &'static str) -> Self {
+        Self {
+            live_audio_divisor: 0,
+            live_video_divisor: 0,
+            reason,
+        }
+    }
+
+    #[must_use]
+    pub const fn divisors(self) -> (u32, u32) {
+        (self.live_audio_divisor, self.live_video_divisor)
+    }
+}
+
 impl StableCoreEsnPolicy {
     #[must_use]
     pub const fn pinned_rescue_direct() -> Self {
@@ -119,6 +161,48 @@ pub fn fixed_survival_aux_z(lambda1_rel: f32, geom_rel: f32, geom_clamp_hi: f32)
 }
 
 #[must_use]
+pub fn stable_core_recovery_z(
+    live_z: Option<&[f32]>,
+    lambda1_rel: f32,
+    geom_rel: f32,
+    geom_clamp_hi: f32,
+    admit_live_video: bool,
+    admit_live_audio: bool,
+    admit_live_semantic: bool,
+    semantic_scale: f32,
+) -> [f32; Z_DIM] {
+    let mut z = fixed_survival_aux_z(lambda1_rel, geom_rel, geom_clamp_hi);
+    let Some(live_z) = live_z else {
+        return z;
+    };
+    if live_z.len() < Z_DIM {
+        return z;
+    }
+    if admit_live_video {
+        z[..VIDEO_DIM].copy_from_slice(&live_z[..VIDEO_DIM]);
+    }
+    if admit_live_audio {
+        let audio_start = VIDEO_DIM;
+        let audio_end = audio_start + AUDIO_DIM;
+        z[audio_start..audio_end].copy_from_slice(&live_z[audio_start..audio_end]);
+    }
+    if admit_live_semantic {
+        let semantic_offset = VIDEO_DIM + AUDIO_DIM + AUX_DIM;
+        let scale = semantic_scale.clamp(0.0, 1.0);
+        for (dst, src) in z[semantic_offset..]
+            .iter_mut()
+            .zip(live_z[semantic_offset..].iter())
+        {
+            *dst = (*src * scale).clamp(
+                -STABLE_CORE_SEMANTIC_TRICKLE_MAX_ABS,
+                STABLE_CORE_SEMANTIC_TRICKLE_MAX_ABS,
+            );
+        }
+    }
+    z
+}
+
+#[must_use]
 pub fn pinned_rescue_projection(
     z: &[f32; Z_DIM],
     dimension_scales: &[f32],
@@ -142,10 +226,12 @@ pub fn pinned_rescue_projection(
     let aux_end = semantic_offset;
     normalize_slice(&z[aux_start..aux_end], &mut proj_input[aux_start..aux_end]);
 
-    // Stable-core proof mode deliberately ignores semantic carryover and
-    // current-runtime semantic bias. Astrid may be present, but writes are not
-    // allowed to shape the physiological kernel during Gate B.
-    proj_input[semantic_offset..].fill(0.0);
+    let semantic_energy = rms(&z[semantic_offset..]);
+    if semantic_energy > f32::EPSILON {
+        proj_input[semantic_offset..].copy_from_slice(&z[semantic_offset..]);
+    } else {
+        proj_input[semantic_offset..].fill(0.0);
+    }
 
     let warmup = warmup_progress.clamp(0.0, 1.0).max(0.2);
     for (idx, activated) in activated_features.iter_mut().enumerate() {
@@ -159,10 +245,10 @@ pub fn pinned_rescue_projection(
 
     StableCoreProjection {
         projection_active: true,
-        input_path: PINNED_RESCUE_INPUT_PATH,
+        input_path: STABLE_CORE_INPUT_PATH,
         proj_input,
         activated_features,
-        semantic_energy: 0.0,
+        semantic_energy,
         semantic_delta: 0.0,
         audio_rms,
         video_var,
@@ -295,27 +381,68 @@ impl StableCoreRuntime {
         fill_pct: f32,
         fill_slope_pct_per_sec: f32,
     ) -> (u32, u32) {
-        if !self.enabled
-            || !scaffold_active
-            || !self.allows_live_intake_for_stage(stage)
-            || !fill_pct.is_finite()
-            || !fill_slope_pct_per_sec.is_finite()
-        {
-            return (0, 0);
+        self.live_intake_decision_for_stage(
+            stage,
+            scaffold_active,
+            high_fill_drain_active,
+            fill_pct,
+            fill_slope_pct_per_sec,
+        )
+        .divisors()
+    }
+
+    #[must_use]
+    pub fn live_intake_decision_for_stage(
+        &self,
+        stage: &str,
+        scaffold_active: bool,
+        high_fill_drain_active: bool,
+        fill_pct: f32,
+        fill_slope_pct_per_sec: f32,
+    ) -> StableCoreLiveIntakeDecision {
+        if !self.enabled {
+            return StableCoreLiveIntakeDecision::suppressed("stable_core_disabled");
+        }
+        if !self.allows_live_intake_for_stage(stage) {
+            return StableCoreLiveIntakeDecision::suppressed("stage_not_allowed");
+        }
+        if !fill_pct.is_finite() || !fill_slope_pct_per_sec.is_finite() {
+            return StableCoreLiveIntakeDecision::suppressed("invalid_fill_or_slope");
         }
         if self.sensory_presence_profile == FULL_PRESENCE_PROFILE {
-            if stage == "discharge" || fill_pct >= FULL_PRESENCE_MAX_FILL_PCT {
-                return (0, 0);
+            if stage == "discharge" {
+                return StableCoreLiveIntakeDecision::suppressed(
+                    "full_presence_discharge_suppressed",
+                );
             }
-            return (self.live_audio_divisor, self.live_video_divisor);
+            if fill_pct >= FULL_PRESENCE_MAX_FILL_PCT {
+                return StableCoreLiveIntakeDecision::suppressed(
+                    "full_presence_high_fill_suppressed",
+                );
+            }
+            return StableCoreLiveIntakeDecision::admitted(
+                self.live_audio_divisor,
+                self.live_video_divisor,
+                "full_presence_admitted",
+            );
         }
-        if high_fill_drain_active
-            || fill_pct >= LIVE_INTAKE_MAX_FILL_PCT
-            || fill_slope_pct_per_sec > LIVE_INTAKE_MAX_RISING_SLOPE_PCT_PER_SEC
-        {
-            return (0, 0);
+        if !scaffold_active {
+            return StableCoreLiveIntakeDecision::suppressed("scaffold_inactive");
         }
-        (self.live_audio_divisor, self.live_video_divisor)
+        if high_fill_drain_active {
+            return StableCoreLiveIntakeDecision::suppressed("high_fill_drain_active");
+        }
+        if fill_pct >= LIVE_INTAKE_MAX_FILL_PCT {
+            return StableCoreLiveIntakeDecision::suppressed("high_fill_suppressed");
+        }
+        if fill_slope_pct_per_sec > LIVE_INTAKE_MAX_RISING_SLOPE_PCT_PER_SEC {
+            return StableCoreLiveIntakeDecision::suppressed("fast_rising_suppressed");
+        }
+        StableCoreLiveIntakeDecision::admitted(
+            self.live_audio_divisor,
+            self.live_video_divisor,
+            "admitted",
+        )
     }
 
     #[must_use]
@@ -599,6 +726,18 @@ mod tests {
             runtime.live_intake_divisors_for_stage("hold", true, false, 66.0, 1.5),
             (0, 0)
         );
+        assert_eq!(
+            runtime
+                .live_intake_decision_for_stage("hold", true, true, 66.0, 0.0)
+                .reason,
+            "high_fill_drain_active"
+        );
+        assert_eq!(
+            runtime
+                .live_intake_decision_for_stage("hold", true, false, 66.0, 1.5)
+                .reason,
+            "fast_rising_suppressed"
+        );
     }
 
     #[test]
@@ -607,22 +746,30 @@ mod tests {
             ("MINIME_RUNTIME_PROFILE", STABLE_CORE_PROFILE),
             ("MINIME_RESCUE_LIVE_AUDIO_DIVISOR", "4"),
             ("MINIME_RESCUE_LIVE_VIDEO_DIVISOR", "4"),
-            ("MINIME_RESCUE_LIVE_INTAKE_STAGES", "hold,elevated"),
+            (
+                "MINIME_RESCUE_LIVE_INTAKE_STAGES",
+                "hold,elevated,discharge",
+            ),
             ("MINIME_STABLE_CORE_SENSORY_PROFILE", FULL_PRESENCE_PROFILE),
         ]);
 
-        assert_eq!(
-            runtime.live_intake_divisors_for_stage("hold", true, true, 71.9, 2.0),
-            (4, 4)
-        );
-        assert_eq!(
-            runtime.live_intake_divisors_for_stage("hold", true, false, 72.0, 0.0),
-            (0, 0)
-        );
-        assert_eq!(
-            runtime.live_intake_divisors_for_stage("discharge", true, false, 78.0, -1.0),
-            (0, 0)
-        );
+        let admitted = runtime.live_intake_decision_for_stage("elevated", true, true, 73.9, 2.0);
+        assert_eq!(admitted.divisors(), (4, 4));
+        assert_eq!(admitted.reason, "full_presence_admitted");
+
+        let retired_scaffold =
+            runtime.live_intake_decision_for_stage("hold", false, false, 70.0, 0.0);
+        assert_eq!(retired_scaffold.divisors(), (4, 4));
+        assert_eq!(retired_scaffold.reason, "full_presence_admitted");
+
+        let high_fill = runtime.live_intake_decision_for_stage("elevated", true, false, 74.0, 0.0);
+        assert_eq!(high_fill.divisors(), (0, 0));
+        assert_eq!(high_fill.reason, "full_presence_high_fill_suppressed");
+
+        let discharge =
+            runtime.live_intake_decision_for_stage("discharge", true, false, 78.0, -1.0);
+        assert_eq!(discharge.divisors(), (0, 0));
+        assert_eq!(discharge.reason, "full_presence_discharge_suppressed");
     }
 
     #[test]
@@ -660,7 +807,7 @@ mod tests {
         let projection = pinned_rescue_projection(&z, &vec![1.0; Z_DIM], 0.58, 0.0);
 
         assert!(projection.projection_active);
-        assert_eq!(projection.input_path, PINNED_RESCUE_INPUT_PATH);
+        assert_eq!(projection.input_path, STABLE_CORE_INPUT_PATH);
         assert!(projection.proj_input[..VIDEO_DIM].iter().all(|v| *v == 0.0));
         assert!(projection.proj_input[VIDEO_DIM..VIDEO_DIM + AUDIO_DIM]
             .iter()
@@ -670,25 +817,73 @@ mod tests {
     }
 
     #[test]
-    fn pinned_projection_zeros_semantics_and_bias_terms() {
+    fn stable_core_recovery_z_admits_live_av_and_gates_semantics() {
+        let semantic_offset = VIDEO_DIM + AUDIO_DIM + AUX_DIM;
+        let mut live_z = [0.0f32; Z_DIM];
+        for value in &mut live_z[..VIDEO_DIM] {
+            *value = 0.25;
+        }
+        for value in &mut live_z[VIDEO_DIM..VIDEO_DIM + AUDIO_DIM] {
+            *value = -0.5;
+        }
+        for value in &mut live_z[semantic_offset..] {
+            *value = 10.0;
+        }
+
+        let z = stable_core_recovery_z(
+            Some(&live_z),
+            1.2,
+            0.9,
+            4.0,
+            true,
+            true,
+            false,
+            STABLE_CORE_SEMANTIC_TRICKLE_SCALE,
+        );
+
+        assert!(z[..VIDEO_DIM].iter().all(|v| *v == 0.25));
+        assert!(z[VIDEO_DIM..VIDEO_DIM + AUDIO_DIM]
+            .iter()
+            .all(|v| *v == -0.5));
+        assert_eq!(z[VIDEO_DIM + AUDIO_DIM], 1.2);
+        assert_eq!(z[VIDEO_DIM + AUDIO_DIM + 1], 0.9);
+        assert!(z[semantic_offset..].iter().all(|v| *v == 0.0));
+
+        let z = stable_core_recovery_z(
+            Some(&live_z),
+            1.2,
+            0.9,
+            4.0,
+            true,
+            true,
+            true,
+            STABLE_CORE_SEMANTIC_TRICKLE_SCALE,
+        );
+        assert!(z[semantic_offset..]
+            .iter()
+            .all(|v| { (*v - STABLE_CORE_SEMANTIC_TRICKLE_MAX_ABS).abs() < f32::EPSILON }));
+    }
+
+    #[test]
+    fn pinned_projection_admits_bounded_semantic_trickle() {
         let mut z = fixed_survival_aux_z(1.2, 0.9, 4.0);
         let semantic_offset = VIDEO_DIM + AUDIO_DIM + AUX_DIM;
         for dim in &mut z[semantic_offset..] {
-            *dim = 10.0;
+            *dim = 0.02;
         }
 
         let projection = pinned_rescue_projection(&z, &vec![1.0; Z_DIM], 0.58, 1.0);
 
-        assert_eq!(projection.semantic_energy, 0.0);
+        assert!(projection.semantic_energy > 0.0);
         assert_eq!(projection.semantic_delta, 0.0);
         assert!(projection.proj_input
             [semantic_offset..semantic_offset + crate::sensory_bus::LLAVA_DIM]
             .iter()
-            .all(|v| *v == 0.0));
+            .all(|v| (*v - 0.02).abs() < f32::EPSILON));
         assert!(projection.activated_features
             [semantic_offset..semantic_offset + crate::sensory_bus::LLAVA_DIM]
             .iter()
-            .all(|v| *v == 0.0));
+            .all(|v| *v > 0.0));
     }
 
     #[test]

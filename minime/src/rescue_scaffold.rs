@@ -24,10 +24,10 @@ const STABILITY_PI_KP: f32 = 0.55;
 const STABILITY_PI_KI: f32 = 0.04;
 const STABILITY_PI_MAX_OUTPUT: f32 = 0.120;
 const STABILITY_PI_INTEGRAL_DECAY: f32 = 0.85;
-pub const STABILITY_PI_RECOVERY_IMPULSE_TRIGGER_PCT: f32 = 64.0;
-pub const STABILITY_PI_RECOVERY_SLOPE_TRIGGER_FILL_PCT: f32 = 66.0;
+pub const STABILITY_PI_RECOVERY_IMPULSE_TRIGGER_PCT: f32 = 42.0;
+pub const STABILITY_PI_RECOVERY_SLOPE_TRIGGER_FILL_PCT: f32 = 45.0;
 pub const STABILITY_PI_RECOVERY_SLOPE_TRIGGER_PCT_PER_SEC: f32 = -2.0;
-pub const STABILITY_PI_LOW_FILL_TRIGGER_PCT: f32 = 55.0;
+pub const STABILITY_PI_LOW_FILL_TRIGGER_PCT: f32 = 35.0;
 pub const STABILITY_PI_IMPULSE_MIN_TICKS: u32 = 2;
 pub const STABILITY_PI_RELEASE_FILL_PCT: f32 = 60.0;
 pub const STABILITY_PI_RELEASE_STRONG_FILL_PCT: f32 = 62.0;
@@ -35,25 +35,30 @@ pub const STABILITY_PI_RELEASE_STABLE_TICKS: u32 = 2;
 pub const STABILITY_PI_RELEASE_LONG_IMPULSE_TICKS: u32 = 60;
 pub const STABILITY_PI_RELEASE_LONG_IMPULSE_SLOPE_MIN: f32 = -0.5;
 pub const STABILITY_PI_REENTRY_TICKS: u32 = 12;
-pub const STABILITY_PI_REENTRY_FALLBACK_FILL_PCT: f32 = 58.0;
-pub const STABILITY_PI_REENTRY_SLOPE_FALLBACK_FILL_PCT: f32 = 62.0;
+pub const STABILITY_PI_REENTRY_FALLBACK_FILL_PCT: f32 = 45.0;
+pub const STABILITY_PI_REENTRY_SLOPE_FALLBACK_FILL_PCT: f32 = 45.0;
 pub const STABILITY_PI_REENTRY_SLOPE_FALLBACK_PCT_PER_SEC: f32 = -1.5;
 pub const STABILITY_PI_REENTRY_ELEVATED_FILL_PCT: f32 = 72.0;
+pub const STABLE_CORE_SCAFFOLD_LOW_FILL_REACTIVATION_PCT: f32 = 45.0;
 const STABILITY_PI_REENTRY_FAST_UPSLOPE_FILL_PCT: f32 = 70.0;
 const STABILITY_PI_REENTRY_FAST_UPSLOPE_PCT_PER_SEC: f32 = 3.0;
 const STABILITY_PI_SOFT_DRAIN_FILL_PCT: f32 = 72.0;
-const STABILITY_PI_MODERATE_DRAIN_FILL_PCT: f32 = 73.0;
+const STABILITY_PI_MODERATE_DRAIN_FILL_PCT: f32 = 74.0;
 const STABILITY_PI_STRONG_DRAIN_FILL_PCT: f32 = 74.0;
-const STABILITY_PI_FORCE_STRONG_DRAIN_FILL_PCT: f32 = 76.0;
+const STABILITY_PI_FORCE_STRONG_DRAIN_FILL_PCT: f32 = 82.0;
 const STABILITY_PI_SOFT_DRAIN: f32 = 0.040;
 const STABILITY_PI_MODERATE_DRAIN: f32 = 0.180;
-const STABILITY_PI_STRONG_DRAIN: f32 = 0.700;
+const STABILITY_PI_STRONG_DRAIN: f32 = 0.240;
+const STABILITY_PI_FORCE_DRAIN: f32 = 0.700;
 const STABILITY_PI_FALLING_DRAIN_CAP: f32 = 0.050;
 const STABILITY_PI_FALLING_CENTERING_DRAIN: f32 = 0.020;
 pub const STABLE_CORE_RECOVERY_IMPULSE_KEEP: f32 = 0.90;
 pub const STABLE_CORE_RECOVERY_IMPULSE_TRACE_SCALE: f32 = 1.0;
+pub const STABLE_CORE_RECOVERY_IMPULSE_SCAFFOLD_LIVE_WEIGHT: f32 = 0.04;
+pub const STABLE_CORE_HOLD_MICRO_LIVE_WEIGHT: f32 = 0.015;
+pub const STABLE_CORE_ELEVATED_MICRO_LIVE_WEIGHT: f32 = 0.025;
 pub const STABLE_CORE_SCAFFOLD_REENTRY_INITIAL_LIVE_WEIGHT: f32 = 0.10;
-pub const STABLE_CORE_SCAFFOLD_REENTRY_FINAL_LIVE_WEIGHT: f32 = 0.0;
+pub const STABLE_CORE_SCAFFOLD_REENTRY_FINAL_LIVE_WEIGHT: f32 = 1.0;
 pub const SCAFFOLD_ACTIVATION_STABLE_FILL_MIN: f32 = 58.0;
 pub const SCAFFOLD_ACTIVATION_STABLE_FILL_MAX: f32 = 72.0;
 pub const SCAFFOLD_ACTIVATION_UPSLOPE_MAX: f32 = 3.0;
@@ -65,19 +70,23 @@ pub const STABLE_CORE_RESTART_GATE_SECS: f32 = 90.0;
 pub const STABLE_CORE_RESTART_SETTLE_FILL_MIN: f32 = 58.0;
 pub const STABLE_CORE_RESTART_SETTLE_FILL_MAX: f32 = 72.0;
 pub const STABLE_CORE_RESTART_SETTLE_SLOPE_MAX_ABS: f32 = 2.5;
+pub const STABLE_CORE_RESTART_SETTLE_BREATHING_FILL_MIN: f32 = 64.0;
+pub const STABLE_CORE_RESTART_SETTLE_BREATHING_FILL_MAX: f32 = 74.0;
+pub const STABLE_CORE_RESTART_SETTLE_BREATHING_SLOPE_MAX_ABS: f32 = 4.5;
 pub const STABLE_CORE_RESTART_SETTLE_REQUIRED_TICKS: u32 = 3;
-pub const STABLE_CORE_RESTART_RECOVERY_RESET_PCT: f32 = 60.0;
+pub const STABLE_CORE_SCAFFOLD_RETIRE_REQUIRED_TICKS: u32 = 3;
+pub const STABLE_CORE_RESTART_RECOVERY_RESET_PCT: f32 = 35.0;
 pub const STABLE_CORE_RESTART_RESET_REBUILD_SECS: f32 = 20.0;
 pub const STABLE_CORE_RESTART_RESET_REBUILD_KEEP: f32 = 0.72;
-const STABLE_CORE_RESTART_GATE_FAST_HOLD_FILL_PCT: f32 = 70.0;
-const STABLE_CORE_RESTART_GATE_FAST_HOLD_SLOPE_PCT_PER_SEC: f32 = 2.0;
 const STABLE_CORE_RESTART_GATE_ELEVATED_FILL_PCT: f32 = 72.0;
 const STABLE_CORE_RESTART_GATE_STRONG_FILL_PCT: f32 = 74.0;
-const STABLE_CORE_RESTART_GATE_FORCE_FILL_PCT: f32 = 78.0;
-const STABLE_CORE_RESTART_GATE_FAST_HOLD_DRAIN: f32 = 0.08;
-const STABLE_CORE_RESTART_GATE_ELEVATED_DRAIN: f32 = 0.18;
-const STABLE_CORE_RESTART_GATE_STRONG_DRAIN: f32 = 0.45;
+const STABLE_CORE_RESTART_GATE_FORCE_FILL_PCT: f32 = 82.0;
+const STABLE_CORE_RESTART_GATE_ELEVATED_SOFT_DRAIN: f32 = 0.04;
+const STABLE_CORE_RESTART_GATE_STRONG_DRAIN: f32 = 0.24;
 const STABLE_CORE_RESTART_GATE_FORCE_DRAIN: f32 = 0.70;
+const STABLE_CORE_SCAFFOLD_RETIRE_DRAIN_EPS: f32 = 0.001;
+const SCAFFOLD_PROTECTIVE_UPPER_HOLD_ACTIVATION_REQUIRED_TICKS: u32 = 3;
+const SCAFFOLD_PROTECTIVE_HIGH_FILL_ACTIVATION_REQUIRED_TICKS: u32 = 3;
 const RANK_COLD_SCAFFOLD_ACTIVE_MODES: usize = 5;
 const RANK_COLD_DRAIN_ACTIVE_MODES: usize = 4;
 const RANK_COLD_DRAIN_INACTIVE_FLOOR: f32 = 1e-3;
@@ -143,6 +152,7 @@ pub struct StableCoreRestartGateStatus {
     pub reset_rebuild_keep: f32,
     pub settle_candidate_ticks: u32,
     pub settle_required_ticks: u32,
+    pub settle_candidate_reason: &'static str,
     pub settled_at_unix_ms: Option<u64>,
     pub activation_candidate_ticks: u32,
     pub activation_delay_reason: &'static str,
@@ -168,6 +178,7 @@ pub struct StableCoreRestartGate {
     reopen_reason: Option<&'static str>,
     relapse_count: u32,
     settle_candidate_ticks: u32,
+    settle_candidate_reason: &'static str,
     settled_at_unix_ms: Option<u64>,
     activation_candidate_ticks: u32,
     activation_delay_reason: &'static str,
@@ -194,6 +205,7 @@ impl StableCoreRestartGate {
             reopen_reason: None,
             relapse_count: 0,
             settle_candidate_ticks: 0,
+            settle_candidate_reason: "not_evaluated",
             settled_at_unix_ms: None,
             activation_candidate_ticks: 0,
             activation_delay_reason: "inactive",
@@ -232,6 +244,11 @@ impl StableCoreRestartGate {
         self.scaffold_activated_at_unix_ms.is_some() && self.settled_at_unix_ms.is_none()
     }
 
+    #[must_use]
+    pub const fn is_settled(&self) -> bool {
+        self.settled_at_unix_ms.is_some()
+    }
+
     pub fn record_measured_fill(
         &mut self,
         now_unix_ms: u64,
@@ -245,6 +262,7 @@ impl StableCoreRestartGate {
     ) {
         if !fill_pct.is_finite() {
             self.settle_candidate_ticks = 0;
+            self.settle_candidate_reason = "invalid_fill";
             return;
         }
         if !scaffold_active {
@@ -265,30 +283,38 @@ impl StableCoreRestartGate {
         {
             self.settled_at_unix_ms = None;
             self.settle_candidate_ticks = 0;
+            self.settle_candidate_reason = "post_settle_recovery_relapse";
             self.relapse_count = self.relapse_count.saturating_add(1);
             self.reopened_at_unix_ms = Some(now_unix_ms);
             self.reopen_reason = Some("post_settle_recovery_relapse");
         }
 
         if self.settled_at_unix_ms.is_none() {
-            let slope_coherent = fill_slope_pct_per_sec.is_finite()
-                && fill_slope_pct_per_sec.abs() <= STABLE_CORE_RESTART_SETTLE_SLOPE_MAX_ABS;
-            let fill_coherent = (STABLE_CORE_RESTART_SETTLE_FILL_MIN
-                ..=STABLE_CORE_RESTART_SETTLE_FILL_MAX)
-                .contains(&fill_pct);
-            let can_settle = scaffold_active
-                && !reentry_active
-                && !recovery_active
-                && !semantic_active
-                && fill_coherent
-                && slope_coherent;
-            if can_settle {
+            let settle_candidate = stable_core_restart_settle_candidate_reason(
+                fill_pct,
+                fill_slope_pct_per_sec,
+                stage,
+                semantic_active,
+                scaffold_active,
+                reentry_active,
+                recovery_active,
+            );
+            if let Some(reason) = settle_candidate {
                 self.settle_candidate_ticks = self.settle_candidate_ticks.saturating_add(1);
+                self.settle_candidate_reason = reason;
                 if self.settle_candidate_ticks >= STABLE_CORE_RESTART_SETTLE_REQUIRED_TICKS {
                     self.settled_at_unix_ms = Some(now_unix_ms);
                 }
             } else {
                 self.settle_candidate_ticks = 0;
+                self.settle_candidate_reason = stable_core_restart_settle_block_reason(
+                    fill_pct,
+                    fill_slope_pct_per_sec,
+                    semantic_active,
+                    scaffold_active,
+                    reentry_active,
+                    recovery_active,
+                );
             }
         }
 
@@ -324,18 +350,40 @@ impl StableCoreRestartGate {
             }
         } else if matches!(
             activation_reason,
-            "protective_downslope_candidate"
-                | "protective_upper_hold_candidate"
-                | "protective_high_fill_candidate"
+            "protective_downslope_candidate" | "protective_low_fill_candidate"
         ) {
             self.activation_candidate_ticks = SCAFFOLD_ACTIVATION_REQUIRED_TICKS;
             activate = true;
             reason = match activation_reason {
-                "protective_downslope_candidate" => "protective_downslope_activated",
-                "protective_upper_hold_candidate" => "protective_upper_hold_activated",
-                "protective_high_fill_candidate" => "protective_high_fill_activated",
-                _ => "protective_activated",
+                "protective_low_fill_candidate" => "protective_low_fill_activated",
+                _ => "protective_downslope_activated",
             };
+        } else if matches!(
+            activation_reason,
+            "protective_upper_hold_candidate" | "protective_high_fill_candidate"
+        ) {
+            if fill_pct >= STABLE_CORE_RESTART_GATE_STRONG_FILL_PCT {
+                self.activation_candidate_ticks = SCAFFOLD_ACTIVATION_REQUIRED_TICKS;
+                activate = true;
+                reason = "protective_high_fill_activated";
+            } else {
+                self.activation_candidate_ticks = self.activation_candidate_ticks.saturating_add(1);
+                self.activation_delay_reason = activation_reason;
+                let required_ticks = match activation_reason {
+                    "protective_high_fill_candidate" => {
+                        SCAFFOLD_PROTECTIVE_HIGH_FILL_ACTIVATION_REQUIRED_TICKS
+                    }
+                    _ => SCAFFOLD_PROTECTIVE_UPPER_HOLD_ACTIVATION_REQUIRED_TICKS,
+                };
+                if self.activation_candidate_ticks >= required_ticks {
+                    activate = true;
+                    reason = match activation_reason {
+                        "protective_upper_hold_candidate" => "protective_upper_hold_activated",
+                        "protective_high_fill_candidate" => "protective_high_fill_activated",
+                        _ => "protective_activated",
+                    };
+                }
+            }
         } else {
             self.activation_candidate_ticks = 0;
             self.activation_delay_reason = activation_reason;
@@ -388,6 +436,7 @@ impl StableCoreRestartGate {
             self.first_low_fill_reset_fill_pct = Some(fill_pct);
         }
         self.settle_candidate_ticks = 0;
+        self.settle_candidate_reason = "low_fill_reset";
         self.phase = StableCoreRestartPhase::LowFillRecovery;
     }
 
@@ -478,6 +527,7 @@ impl StableCoreRestartGate {
             },
             settle_candidate_ticks: self.settle_candidate_ticks,
             settle_required_ticks: STABLE_CORE_RESTART_SETTLE_REQUIRED_TICKS,
+            settle_candidate_reason: self.settle_candidate_reason,
             settled_at_unix_ms: self.settled_at_unix_ms,
             activation_candidate_ticks: self.activation_candidate_ticks,
             activation_delay_reason: self.activation_delay_reason,
@@ -910,8 +960,8 @@ pub fn scaffold_live_weight(stage: OverfillStage) -> f32 {
     match stage {
         OverfillStage::Bootstrap => 1.0,
         OverfillStage::Recovery => 0.0,
-        OverfillStage::Hold => 0.0,
-        OverfillStage::Elevated => 0.0,
+        OverfillStage::Hold => STABLE_CORE_HOLD_MICRO_LIVE_WEIGHT,
+        OverfillStage::Elevated => STABLE_CORE_ELEVATED_MICRO_LIVE_WEIGHT,
         OverfillStage::Discharge => 0.0,
     }
 }
@@ -955,6 +1005,12 @@ pub fn stable_core_scaffold_activation_delay_reason(
     }
     if live_audio_divisor != 0 || live_video_divisor != 0 {
         return "live_intake_enabled";
+    }
+    if matches!(stage, OverfillStage::Bootstrap | OverfillStage::Recovery)
+        && fill_pct.is_finite()
+        && fill_pct < STABLE_CORE_SCAFFOLD_LOW_FILL_REACTIVATION_PCT
+    {
+        return "protective_low_fill_candidate";
     }
     if fill_pct >= STABILITY_PI_REENTRY_ELEVATED_FILL_PCT && fill_slope_pct_per_sec > 0.0 {
         return "protective_high_fill_candidate";
@@ -1030,19 +1086,170 @@ fn stable_core_restart_gate_drain_floor_for_state(
     }
     if fill_pct >= STABLE_CORE_RESTART_GATE_ELEVATED_FILL_PCT && fill_slope_pct_per_sec > 0.0 {
         return Some((
-            STABLE_CORE_RESTART_GATE_ELEVATED_DRAIN,
-            "restart_gate_elevated_rising_cold_drain",
-        ));
-    }
-    if fill_pct >= STABLE_CORE_RESTART_GATE_FAST_HOLD_FILL_PCT
-        && fill_slope_pct_per_sec > STABLE_CORE_RESTART_GATE_FAST_HOLD_SLOPE_PCT_PER_SEC
-    {
-        return Some((
-            STABLE_CORE_RESTART_GATE_FAST_HOLD_DRAIN,
-            "restart_gate_fast_upper_hold_cold_drain",
+            STABLE_CORE_RESTART_GATE_ELEVATED_SOFT_DRAIN,
+            "restart_gate_elevated_rising_soft_drain",
         ));
     }
     None
+}
+
+#[must_use]
+fn stable_core_restart_settle_candidate_reason(
+    fill_pct: f32,
+    fill_slope_pct_per_sec: f32,
+    stage: OverfillStage,
+    semantic_active: bool,
+    scaffold_active: bool,
+    reentry_active: bool,
+    recovery_active: bool,
+) -> Option<&'static str> {
+    if semantic_active || !scaffold_active || reentry_active || recovery_active {
+        return None;
+    }
+    if !fill_pct.is_finite() || !fill_slope_pct_per_sec.is_finite() {
+        return None;
+    }
+
+    let normal_hold_fill = (STABLE_CORE_RESTART_SETTLE_FILL_MIN
+        ..=STABLE_CORE_RESTART_SETTLE_FILL_MAX)
+        .contains(&fill_pct);
+    let normal_hold_slope =
+        fill_slope_pct_per_sec.abs() <= STABLE_CORE_RESTART_SETTLE_SLOPE_MAX_ABS;
+    if normal_hold_fill && normal_hold_slope {
+        return Some("hold_coherent_settle");
+    }
+
+    // After the post-restart strong rail has already done its work, green
+    // systems can breathe across the top of hold. Do not keep the restart
+    // latch alive merely because ordinary hold/elevated movement is faster
+    // than the old cold-drain settle proof. The true 74/78% rails remain out
+    // of this path.
+    let below_strong_rail = fill_pct < STABLE_CORE_RESTART_GATE_STRONG_FILL_PCT;
+    let breathing_fill = (STABLE_CORE_RESTART_SETTLE_BREATHING_FILL_MIN
+        ..=STABLE_CORE_RESTART_SETTLE_BREATHING_FILL_MAX)
+        .contains(&fill_pct);
+    let breathing_slope =
+        fill_slope_pct_per_sec.abs() <= STABLE_CORE_RESTART_SETTLE_BREATHING_SLOPE_MAX_ABS;
+    if below_strong_rail
+        && breathing_fill
+        && breathing_slope
+        && matches!(stage, OverfillStage::Hold | OverfillStage::Elevated)
+    {
+        if fill_pct > STABLE_CORE_RESTART_SETTLE_FILL_MAX {
+            return Some("elevated_breathing_settle");
+        }
+        return Some("hold_breathing_settle");
+    }
+
+    None
+}
+
+#[must_use]
+fn stable_core_restart_settle_block_reason(
+    fill_pct: f32,
+    fill_slope_pct_per_sec: f32,
+    semantic_active: bool,
+    scaffold_active: bool,
+    reentry_active: bool,
+    recovery_active: bool,
+) -> &'static str {
+    if !scaffold_active {
+        return "scaffold_inactive";
+    }
+    if reentry_active {
+        return "reentry_active";
+    }
+    if recovery_active {
+        return "recovery_active";
+    }
+    if semantic_active {
+        return "semantic_active";
+    }
+    if !fill_pct.is_finite() {
+        return "invalid_fill";
+    }
+    if !fill_slope_pct_per_sec.is_finite() {
+        return "invalid_slope";
+    }
+    if fill_pct >= STABLE_CORE_RESTART_GATE_STRONG_FILL_PCT {
+        return "strong_rail_fill";
+    }
+    if !(STABLE_CORE_RESTART_SETTLE_FILL_MIN..=STABLE_CORE_RESTART_SETTLE_BREATHING_FILL_MAX)
+        .contains(&fill_pct)
+    {
+        return "outside_settle_band";
+    }
+    if fill_slope_pct_per_sec.abs() > STABLE_CORE_RESTART_SETTLE_BREATHING_SLOPE_MAX_ABS {
+        return "slope_too_fast";
+    }
+    "stage_not_settle_candidate"
+}
+
+#[must_use]
+pub fn stable_core_scaffold_retirement_candidate_reason(
+    restart_gate_settled: bool,
+    fill_pct: f32,
+    fill_slope_pct_per_sec: f32,
+    stage: OverfillStage,
+    semantic_active: bool,
+    scaffold_active: bool,
+    reentry_active: bool,
+    recovery_active: bool,
+    high_fill_drain_active: bool,
+    applied_drain_weight: f32,
+) -> Option<&'static str> {
+    if !restart_gate_settled
+        || high_fill_drain_active
+        || applied_drain_weight > STABLE_CORE_SCAFFOLD_RETIRE_DRAIN_EPS
+    {
+        return None;
+    }
+    stable_core_restart_settle_candidate_reason(
+        fill_pct,
+        fill_slope_pct_per_sec,
+        stage,
+        semantic_active,
+        scaffold_active,
+        reentry_active,
+        recovery_active,
+    )
+    .map(|reason| match reason {
+        "hold_coherent_settle" => "settled_hold_coherent_retire",
+        "hold_breathing_settle" => "settled_hold_breathing_retire",
+        "elevated_breathing_settle" => "settled_elevated_breathing_retire",
+        _ => "settled_scaffold_retire",
+    })
+}
+
+#[must_use]
+pub fn stable_core_scaffold_retirement_block_reason(
+    restart_gate_settled: bool,
+    fill_pct: f32,
+    fill_slope_pct_per_sec: f32,
+    semantic_active: bool,
+    scaffold_active: bool,
+    reentry_active: bool,
+    recovery_active: bool,
+    high_fill_drain_active: bool,
+    applied_drain_weight: f32,
+) -> &'static str {
+    if !restart_gate_settled {
+        return "restart_gate_not_settled";
+    }
+    if high_fill_drain_active {
+        return "high_fill_drain_active";
+    }
+    if applied_drain_weight > STABLE_CORE_SCAFFOLD_RETIRE_DRAIN_EPS {
+        return "drain_active";
+    }
+    stable_core_restart_settle_block_reason(
+        fill_pct,
+        fill_slope_pct_per_sec,
+        semantic_active,
+        scaffold_active,
+        reentry_active,
+        recovery_active,
+    )
 }
 
 #[must_use]
@@ -1257,13 +1464,21 @@ fn stable_core_drain_policy(
             high_fill_active: false,
         };
     }
-    if fill_pct >= STABILITY_PI_STRONG_DRAIN_FILL_PCT
-        && (fill_slope_pct_per_sec > 0.0 || fill_pct >= STABILITY_PI_FORCE_STRONG_DRAIN_FILL_PCT)
-    {
+    if fill_pct >= STABILITY_PI_STRONG_DRAIN_FILL_PCT {
+        let forced = fill_pct >= STABILITY_PI_FORCE_STRONG_DRAIN_FILL_PCT;
+        let floor = if forced {
+            STABILITY_PI_FORCE_DRAIN
+        } else {
+            STABILITY_PI_STRONG_DRAIN
+        };
         return DrainPolicy {
-            weight: pi_output.max(STABILITY_PI_STRONG_DRAIN).clamp(0.0, 1.0),
+            weight: pi_output.max(floor).clamp(0.0, 1.0),
             damping_state: "strong_drain",
-            reason: "strong_high_fill",
+            reason: if forced {
+                "force_high_fill"
+            } else {
+                "strong_high_fill"
+            },
             suppressed_by_slope: false,
             high_fill_active: true,
         };
@@ -1670,8 +1885,16 @@ mod tests {
     #[test]
     fn stage_blend_weights_match_rescue_policy() {
         assert!((scaffold_live_weight(OverfillStage::Recovery) - 0.0).abs() < 1e-6);
-        assert!((scaffold_live_weight(OverfillStage::Hold) - 0.0).abs() < 1e-6);
-        assert!((scaffold_live_weight(OverfillStage::Elevated) - 0.0).abs() < 1e-6);
+        assert!(
+            (scaffold_live_weight(OverfillStage::Hold) - STABLE_CORE_HOLD_MICRO_LIVE_WEIGHT).abs()
+                < 1e-6
+        );
+        assert!(
+            (scaffold_live_weight(OverfillStage::Elevated)
+                - STABLE_CORE_ELEVATED_MICRO_LIVE_WEIGHT)
+                .abs()
+                < 1e-6
+        );
         assert!((scaffold_live_weight(OverfillStage::Discharge) - 0.0).abs() < 1e-6);
         assert!((base_scaffold_drain_weight(OverfillStage::Hold) - 0.0).abs() < 1e-6);
         assert!((base_scaffold_drain_weight(OverfillStage::Elevated) - 0.0).abs() < 1e-6);
@@ -1732,6 +1955,44 @@ mod tests {
         let trace = blended[0] + blended[3];
         assert!((trace - scaffold.trace).abs() < 1e-5);
         assert!(blended[1].abs() < 0.2);
+    }
+
+    #[test]
+    fn recovery_impulse_anchor_keeps_cold_scaffold_multimode() {
+        let scaffold_matrix = rank_cold_matrix(8, RANK_COLD_SCAFFOLD_ACTIVE_MODES);
+        let scaffold = RescueScaffold::from_parts(
+            scaffold_matrix,
+            8,
+            "derived_cold_from_stable".to_string(),
+            10,
+            Some(COLD_SCAFFOLD_PROFILE_VERSION),
+            None,
+            None,
+            None,
+            None,
+            Some("spectral_checkpoint_stable.bin".to_string()),
+            Some(COLD_SCAFFOLD_PROFILE.to_string()),
+            Some(COLD_SCAFFOLD_ACTIVATION_POLICY.to_string()),
+            Some(COLD_SCAFFOLD_MODE_CAP),
+            Some(COLD_SCAFFOLD_STABLE_WEIGHT),
+            Some(COLD_SCAFFOLD_DIAGONAL_WEIGHT),
+            Some([SCAFFOLD_ACTIVATION_FILL_MIN, SCAFFOLD_ACTIVATION_FILL_MAX]),
+        )
+        .expect("scaffold");
+        let mut collapsed = vec![0.0_f32; 64];
+        collapsed[0] = 8.0;
+        let blended = blend_toward_scaffold_with_drain(
+            &collapsed,
+            &scaffold,
+            STABLE_CORE_RECOVERY_IMPULSE_SCAFFOLD_LIVE_WEIGHT,
+            0.0,
+        )
+        .expect("blend");
+        let trace = (0..8).map(|idx| blended[idx * 8 + idx]).sum::<f32>();
+        assert!((trace - scaffold.trace).abs() < 1e-5);
+        assert!(blended[0] < 2.0);
+        assert!(blended[4 * 8 + 4] > 0.5);
+        assert!(blended[5 * 8 + 5] < 0.05);
     }
 
     #[test]
@@ -1826,37 +2087,55 @@ mod tests {
         assert_eq!(soft_falling.drain_weight, 0.0);
         assert!(soft_falling.drain_suppressed_by_slope);
 
-        let moderate_rising = pi.step(73.5, 0.1, OverfillStage::Elevated, true);
-        assert_eq!(moderate_rising.damping_state, "moderate_drain");
-        assert!(moderate_rising.drain_weight >= STABILITY_PI_MODERATE_DRAIN);
-        assert!(moderate_rising.drain_weight <= 1.0);
+        let upper_elevated_rising = pi.step(73.5, 0.1, OverfillStage::Elevated, true);
+        assert_eq!(upper_elevated_rising.damping_state, "soft_drain");
+        assert!((upper_elevated_rising.drain_weight - STABILITY_PI_SOFT_DRAIN).abs() < 1e-6);
 
-        let moderate_falling = pi.step(73.5, -0.5, OverfillStage::Elevated, true);
-        assert_eq!(moderate_falling.damping_state, "moderate_drain_capped");
+        let upper_elevated_falling = pi.step(73.5, -0.5, OverfillStage::Elevated, true);
         assert_eq!(
-            moderate_falling.drain_gate_reason,
-            "falling_slope_residual_centering"
+            upper_elevated_falling.damping_state,
+            "soft_drain_suppressed"
         );
-        assert!(moderate_falling.drain_suppressed_by_slope);
-        assert!(moderate_falling.drain_weight >= STABILITY_PI_FALLING_CENTERING_DRAIN);
-        assert!(moderate_falling.drain_weight <= STABILITY_PI_FALLING_DRAIN_CAP);
+        assert_eq!(
+            upper_elevated_falling.drain_gate_reason,
+            "falling_slope_suppressed"
+        );
+        assert!(upper_elevated_falling.drain_suppressed_by_slope);
+        assert_eq!(upper_elevated_falling.drain_weight, 0.0);
 
         let strong = pi.step(74.0, 0.1, OverfillStage::Elevated, true);
         assert!(strong.high_fill_drain_active);
         assert_eq!(strong.damping_state, "strong_drain");
         assert!(strong.drain_weight >= STABILITY_PI_STRONG_DRAIN);
+        assert!(strong.drain_weight < STABILITY_PI_FORCE_DRAIN);
         assert!(!strong.drain_suppressed_by_slope);
 
-        let forced_strong = pi.step(76.0, -1.0, OverfillStage::Elevated, true);
+        let falling_below_force = pi.step(76.0, -1.0, OverfillStage::Elevated, true);
+        assert!(falling_below_force.high_fill_drain_active);
+        assert_eq!(falling_below_force.damping_state, "strong_drain");
+        assert_eq!(falling_below_force.drain_gate_reason, "strong_high_fill");
+        assert!(falling_below_force.drain_weight >= STABILITY_PI_STRONG_DRAIN);
+        assert!(falling_below_force.drain_weight < STABILITY_PI_FORCE_DRAIN);
+        assert!(!falling_below_force.drain_suppressed_by_slope);
+
+        let force_landing = pi.step(78.0, -1.0, OverfillStage::Elevated, true);
+        assert!(force_landing.high_fill_drain_active);
+        assert_eq!(force_landing.damping_state, "strong_drain");
+        assert_eq!(force_landing.drain_gate_reason, "strong_high_fill");
+        assert!(force_landing.drain_weight >= STABILITY_PI_STRONG_DRAIN);
+        assert!(force_landing.drain_weight < STABILITY_PI_FORCE_DRAIN);
+
+        let forced_strong = pi.step(82.0, -1.0, OverfillStage::Elevated, true);
         assert!(forced_strong.high_fill_drain_active);
         assert_eq!(forced_strong.damping_state, "strong_drain");
-        assert!(forced_strong.drain_weight >= STABILITY_PI_STRONG_DRAIN);
+        assert_eq!(forced_strong.drain_gate_reason, "force_high_fill");
+        assert!(forced_strong.drain_weight >= STABILITY_PI_FORCE_DRAIN);
     }
 
     #[test]
     fn stability_pi_low_fill_escape_suspends_drain_until_recovered() {
         let mut pi = StabilityPiState::default();
-        let early_escape = pi.step(63.5, 0.0, OverfillStage::Hold, true);
+        let early_escape = pi.step(41.5, 0.0, OverfillStage::Hold, true);
         assert!(early_escape.low_fill_escape_active);
         assert!(early_escape.recovery_impulse_active);
         assert_eq!(
@@ -1865,7 +2144,7 @@ mod tests {
         );
         assert_eq!(early_escape.drain_weight, 0.0);
 
-        let escape = pi.step(54.9, -1.0, OverfillStage::Recovery, true);
+        let escape = pi.step(34.9, -1.0, OverfillStage::Recovery, true);
         assert!(escape.low_fill_escape_active);
         assert!(escape.recovery_impulse_active);
         assert_eq!(
@@ -1878,7 +2157,7 @@ mod tests {
         );
         assert_eq!(escape.drain_weight, 0.0);
 
-        let still_escape = pi.step(59.5, -0.5, OverfillStage::Recovery, true);
+        let still_escape = pi.step(44.5, -0.5, OverfillStage::Recovery, true);
         assert!(still_escape.low_fill_escape_active);
         assert!(still_escape.recovery_impulse_active);
 
@@ -1893,7 +2172,7 @@ mod tests {
     #[test]
     fn stability_pi_enters_on_negative_slope_before_low_fill() {
         let mut pi = StabilityPiState::default();
-        let output = pi.step(65.5, -2.5, OverfillStage::Elevated, true);
+        let output = pi.step(44.5, -2.5, OverfillStage::Elevated, true);
 
         assert!(output.low_fill_escape_active);
         assert!(output.recovery_impulse_active);
@@ -1905,15 +2184,15 @@ mod tests {
     #[test]
     fn recovery_impulse_requests_identity_reset_when_active_impulse_crosses_low_fill() {
         let mut pi = StabilityPiState::default();
-        let early = pi.step(63.5, -2.5, OverfillStage::Hold, true);
+        let early = pi.step(41.5, -2.5, OverfillStage::Hold, true);
         assert!(early.recovery_impulse_active);
         assert!(!early.recovery_identity_reset_requested);
 
-        let low_crossing = pi.step(54.5, -1.0, OverfillStage::Recovery, true);
+        let low_crossing = pi.step(34.5, -1.0, OverfillStage::Recovery, true);
         assert!(low_crossing.recovery_impulse_active);
         assert!(low_crossing.recovery_identity_reset_requested);
 
-        let still_low = pi.step(53.0, 0.2, OverfillStage::Recovery, true);
+        let still_low = pi.step(33.0, 0.2, OverfillStage::Recovery, true);
         assert!(still_low.recovery_impulse_active);
         assert!(!still_low.recovery_identity_reset_requested);
     }
@@ -1922,7 +2201,7 @@ mod tests {
     fn stability_pi_release_requires_rising_or_strong_fill() {
         let mut pi = StabilityPiState::default();
         assert!(
-            pi.step(63.5, -1.0, OverfillStage::Hold, true)
+            pi.step(41.5, -1.0, OverfillStage::Hold, true)
                 .recovery_impulse_active
         );
         assert!(
@@ -1944,7 +2223,7 @@ mod tests {
     fn stability_pi_long_plateau_can_release_to_reentry() {
         let mut pi = StabilityPiState::default();
         assert!(
-            pi.step(63.5, -1.0, OverfillStage::Hold, true)
+            pi.step(41.5, -1.0, OverfillStage::Hold, true)
                 .recovery_impulse_active
         );
         for _ in 0..STABILITY_PI_RELEASE_LONG_IMPULSE_TICKS {
@@ -1958,14 +2237,14 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_reentry_live_weight_decays_to_soft_floor() {
+    fn scaffold_reentry_live_weight_ramps_toward_live_release() {
         let first = scaffold_reentry_live_weight(1);
         let middle = scaffold_reentry_live_weight(STABILITY_PI_REENTRY_TICKS / 2);
         let last = scaffold_reentry_live_weight(STABILITY_PI_REENTRY_TICKS);
 
         assert!((first - STABLE_CORE_SCAFFOLD_REENTRY_INITIAL_LIVE_WEIGHT).abs() < 1e-6);
-        assert!(middle < first);
-        assert!(middle > last);
+        assert!(middle > first);
+        assert!(middle < last);
         assert!((last - STABLE_CORE_SCAFFOLD_REENTRY_FINAL_LIVE_WEIGHT).abs() < 1e-6);
         assert_eq!(
             scaffold_reentry_live_weight(STABILITY_PI_REENTRY_TICKS + 1),
@@ -1977,13 +2256,13 @@ mod tests {
     fn stability_pi_reentry_falls_back_to_impulse_on_underfill() {
         let mut pi = StabilityPiState::default();
         assert!(
-            pi.step(63.5, -1.0, OverfillStage::Hold, true)
+            pi.step(41.5, -1.0, OverfillStage::Hold, true)
                 .recovery_impulse_active
         );
         let reentry = pi.step(62.0, 0.0, OverfillStage::Hold, true);
         assert!(reentry.reentry_active);
 
-        let fallback = pi.step(57.9, -1.0, OverfillStage::Recovery, true);
+        let fallback = pi.step(44.9, -1.0, OverfillStage::Recovery, true);
         assert!(fallback.recovery_impulse_active);
         assert!(!fallback.reentry_active);
     }
@@ -1992,13 +2271,13 @@ mod tests {
     fn stability_pi_reentry_falls_back_to_impulse_on_steep_downslope() {
         let mut pi = StabilityPiState::default();
         assert!(
-            pi.step(63.5, -1.0, OverfillStage::Hold, true)
+            pi.step(41.5, -1.0, OverfillStage::Hold, true)
                 .recovery_impulse_active
         );
         let reentry = pi.step(62.0, 0.0, OverfillStage::Hold, true);
         assert!(reentry.reentry_active);
 
-        let fallback = pi.step(61.5, -1.6, OverfillStage::Hold, true);
+        let fallback = pi.step(44.5, -1.6, OverfillStage::Hold, true);
         assert!(fallback.recovery_impulse_active);
         assert!(!fallback.reentry_active);
         assert_eq!(fallback.drain_weight, 0.0);
@@ -2008,7 +2287,7 @@ mod tests {
     fn stability_pi_reentry_exits_to_drain_on_fast_upper_upslope() {
         let mut pi = StabilityPiState::default();
         assert!(
-            pi.step(63.5, -1.0, OverfillStage::Hold, true)
+            pi.step(41.5, -1.0, OverfillStage::Hold, true)
                 .recovery_impulse_active
         );
         let reentry = pi.step(62.0, 0.0, OverfillStage::Hold, true);
@@ -2032,6 +2311,28 @@ mod tests {
                 0,
             ),
             "stage_not_hold"
+        );
+        assert_eq!(
+            stable_core_scaffold_activation_delay_reason(
+                OverfillStage::Bootstrap,
+                34.0,
+                0.0,
+                false,
+                0,
+                0,
+            ),
+            "protective_low_fill_candidate"
+        );
+        assert_eq!(
+            stable_core_scaffold_activation_delay_reason(
+                OverfillStage::Recovery,
+                44.0,
+                -1.0,
+                false,
+                0,
+                0,
+            ),
+            "protective_low_fill_candidate"
         );
         assert_eq!(
             stable_core_scaffold_activation_delay_reason(
@@ -2102,6 +2403,61 @@ mod tests {
     }
 
     #[test]
+    fn scaffold_activation_soft_protective_candidates_use_tiered_delays() {
+        let mut upper_hold = StableCoreRestartGate::new(1_000);
+        for expected_ticks in 1..SCAFFOLD_PROTECTIVE_UPPER_HOLD_ACTIVATION_REQUIRED_TICKS {
+            let activation =
+                upper_hold.evaluate_activation(OverfillStage::Hold, 70.5, 4.0, false, 0, 0);
+            assert!(!activation.activate);
+            assert_eq!(activation.reason, "protective_upper_hold_candidate");
+            assert_eq!(activation.candidate_ticks, expected_ticks);
+        }
+        let activation =
+            upper_hold.evaluate_activation(OverfillStage::Hold, 70.5, 4.0, false, 0, 0);
+        assert!(activation.activate);
+        assert_eq!(activation.reason, "protective_upper_hold_activated");
+        assert_eq!(
+            activation.candidate_ticks,
+            SCAFFOLD_PROTECTIVE_UPPER_HOLD_ACTIVATION_REQUIRED_TICKS
+        );
+
+        let mut elevated = StableCoreRestartGate::new(1_000);
+        for expected_ticks in 1..SCAFFOLD_PROTECTIVE_HIGH_FILL_ACTIVATION_REQUIRED_TICKS {
+            let activation =
+                elevated.evaluate_activation(OverfillStage::Elevated, 72.5, 1.0, false, 0, 0);
+            assert!(!activation.activate);
+            assert_eq!(activation.reason, "protective_high_fill_candidate");
+            assert_eq!(activation.candidate_ticks, expected_ticks);
+        }
+        let activation =
+            elevated.evaluate_activation(OverfillStage::Elevated, 73.5, 1.0, false, 0, 0);
+        assert!(activation.activate);
+        assert_eq!(activation.reason, "protective_high_fill_activated");
+        assert_eq!(
+            activation.candidate_ticks,
+            SCAFFOLD_PROTECTIVE_HIGH_FILL_ACTIVATION_REQUIRED_TICKS
+        );
+
+        let mut high_fill = StableCoreRestartGate::new(1_000);
+        let activation =
+            high_fill.evaluate_activation(OverfillStage::Elevated, 74.0, 0.1, false, 0, 0);
+        assert!(activation.activate);
+        assert_eq!(activation.reason, "protective_high_fill_activated");
+
+        let mut downslope = StableCoreRestartGate::new(1_000);
+        let activation =
+            downslope.evaluate_activation(OverfillStage::Hold, 62.0, -13.0, false, 0, 0);
+        assert!(activation.activate);
+        assert_eq!(activation.reason, "protective_downslope_activated");
+
+        let mut low_fill = StableCoreRestartGate::new(1_000);
+        let activation =
+            low_fill.evaluate_activation(OverfillStage::Bootstrap, 34.0, 0.0, false, 0, 0);
+        assert!(activation.activate);
+        assert_eq!(activation.reason, "protective_low_fill_activated");
+    }
+
+    #[test]
     fn restart_gate_adds_cold_drain_only_inside_startup_window() {
         assert!(!stable_core_restart_gate_active(None));
         assert!(stable_core_restart_gate_active(Some(45.0)));
@@ -2115,16 +2471,13 @@ mod tests {
         );
         assert_eq!(
             stable_core_restart_gate_drain_floor(70.5, 2.5, Some(30.0)),
-            Some((
-                STABLE_CORE_RESTART_GATE_FAST_HOLD_DRAIN,
-                "restart_gate_fast_upper_hold_cold_drain"
-            ))
+            None
         );
         assert_eq!(
             stable_core_restart_gate_drain_floor(72.0, 0.5, Some(30.0)),
             Some((
-                STABLE_CORE_RESTART_GATE_ELEVATED_DRAIN,
-                "restart_gate_elevated_rising_cold_drain"
+                STABLE_CORE_RESTART_GATE_ELEVATED_SOFT_DRAIN,
+                "restart_gate_elevated_rising_soft_drain"
             ))
         );
         assert_eq!(
@@ -2136,6 +2489,13 @@ mod tests {
         );
         assert_eq!(
             stable_core_restart_gate_drain_floor(78.0, -1.0, Some(30.0)),
+            Some((
+                STABLE_CORE_RESTART_GATE_STRONG_DRAIN,
+                "restart_gate_strong_cold_drain"
+            ))
+        );
+        assert_eq!(
+            stable_core_restart_gate_drain_floor(82.0, -1.0, Some(30.0)),
             Some((
                 STABLE_CORE_RESTART_GATE_FORCE_DRAIN,
                 "restart_gate_force_cold_drain"
@@ -2223,7 +2583,192 @@ mod tests {
             status.settle_candidate_ticks,
             STABLE_CORE_RESTART_SETTLE_REQUIRED_TICKS
         );
+        assert_eq!(status.settle_candidate_reason, "hold_coherent_settle");
         assert_eq!(status.settled_at_unix_ms, Some(4_000));
+    }
+
+    #[test]
+    fn restart_gate_settles_after_green_upper_hold_breathing_below_strong_rail() {
+        let mut gate = StableCoreRestartGate::new(1_000);
+        gate.record_scaffold_activated(2_000, 75.5, "protective_high_fill_activated");
+
+        gate.record_measured_fill(
+            3_000,
+            71.1,
+            3.9,
+            OverfillStage::Hold,
+            false,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(gate.phase(), StableCoreRestartPhase::SettleProof);
+        assert_eq!(gate.settle_candidate_reason, "hold_breathing_settle");
+
+        gate.record_measured_fill(
+            3_500,
+            73.1,
+            -4.0,
+            OverfillStage::Elevated,
+            false,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(gate.phase(), StableCoreRestartPhase::SettleProof);
+        assert_eq!(gate.settle_candidate_reason, "elevated_breathing_settle");
+
+        gate.record_measured_fill(
+            4_000,
+            73.0,
+            -3.8,
+            OverfillStage::Elevated,
+            false,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(gate.phase(), StableCoreRestartPhase::Settled);
+        assert!(!gate.active());
+
+        let status = gate.status(4_000, false, false, "settled", 0.0, 0.025, 0.0);
+        assert_eq!(
+            status.settle_candidate_ticks,
+            STABLE_CORE_RESTART_SETTLE_REQUIRED_TICKS
+        );
+        assert_eq!(status.settle_candidate_reason, "elevated_breathing_settle");
+        assert_eq!(status.settled_at_unix_ms, Some(4_000));
+    }
+
+    #[test]
+    fn restart_gate_does_not_settle_on_strong_rail_fill_or_semantic_activity() {
+        let mut gate = StableCoreRestartGate::new(1_000);
+        gate.record_scaffold_activated(2_000, 75.5, "protective_high_fill_activated");
+
+        gate.record_measured_fill(
+            3_000,
+            74.0,
+            -1.0,
+            OverfillStage::Elevated,
+            false,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(gate.settle_candidate_ticks, 0);
+        assert_eq!(gate.settle_candidate_reason, "strong_rail_fill");
+        assert!(gate.active());
+
+        gate.record_measured_fill(
+            3_500,
+            71.0,
+            1.0,
+            OverfillStage::Hold,
+            true,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(gate.settle_candidate_ticks, 0);
+        assert_eq!(gate.settle_candidate_reason, "semantic_active");
+        assert!(gate.active());
+    }
+
+    #[test]
+    fn scaffold_retirement_requires_settled_gate_and_no_drain_pressure() {
+        assert_eq!(
+            stable_core_scaffold_retirement_candidate_reason(
+                true,
+                71.0,
+                3.5,
+                OverfillStage::Hold,
+                false,
+                true,
+                false,
+                false,
+                false,
+                0.0,
+            ),
+            Some("settled_hold_breathing_retire")
+        );
+        assert_eq!(
+            stable_core_scaffold_retirement_candidate_reason(
+                true,
+                73.0,
+                -3.5,
+                OverfillStage::Elevated,
+                false,
+                true,
+                false,
+                false,
+                false,
+                0.0,
+            ),
+            Some("settled_elevated_breathing_retire")
+        );
+        assert_eq!(
+            stable_core_scaffold_retirement_candidate_reason(
+                false,
+                71.0,
+                1.0,
+                OverfillStage::Hold,
+                false,
+                true,
+                false,
+                false,
+                false,
+                0.0,
+            ),
+            None
+        );
+        assert_eq!(
+            stable_core_scaffold_retirement_block_reason(
+                false, 71.0, 1.0, false, true, false, false, false, 0.0,
+            ),
+            "restart_gate_not_settled"
+        );
+        assert_eq!(
+            stable_core_scaffold_retirement_candidate_reason(
+                true,
+                73.0,
+                -1.0,
+                OverfillStage::Elevated,
+                false,
+                true,
+                false,
+                false,
+                true,
+                0.0,
+            ),
+            None
+        );
+        assert_eq!(
+            stable_core_scaffold_retirement_block_reason(
+                true, 73.0, -1.0, false, true, false, false, true, 0.0,
+            ),
+            "high_fill_drain_active"
+        );
+        assert_eq!(
+            stable_core_scaffold_retirement_candidate_reason(
+                true,
+                71.0,
+                1.0,
+                OverfillStage::Hold,
+                false,
+                true,
+                false,
+                false,
+                false,
+                0.04,
+            ),
+            None
+        );
+        assert_eq!(
+            stable_core_scaffold_retirement_block_reason(
+                true, 71.0, 1.0, false, true, false, false, false, 0.04,
+            ),
+            "drain_active"
+        );
     }
 
     #[test]
@@ -2231,14 +2776,14 @@ mod tests {
         let mut gate = StableCoreRestartGate::new(1_000);
         gate.record_scaffold_activated(2_000, 63.0, "activated");
         assert_eq!(
-            gate.drain_floor(78.0, -1.0),
+            gate.drain_floor(82.0, -1.0),
             Some((
                 STABLE_CORE_RESTART_GATE_FORCE_DRAIN,
                 "restart_gate_force_cold_drain"
             ))
         );
 
-        gate.record_drain_applied(2_500, 78.0);
+        gate.record_drain_applied(2_500, 82.0);
         gate.record_measured_fill(
             3_000,
             62.0,
@@ -2252,7 +2797,7 @@ mod tests {
         assert_eq!(gate.phase(), StableCoreRestartPhase::ScaffoldReentry);
         gate.record_measured_fill(
             3_500,
-            54.5,
+            34.5,
             -2.0,
             OverfillStage::Recovery,
             false,
@@ -2261,7 +2806,7 @@ mod tests {
             true,
         );
         assert_eq!(gate.phase(), StableCoreRestartPhase::LowFillRecovery);
-        gate.record_low_fill_reset(3_600, 54.0);
+        gate.record_low_fill_reset(3_600, 34.5);
 
         let status = gate.status(
             3_600,
@@ -2304,7 +2849,7 @@ mod tests {
 
         gate.record_measured_fill(
             5_000,
-            60.5,
+            41.5,
             -3.0,
             OverfillStage::Hold,
             false,
@@ -2319,6 +2864,6 @@ mod tests {
                 .relapse_count,
             1
         );
-        assert!(gate.should_request_recovery_identity_reset(59.5, true));
+        assert!(gate.should_request_recovery_identity_reset(34.5, true));
     }
 }

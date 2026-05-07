@@ -211,16 +211,16 @@ impl TelemetryProjector {
             splitmix64(self.rolling_seed ^ frame_seed ^ self.frame_index.rotate_left(13));
         let bank = SeedBank::from_root(self.rolling_seed ^ frame_seed);
 
-        let brightness =
-            (1.0 - 0.40 * self.ema[2] - 0.25 * self.ema[5] - 0.15 * self.ema[3] + 0.10 * h[2])
-                .clamp(0.05, 1.0);
+        let brightness = (1.0 - 0.40 * self.ema[2] - 0.25 * self.ema[5] - 0.15 * self.ema[3]
+            + 0.10 * h[2])
+            .clamp(0.05, 1.0);
         let gain = (0.16 + 0.04 * self.ema[0] + 0.03 * motion).clamp(0.08, 0.28);
         let cutoff_hz = 250.0 + 5_500.0 * brightness;
-        let air_mix = (0.005 + 0.05 * self.ema[3] + 0.03 * self.ema[7] + 0.02 * motion)
-            .clamp(0.0, 0.15);
+        let air_mix =
+            (0.005 + 0.05 * self.ema[3] + 0.03 * self.ema[7] + 0.02 * motion).clamp(0.0, 0.15);
         let width = (0.20 + 0.55 * entropy + 0.10 * self.ema[6]).clamp(0.0, 0.95);
-        let drift_hz = (0.008 + 0.05 * contrast + 0.08 * self.ema[6] + 0.04 * motion)
-            .clamp(0.005, 0.18);
+        let drift_hz =
+            (0.008 + 0.05 * contrast + 0.08 * self.ema[6] + 0.04 * motion).clamp(0.005, 0.18);
         let seed_mix = (0.01 + 0.10 * contrast + 0.10 * motion).clamp(0.005, 0.18);
 
         let mut voice_weights = [0.0; VOICES];

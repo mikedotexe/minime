@@ -48,8 +48,12 @@ impl VideoEngine {
                     + (ny * (1.4 + control.snapshot.load * 6.0))
                     + self.phase)
                     .cos();
-                let edge = ((nx * (6.0 + control.edge_bias * 10.0) + self.phase * 1.3).sin().abs()
-                    + (ny * (5.0 + control.contrast * 8.0) - self.phase * 0.9).sin().abs())
+                let edge = ((nx * (6.0 + control.edge_bias * 10.0) + self.phase * 1.3)
+                    .sin()
+                    .abs()
+                    + (ny * (5.0 + control.contrast * 8.0) - self.phase * 0.9)
+                        .sin()
+                        .abs())
                     * 0.5;
 
                 let quadrant_idx = match (x >= WIDTH / 2, y >= HEIGHT / 2) {
@@ -77,7 +81,8 @@ impl VideoEngine {
                 let current = (value.clamp(0.0, 1.0) * 255.0) as u8;
                 let previous = self.previous[idx] as f32 / 255.0;
                 let motion_blend = (0.20 + control.motion * 0.45).clamp(0.0, 0.8);
-                let blended = previous * (1.0 - motion_blend) + (current as f32 / 255.0) * motion_blend;
+                let blended =
+                    previous * (1.0 - motion_blend) + (current as f32 / 255.0) * motion_blend;
                 frame[idx] = (blended.clamp(0.0, 1.0) * 255.0) as u8;
             }
         }

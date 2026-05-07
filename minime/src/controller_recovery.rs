@@ -155,6 +155,24 @@ pub fn semantic_lane_is_active(semantic_fresh_ms: Option<u64>, semantic_stale_ms
     semantic_fresh_ms.is_some_and(|age_ms| age_ms <= semantic_stale_ms)
 }
 
+/// Stable-core scaffold retirement should wait for semantic input only when
+/// semantic content actually reaches the stable-core projection. A fresh but
+/// budgeted-out semantic trace remains visible telemetry, not a reason to keep
+/// the cold scaffold latched.
+#[must_use]
+pub fn stable_core_semantic_retirement_active(
+    semantic_fresh_ms: Option<u64>,
+    semantic_stale_ms: u64,
+    semantic_kernel_energy: f32,
+    semantic_trickle_allowed: bool,
+) -> bool {
+    if !semantic_lane_is_active(semantic_fresh_ms, semantic_stale_ms) {
+        return false;
+    }
+    (semantic_kernel_energy.is_finite() && semantic_kernel_energy > f32::EPSILON)
+        || semantic_trickle_allowed
+}
+
 /// A projection tick is only meaningfully "fed" when at least one external or
 /// decayed sensory lane still has signal, or when the semantic lane is active.
 #[must_use]
@@ -174,7 +192,7 @@ mod tests {
         adaptive_target_floor, hard_reset_synth_gain_floor, projection_has_signal,
         recovery_fill_boost, recovery_fill_threshold, recovery_keep_ceiling,
         recovery_keep_floor_base, semantic_lane_is_active, semantic_projection_bias,
-        underfill_spread_relief,
+        stable_core_semantic_retirement_active, underfill_spread_relief,
     };
 
     #[test]
@@ -260,6 +278,34 @@ mod tests {
         assert!(!semantic_lane_is_active(None, 30_000));
         assert!(semantic_lane_is_active(Some(15_000), 30_000));
         assert!(!semantic_lane_is_active(Some(45_000), 30_000));
+    }
+
+    #[test]
+    fn stable_core_semantic_retirement_ignores_fresh_budgeted_out_trace() {
+        assert!(!stable_core_semantic_retirement_active(
+            Some(5_000),
+            30_000,
+            0.0,
+            false
+        ));
+        assert!(stable_core_semantic_retirement_active(
+            Some(5_000),
+            30_000,
+            0.01,
+            false
+        ));
+        assert!(stable_core_semantic_retirement_active(
+            Some(5_000),
+            30_000,
+            0.0,
+            true
+        ));
+        assert!(!stable_core_semantic_retirement_active(
+            Some(45_000),
+            30_000,
+            0.01,
+            true
+        ));
     }
 
     #[test]

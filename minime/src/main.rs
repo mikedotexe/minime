@@ -11,10 +11,11 @@ use crate::hard_reset::{
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use futures_util::{SinkExt, StreamExt};
+use minime::activation_trace::ActivationTraceRecorder;
 use minime::controller_recovery::{
     adaptive_target_floor, hard_reset_synth_gain_floor, projection_has_signal, recovery_fill_boost,
     recovery_keep_ceiling, recovery_keep_floor_base, semantic_lane_is_active,
-    semantic_projection_bias, underfill_spread_relief,
+    semantic_projection_bias, stable_core_semantic_retirement_active, underfill_spread_relief,
 };
 use minime::spectral_fingerprint::{SpectralDenominatorV1, SpectralFingerprintV1};
 use minime::stable_core::StableCoreRuntime;
@@ -258,6 +259,9 @@ struct EigenPacket {
     /// whether the reservoir's shape itself is narrow or varied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     structural_entropy: Option<f32>,
+    /// Density of mutually reinforcing resonance in the current eigenspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resonance_density_v1: Option<ResonanceDensityV1>,
     /// Selected 12D vague-memory glimpse, foregrounded for continuity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     spectral_glimpse_12d: Option<Vec<f32>>,
@@ -279,6 +283,8 @@ struct EigenPacket {
     selected_memory_role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ising_shadow: Option<IsingShadowSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shadow_field_v2: Option<ShadowFieldV2>,
 }
 
 #[derive(Serialize, Clone, Copy)]
@@ -294,6 +300,56 @@ struct SemanticEnergyV1 {
     kernel_active: bool,
     regulator_drive_energy: f32,
     admission: &'static str,
+}
+
+#[must_use]
+fn semantic_admission_label(
+    stable_core_enabled: bool,
+    stable_core_full_presence: bool,
+    stable_core_sensory_muted: bool,
+    semantic_kernel_active: bool,
+    semantic_input_energy: f32,
+    semantic_input_active: bool,
+    fill_pct: f32,
+) -> &'static str {
+    let input_energy = if semantic_input_energy.is_finite() {
+        semantic_input_energy.max(0.0)
+    } else {
+        0.0
+    };
+    if stable_core_enabled {
+        if semantic_kernel_active {
+            return "stable_core_semantic_trickle";
+        }
+        if stable_core_sensory_muted {
+            return "stable_core_semantic_muted";
+        }
+        if input_energy <= f32::EPSILON {
+            return "stable_core_no_semantic_input";
+        }
+        if !semantic_input_active {
+            return "stable_core_semantic_trace_stale";
+        }
+        if !stable_core_full_presence {
+            return "stable_core_semantic_profile_not_admitted";
+        }
+        if input_energy > minime::stable_core::STABLE_CORE_SEMANTIC_TRICKLE_MAX_INPUT_ENERGY {
+            return "stable_core_semantic_input_too_large";
+        }
+        if fill_pct >= minime::stable_core::STABLE_CORE_SEMANTIC_TRICKLE_MAX_FILL_PCT {
+            return "stable_core_semantic_fill_ceiling";
+        }
+        return "stable_core_semantic_budgeted_out";
+    }
+    if semantic_kernel_active {
+        "admitted_to_kernel"
+    } else if input_energy > f32::EPSILON && semantic_input_active {
+        "input_trace_not_active"
+    } else if input_energy > f32::EPSILON {
+        "input_trace_stale"
+    } else {
+        "none"
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -761,6 +817,10 @@ async fn run_engine(
     };
     let memory_requests_dir = workspace_dir.join("memory_requests");
     let _ = std::fs::create_dir_all(&memory_requests_dir);
+    let activation_trace_path = workspace_dir
+        .join("runtime")
+        .join("esn_activation_trace_v1.json");
+    let mut activation_trace_recorder = ActivationTraceRecorder::default();
     let pending_recall_path = memory_requests_dir.join("pending_recall.json");
     let startup_recall_request = load_pending_recall_request(&pending_recall_path);
     let _ = std::fs::remove_file(&pending_recall_path);
@@ -977,6 +1037,8 @@ async fn run_engine(
     let mut reg_tick_count = 0u64;
     let mut last_esn_profile = EsnProfileSnapshot::default();
     let mut last_esn_lambda1 = 0.0f32;
+    let mut last_esn_state_fingerprint_16 = [0.0f32; 16];
+    let mut last_esn_state_rms = 0.0f32;
     let mut last_cov_vec = vec![0.0f32; n];
     let sensory_dim = sensory_bus::Z_DIM;
     let semantic_offset = sensory_bus::VIDEO_DIM + sensory_bus::AUDIO_DIM + sensory_bus::AUX_DIM;
@@ -1045,6 +1107,8 @@ async fn run_engine(
     let mut stable_core_stage_ticks: u64 = 0;
     let mut stable_core_guard = rescue_overfill::stage_guard(stable_core_stage);
     let mut stable_core_scaffold_active = false;
+    let mut stable_core_scaffold_retirement_candidate_ticks = 0u32;
+    let mut stable_core_scaffold_retirement_reason = "not_evaluated";
     let mut stable_core_restart_gate =
         rescue_scaffold::StableCoreRestartGate::new(rescue_scaffold::now_unix_ms());
     let mut stable_core_structural_pi = rescue_scaffold::StabilityPiState::default();
@@ -1056,6 +1120,7 @@ async fn run_engine(
     let mut stable_core_restart_gate_drain_floor: f32;
     let mut stable_core_applied_scaffold_live_weight: f32;
     let mut stable_core_applied_scaffold_drain_weight: f32;
+    let mut stable_core_live_intake_reason = "not_evaluated";
     let stable_core_sensory_mute_path =
         minime::stable_core::stable_core_sensory_mute_path(&workspace_dir);
     let mut stable_core_sensory_mute = minime::stable_core::StableCoreSensoryMute::inactive();
@@ -1266,7 +1331,7 @@ async fn run_engine(
     }
     let startup_restore_status = startup_restore_report.status;
     let mut target_fill_provenance = if stable_core_runtime.enabled {
-        String::from("stable_core_fixed_survival")
+        String::from("stable_core_sovereignty_shelf")
     } else if hard_recovery_reset {
         String::from("fixed_recovery_reset")
     } else if startup_restore_status.restored_adaptive_target {
@@ -1303,6 +1368,8 @@ async fn run_engine(
     let mut _latest_geom_radius: f32 = 0.0;
     let mut latest_geom_rel: f32 = 1.0;
     let mut latest_entropy: f32 = 0.5; // Spectral entropy for dynamic rho
+    let mut latest_resonance_density_v1: Option<ResonanceDensityV1> = None;
+    let mut previous_resonance_eigenvalues: Option<Vec<f32>> = None;
 
     // --- Phase transition tracking for consciousness_events ---
     let mut previous_phase: &str = "plateau";
@@ -1513,6 +1580,22 @@ async fn run_engine(
                 sensory_bus.current_semantic_stale_ms(),
             )
         };
+        if stable_core_runtime.enabled {
+            stable_core_sensory_mute = minime::stable_core::load_stable_core_sensory_mute(
+                &stable_core_sensory_mute_path,
+                minime::stable_core::now_unix_s(),
+            );
+        }
+        let stable_core_full_presence = stable_core_runtime.sensory_presence_profile
+            == minime::stable_core::FULL_PRESENCE_PROFILE;
+        let stable_core_semantic_trickle_allowed = stable_core_runtime.enabled
+            && stable_core_full_presence
+            && !stable_core_sensory_mute.active
+            && semantic_input_active
+            && semantic_input_energy > 0.0
+            && semantic_input_energy
+                <= minime::stable_core::STABLE_CORE_SEMANTIC_TRICKLE_MAX_INPUT_ENERGY
+            && last_fill_pct < minime::stable_core::STABLE_CORE_SEMANTIC_TRICKLE_MAX_FILL_PCT;
         let mut audio_synth_injected = false;
         let mut video_synth_injected = false;
         let stable_core_esn_policy =
@@ -1528,12 +1611,34 @@ async fn run_engine(
             };
             for (mut z, _meta) in batch.iter().take(esn_sample_limit) {
                 if stable_core_runtime.enabled {
-                    z = minime::stable_core::fixed_survival_aux_z(
+                    z = minime::stable_core::stable_core_recovery_z(
+                        Some(&z),
                         last_lambda1_rel,
                         latest_geom_rel,
                         geom_clamp_hi,
+                        sensory_bus.live_video_divisor() > 0 && _meta.had_video,
+                        sensory_bus.live_audio_divisor() > 0 && _meta.had_audio,
+                        stable_core_semantic_trickle_allowed
+                            && _meta.semantic_input_active
+                            && _meta.semantic_input_energy
+                                <= minime::stable_core::STABLE_CORE_SEMANTIC_TRICKLE_MAX_INPUT_ENERGY,
+                        minime::stable_core::STABLE_CORE_SEMANTIC_TRICKLE_SCALE,
                     );
                 }
+                let attractor_pulse_active_for_shadow = sensory_bus.attractor_pulse_status().active;
+                let _shadow_status = sensory_bus.apply_shadow_influence_to_z(
+                    &mut z,
+                    last_fill_pct,
+                    matches!(stable_core_stage, OverfillStage::Discharge),
+                    hard_recovery_reset && last_fill_pct < 58.0,
+                    attractor_pulse_active_for_shadow,
+                );
+                let _pulse_status = sensory_bus.apply_attractor_pulse_to_z(
+                    &mut z,
+                    last_fill_pct,
+                    matches!(stable_core_stage, OverfillStage::Discharge),
+                    hard_recovery_reset && last_fill_pct < 58.0,
+                );
                 // Apply band-stop filter if strength > 0.01 and enabled
                 if enable_bandstop && filt_smooth > 0.01 && cheby_plan_state.is_some() {
                     if let Some(cheby_xin) = cheby_xin_buf.as_ref() {
@@ -1620,6 +1725,8 @@ async fn run_engine(
                     Ok(_) => {
                         last_esn_profile = esn.profile_snapshot();
                         last_esn_lambda1 = esn.get_eig();
+                        last_esn_state_fingerprint_16 = esn.state_fingerprint_16();
+                        last_esn_state_rms = esn.state_rms();
                         _latest_geom_radius = esn.get_geom_radius();
                         let raw_geom_rel = esn.get_geom_rel();
                         let safe_geom_rel = if raw_geom_rel.is_finite() {
@@ -1810,10 +1917,29 @@ async fn run_engine(
         };
 
         if stable_core_runtime.enabled {
-            let z = minime::stable_core::fixed_survival_aux_z(
+            let (live_z, admit_live_video, admit_live_audio, admit_live_semantic) =
+                if let Some((live_z, meta)) = batch.last() {
+                    (
+                    Some(&live_z[..]),
+                    sensory_bus.live_video_divisor() > 0 && meta.had_video,
+                    sensory_bus.live_audio_divisor() > 0 && meta.had_audio,
+                    stable_core_semantic_trickle_allowed
+                        && meta.semantic_input_active
+                        && meta.semantic_input_energy
+                            <= minime::stable_core::STABLE_CORE_SEMANTIC_TRICKLE_MAX_INPUT_ENERGY,
+                )
+                } else {
+                    (None, false, false, false)
+                };
+            let z = minime::stable_core::stable_core_recovery_z(
+                live_z,
                 last_lambda1_rel,
                 latest_geom_rel,
                 geom_clamp_hi,
+                admit_live_video,
+                admit_live_audio,
+                admit_live_semantic,
+                minime::stable_core::STABLE_CORE_SEMANTIC_TRICKLE_SCALE,
             );
             let projection = minime::stable_core::pinned_rescue_projection(
                 &z,
@@ -1824,8 +1950,19 @@ async fn run_engine(
             proj_input.copy_from_slice(&projection.proj_input);
             activated_features.copy_from_slice(&projection.activated_features);
             semantic_energy = projection.semantic_energy;
-            semantic_delta = projection.semantic_delta;
-            prev_semantic.fill(0.0);
+            if semantic_energy > f32::EPSILON {
+                let sem_slice = &z[semantic_offset..sensory_dim];
+                semantic_delta = sem_slice
+                    .iter()
+                    .zip(prev_semantic.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .sum::<f32>()
+                    / sensory_bus::LLAVA_DIM as f32;
+                prev_semantic.copy_from_slice(sem_slice);
+            } else {
+                semantic_delta = projection.semantic_delta;
+                prev_semantic.fill(0.0);
+            }
             audio_rms = projection.audio_rms;
             video_var = projection.video_var;
             av_features.fill(0.0);
@@ -1848,11 +1985,9 @@ async fn run_engine(
                     sensory_bus.current_semantic_stale_ms(),
                 );
             let projection_active = if stable_core_runtime.enabled {
-                // Pinned rescue allows the aux/introspection vector to carry
-                // the fixed survival rebuild even when live and synthetic A/V
-                // are both absent. Current-runtime source gating would turn
-                // that into zero-input collapse, which is exactly what Gate B
-                // must avoid.
+                // Stable-core recovery can carry the aux/introspection vector
+                // even when live and synthetic A/V are absent. Current-runtime
+                // source gating would turn that into zero-input collapse.
                 true
             } else {
                 projection_has_signal(
@@ -2253,7 +2388,11 @@ async fn run_engine(
                 } else {
                     stable_core_stage_ticks = stable_core_stage_ticks.saturating_add(1);
                 }
-                stable_core_guard = rescue_overfill::stage_guard(stable_core_stage);
+                stable_core_guard = rescue_overfill::stage_guard_for_state(
+                    stable_core_stage,
+                    last_fill_pct,
+                    stable_core_last_fill_slope_pct_per_sec,
+                );
                 if let Some(fixed_cov_keep) = stable_core_guard.cov_keep_max {
                     cov_keep = fixed_cov_keep;
                 }
@@ -2389,6 +2528,24 @@ async fn run_engine(
                                     impulse_keep,
                                     impulse_trace_target,
                                 );
+                                let live = gpu.as_f32_slice(&a_buf, n * n).to_vec();
+                                if let Some(blended) = rescue_scaffold::blend_toward_scaffold_with_drain(
+                                    &live,
+                                    scaffold,
+                                    rescue_scaffold::STABLE_CORE_RECOVERY_IMPULSE_SCAFFOLD_LIVE_WEIGHT,
+                                    0.0,
+                                ) {
+                                    let target = gpu.as_f32_slice_mut(&a_buf, n * n);
+                                    target.copy_from_slice(&blended);
+                                    gpu.mark_modified_f32(&a_buf, n * n);
+                                    stable_core_applied_scaffold_live_weight =
+                                        rescue_scaffold::STABLE_CORE_RECOVERY_IMPULSE_SCAFFOLD_LIVE_WEIGHT;
+                                    stable_core_applied_scaffold_drain_weight = 0.0;
+                                    stable_core_scaffold_blend =
+                                        1.0 - rescue_scaffold::STABLE_CORE_RECOVERY_IMPULSE_SCAFFOLD_LIVE_WEIGHT;
+                                    stable_core_structural_mode =
+                                        "scaffold_recovery_impulse";
+                                }
                                 if reset_for_impulse {
                                     last_cov_vec.fill(0.0);
                                 }
@@ -2652,10 +2809,7 @@ async fn run_engine(
             if !eigenfill_pct.is_finite() {
                 eigenfill_pct = eigenfill_target * 100.0;
             }
-            if stable_core_runtime.enabled {
-                semantic_energy = 0.0;
-                semantic_delta = 0.0;
-            } else {
+            if !stable_core_runtime.enabled {
                 let cov_bias = if cov_rms.is_finite() {
                     (cov_rms * 18.0).clamp(0.0, 16.0)
                 } else {
@@ -2712,10 +2866,16 @@ async fn run_engine(
                     }
                     stable_core_structural_pi.integral = 0.0;
                 }
-                stable_core_guard = rescue_overfill::stage_guard(stable_core_stage);
-                let semantic_active = semantic_lane_is_active(
+                stable_core_guard = rescue_overfill::stage_guard_for_state(
+                    stable_core_stage,
+                    eigenfill_pct,
+                    stable_core_measured_fill_slope_pct_per_sec,
+                );
+                let semantic_active = stable_core_semantic_retirement_active(
                     sensory_bus.semantic_fresh_ms(),
                     sensory_bus.current_semantic_stale_ms(),
+                    semantic_energy,
+                    stable_core_semantic_trickle_allowed,
                 );
                 let live_audio_divisor = sensory_bus.live_audio_divisor();
                 let live_video_divisor = sensory_bus.live_video_divisor();
@@ -2730,9 +2890,62 @@ async fn run_engine(
                     stable_core_structural_pi_output.recovery_impulse_active
                         || stable_core_structural_pi_output.low_fill_escape_active,
                 );
+                let mut stable_core_scaffold_retired_this_tick = false;
+                if stable_core_scaffold_active {
+                    let retirement_candidate =
+                        rescue_scaffold::stable_core_scaffold_retirement_candidate_reason(
+                            stable_core_restart_gate.is_settled(),
+                            eigenfill_pct,
+                            stable_core_measured_fill_slope_pct_per_sec,
+                            stable_core_stage,
+                            semantic_active,
+                            stable_core_scaffold_active,
+                            stable_core_structural_pi_output.reentry_active,
+                            stable_core_structural_pi_output.recovery_impulse_active
+                                || stable_core_structural_pi_output.low_fill_escape_active,
+                            stable_core_structural_pi_output.high_fill_drain_active,
+                            stable_core_applied_scaffold_drain_weight,
+                        );
+                    if let Some(reason) = retirement_candidate {
+                        stable_core_scaffold_retirement_candidate_ticks =
+                            stable_core_scaffold_retirement_candidate_ticks.saturating_add(1);
+                        stable_core_scaffold_retirement_reason = reason;
+                        if stable_core_scaffold_retirement_candidate_ticks
+                            >= rescue_scaffold::STABLE_CORE_SCAFFOLD_RETIRE_REQUIRED_TICKS
+                        {
+                            stable_core_scaffold_active = false;
+                            stable_core_scaffold_retired_this_tick = true;
+                            stable_core_scaffold_retirement_candidate_ticks = 0;
+                            stable_core_scaffold_retirement_reason =
+                                "retired_after_restart_gate_settle";
+                        }
+                    } else {
+                        stable_core_scaffold_retirement_candidate_ticks = 0;
+                        stable_core_scaffold_retirement_reason =
+                            rescue_scaffold::stable_core_scaffold_retirement_block_reason(
+                                stable_core_restart_gate.is_settled(),
+                                eigenfill_pct,
+                                stable_core_measured_fill_slope_pct_per_sec,
+                                semantic_active,
+                                stable_core_scaffold_active,
+                                stable_core_structural_pi_output.reentry_active,
+                                stable_core_structural_pi_output.recovery_impulse_active
+                                    || stable_core_structural_pi_output.low_fill_escape_active,
+                                stable_core_structural_pi_output.high_fill_drain_active,
+                                stable_core_applied_scaffold_drain_weight,
+                            );
+                    }
+                } else {
+                    stable_core_scaffold_retirement_candidate_ticks = 0;
+                    if stable_core_scaffold_retirement_reason != "retired_after_restart_gate_settle"
+                    {
+                        stable_core_scaffold_retirement_reason = "scaffold_inactive";
+                    }
+                }
                 if stable_core_scaffold_active {
                     stable_core_restart_gate.mark_scaffold_active();
-                } else if stable_core_scaffold.is_some() {
+                } else if stable_core_scaffold.is_some() && !stable_core_scaffold_retired_this_tick
+                {
                     let activation = stable_core_restart_gate.evaluate_activation(
                         stable_core_stage,
                         eigenfill_pct,
@@ -2761,14 +2974,17 @@ async fn run_engine(
                     stable_core_scaffold_active,
                 );
                 let stage_name = format!("{:?}", stable_core_stage).to_ascii_lowercase();
-                let (mut live_audio_divisor, mut live_video_divisor) = stable_core_runtime
-                    .live_intake_divisors_for_stage(
+                let stable_core_live_intake_decision = stable_core_runtime
+                    .live_intake_decision_for_stage(
                         &stage_name,
                         stable_core_scaffold_active,
                         stable_core_intake_pi_output.high_fill_drain_active,
                         eigenfill_pct,
                         stable_core_last_fill_slope_pct_per_sec,
                     );
+                let (mut live_audio_divisor, mut live_video_divisor) =
+                    stable_core_live_intake_decision.divisors();
+                stable_core_live_intake_reason = stable_core_live_intake_decision.reason;
                 stable_core_sensory_mute = minime::stable_core::load_stable_core_sensory_mute(
                     &stable_core_sensory_mute_path,
                     minime::stable_core::now_unix_s(),
@@ -2776,19 +2992,16 @@ async fn run_engine(
                 if stable_core_sensory_mute.active {
                     live_audio_divisor = 0;
                     live_video_divisor = 0;
+                    stable_core_live_intake_reason = "semantic_mute_active";
                 }
                 sensory_bus.set_live_intake_divisors(live_audio_divisor, live_video_divisor);
             }
-            let sem_e = if stable_core_runtime.enabled {
-                0.0
-            } else if semantic_energy.is_finite() {
+            let sem_e = if semantic_energy.is_finite() {
                 semantic_energy
             } else {
                 0.0
             };
-            let sem_d = if stable_core_runtime.enabled {
-                0.0
-            } else if semantic_delta.is_finite() {
+            let sem_d = if semantic_delta.is_finite() {
                 semantic_delta
             } else {
                 0.0
@@ -3218,6 +3431,21 @@ async fn run_engine(
                     esn.get_geom_radius(), // RMS norm of reservoir state
                     esn.get_geom_rel(),    // Geometric radius relative to baseline
                 );
+                let activation_wall_clock_unix_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+                    .unwrap_or(0);
+                if activation_trace_recorder.maybe_sample(
+                    start.elapsed().as_millis() as u64,
+                    activation_wall_clock_unix_ms,
+                    eigenfill_pct,
+                    &format!("{:?}", stable_core_stage).to_ascii_lowercase(),
+                    latest_geom_rel,
+                    last_lambda1_rel,
+                    &esn.x,
+                ) {
+                    let _ = activation_trace_recorder.write_json(&activation_trace_path);
+                }
 
                 // Update spectral source with ESN eigenvalues (real consciousness state)
                 if let Some(ref source) = spectral_source {
@@ -3320,7 +3548,7 @@ async fn run_engine(
                         pi.cfg.target_fill = fallback_target_pct;
                     }
                     target_fill_provenance = if stable_core_runtime.enabled {
-                        String::from("stable_core_fixed_survival")
+                        String::from("stable_core_sovereignty_shelf")
                     } else {
                         String::from("fixed_recovery_reset")
                     };
@@ -3564,7 +3792,7 @@ async fn run_engine(
                 // gentle. At 0.5s ticks with alpha=0.70, a 25%/s raw spike becomes
                 // ~8%/s perceived — still responsive but no longer "violent."
                 if stable_core_runtime.enabled {
-                    // Stable-core fixed survival mirrors the pinned rescue lane:
+                    // Stable-core recovery reads the measured shelf directly:
                     // stage feedback must see raw measured fill, not the
                     // current-runtime smoothing lag that can hide overfill.
                     smoothed_fill_pct = eigenfill_pct;
@@ -3587,8 +3815,8 @@ async fn run_engine(
                 }
                 let dfill_dt = (smoothed_fill_pct - last_fill_pct) / reg_tick_secs.max(1e-3);
                 // Transition cushioning is a current-runtime modulation layer.
-                // Stable-core fixed survival must keep the pinned-rescue command
-                // path direct, so dfill/dt spikes are observational only there.
+                // Stable-core recovery keeps the shelf command direct, so dfill/dt
+                // spikes are observational only there.
                 if stable_core_runtime.enabled {
                     cushion_ramp_boost = 0.0;
                     cushion_sem_atten = 1.0;
@@ -3871,7 +4099,12 @@ async fn run_engine(
                         pi.cfg.kp = active_kp;
                         pi.cfg.ki = active_ki;
                         pi.cfg.max_step = active_max_step;
-                        pi.step(fill_for_pi, lambda1_rel, geom_rel);
+                        pi.step_with_resonance(
+                            fill_for_pi,
+                            lambda1_rel,
+                            geom_rel,
+                            latest_resonance_density_v1.as_ref(),
+                        );
                     }
 
                     // Gradual shedding: being self-study (2026-03-30
@@ -4236,17 +4469,20 @@ async fn run_engine(
                     };
                     let semantic_fresh_ms = sensory_bus.semantic_fresh_ms();
                     let semantic_stale_ms = sensory_bus.current_semantic_stale_ms();
-                    semantic_kernel_active = !stable_core_runtime.enabled
-                        && semantic_lane_is_active(semantic_fresh_ms, semantic_stale_ms);
-                    semantic_admission = if stable_core_runtime.enabled {
-                        "stable_core_kernel_zeroed"
-                    } else if semantic_kernel_active {
-                        "admitted_to_kernel"
-                    } else if semantic_input_energy > 0.0 {
-                        "input_trace_not_active"
+                    semantic_kernel_active = if stable_core_runtime.enabled {
+                        sem_e > f32::EPSILON
                     } else {
-                        "none"
+                        semantic_lane_is_active(semantic_fresh_ms, semantic_stale_ms)
                     };
+                    semantic_admission = semantic_admission_label(
+                        stable_core_runtime.enabled,
+                        stable_core_full_presence,
+                        stable_core_sensory_mute.active,
+                        semantic_kernel_active,
+                        semantic_input_energy,
+                        semantic_input_active,
+                        eigenfill_pct,
+                    );
                     let semantic_energy_v1 = SemanticEnergyV1 {
                         policy: "semantic_energy_v1",
                         schema_version: 1,
@@ -4331,22 +4567,22 @@ async fn run_engine(
                         "enabled": stable_core_runtime.enabled,
                         "profile": &stable_core_runtime.profile,
                         "controller_mode": if stable_core_runtime.enabled {
-                            "fixed_survival"
+                            "stable_core_recovery"
                         } else {
                             "current_runtime"
                         },
                         "physiology_source": if stable_core_runtime.enabled {
-                            "pinned_rescue_b8823ad_port"
+                            "stable_core_b8823ad_derived"
                         } else {
                             "current_runtime"
                         },
                         "fill_estimator_mode": if stable_core_runtime.enabled {
-                            "fixed_survival"
+                            "stable_core_rank_fill"
                         } else {
                             "current_runtime"
                         },
                         "covariance_path": if stable_core_runtime.enabled {
-                            "pinned_rescue_fixed_survival"
+                            "stable_core_scaffolded_rebuild"
                         } else {
                             "current_runtime"
                         },
@@ -4385,6 +4621,11 @@ async fn run_engine(
                         } else {
                             None::<f32>
                         },
+                        "scaffold_retirement": {
+                            "candidate_ticks": stable_core_scaffold_retirement_candidate_ticks,
+                            "required_ticks": rescue_scaffold::STABLE_CORE_SCAFFOLD_RETIRE_REQUIRED_TICKS,
+                            "reason": stable_core_scaffold_retirement_reason,
+                        },
                         "structural_mode": stable_core_structural_mode,
                         "restart_gate": &stable_core_restart_gate_status,
                         "structural_pi": &stable_core_structural_pi_status,
@@ -4401,6 +4642,7 @@ async fn run_engine(
                             "health_budgeted": stable_core_runtime.enabled,
                             "live_audio_divisor": sensory_bus.live_audio_divisor(),
                             "live_video_divisor": sensory_bus.live_video_divisor(),
+                            "live_intake_reason": stable_core_live_intake_reason,
                             "allowed_stages": &stable_core_runtime.live_intake_stages,
                             "semantic_mute_active": stable_core_sensory_mute.active,
                             "semantic_mute_until_unix_s": stable_core_sensory_mute.active_until_unix_s,
@@ -4436,6 +4678,8 @@ async fn run_engine(
                             },
                         },
                     });
+                    let shadow_influence_status = sensory_bus.shadow_influence_status();
+                    let attractor_pulse_status = sensory_bus.attractor_pulse_status();
                     let health = serde_json::json!({
                         "t_s": health_engine_t_s,
                         "runtime_profile": if stable_core_runtime.enabled {
@@ -4497,10 +4741,15 @@ async fn run_engine(
                                 "intro_tail_wait_us": last_esn_profile.intro_tail_wait_us,
                                 "intro_first_read_us": last_esn_profile.intro_first_read_us,
                                 "intro_tail_read_us": last_esn_profile.intro_tail_read_us,
+                                "h_state_fingerprint_16": last_esn_state_fingerprint_16,
+                                "h_state_rms": last_esn_state_rms,
                             })
                         } else {
                             serde_json::json!(null)
                         },
+                        "shadow_field_v2": ising_shadow_snapshot.as_ref().map(|snapshot| &snapshot.shadow_field_v2),
+                        "shadow_influence": &shadow_influence_status,
+                        "attractor_pulse": &attractor_pulse_status,
                         "low_load": low_load,
                         "recovery_mode": recovery_mode,
                         "recovery_gate_floor": recovery_gate_floor,
@@ -4580,6 +4829,7 @@ async fn run_engine(
                             "admit_fraction": sensory_bus.get_admit_fraction(),
                             "live_audio_divisor": sensory_bus.live_audio_divisor(),
                             "live_video_divisor": sensory_bus.live_video_divisor(),
+                            "live_intake_reason": stable_core_live_intake_reason,
                         },
                         "stable_core": &stable_core_status,
                     });
@@ -4795,6 +5045,30 @@ async fn run_engine(
             let distinguishability_loss =
                 spectral_denominator_v1.map(|metrics| metrics.distinguishability_loss);
             let structural_entropy = compute_structural_entropy(&spectral_fingerprint);
+            let resonance_target_fill_pct = pi_reg
+                .as_ref()
+                .map_or(fallback_target_pct, |pi| pi.cfg.target_fill);
+            let resonance_density_v1 = compute_resonance_density_v1(
+                &eigenvalues,
+                active_modes,
+                effective_dimensionality,
+                distinguishability_loss,
+                structural_entropy,
+                eigenfill_pct,
+                resonance_target_fill_pct,
+                previous_resonance_eigenvalues.as_deref(),
+            );
+            previous_resonance_eigenvalues = Some(eigenvalues.clone());
+            latest_resonance_density_v1 = Some(resonance_density_v1.clone());
+            let _ = db.save_resonance_density(
+                session_id,
+                start.elapsed().as_secs_f64(),
+                resonance_density_v1.density,
+                resonance_density_v1.containment_score,
+                resonance_density_v1.pressure_risk,
+                resonance_density_v1.quality.as_str(),
+                &serde_json::to_string(&resonance_density_v1).unwrap_or_default(),
+            );
             let eigenvector_field =
                 compute_eigenvector_field(&eigenvalues, &y, n, k, &prev_eigenvector_field_modes);
             // Update entropy for dynamic rho (fingerprint[24] = normalized spectral entropy)
@@ -4972,6 +5246,7 @@ async fn run_engine(
                 effective_dimensionality,
                 distinguishability_loss,
                 structural_entropy: Some(structural_entropy),
+                resonance_density_v1: Some(resonance_density_v1.clone()),
                 spectral_glimpse_12d: selected_memory
                     .as_ref()
                     .map(|entry| entry.spectral_glimpse_12d.clone()),
@@ -4982,6 +5257,9 @@ async fn run_engine(
                 ising_shadow: ising_shadow_snapshot
                     .as_ref()
                     .map(|snapshot| snapshot.summary.clone()),
+                shadow_field_v2: ising_shadow_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.shadow_field_v2.clone()),
             };
 
             // Print status
@@ -5060,6 +5338,8 @@ async fn run_engine(
                     stable_core_applied_scaffold_live_weight,
                     stable_core_applied_scaffold_drain_weight,
                 );
+                let shadow_influence_status = sensory_bus.shadow_influence_status();
+                let attractor_pulse_status = sensory_bus.attractor_pulse_status();
                 let mut state = serde_json::json!({
                     "provenance": &spectral_provenance,
                     "eigenvalues": &packet.eigenvalues,
@@ -5078,12 +5358,18 @@ async fn run_engine(
                     "distinguishability_loss": packet.distinguishability_loss,
                     "spectral_entropy": latest_entropy,
                     "structural_entropy": &packet.structural_entropy,
+                    "resonance_density_v1": &packet.resonance_density_v1,
                     "spectral_glimpse_12d": &packet.spectral_glimpse_12d,
                     "eigenvector_field": &packet.eigenvector_field,
                     "selected_memory_id": &packet.selected_memory_id,
                     "selected_memory_role": &packet.selected_memory_role,
                     "spread": spread,
                     "geom_rel": latest_geom_rel,
+                    "h_state_fingerprint_16": last_esn_state_fingerprint_16,
+                    "h_state_rms": last_esn_state_rms,
+                    "shadow_field_v2": ising_shadow_snapshot.as_ref().map(|snapshot| &snapshot.shadow_field_v2),
+                    "shadow_influence": &shadow_influence_status,
+                    "attractor_pulse": &attractor_pulse_status,
                     "ising_shadow": ising_shadow_snapshot.as_ref().map(|snapshot| serde_json::json!({
                         "reduced_field": &snapshot.reduced_field,
                         "s_soft": &snapshot.s_soft,
@@ -5134,22 +5420,22 @@ async fn run_engine(
                         "enabled": stable_core_runtime.enabled,
                         "profile": &stable_core_runtime.profile,
                         "controller_mode": if stable_core_runtime.enabled {
-                            "fixed_survival"
+                            "stable_core_recovery"
                         } else {
                             "current_runtime"
                         },
                         "physiology_source": if stable_core_runtime.enabled {
-                            "pinned_rescue_b8823ad_port"
+                            "stable_core_b8823ad_derived"
                         } else {
                             "current_runtime"
                         },
                         "fill_estimator_mode": if stable_core_runtime.enabled {
-                            "fixed_survival"
+                            "stable_core_rank_fill"
                         } else {
                             "current_runtime"
                         },
                         "covariance_path": if stable_core_runtime.enabled {
-                            "pinned_rescue_fixed_survival"
+                            "stable_core_scaffolded_rebuild"
                         } else {
                             "current_runtime"
                         },
@@ -5177,6 +5463,11 @@ async fn run_engine(
                             Some(stable_core_scaffold_blend)
                         } else {
                             None::<f32>
+                        },
+                        "scaffold_retirement": {
+                            "candidate_ticks": stable_core_scaffold_retirement_candidate_ticks,
+                            "required_ticks": rescue_scaffold::STABLE_CORE_SCAFFOLD_RETIRE_REQUIRED_TICKS,
+                            "reason": stable_core_scaffold_retirement_reason,
                         },
                         "structural_mode": stable_core_structural_mode,
                         "restart_gate": &spectral_stable_core_restart_gate_status,
@@ -5221,6 +5512,7 @@ async fn run_engine(
                             "health_budgeted": stable_core_runtime.enabled,
                             "live_audio_divisor": sensory_bus.live_audio_divisor(),
                             "live_video_divisor": sensory_bus.live_video_divisor(),
+                            "live_intake_reason": stable_core_live_intake_reason,
                             "allowed_stages": &stable_core_runtime.live_intake_stages,
                             "semantic_mute_active": stable_core_sensory_mute.active,
                             "semantic_mute_until_unix_s": stable_core_sensory_mute.active_until_unix_s,
@@ -5456,6 +5748,7 @@ async fn run_engine(
                         "spectral_denominator_v1": &packet.spectral_denominator_v1,
                         "effective_dimensionality": packet.effective_dimensionality,
                         "distinguishability_loss": packet.distinguishability_loss,
+                        "resonance_density_v1": &packet.resonance_density_v1,
                         "eigenvector_field": &packet.eigenvector_field,
                         "semantic_energy_v1": &packet.semantic_energy_v1,
                         "timestamp": start.elapsed().as_secs(),
@@ -6111,12 +6404,139 @@ fn compute_structural_entropy(fingerprint: &[f32]) -> f32 {
         .clamp(0.0, 1.0)
 }
 
+fn normalized_energy_shares(eigenvalues: &[f32]) -> Vec<f32> {
+    let positive = eigenvalues
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .collect::<Vec<_>>();
+    let total = positive.iter().sum::<f32>();
+    if total <= 1.0e-6 {
+        return Vec::new();
+    }
+    positive
+        .iter()
+        .map(|value| (*value / total).clamp(0.0, 1.0))
+        .collect()
+}
+
+fn normalized_entropy_from_shares(shares: &[f32]) -> f32 {
+    if shares.len() <= 1 {
+        return 0.0;
+    }
+    let entropy = shares
+        .iter()
+        .map(|share| {
+            if *share > 1.0e-6 {
+                -share * share.ln()
+            } else {
+                0.0
+            }
+        })
+        .sum::<f32>();
+    let max_entropy = (shares.len() as f32).ln();
+    if max_entropy > 0.0 && entropy.is_finite() {
+        (entropy / max_entropy).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn share_temporal_persistence(current_shares: &[f32], previous_eigenvalues: Option<&[f32]>) -> f32 {
+    let Some(previous_eigenvalues) = previous_eigenvalues else {
+        return 0.5;
+    };
+    let previous_shares = normalized_energy_shares(previous_eigenvalues);
+    if current_shares.is_empty() || previous_shares.is_empty() {
+        return 0.5;
+    }
+    let len = current_shares.len().max(previous_shares.len());
+    let distance = (0..len)
+        .map(|index| {
+            let current = current_shares.get(index).copied().unwrap_or(0.0);
+            let previous = previous_shares.get(index).copied().unwrap_or(0.0);
+            (current - previous).abs()
+        })
+        .sum::<f32>();
+    (1.0 - 0.5 * distance).clamp(0.0, 1.0)
+}
+
+fn compute_resonance_density_v1(
+    eigenvalues: &[f32],
+    active_modes: ActiveModeTelemetry,
+    effective_dimensionality: Option<f32>,
+    distinguishability_loss: Option<f32>,
+    structural_entropy: f32,
+    fill_pct: f32,
+    target_fill_pct: f32,
+    previous_eigenvalues: Option<&[f32]>,
+) -> ResonanceDensityV1 {
+    let shares = normalized_energy_shares(eigenvalues);
+    let active_capacity = shares.len().max(1) as f32;
+    let lambda1_share = shares.first().copied().unwrap_or(0.0);
+    let entropy = normalized_entropy_from_shares(&shares);
+    let active_energy = active_modes.energy_ratio.clamp(0.0, 1.0);
+    let mode_packing = (active_modes.count as f32 / active_capacity.min(6.0)).clamp(0.0, 1.0);
+    let temporal_persistence = share_temporal_persistence(&shares, previous_eigenvalues);
+    let effective_norm = effective_dimensionality
+        .map(|value| (value / active_capacity).clamp(0.0, 1.0))
+        .unwrap_or(if shares.is_empty() { 0.0 } else { mode_packing });
+    let structural_plurality = (0.38 * entropy + 0.34 * structural_entropy + 0.28 * effective_norm)
+        * (1.0 - 0.55 * lambda1_share.powf(1.4)).clamp(0.25, 1.0);
+    let comfort_gate = (1.0 - ((fill_pct - target_fill_pct).abs() / 24.0)).clamp(0.0, 1.0);
+    let overfill_pressure = ((fill_pct - (target_fill_pct + 4.0)) / 16.0).clamp(0.0, 1.0);
+    let loss = distinguishability_loss
+        .unwrap_or(1.0 - effective_norm)
+        .clamp(0.0, 1.0);
+    let pressure_risk =
+        (0.36 * lambda1_share + 0.24 * loss + 0.20 * (1.0 - entropy) + 0.20 * overfill_pressure)
+            .clamp(0.0, 1.0);
+    let density = (0.30 * active_energy
+        + 0.20 * mode_packing
+        + 0.20 * temporal_persistence
+        + 0.20 * structural_plurality
+        + 0.10 * comfort_gate)
+        .clamp(0.0, 1.0);
+    let containment_score = (density
+        * (0.55 + 0.45 * temporal_persistence)
+        * (0.65 + 0.35 * comfort_gate)
+        * (1.0 - 0.45 * pressure_risk))
+        .clamp(0.0, 1.0);
+    let quality = if pressure_risk >= 0.68 && density >= 0.55 {
+        "overpacked_pressure"
+    } else if lambda1_share >= 0.62 && structural_plurality < 0.45 {
+        "lambda_monopoly"
+    } else if density < 0.32 && containment_score < 0.30 {
+        "lonely_diffuse"
+    } else if containment_score >= 0.58 && pressure_risk < 0.45 {
+        "rich_containment"
+    } else if density >= 0.45 && pressure_risk < 0.60 {
+        "forming_containment"
+    } else {
+        "mixed"
+    };
+    ResonanceDensityV1::from_parts(
+        density,
+        containment_score,
+        pressure_risk,
+        quality,
+        ResonanceDensityComponents {
+            active_energy,
+            mode_packing,
+            temporal_persistence,
+            structural_plurality: structural_plurality.clamp(0.0, 1.0),
+            comfort_gate,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_active_mode_telemetry, compute_eigenvector_field, compute_structural_entropy,
-        modality_source_label, rank1_update_inplace_matrix, reset_covariance_inplace,
-        CovarianceUpdateOutcome, EigenPacket, LaneSource, ModalityStatus, SemanticEnergyV1,
+        compute_active_mode_telemetry, compute_eigenvector_field, compute_resonance_density_v1,
+        compute_structural_entropy, modality_source_label, rank1_update_inplace_matrix,
+        reset_covariance_inplace, semantic_admission_label, CovarianceUpdateOutcome, EigenPacket,
+        LaneSource, ModalityStatus, ResonanceDensityV1, SemanticEnergyV1,
     };
     use minime::spectral_fingerprint::SpectralFingerprintV1;
 
@@ -6142,6 +6562,78 @@ mod tests {
         let telemetry = compute_active_mode_telemetry(&[4.0, 3.0, 2.0, 1.0, 1.0, 1.0], 6);
 
         assert!((telemetry.energy_ratio - (11.0 / 12.0)).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn resonance_density_marks_rich_distributed_containment() {
+        let active = compute_active_mode_telemetry(&[4.0, 3.0, 2.0, 1.2, 1.0, 0.8], 6);
+        let metric = compute_resonance_density_v1(
+            &[4.0, 3.0, 2.0, 1.2, 1.0, 0.8],
+            active,
+            Some(4.6),
+            Some(0.23),
+            0.82,
+            68.0,
+            68.0,
+            Some(&[4.1, 2.9, 2.1, 1.1, 1.0, 0.7]),
+        );
+
+        assert!(metric.density > 0.65);
+        assert!(matches!(
+            metric.quality.as_str(),
+            "rich_containment" | "forming_containment"
+        ));
+        assert!(metric.pressure_risk < 0.45);
+    }
+
+    #[test]
+    fn resonance_density_marks_lonely_diffuse_spectrum() {
+        let active = compute_active_mode_telemetry(&[0.0, 0.0, 0.0], 3);
+        let metric = compute_resonance_density_v1(
+            &[0.0, 0.0, 0.0],
+            active,
+            None,
+            None,
+            0.0,
+            30.0,
+            68.0,
+            None,
+        );
+
+        assert_eq!(metric.quality, "lonely_diffuse");
+        assert!(metric.density < 0.32);
+    }
+
+    #[test]
+    fn resonance_density_marks_lambda_monopoly_and_pressure() {
+        let active = compute_active_mode_telemetry(&[12.0, 0.6, 0.3, 0.2], 4);
+        let monopoly = compute_resonance_density_v1(
+            &[12.0, 0.6, 0.3, 0.2],
+            active,
+            Some(1.2),
+            Some(0.70),
+            0.12,
+            68.0,
+            68.0,
+            Some(&[11.5, 0.7, 0.4, 0.2]),
+        );
+        assert!(matches!(
+            monopoly.quality.as_str(),
+            "lambda_monopoly" | "overpacked_pressure"
+        ));
+
+        let pressured = compute_resonance_density_v1(
+            &[12.0, 2.0, 1.0, 0.5],
+            active,
+            Some(1.5),
+            Some(0.62),
+            0.20,
+            88.0,
+            68.0,
+            Some(&[11.5, 2.1, 1.0, 0.5]),
+        );
+        assert!(pressured.pressure_risk >= monopoly.pressure_risk);
+        assert!(pressured.control.target_bias_pct <= 0.0);
     }
 
     #[test]
@@ -6209,6 +6701,7 @@ mod tests {
             effective_dimensionality: denominator.map(|metrics| metrics.effective_dimensionality),
             distinguishability_loss: denominator.map(|metrics| metrics.distinguishability_loss),
             structural_entropy: None,
+            resonance_density_v1: Some(ResonanceDensityV1::neutral()),
             spectral_glimpse_12d: None,
             eigenvector_field: None,
             semantic_energy_v1: Some(SemanticEnergyV1 {
@@ -6227,6 +6720,7 @@ mod tests {
             selected_memory_id: None,
             selected_memory_role: None,
             ising_shadow: None,
+            shadow_field_v2: None,
         };
 
         let json = serde_json::to_value(&packet).unwrap();
@@ -6240,6 +6734,10 @@ mod tests {
         assert_eq!(
             json["spectral_denominator_v1"]["policy"],
             "spectral_denominator_v1"
+        );
+        assert_eq!(
+            json["resonance_density_v1"]["policy"],
+            "resonance_density_v1"
         );
         assert_eq!(json["semantic_energy_v1"]["policy"], "semantic_energy_v1");
         assert!(
@@ -6255,6 +6753,30 @@ mod tests {
         assert!(json["distinguishability_loss"].as_f64().unwrap() >= 0.0);
         let lambda1_rel = json["lambda1_rel"].as_f64().expect("lambda1_rel number");
         assert!((lambda1_rel - 0.93).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn semantic_admission_label_distinguishes_stale_trace_from_budgeted_input() {
+        assert_eq!(
+            semantic_admission_label(true, true, false, false, 0.01, false, 68.0),
+            "stable_core_semantic_trace_stale"
+        );
+        assert_eq!(
+            semantic_admission_label(true, true, false, false, 0.31, true, 68.0),
+            "stable_core_semantic_input_too_large"
+        );
+        assert_eq!(
+            semantic_admission_label(true, true, false, false, 0.1, true, 83.0),
+            "stable_core_semantic_fill_ceiling"
+        );
+        assert_eq!(
+            semantic_admission_label(true, true, false, true, 0.01, true, 68.0),
+            "stable_core_semantic_trickle"
+        );
+        assert_eq!(
+            semantic_admission_label(false, true, false, false, 0.01, false, 68.0),
+            "input_trace_stale"
+        );
     }
 
     #[test]

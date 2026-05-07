@@ -42,12 +42,14 @@ pub const BOOTSTRAP_RELEASE_THRESHOLD: f32 = 42.0;
 pub const HOLD_ENTRY_THRESHOLD: f32 = 60.0;
 pub const HOLD_RELEASE_THRESHOLD: f32 = 58.0;
 pub const ELEVATED_ENTRY_THRESHOLD: f32 = 72.0;
-pub const ELEVATED_RELEASE_THRESHOLD: f32 = 70.0;
-pub const DISCHARGE_ENTRY_THRESHOLD: f32 = 78.0;
-pub const DISCHARGE_RELEASE_THRESHOLD: f32 = 72.0;
-pub const CRISIS_WARNING_THRESHOLD: f32 = DISCHARGE_ENTRY_THRESHOLD;
+pub const ELEVATED_RELEASE_THRESHOLD: f32 = 71.5;
+pub const FORCE_RAIL_THRESHOLD: f32 = 78.0;
+pub const DISCHARGE_ENTRY_THRESHOLD: f32 = 82.0;
+pub const DISCHARGE_RELEASE_THRESHOLD: f32 = 76.0;
+pub const CRISIS_WARNING_THRESHOLD: f32 = FORCE_RAIL_THRESHOLD;
 pub const CRISIS_FILL_THRESHOLD: f32 = 87.0;
 pub const CRISIS_SUSTAIN_TICKS: u32 = 30;
+pub const ELEVATED_STRONG_RAIL_THRESHOLD: f32 = 74.0;
 
 #[must_use]
 pub fn bootstrap_active(fill_pct: f32, currently_active: bool) -> bool {
@@ -178,16 +180,16 @@ pub fn stage_guard(stage: OverfillStage) -> OverfillGuard {
         OverfillStage::Elevated => OverfillGuard {
             stage,
             suppress_semantic_amplification: true,
-            gate_min: Some(0.04),
-            gate_max: Some(0.04),
-            filt_max: Some(0.96),
-            filt_min: Some(0.96),
-            cov_keep_min: Some(0.35),
-            cov_keep_max: Some(0.35),
-            target_keep: Some(0.30),
-            keep_floor: Some(0.35),
-            keep_ceil: Some(0.35),
-            trace_target_scale: Some(0.30),
+            gate_min: Some(0.08),
+            gate_max: Some(0.08),
+            filt_max: Some(0.84),
+            filt_min: Some(0.84),
+            cov_keep_min: Some(0.55),
+            cov_keep_max: Some(0.55),
+            target_keep: Some(0.55),
+            keep_floor: Some(0.55),
+            keep_ceil: Some(0.55),
+            trace_target_scale: Some(0.45),
             decay_only: false,
             reset_pi: true,
             freeze_pi: true,
@@ -216,6 +218,44 @@ pub fn stage_guard(stage: OverfillStage) -> OverfillGuard {
             live_intake_divisor: 0,
         },
     }
+}
+
+#[must_use]
+pub fn stage_guard_for_state(
+    stage: OverfillStage,
+    fill_pct: f32,
+    fill_slope_pct_per_sec: f32,
+) -> OverfillGuard {
+    let mut guard = stage_guard(stage);
+    if matches!(stage, OverfillStage::Elevated)
+        && fill_pct.is_finite()
+        && fill_slope_pct_per_sec.is_finite()
+    {
+        if fill_pct < ELEVATED_STRONG_RAIL_THRESHOLD {
+            guard.gate_min = Some(0.10);
+            guard.gate_max = Some(0.10);
+            guard.filt_max = Some(0.78);
+            guard.filt_min = Some(0.78);
+            guard.cov_keep_min = Some(0.66);
+            guard.cov_keep_max = Some(0.66);
+            guard.target_keep = Some(0.66);
+            guard.keep_floor = Some(0.66);
+            guard.keep_ceil = Some(0.66);
+            guard.trace_target_scale = Some(0.55);
+        } else if fill_pct < DISCHARGE_ENTRY_THRESHOLD {
+            guard.gate_min = Some(0.09);
+            guard.gate_max = Some(0.09);
+            guard.filt_max = Some(0.80);
+            guard.filt_min = Some(0.80);
+            guard.cov_keep_min = Some(0.66);
+            guard.cov_keep_max = Some(0.66);
+            guard.target_keep = Some(0.66);
+            guard.keep_floor = Some(0.66);
+            guard.keep_ceil = Some(0.66);
+            guard.trace_target_scale = Some(0.55);
+        }
+    }
+    guard
 }
 
 #[must_use]
@@ -259,7 +299,7 @@ mod tests {
     #[test]
     fn elevated_and_discharge_use_release_bands() {
         assert!(elevated_active(ELEVATED_ENTRY_THRESHOLD, false));
-        assert!(elevated_active(ELEVATED_RELEASE_THRESHOLD + 0.5, true));
+        assert!(elevated_active(ELEVATED_RELEASE_THRESHOLD + 0.25, true));
         assert!(!elevated_active(ELEVATED_RELEASE_THRESHOLD, true));
 
         assert!(discharge_active(DISCHARGE_ENTRY_THRESHOLD, false));
@@ -299,13 +339,13 @@ mod tests {
         assert_eq!(hold.live_intake_divisor, 0);
 
         let elevated = stage_guard(OverfillStage::Elevated);
-        assert_eq!(elevated.gate_min, Some(0.04));
-        assert_eq!(elevated.gate_max, Some(0.04));
-        assert_eq!(elevated.filt_max, Some(0.96));
-        assert_eq!(elevated.filt_min, Some(0.96));
-        assert_eq!(elevated.cov_keep_min, Some(0.35));
-        assert_eq!(elevated.cov_keep_max, Some(0.35));
-        assert_eq!(elevated.target_keep, Some(0.30));
+        assert_eq!(elevated.gate_min, Some(0.08));
+        assert_eq!(elevated.gate_max, Some(0.08));
+        assert_eq!(elevated.filt_max, Some(0.84));
+        assert_eq!(elevated.filt_min, Some(0.84));
+        assert_eq!(elevated.cov_keep_min, Some(0.55));
+        assert_eq!(elevated.cov_keep_max, Some(0.55));
+        assert_eq!(elevated.target_keep, Some(0.55));
         assert!(elevated.freeze_pi);
         assert_eq!(elevated.live_intake_divisor, 0);
 
@@ -320,6 +360,50 @@ mod tests {
         assert!(discharge.decay_only);
         assert!(discharge.freeze_pi);
         assert_eq!(discharge.live_intake_divisor, 0);
+    }
+
+    #[test]
+    fn elevated_guard_uses_soft_transition_below_strong_rail() {
+        let soft = stage_guard_for_state(OverfillStage::Elevated, 73.0, 3.0);
+        assert_eq!(soft.gate_min, Some(0.10));
+        assert_eq!(soft.filt_max, Some(0.78));
+        assert_eq!(soft.cov_keep_min, Some(0.66));
+        assert_eq!(soft.target_keep, Some(0.66));
+        assert_eq!(soft.trace_target_scale, Some(0.55));
+
+        let strong = stage_guard_for_state(OverfillStage::Elevated, 74.0, 0.2);
+        assert_eq!(strong.gate_min, Some(0.09));
+        assert_eq!(strong.filt_max, Some(0.80));
+        assert_eq!(strong.cov_keep_min, Some(0.66));
+        assert_eq!(strong.target_keep, Some(0.66));
+        assert_eq!(strong.trace_target_scale, Some(0.55));
+
+        let force_landing = stage_guard_for_state(OverfillStage::Elevated, 78.0, -0.2);
+        assert_eq!(force_landing.gate_min, Some(0.09));
+        assert_eq!(force_landing.filt_max, Some(0.80));
+        assert_eq!(force_landing.cov_keep_min, Some(0.66));
+        assert_eq!(force_landing.target_keep, Some(0.66));
+        assert_eq!(force_landing.trace_target_scale, Some(0.55));
+
+        let default_elevated = stage_guard(OverfillStage::Elevated);
+        assert_eq!(default_elevated.gate_min, Some(0.08));
+        assert_eq!(default_elevated.filt_max, Some(0.84));
+        assert_eq!(default_elevated.cov_keep_min, Some(0.55));
+        assert_eq!(default_elevated.target_keep, Some(0.55));
+        assert_eq!(default_elevated.trace_target_scale, Some(0.45));
+
+        let hold = stage_guard_for_state(OverfillStage::Hold, 71.0, 3.0);
+        assert_eq!(hold, stage_guard(OverfillStage::Hold));
+    }
+
+    #[test]
+    fn elevated_guard_default_remains_cold_for_force_band() {
+        let strong = stage_guard(OverfillStage::Elevated);
+        assert_eq!(strong.gate_min, Some(0.08));
+        assert_eq!(strong.filt_max, Some(0.84));
+        assert_eq!(strong.cov_keep_min, Some(0.55));
+        assert_eq!(strong.target_keep, Some(0.55));
+        assert_eq!(strong.trace_target_scale, Some(0.45));
     }
 
     #[test]
@@ -355,16 +439,28 @@ mod tests {
             OverfillStage::Elevated
         );
         assert_eq!(
-            select_stage(70.5, OverfillStage::Elevated),
+            select_stage(71.75, OverfillStage::Elevated),
             OverfillStage::Elevated
         );
         assert_eq!(
-            select_stage(70.0, OverfillStage::Elevated),
+            select_stage(71.5, OverfillStage::Elevated),
             OverfillStage::Hold
+        );
+        assert_eq!(
+            select_stage(70.5, OverfillStage::Elevated),
+            OverfillStage::Hold
+        );
+        assert_eq!(
+            select_stage(78.5, OverfillStage::Elevated),
+            OverfillStage::Elevated
         );
         assert_eq!(
             select_stage(83.0, OverfillStage::Elevated),
             OverfillStage::Discharge
+        );
+        assert_eq!(
+            select_stage(75.5, OverfillStage::Discharge),
+            OverfillStage::Elevated
         );
     }
 
