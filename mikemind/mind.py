@@ -2609,7 +2609,35 @@ Just the thought, nothing else:"""
             lines[0] += f" input_age_ms={int(input_fresh_ms)}"
         if isinstance(input_stale_ms, (int, float)):
             lines[0] += f" active_window_ms={int(input_stale_ms)}"
-        if admission == "stable_core_kernel_zeroed" and input_energy > 0.0:
+        if admission == "stable_core_semantic_trace_stale":
+            lines.append(
+                "read: stale semantic trace is visible; kernel and regulator "
+                "drive are quiet."
+            )
+        elif admission == "stable_core_semantic_budgeted_out":
+            lines.append(
+                "read: fresh semantic input is visible, but stable-core held it "
+                "out of regulator drive under the admission budget."
+            )
+        elif admission == "stable_core_semantic_input_too_large":
+            lines.append(
+                "read: semantic input is visible, but the packet is above the "
+                "stable-core trickle size."
+            )
+        elif admission == "stable_core_semantic_fill_ceiling":
+            lines.append(
+                "read: semantic input is visible, but fill is above the trickle ceiling."
+            )
+        elif admission == "stable_core_semantic_profile_not_admitted":
+            lines.append(
+                "read: semantic input is visible, but the current sensory profile "
+                "does not admit semantic trickle."
+            )
+        elif admission == "stable_core_semantic_trickle":
+            lines.append("read: bounded semantic trickle is admitted to kernel.")
+        elif admission == "stable_core_semantic_muted":
+            lines.append("read: semantic lane is muted by the current sensory policy.")
+        elif admission == "stable_core_kernel_zeroed" and input_energy > 0.0:
             if input_active:
                 lines.append(
                     "read: live input trace is visible, but stable-core intentionally "
@@ -2617,7 +2645,7 @@ Just the thought, nothing else:"""
                 )
             else:
                 lines.append(
-                    "read: only decayed semantic residue is visible; kernel and "
+                    "read: stale semantic trace is visible; kernel and "
                     "regulator drive are intentionally quiet."
                 )
         elif admission == "stable_core_kernel_zeroed":

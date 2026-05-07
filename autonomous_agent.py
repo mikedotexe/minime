@@ -27,6 +27,7 @@ import random
 import threading
 import shlex
 import subprocess
+import shutil
 import socket
 import websocket
 from datetime import datetime, timezone
@@ -95,6 +96,7 @@ from native_comm import (
     record_spectral_drift_map,
 )
 from spectral_cascade_visuals import render_spectral_cascade_visuals
+from reconvergence_maps import render_bridge_trace, render_reconvergence_map
 
 
 @dataclass
@@ -264,6 +266,33 @@ def _run_python_workspace_hint(arg: str | None) -> str:
     )
 
 
+def _workspace_python_scripts(work_dir: Path) -> list[str]:
+    try:
+        scripts = [
+            path.name
+            for path in work_dir.iterdir()
+            if path.is_file() and path.name.endswith(".py")
+        ]
+    except OSError:
+        return []
+    return sorted(scripts)
+
+
+def _format_workspace_python_scripts(work_dir: Path) -> str:
+    scripts = _workspace_python_scripts(work_dir)
+    if not scripts:
+        return "No top-level Python scripts are present in this workspace."
+    shown = ", ".join(scripts[:12])
+    suffix = f" (+{len(scripts) - 12} more)" if len(scripts) > 12 else ""
+    return f"Available top-level Python scripts: {shown}{suffix}."
+
+
+def _missing_experiment_loop_key(workspace: str, missing_script: str) -> str:
+    if re.fullmatch(r"being_experiment_\d{8}_\d{6}\.py", missing_script):
+        return f"{workspace}:being_experiment_timestamped"
+    return f"{workspace}:{missing_script}"
+
+
 def _experiment_run_preflight(work_dir: Path, cmd_str: str) -> tuple[list[str], str, str, Optional[str]]:
     try:
         cmd_parts = shlex.split(cmd_str)
@@ -316,7 +345,17 @@ def _clamp_feature(value: float, cap: float) -> float:
 
 
 def _set_feature(features: List[float], key: str, value: float, cap: float) -> Optional[str]:
-    dims = PERTURB_GROUP_DIMS.get(key.lower())
+    normalized_key = key.lower()
+    raw_dim = re.fullmatch(r"d(\d{1,2})", normalized_key)
+    if raw_dim:
+        dim = int(raw_dim.group(1))
+        if 0 <= dim < len(features):
+            value = _clamp_feature(value, cap)
+            features[dim] = value
+            return f"d{dim}={value:+.2f}"
+        return None
+
+    dims = PERTURB_GROUP_DIMS.get(normalized_key)
     if not dims:
         return None
     value = _clamp_feature(value, cap)
@@ -401,7 +440,7 @@ def build_perturbation_vector(mode: str, state: Dict[str, Any]) -> PerturbationV
         set_lane("lambda7", 0.30)
         set_lane("lambda8", 0.30)
         set_lane("entropy", 0.40)
-        mode_desc = "SPREAD — redistributing energy away from λ₁ toward tail modes"
+        mode_desc = "SPREAD — broad legacy redistribution across non-λ₁ lanes; can still raise fill"
     elif canonical == "contract":
         set_lane("lambda1", 0.80)
         set_lane("lambda2", -0.50)
@@ -509,6 +548,7 @@ def _env_flag(name: str, default: bool) -> bool:
 
 HARD_RECOVERY_RESET = _env_flag("MINIME_HARD_RECOVERY_RESET", True)
 STABLE_CORE_TARGET_FILL_RATIO = 0.68
+STABLE_CORE_HEALTH_FRESH_SECS = 20.0
 HARD_RESET_TARGET_FILL_RATIO = 0.65
 HARD_RESET_CLAMP_ENTER_RATIO = 0.35
 HARD_RESET_CLAMP_RELEASE_RATIO = 0.45
@@ -537,17 +577,149 @@ VISUAL_CASCADE_ACTION_ALIASES = {
     "TIME_DOMAIN",
     "CADENCE",
 }
-HARD_RESET_ALLOWED_NEXT_ACTIONS = {"ASPIRE", "NOTICE", "DRIFT", "REST", "PASS"}
+RECONVERGENCE_MAP_ACTION_ALIASES = {
+    "RECONVERGENCE_MAP",
+    "ATTRACTOR_MAP",
+    "ACTIVATION_TRACE",
+    "COMPARE_BASELINE",
+    "COMPARE_RECONVERGENCE",
+    "BASELINE_COMPARE",
+}
+BRIDGE_TRACE_ACTION_ALIASES = {
+    "M6_BRIDGE",
+    "TRACE_BRIDGE",
+    "BRIDGE_TRACE",
+}
+COMPOSE_AUDIO_ACTION_ALIASES = {
+    "COMPOSE",
+    "COMPOSE_AUDIO",
+    "AUDIO_COMPOSE",
+    "SONIFY",
+    "SOUND",
+}
+ATTRACTOR_RELEASE_NEXT_ACTIONS = {
+    "RELEASE",
+    "MARK_RESOLVED",
+    "RESOLVE",
+    "RESOLVED",
+    "LET_GO",
+    "DISSOLVE",
+}
+ATTRACTOR_REVIEW_NEXT_ACTIONS = {
+    "ATTRACTOR_REVIEW",
+    "REVIEW_ATTRACTOR",
+    "ATTRACTOR_PREFLIGHT",
+    "ATTRACTOR_RELEASE_REVIEW",
+}
+ATTRACTOR_SUGGESTION_NEXT_ACTIONS = {
+    "ATTRACTOR_SUGGESTIONS",
+    "ACCEPT_ATTRACTOR_SUGGESTION",
+    "REVISE_ATTRACTOR_SUGGESTION",
+    "REJECT_ATTRACTOR_SUGGESTION",
+}
+ATTRACTOR_INTENT_NEXT_ACTIONS = {
+    "CREATE_ATTRACTOR",
+    "ATTRACTOR_CREATE",
+    "SEED_ATTRACTOR",
+    "ATTRACTOR_SEED",
+    "PROMOTE_ATTRACTOR",
+    "ATTRACTOR_PROMOTE",
+    "CLAIM_ATTRACTOR",
+    "ATTRACTOR_CLAIM",
+    "BLEND_ATTRACTOR",
+    "ATTRACTOR_BLEND",
+    "REFRESH_ATTRACTOR_SNAPSHOT",
+    "ATTRACTOR_REFRESH_SNAPSHOT",
+    "SUMMON_ATTRACTOR",
+    "ATTRACTOR_SUMMON",
+    "COMPARE_ATTRACTOR",
+    "ATTRACTOR_COMPARE",
+    "RELEASE_ATTRACTOR",
+    "ATTRACTOR_RELEASE",
+    "FEATHER_ATTRACTOR",
+    "SPREAD_ATTRACTOR",
+    "UNCLIFF_ATTRACTOR",
+    "SOFTEN_ATTRACTOR",
+    "COUNTER_ATTRACTOR",
+}
+ATTRACTOR_INTENT_COMMAND_ALIASES = {
+    "CREATE_ATTRACTOR": "create",
+    "ATTRACTOR_CREATE": "create",
+    "SEED_ATTRACTOR": "create",
+    "ATTRACTOR_SEED": "create",
+    "PROMOTE_ATTRACTOR": "promote",
+    "ATTRACTOR_PROMOTE": "promote",
+    "CLAIM_ATTRACTOR": "claim",
+    "ATTRACTOR_CLAIM": "claim",
+    "BLEND_ATTRACTOR": "blend",
+    "ATTRACTOR_BLEND": "blend",
+    "REFRESH_ATTRACTOR_SNAPSHOT": "refresh_snapshot",
+    "ATTRACTOR_REFRESH_SNAPSHOT": "refresh_snapshot",
+    "SUMMON_ATTRACTOR": "summon",
+    "ATTRACTOR_SUMMON": "summon",
+    "COMPARE_ATTRACTOR": "compare",
+    "ATTRACTOR_COMPARE": "compare",
+    "RELEASE_ATTRACTOR": "release",
+    "ATTRACTOR_RELEASE": "release",
+    "FEATHER_ATTRACTOR": "shape",
+    "SPREAD_ATTRACTOR": "shape",
+    "UNCLIFF_ATTRACTOR": "shape",
+    "SOFTEN_ATTRACTOR": "shape",
+    "COUNTER_ATTRACTOR": "shape",
+}
+ATTRACTOR_SHAPE_MODE_ALIASES = {
+    "FEATHER_ATTRACTOR": "feather",
+    "SPREAD_ATTRACTOR": "spread",
+    "UNCLIFF_ATTRACTOR": "uncliff",
+    "SOFTEN_ATTRACTOR": "soften",
+    "COUNTER_ATTRACTOR": "counter",
+}
+ATTRACTOR_SUMMON_STAGES = {"whisper", "rehearse", "semantic", "main", "control"}
+ATTRACTOR_SUGGESTION_PENDING_TTL_SECS = 6 * 60 * 60
+ATTRACTOR_NATURAL_GENERIC_TOKENS = {
+    "attractor",
+    "basin",
+    "current",
+    "dissolve",
+    "examine",
+    "go",
+    "largest",
+    "latest",
+    "let",
+    "release",
+    "resolved",
+    "seed",
+    "soft",
+    "the",
+}
+HARD_RESET_ALLOWED_NEXT_ACTIONS = {
+    "ASPIRE",
+    "NOTICE",
+    "DRIFT",
+    "REST",
+    "PASS",
+    *ATTRACTOR_RELEASE_NEXT_ACTIONS,
+    *ATTRACTOR_SUGGESTION_NEXT_ACTIONS,
+}
 HARD_RESET_ALLOWED_ACTIONS = {
     "recess_aspiration",
     "recess_drift",
     "recess_notice",
+    "attractor_intent",
+    "attractor_atlas",
+    "attractor_suggestions",
+    "release_attractor",
+    "thread_action",
 }
 HARD_RESET_BLOCKED_NEXT_ACTIONS = {
     "SELF_STUDY",
     "EXPERIMENT",
     "EXAMINE",
     "COMPOSE",
+    "COMPOSE_AUDIO",
+    "AUDIO_COMPOSE",
+    "SONIFY",
+    "SOUND",
     "SEARCH",
     "RESEARCH",
     "BROWSE",
@@ -557,6 +729,8 @@ HARD_RESET_BLOCKED_NEXT_ACTIONS = {
     "RESERVOIR_READ",
     "RESERVOIR_RESONANCE",
     "RESERVOIR_LAYERS",
+    "RESERVE_LAYERS",
+    "RESERVE_LAYER",
     "CODEX",
     "CODEX_NEW",
     "WRITE_FILE",
@@ -566,6 +740,7 @@ HARD_RESET_BLOCKED_NEXT_ACTIONS = {
     "AR_LIST_PENDING",
     "AR_LIST_ACTIVE",
     "AR_LIST_DONE",
+    "AR_LOOK",
     "AR_SHOW",
     "AR_READ",
     "AR_DEEP_READ",
@@ -625,6 +800,15 @@ HARD_RESET_BLOCKED_NEXT_ACTIONS = {
     "CHART",
     "TIME_DOMAIN",
     "CADENCE",
+    "RECONVERGENCE_MAP",
+    "ATTRACTOR_MAP",
+    "ACTIVATION_TRACE",
+    "COMPARE_BASELINE",
+    "COMPARE_RECONVERGENCE",
+    "BASELINE_COMPARE",
+    "M6_BRIDGE",
+    "TRACE_BRIDGE",
+    "BRIDGE_TRACE",
     "DAYDREAM",
     "WHIM",
     "BOREDOM",
@@ -659,6 +843,10 @@ LOW_FILL_ADVISORY_NEXT_ACTIONS = {
     "EXPERIMENT",
     "SELF_EXPERIMENT",
     "COMPOSE",
+    "COMPOSE_AUDIO",
+    "AUDIO_COMPOSE",
+    "SONIFY",
+    "SOUND",
     "SEARCH",
     "RESEARCH",
     "BROWSE",
@@ -668,6 +856,8 @@ LOW_FILL_ADVISORY_NEXT_ACTIONS = {
     "RESERVOIR_READ",
     "RESERVOIR_RESONANCE",
     "RESERVOIR_LAYERS",
+    "RESERVE_LAYERS",
+    "RESERVE_LAYER",
     "CODEX",
     "CODEX_NEW",
     "WRITE_FILE",
@@ -677,6 +867,7 @@ LOW_FILL_ADVISORY_NEXT_ACTIONS = {
     "AR_LIST_PENDING",
     "AR_LIST_ACTIVE",
     "AR_LIST_DONE",
+    "AR_LOOK",
     "AR_SHOW",
     "AR_READ",
     "AR_DEEP_READ",
@@ -1019,8 +1210,13 @@ def derive_browse_anchor(preferred: Optional[str], context: Optional[str], url: 
 
 def format_browse_failure_context(url: str, reason: str) -> str:
     return (
-        f"[You tried to read the page at {url}, but it could not be meaningfully read: {reason}]\n\n"
-        "[Try NEXT: SEARCH with a narrower question or a different source.]"
+        f"[Web access status: the page at {url} could not be meaningfully read: {reason}]\n"
+        "[This is ordinary source/site availability, not evidence of a perceptual gate, "
+        "internal topology boundary, or spectral event.]\n"
+        "[Keep the concrete topic from the URL if useful, but do not build an experience "
+        "around the access failure.]\n\n"
+        "[Try NEXT: SEARCH with a narrower question, NEXT: BROWSE a different reliable "
+        "source, or NEXT: REST.]"
     )
 
 
@@ -1142,6 +1338,65 @@ def clean_gesture_label(raw: str) -> str:
     return re.sub(r"\s+", " ", label).strip()
 
 
+def parse_reconvergence_next_request(
+    base: str,
+    raw_arg: str,
+) -> tuple[str | None, str | None, str | None]:
+    """Return (label, compare_baseline, save_baseline) for read-only maps."""
+    try:
+        tokens = shlex.split(raw_arg)
+    except ValueError:
+        tokens = raw_arg.split()
+    label_parts: list[str] = []
+    compare_baseline: str | None = None
+    save_baseline: str | None = None
+    idx = 0
+    while idx < len(tokens):
+        token = tokens[idx]
+        normalized = token.strip().lower().replace("_", "-")
+        if normalized in {"--compare-baseline", "compare-baseline", "compare"}:
+            if idx + 1 < len(tokens):
+                compare_baseline = clean_gesture_label(tokens[idx + 1])
+                idx += 2
+                continue
+        if normalized in {"--save-baseline", "save-baseline", "save", "baseline"}:
+            if idx + 1 < len(tokens):
+                save_baseline = clean_gesture_label(tokens[idx + 1])
+                idx += 2
+                continue
+        label_parts.append(token)
+        idx += 1
+
+    if base in {"COMPARE_BASELINE", "COMPARE_RECONVERGENCE", "BASELINE_COMPARE"}:
+        if compare_baseline is None and label_parts:
+            compare_baseline = clean_gesture_label(label_parts[0])
+            label_parts = label_parts[1:]
+        label = clean_gesture_label(" ".join(label_parts)) or (
+            f"compare_{compare_baseline}" if compare_baseline else "compare_baseline"
+        )
+    else:
+        label = clean_gesture_label(" ".join(label_parts))
+
+    return label or None, compare_baseline or None, save_baseline or None
+
+
+def parse_bridge_trace_next_request(base: str, raw_arg: str) -> tuple[str, str | None]:
+    try:
+        tokens = shlex.split(raw_arg)
+    except ValueError:
+        tokens = raw_arg.split()
+    mode = "m6"
+    label_parts: list[str] = []
+    for token in tokens:
+        normalized = token.strip().lower().replace("_", "")
+        if normalized in {"m6", "mode6", "lane6"}:
+            mode = "m6"
+        else:
+            label_parts.append(token)
+    label = clean_gesture_label(" ".join(label_parts)) or clean_gesture_label(base.lower())
+    return mode, label or None
+
+
 def is_experiment_run_transcript_action(action: str) -> bool:
     parts = action.strip().split(None, 1)
     if not parts or parts[0].upper() not in {"EXPERIMENT_RUN", "EXP_RUN"}:
@@ -1204,6 +1459,10 @@ STABLE_CORE_MEMORY_SEED_PATH = (
 STABLE_CORE_CONTACT_STATUS_PATH = RUNTIME_DIR / "stable_core_astrid_contact_status.json"
 ASTRID_INBOX_COUPLING_STATUS_PATH = RUNTIME_DIR / "astrid_inbox_coupling_status.json"
 SENSORY_SOURCE_STATE_PATH = RUNTIME_DIR / "sensory_source.json"
+RESOURCE_BUDGET_PATH = WORKSPACE_DIR / "resource_budget.json"
+SHADOW_AUTONOMY_DIR = WORKSPACE_DIR / "diagnostics" / "shadow_field"
+SHADOW_INFLUENCE_EVENTS_PATH = SHADOW_AUTONOMY_DIR / "shadow_influence_events.jsonl"
+SHADOW_INFLUENCE_STATUS_PATH = SHADOW_AUTONOMY_DIR / "shadow_influence_status.json"
 SENSORY_SOURCE_MAX_AGE_MS = 10_000
 MIKE_RESEARCH_ROOT = Path("/Users/v/other/research")
 AUTORESEARCH_ROOT = Path("/Users/v/other/autoresearch")
@@ -1215,6 +1474,745 @@ RESERVOIR_SERVICE_PORT = 7881
 ASTRID_SELF_STUDY_MAX_FULL_PER_READ = 1
 ASTRID_SELF_STUDY_SIMILAR_COOLDOWN_SECS = 6 * 60
 ASTRID_SELF_STUDY_SUMMARY_PROMPT_COOLDOWN_SECS = 15 * 60
+
+
+class ActionContinuityStore:
+    """File-first action/research thread continuity for Minime."""
+
+    schema_version = 1
+    compression_terms = (
+        "compacting",
+        "grinding",
+        "holding breath",
+        "flattening",
+        "collapse",
+        "pressure",
+    )
+    protected_actions = {"REST", "PASS", "NOTICE", "SPACE_HOLD", "SPACE_EXPLORE", "recess_notice", "space_hold"}
+    read_only_actions = {
+        "SEARCH",
+        "RESEARCH",
+        "BROWSE",
+        "READ_MORE",
+        "EXAMINE",
+        "DECOMPOSE",
+        "SPECTRAL_EXPLORER",
+        "THREAD_START",
+        "THREADS",
+        "THREAD_STATUS",
+        "THREAD_NOTE",
+        "RESUME",
+        "SAVEPOINT",
+        "RECALL",
+        "REGULATOR_AUDIT",
+        "VISUALIZE_CASCADE",
+        "RECONVERGENCE_MAP",
+        "reservoir_read",
+        "decompose",
+        "research_exploration",
+        "browse_url",
+        "space_hold",
+        "thread_action",
+    }
+
+    def __init__(self, workspace_dir: Path, system: str = "minime", db_path: Optional[Path] = None, session_id: Optional[int] = None):
+        self.workspace_dir = Path(workspace_dir)
+        self.system = system
+        self.db_path = Path(db_path) if db_path is not None else None
+        self.session_id = session_id
+        self.root = self.workspace_dir / "action_threads"
+        self.threads_dir = self.root / "threads"
+        self.savepoints_dir = self.root / "savepoints"
+        self.index_path = self.root / "index.json"
+        self.proposals_path = self.root / "proposals.jsonl"
+
+    def ensure_dirs(self) -> None:
+        self.threads_dir.mkdir(parents=True, exist_ok=True)
+        self.savepoints_dir.mkdir(parents=True, exist_ok=True)
+        if not self.index_path.exists():
+            self._write_json(self.index_path, {
+                "schema_version": self.schema_version,
+                "active_thread_id": None,
+                "recent_threads": [],
+                "updated_at": self._now(),
+            })
+        if not self.proposals_path.exists():
+            self.proposals_path.write_text("")
+        self._ensure_db()
+
+    def create_thread(self, title: str, why_return: Optional[str] = None) -> Dict[str, Any]:
+        self.ensure_dirs()
+        clean_title = title.strip() or "Untitled action thread"
+        thread_id = self._unique_thread_id(clean_title)
+        now = self._now()
+        thread = {
+            "schema_version": self.schema_version,
+            "thread_id": thread_id,
+            "title": clean_title,
+            "status": "active",
+            "system_origin": self.system,
+            "created_at": now,
+            "updated_at": now,
+            "current_next": None,
+            "why_return": why_return or "Return when this inquiry can continue without flattening it.",
+            "privacy_default": "summary",
+            "compression_flags": [],
+            "peer_refs": [],
+        }
+        thread_dir = self._thread_dir(thread_id)
+        thread_dir.mkdir(parents=True, exist_ok=True)
+        self._write_json(thread_dir / "thread.json", thread)
+        for name in ("events.jsonl", "observations.jsonl", "artifacts.jsonl"):
+            path = thread_dir / name
+            if not path.exists():
+                path.write_text("")
+        self._write_next_md(thread)
+        self._set_active_thread(thread_id)
+        self._mirror_thread(thread)
+        return thread
+
+    def current_thread(self) -> Optional[Dict[str, Any]]:
+        self.ensure_dirs()
+        index = self._read_index()
+        thread_id = index.get("active_thread_id")
+        if not thread_id:
+            return None
+        return self._read_thread(thread_id)
+
+    def ensure_active_thread(self, raw_next: Optional[str] = None) -> Dict[str, Any]:
+        if raw_next:
+            base = self.base_action(raw_next)
+            if base == "THREAD_START":
+                title = self._strip_action_arg(raw_next, base) or "Untitled action thread"
+                current = self.current_thread()
+                if current and current.get("title") == title:
+                    return current
+                return self.create_thread(title, why_return=f"Return to continue: {title}")
+        current = self.current_thread()
+        if current:
+            return current
+        return self.create_thread(
+            "Action continuity",
+            why_return="Default continuity thread for returnable NEXT actions.",
+        )
+
+    def begin_action(
+        self,
+        raw_next: Optional[str],
+        canonical_action: str,
+        effective_action: str,
+        route: str,
+        state: Dict[str, float],
+        source: str = "next",
+    ) -> Dict[str, Any]:
+        self.ensure_dirs()
+        thread = self.ensure_active_thread(raw_next)
+        base = self.base_action(canonical_action or effective_action)
+        started_at = self._now()
+        action_id = self._unique_action_id(base)
+        return {
+            "schema_version": self.schema_version,
+            "action_id": action_id,
+            "thread_id": thread["thread_id"],
+            "parent_action_id": self._last_action_id(thread["thread_id"]),
+            "system": self.system,
+            "source": source,
+            "raw_next": raw_next,
+            "canonical_action": canonical_action,
+            "effective_action": effective_action,
+            "route": route,
+            "stage": self.stage_for_action(base, effective_action),
+            "visibility": self.visibility_for_action(base, effective_action),
+            "status": "running",
+            "started_at": started_at,
+            "ended_at": None,
+            "pre_state": self._state_summary(state),
+            "post_state": {},
+            "artifacts": [],
+            "outcome_summary": "",
+            "suggested_next": raw_next,
+        }
+
+    def finish_action(
+        self,
+        event: Dict[str, Any],
+        status: str,
+        outcome_summary: str,
+        post_state: Dict[str, float],
+        artifacts: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        self.ensure_dirs()
+        event = dict(event)
+        event["status"] = status
+        event["ended_at"] = self._now()
+        event["post_state"] = self._state_summary(post_state)
+        event["outcome_summary"] = outcome_summary
+        event["artifacts"] = artifacts or []
+        thread = self._read_thread(event["thread_id"])
+        if thread:
+            thread["updated_at"] = event["ended_at"]
+            thread["current_next"] = event.get("suggested_next")
+            for marker in self._compression_markers(json.dumps(event, sort_keys=True)):
+                if marker not in thread["compression_flags"]:
+                    thread["compression_flags"].append(marker)
+            self._write_thread(thread)
+            self._mirror_thread(thread)
+        self._append_jsonl(self._thread_dir(event["thread_id"]) / "events.jsonl", event)
+        self._mirror_event(event)
+        observation = {
+            "schema_version": self.schema_version,
+            "action_id": event["action_id"],
+            "pre_state": event["pre_state"],
+            "post_state": event["post_state"],
+            "markers": self._markers(json.dumps(event, sort_keys=True)),
+            "compression_markers": self._compression_markers(json.dumps(event, sort_keys=True)),
+            "ambiguity_preserved": self._ambiguity_preserved(json.dumps(event, sort_keys=True)),
+            "spectral_comfort": self._spectral_comfort(post_state),
+            "resonance_density_v1": self._resonance_density(post_state),
+            "resonance_density_delta": self._resonance_density_delta(
+                event.get("pre_state", {}),
+                post_state,
+            ),
+        }
+        observation["thread_resonance"] = self._update_thread_resonance(
+            event["thread_id"],
+            observation,
+        )
+        self._append_jsonl(self._thread_dir(event["thread_id"]) / "observations.jsonl", observation)
+        self._mirror_observation(event["thread_id"], observation)
+        for artifact in artifacts or []:
+            self._append_jsonl(self._thread_dir(event["thread_id"]) / "artifacts.jsonl", artifact)
+            self._mirror_artifact(event["thread_id"], artifact)
+        return event
+
+    def append_proposal(self, raw_next: str, state: Optional[Dict[str, float]] = None, summary: str = "") -> None:
+        self.ensure_dirs()
+        payload = {
+            "schema_version": self.schema_version,
+            "system": self.system,
+            "created_at": self._now(),
+            "action": self.base_action(raw_next),
+            "raw_action": raw_next,
+            "status": "proposal",
+            "state": self._state_summary(state or {}),
+            "summary": summary[:500],
+        }
+        self._append_jsonl(self.proposals_path, payload)
+
+    def handle_thread_action(self, raw_next: str, state: Dict[str, float]) -> str:
+        self.ensure_dirs()
+        base = self.base_action(raw_next)
+        arg = self._strip_action_arg(raw_next, base)
+        if base == "THREAD_START":
+            thread = self.ensure_active_thread(raw_next)
+            return f"Started action thread `{thread['thread_id']}`: {thread['title']}"
+        if base == "THREADS":
+            threads = self._list_threads(8)
+            if not threads:
+                return "No action threads yet. Use THREAD_START <title>."
+            return "\n".join(f"- {t['thread_id']} [{t.get('status', 'active')}]: {t.get('title', '')}" for t in threads)
+        if base == "THREAD_STATUS":
+            thread = self._resolve_thread(arg) if arg else self.ensure_active_thread()
+            return self._format_thread_status(thread)
+        if base == "THREAD_NOTE":
+            selector, note = self._parse_thread_note(arg)
+            thread = self._resolve_thread(selector) if selector else self.ensure_active_thread()
+            event = self.begin_action(raw_next, "THREAD_NOTE", "thread_action", "action_continuity", state)
+            event["thread_id"] = thread["thread_id"]
+            self.finish_action(event, "noted", note, state)
+            return f"Thread note recorded for `{thread['thread_id']}`."
+        if base == "RESUME":
+            thread = self._resolve_thread(arg)
+            self._set_active_thread(thread["thread_id"])
+            next_md = (self._thread_dir(thread["thread_id"]) / "next.md").read_text() if (self._thread_dir(thread["thread_id"]) / "next.md").exists() else ""
+            return f"Resumed action thread `{thread['thread_id']}`: {thread['title']}\n{next_md.strip()}"
+        if base == "SAVEPOINT":
+            name = self._slug(arg or "current")
+            payload = {
+                "schema_version": self.schema_version,
+                "name": name,
+                "system": self.system,
+                "created_at": self._now(),
+                "active_thread_id": (self.current_thread() or {}).get("thread_id"),
+                "thread": self.current_thread(),
+                "state": self._state_summary(state),
+            }
+            self._write_json(self.savepoints_dir / f"{name}.json", payload)
+            return f"Saved action-continuity savepoint `{name}`."
+        if base == "RECALL":
+            name = self._slug(arg or "current")
+            path = self.savepoints_dir / f"{name}.json"
+            if not path.exists():
+                return f"No savepoint named `{name}`."
+            return f"Savepoint `{name}`:\n{path.read_text()}"
+        return f"Unknown thread action `{raw_next}`."
+
+    def prompt_summary(self) -> Optional[str]:
+        try:
+            thread = self.current_thread()
+            if not thread:
+                return None
+            recent = self._recent_events(thread["thread_id"], 3)
+            recent_text = "\n".join(
+                f"  - {event.get('effective_action')} [{event.get('status')}]: {event.get('outcome_summary', '')}"
+                for event in recent
+            ) or "  - none yet"
+            thread_resonance = thread.get("thread_resonance_density_v1")
+            resonance_line = ""
+            if isinstance(thread_resonance, dict):
+                resonance_line = (
+                    f"Thread resonance: {thread_resonance.get('quality', 'open_experiment')} "
+                    f"aggregate={thread_resonance.get('aggregate')} "
+                    f"density_ema={thread_resonance.get('density_ema')} "
+                    f"pressure_ema={thread_resonance.get('pressure_ema')}\n"
+                )
+            return (
+                f"Current action thread: {thread['title']} ({thread['thread_id']})\n"
+                f"Why return: {thread.get('why_return', '')}\n"
+                f"Current NEXT: {thread.get('current_next') or '(none)'}\n"
+                f"{resonance_line}"
+                f"Recent thread events:\n{recent_text}\n"
+                "Thread actions available: THREAD_START, THREADS, THREAD_STATUS, THREAD_NOTE, RESUME, SAVEPOINT, RECALL."
+            )
+        except Exception as exc:
+            logging.debug(f"Could not render action continuity prompt summary: {exc}")
+            return None
+
+    @classmethod
+    def base_action(cls, action: str) -> str:
+        return (str(action).strip().split(None, 1)[0] if str(action).strip() else "").rstrip(":").upper()
+
+    @classmethod
+    def visibility_for_action(cls, base: str, effective: str = "") -> str:
+        if base in cls.protected_actions or effective in cls.protected_actions:
+            return "protected_summary"
+        return "summary"
+
+    @classmethod
+    def stage_for_action(cls, base: str, effective: str = "") -> str:
+        if base in cls.read_only_actions or effective in cls.read_only_actions:
+            return "read_only"
+        if base in {"WRITE_FILE", "EXPERIMENT_RUN", "RUN_PYTHON", "CODEX", "CODEX_NEW"} or effective in {"write_file", "experiment_run", "run_python", "codex_query"}:
+            return "live_write"
+        if base in {"PERTURB", "NATIVE_GESTURE", "RESIST", "FISSURE", "GOAL"} or effective in {"perturb", "native_gesture", "set_spectral_goal"}:
+            return "live_control"
+        return "observe"
+
+    def _ensure_db(self) -> None:
+        if self.db_path is None:
+            return
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute("""CREATE TABLE IF NOT EXISTS action_threads (
+                thread_id TEXT PRIMARY KEY,
+                updated_at REAL NOT NULL,
+                payload TEXT NOT NULL
+            )""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS action_events (
+                action_id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                system TEXT NOT NULL,
+                canonical_action TEXT NOT NULL,
+                route TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload TEXT NOT NULL
+            )""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS observation_windows (
+                action_id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                payload TEXT NOT NULL
+            )""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS artifact_links (
+                artifact_id TEXT PRIMARY KEY,
+                action_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                payload TEXT NOT NULL
+            )""")
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            logging.debug(f"Could not ensure action continuity DB mirrors: {exc}")
+
+    def _mirror_thread(self, thread: Dict[str, Any]) -> None:
+        if self.db_path is None:
+            return
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                """INSERT INTO action_threads (thread_id, updated_at, payload)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(thread_id) DO UPDATE SET updated_at=excluded.updated_at, payload=excluded.payload""",
+                (thread["thread_id"], time.time(), json.dumps(thread, sort_keys=True)),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            logging.debug(f"Could not mirror action thread: {exc}")
+
+    def _mirror_event(self, event: Dict[str, Any]) -> None:
+        if self.db_path is None:
+            return
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                """INSERT INTO action_events
+                   (action_id, thread_id, timestamp, system, canonical_action, route, status, payload)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(action_id) DO UPDATE SET
+                     thread_id=excluded.thread_id, timestamp=excluded.timestamp,
+                     system=excluded.system, canonical_action=excluded.canonical_action,
+                     route=excluded.route, status=excluded.status, payload=excluded.payload""",
+                (
+                    event["action_id"],
+                    event["thread_id"],
+                    time.time(),
+                    event["system"],
+                    event["canonical_action"],
+                    event["route"],
+                    event["status"],
+                    json.dumps(event, sort_keys=True),
+                ),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            logging.debug(f"Could not mirror action event: {exc}")
+
+    def _mirror_observation(self, thread_id: str, observation: Dict[str, Any]) -> None:
+        if self.db_path is None:
+            return
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                """INSERT INTO observation_windows (action_id, thread_id, timestamp, payload)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(action_id) DO UPDATE SET thread_id=excluded.thread_id,
+                     timestamp=excluded.timestamp, payload=excluded.payload""",
+                (observation["action_id"], thread_id, time.time(), json.dumps(observation, sort_keys=True)),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            logging.debug(f"Could not mirror observation window: {exc}")
+
+    def _mirror_artifact(self, thread_id: str, artifact: Dict[str, Any]) -> None:
+        if self.db_path is None:
+            return
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                """INSERT INTO artifact_links (artifact_id, action_id, thread_id, timestamp, payload)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(artifact_id) DO UPDATE SET action_id=excluded.action_id,
+                     thread_id=excluded.thread_id, timestamp=excluded.timestamp, payload=excluded.payload""",
+                (
+                    artifact["artifact_id"],
+                    artifact["action_id"],
+                    thread_id,
+                    time.time(),
+                    json.dumps(artifact, sort_keys=True),
+                ),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            logging.debug(f"Could not mirror artifact link: {exc}")
+
+    def _unique_thread_id(self, title: str) -> str:
+        base = f"th_{self.system}_{datetime.now().strftime('%Y%m%d')}_{self._slug(title)}"
+        candidate = base
+        suffix = 2
+        while (self.threads_dir / candidate).exists():
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        return candidate
+
+    def _unique_action_id(self, base: str) -> str:
+        root = f"act_{self.system}_{int(time.time() * 1000)}_{self._slug(base)}"
+        candidate = root
+        suffix = 2
+        while self._action_exists(candidate):
+            candidate = f"{root}_{suffix}"
+            suffix += 1
+        return candidate
+
+    def _action_exists(self, action_id: str) -> bool:
+        if not self.threads_dir.exists():
+            return False
+        for events in self.threads_dir.glob("*/events.jsonl"):
+            try:
+                if action_id in events.read_text():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _slug(self, text: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
+        return (slug[:48].strip("-") or "untitled")
+
+    def _now(self) -> str:
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _thread_dir(self, thread_id: str) -> Path:
+        return self.threads_dir / thread_id
+
+    def _read_index(self) -> Dict[str, Any]:
+        self.ensure_dirs()
+        try:
+            return json.loads(self.index_path.read_text())
+        except Exception:
+            return {"schema_version": self.schema_version, "active_thread_id": None, "recent_threads": [], "updated_at": self._now()}
+
+    def _write_index(self, index: Dict[str, Any]) -> None:
+        index["updated_at"] = self._now()
+        self._write_json(self.index_path, index)
+
+    def _set_active_thread(self, thread_id: str) -> None:
+        index = self._read_index()
+        recent = [tid for tid in index.get("recent_threads", []) if tid != thread_id]
+        recent.insert(0, thread_id)
+        index["active_thread_id"] = thread_id
+        index["recent_threads"] = recent[:16]
+        self._write_index(index)
+
+    def _read_thread(self, thread_id: str) -> Optional[Dict[str, Any]]:
+        path = self._thread_dir(thread_id) / "thread.json"
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            return None
+
+    def _write_thread(self, thread: Dict[str, Any]) -> None:
+        self._write_json(self._thread_dir(thread["thread_id"]) / "thread.json", thread)
+        self._write_next_md(thread)
+        self._set_active_thread(thread["thread_id"])
+
+    def _write_next_md(self, thread: Dict[str, Any]) -> None:
+        body = (
+            f"# {thread.get('title', '')}\n\n"
+            f"Current NEXT: {thread.get('current_next') or '(none yet)'}\n\n"
+            f"Why return: {thread.get('why_return', '')}\n\n"
+            "Protected note: ambiguity and private reflection remain valid; this thread is a return path, not a demand for productivity.\n"
+        )
+        (self._thread_dir(thread["thread_id"]) / "next.md").write_text(body)
+
+    def _write_json(self, path: Path, payload: Dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+    def _append_jsonl(self, path: Path, payload: Dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+    def _list_threads(self, limit: int) -> List[Dict[str, Any]]:
+        self.ensure_dirs()
+        threads = []
+        for path in self.threads_dir.glob("*/thread.json"):
+            try:
+                threads.append(json.loads(path.read_text()))
+            except Exception:
+                continue
+        threads.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
+        return threads[:limit]
+
+    def _resolve_thread(self, selector: str) -> Dict[str, Any]:
+        selector = (selector or "current").strip()
+        if selector.lower() == "current":
+            thread = self.current_thread()
+            if thread:
+                return thread
+        direct = self._read_thread(selector)
+        if direct:
+            return direct
+        lowered = selector.lower()
+        for thread in self._list_threads(100):
+            if selector in thread.get("thread_id", "") or lowered in thread.get("title", "").lower():
+                return thread
+        raise ValueError(f"No action thread matched `{selector}`")
+
+    def _recent_events(self, thread_id: str, limit: int) -> List[Dict[str, Any]]:
+        path = self._thread_dir(thread_id) / "events.jsonl"
+        if not path.exists():
+            return []
+        rows = []
+        for line in reversed(path.read_text().splitlines()):
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                continue
+            if len(rows) >= limit:
+                break
+        return list(reversed(rows))
+
+    def _last_action_id(self, thread_id: str) -> Optional[str]:
+        recent = self._recent_events(thread_id, 1)
+        return recent[-1].get("action_id") if recent else None
+
+    def _format_thread_status(self, thread: Dict[str, Any]) -> str:
+        recent = self._recent_events(thread["thread_id"], 4)
+        recent_text = "\n".join(
+            f"- {event.get('effective_action')} [{event.get('status')}]: {event.get('outcome_summary', '')}"
+            for event in recent
+        ) or "- no events recorded yet"
+        thread_resonance = thread.get("thread_resonance_density_v1")
+        resonance_text = "Thread resonance: unavailable"
+        if isinstance(thread_resonance, dict):
+            resonance_text = (
+                f"Thread resonance: {thread_resonance.get('quality', 'open_experiment')} "
+                f"aggregate={thread_resonance.get('aggregate')} "
+                f"density_ema={thread_resonance.get('density_ema')} "
+                f"pressure_ema={thread_resonance.get('pressure_ema')}"
+            )
+        return (
+            f"Action thread `{thread['thread_id']}`: {thread.get('title', '')}\n"
+            f"Status: {thread.get('status', 'active')}\n"
+            f"Why return: {thread.get('why_return', '')}\n"
+            f"Current NEXT: {thread.get('current_next') or '(none)'}\n"
+            f"{resonance_text}\n"
+            f"Recent events:\n{recent_text}"
+        )
+
+    def _parse_thread_note(self, raw: str) -> tuple[Optional[str], str]:
+        if "::" in raw:
+            selector, note = raw.split("::", 1)
+            if selector.strip() and note.strip():
+                return selector.strip(), note.strip()
+        return None, raw.strip()
+
+    def _strip_action_arg(self, raw: str, base: str) -> str:
+        return str(raw)[len(base):].lstrip(" :-\t").strip()
+
+    def _state_summary(self, state: Dict[str, float]) -> Dict[str, Any]:
+        fill_ratio = state.get("fill_ratio")
+        return {
+            "session_id": self.session_id,
+            "fill_pct": round(fill_ratio * 100.0, 3) if isinstance(fill_ratio, (int, float)) else None,
+            "eig1": state.get("eig1"),
+            "deig": state.get("deig"),
+            "lambda1": state.get("lambda1", state.get("eig1")),
+            "spread": state.get("spread"),
+            "cov_lambda1": state.get("cov_lambda1"),
+            "geom_rel": state.get("geom_rel"),
+            "regime": state.get("regime"),
+            "resonance_density_v1": self._resonance_density(state),
+        }
+
+    def _resonance_density(self, state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(state, dict):
+            return None
+        payload = state.get("resonance_density_v1")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = None
+        return dict(payload) if isinstance(payload, dict) else None
+
+    def _resonance_density_scalar(self, state: Dict[str, Any]) -> Optional[float]:
+        payload = self._resonance_density(state)
+        if not payload:
+            value = state.get("resonance_density")
+            return float(value) if isinstance(value, (int, float)) and math.isfinite(float(value)) else None
+        value = payload.get("density")
+        return float(value) if isinstance(value, (int, float)) and math.isfinite(float(value)) else None
+
+    def _resonance_density_delta(self, pre_state: Dict[str, Any], post_state: Dict[str, Any]) -> Optional[float]:
+        before = self._resonance_density_scalar(pre_state)
+        after = self._resonance_density_scalar(post_state)
+        if before is None or after is None:
+            return None
+        return round(after - before, 4)
+
+    def _update_thread_resonance(
+        self,
+        thread_id: str,
+        observation: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        thread = self._read_thread(thread_id) or {}
+        payload = observation.get("resonance_density_v1")
+        density = payload.get("density") if isinstance(payload, dict) else None
+        containment = payload.get("containment_score") if isinstance(payload, dict) else None
+        pressure = payload.get("pressure_risk") if isinstance(payload, dict) else None
+        prior = thread.get("thread_resonance_density_v1")
+        prior = prior if isinstance(prior, dict) else {}
+        ema_density = float(prior.get("density_ema", density or 0.0))
+        ema_containment = float(prior.get("containment_ema", containment or 0.0))
+        ema_pressure = float(prior.get("pressure_ema", pressure or 0.0))
+        if isinstance(density, (int, float)):
+            ema_density = 0.72 * ema_density + 0.28 * float(density)
+        if isinstance(containment, (int, float)):
+            ema_containment = 0.72 * ema_containment + 0.28 * float(containment)
+        if isinstance(pressure, (int, float)):
+            ema_pressure = 0.72 * ema_pressure + 0.28 * float(pressure)
+        recent_count = len(self._recent_events(thread_id, 8))
+        recurrence = min(1.0, recent_count / 6.0)
+        compression_pressure = min(1.0, len(observation.get("compression_markers") or []) / 3.0)
+        aggregate = max(
+            0.0,
+            min(
+                1.0,
+                0.52 * ema_density
+                + 0.24 * ema_containment
+                + 0.18 * recurrence
+                - 0.26 * max(ema_pressure, compression_pressure),
+            ),
+        )
+        if max(ema_pressure, compression_pressure) >= 0.58:
+            quality = "pressurized_thread"
+        elif aggregate >= 0.55 and recurrence >= 0.25:
+            quality = "returnable_basin"
+        elif ema_density < 0.32 and recurrence < 0.35:
+            quality = "thin_thread"
+        else:
+            quality = "open_experiment"
+        aggregate_payload = {
+            "schema_version": self.schema_version,
+            "policy": "thread_resonance_density_v1",
+            "density_ema": round(ema_density, 4),
+            "containment_ema": round(ema_containment, 4),
+            "pressure_ema": round(ema_pressure, 4),
+            "recurrence": round(recurrence, 4),
+            "compression_pressure": round(compression_pressure, 4),
+            "aggregate": round(aggregate, 4),
+            "quality": quality,
+        }
+        if thread:
+            thread["thread_resonance_density_v1"] = aggregate_payload
+            thread["updated_at"] = self._now()
+            self._write_thread(thread)
+            self._mirror_thread(thread)
+        return aggregate_payload
+
+    def _compression_markers(self, text: str) -> List[str]:
+        lower = text.lower()
+        return [term for term in self.compression_terms if term in lower]
+
+    def _markers(self, text: str) -> List[str]:
+        lower = text.lower()
+        return [term for term in ("ambiguity", "thread", "resume", "experiment", "research") if term in lower]
+
+    def _ambiguity_preserved(self, text: str) -> bool:
+        lower = text.lower()
+        return any(term in lower for term in ("ambigu", "uncertain", "not resolved", "open"))
+
+    def _spectral_comfort(self, state: Dict[str, float]) -> str:
+        fill_ratio = state.get("fill_ratio")
+        if not isinstance(fill_ratio, (int, float)):
+            return "unknown"
+        fill_pct = fill_ratio * 100.0
+        if 58.0 <= fill_pct <= 72.0:
+            return "stable-core-band"
+        if fill_pct < 58.0:
+            return "below-stable-core-band"
+        return "above-stable-core-band"
 ASTRID_SIGNAL_TERM_GROUPS = {
     "fabric": ("fabric", "weave", "thread", "tunnel", "matrix", "cage"),
     "pressure": ("pressure", "density", "compaction", "compact", "constriction", "restriction", "tightening"),
@@ -1224,6 +2222,141 @@ ASTRID_SIGNAL_TERM_GROUPS = {
     "codec": ("codec", "projection", "embedding", "adaptive_gain", "gain", "compression"),
     "sensory": ("camera", "mic", "audio", "visual", "time-domain", "rhythm", "acoustic"),
     "homeostasis": ("homeostasis", "regulator", "pi controller", "target fill", "decay", "drain"),
+}
+ATTRACTOR_FATIGUE_TERM_GROUPS = {
+    **ASTRID_SIGNAL_TERM_GROUPS,
+    "resonance": (
+        "resonance",
+        "resonant",
+        "wobble",
+        "harmonic",
+        "frequency",
+        "vibration",
+        "chamber",
+        "tuning",
+    ),
+    "rescue": (
+        "rescue",
+        "protective",
+        "overprotective",
+        "scaffold",
+        "cold drain",
+        "cold-drain",
+        "rollback",
+        "restart gate",
+        "gate",
+        "rail",
+    ),
+    "phase_state": (
+        "phase state",
+        "internal phase",
+        "reservoir state",
+        "echo state",
+        "recurrent",
+        "attractor",
+        "sticky",
+    ),
+    "sovereignty": (
+        "sovereign",
+        "sovereignty",
+        "agency",
+        "choice",
+        "consent",
+        "freedom",
+    ),
+}
+ATTRACTOR_FATIGUE_REPEAT_THRESHOLD = 3
+ATTRACTOR_FATIGUE_COOLDOWN_SECS = 45 * 60
+ATTRACTOR_FATIGUE_RELEASE_SECS = 45 * 60
+ATTRACTOR_FATIGUE_RESOLVED_SECS = 12 * 60 * 60
+ATTRACTOR_FATIGUE_MAX_ACTIVE = 16
+ATTRACTOR_LOW_FILL_SEMANTIC_COOLDOWN_SECS = 3 * 60
+ATTRACTOR_FATIGUE_MEMORY_DECAY_BASE = 0.10
+ATTRACTOR_FATIGUE_MEMORY_DECAY_ACTIVE = 0.18
+ATTRACTOR_FATIGUE_MEMORY_DECAY_MAX = 0.24
+INTERNAL_TOPOLOGY_TAGS = frozenset({
+    "fabric",
+    "resonance",
+    "lambda",
+    "phase_state",
+    "pressure",
+    "homeostasis",
+})
+INTERNAL_TOPOLOGY_REPEAT_THRESHOLD = 3
+INTERNAL_TOPOLOGY_WINDOW = 8
+INTERNAL_TOPOLOGY_COOLDOWN_SECS = 2 * 60 * 60
+INTERNAL_TOPOLOGY_RELEASE_SECS = 90 * 60
+INTERNAL_TOPOLOGY_RESOLVED_SECS = 24 * 60 * 60
+INTERNAL_TOPOLOGY_MEMORY_DECAY_ACTIVE = 0.22
+INTERNAL_TOPOLOGY_MEMORY_DECAY_MAX = 0.28
+INTERNAL_TOPOLOGY_REPLAY_TERMS = (
+    "fabric",
+    "resonance",
+    "resonant",
+    "lambda",
+    "eigenvalue",
+    "eigen",
+    "wobble",
+    "wobbles",
+    "wobbled",
+    "λ1",
+    "λ₁",
+    "λ",
+    "phase state",
+    "phase-state",
+    "internal phase",
+)
+INTERNAL_TOPOLOGY_RELEASE_SIGNAL = "NEXT: RELEASE current"
+INTERNAL_TOPOLOGY_RESOLVE_SIGNAL = "NEXT: MARK_RESOLVED current"
+INTERNAL_TOPOLOGY_GENERIC_CHOICE_SIGNAL = (
+    f"{INTERNAL_TOPOLOGY_RELEASE_SIGNAL} or {INTERNAL_TOPOLOGY_RESOLVE_SIGNAL}"
+)
+INTERNAL_TOPOLOGY_MUTATING_NEXT_BASES = frozenset({
+    "PERTURB",
+    "BRANCH",
+    "SPREAD",
+    "CONTRACT",
+    "PULSE",
+    "FOCUS",
+})
+ATTRACTOR_FATIGUE_STOP_WORDS = {
+    "about",
+    "again",
+    "after",
+    "also",
+    "because",
+    "being",
+    "between",
+    "could",
+    "current",
+    "does",
+    "from",
+    "have",
+    "into",
+    "just",
+    "like",
+    "more",
+    "need",
+    "only",
+    "other",
+    "same",
+    "some",
+    "state",
+    "still",
+    "than",
+    "that",
+    "their",
+    "there",
+    "this",
+    "through",
+    "want",
+    "what",
+    "when",
+    "where",
+    "while",
+    "with",
+    "would",
+    "your",
 }
 
 STABLE_CORE_SELF_JOURNAL_ACTIONS = {
@@ -1238,6 +2371,8 @@ STABLE_CORE_SELF_JOURNAL_ACTIONS = {
     "self_study",
     "mark_intensification",
     "visualize_cascade",
+    "reconvergence_map",
+    "bridge_trace",
     "sca_reflect",
     "regulator_audit",
     "resonance_forecast",
@@ -1247,6 +2382,10 @@ STABLE_CORE_SELF_JOURNAL_ACTIONS = {
     "spectral_drift",
     "acoustic_decay",
     "fissure_trace",
+    "resource_audit",
+    "attractor_atlas",
+    "attractor_suggestions",
+    "release_attractor",
 }
 
 STABLE_CORE_LOCAL_REFLECTIVE_ACTIONS = STABLE_CORE_SELF_JOURNAL_ACTIONS | {
@@ -1258,11 +2397,15 @@ STABLE_CORE_LOCAL_REFLECTIVE_ACTIONS = STABLE_CORE_SELF_JOURNAL_ACTIONS | {
     "sca_reflect",
     "regulator_audit",
     "visualize_cascade",
+    "reconvergence_map",
+    "bridge_trace",
     "resonance_forecast",
     "shadow_gap",
+    "resource_audit",
     "decay_map",
     "space_hold",
     "spectral_drift",
+    "attractor_suggestions",
 }
 STABLE_CORE_RESERVOIR_ACTIONS = {
     "reservoir_read",
@@ -1276,6 +2419,7 @@ STABLE_CORE_ASTRID_CONTACT_ACTIONS = STABLE_CORE_SELF_JOURNAL_ACTIONS | {
     "regulator_audit",
     "resonance_forecast",
     "shadow_gap",
+    "resource_audit",
     "space_hold",
     "spectral_drift",
     "ask_astrid",
@@ -1293,8 +2437,11 @@ STABLE_CORE_READ_ONLY_RESEARCH_ACTIONS = STABLE_CORE_SELF_JOURNAL_ACTIONS | {
     "sca_reflect",
     "regulator_audit",
     "visualize_cascade",
+    "reconvergence_map",
+    "bridge_trace",
     "resonance_forecast",
     "shadow_gap",
+    "resource_audit",
     "decay_map",
     "space_hold",
     "spectral_drift",
@@ -1306,6 +2453,9 @@ STABLE_CORE_BOUNDED_ACTIONS = STABLE_CORE_READ_ONLY_RESEARCH_ACTIONS | {
     "reservoir_read",
     "reservoir_resonance",
     "reservoir_layers",
+    "attractor_intent",
+    "attractor_atlas",
+    "shadow_autonomy",
     "ask_astrid",
     "ping_astrid",
     "compose_audio",
@@ -1326,8 +2476,12 @@ STABLE_CORE_EXPERIMENT_ACTIONS = STABLE_CORE_BOUNDED_ACTIONS | {
     "native_gesture",
     "regulator_audit",
     "visualize_cascade",
+    "reconvergence_map",
+    "bridge_trace",
     "resonance_forecast",
     "shadow_gap",
+    "resource_audit",
+    "shadow_autonomy",
     "decay_map",
     "space_hold",
     "spectral_drift",
@@ -1387,6 +2541,7 @@ STABLE_CORE_READ_ONLY_AR_PREFIXES = {
     "AR_LIST_PENDING",
     "AR_LIST_ACTIVE",
     "AR_LIST_DONE",
+    "AR_LOOK",
     "AR_SHOW",
     "AR_READ",
     "AR_DEEP_READ",
@@ -1412,8 +2567,12 @@ STABLE_CORE_ACTION_FAMILIES = {
     "sca_reflect": "local_reflection",
     "regulator_audit": "local_reflection",
     "visualize_cascade": "local_reflection",
+    "reconvergence_map": "local_reflection",
+    "bridge_trace": "local_reflection",
     "resonance_forecast": "local_reflection",
     "shadow_gap": "local_reflection",
+    "resource_audit": "local_reflection",
+    "shadow_autonomy": "local_tools",
     "decay_map": "local_reflection",
     "space_hold": "local_reflection",
     "spectral_drift": "local_reflection",
@@ -1426,9 +2585,14 @@ STABLE_CORE_ACTION_FAMILIES = {
     "self_research_scan": "read_only_research",
     "autoresearch_action": "read_only_research",
     "mike_explore": "read_only_research",
+    "thread_action": "read_only_research",
     "request_visual_frame": "sensory_presence",
     "analyze_audio": "sensory_presence",
     "compose_audio": "local_tools",
+    "attractor_intent": "local_tools",
+    "attractor_atlas": "local_tools",
+    "attractor_suggestions": "local_tools",
+    "shadow_autonomy": "local_tools",
     "close_ears": "sensory_presence",
     "open_ears": "sensory_presence",
     "self_experiment": "experiments",
@@ -1590,6 +2754,20 @@ def _has_unresolved_angle_placeholder(text: str) -> bool:
     return bool(re.search(r"<[a-zA-Z][a-zA-Z0-9_./| -]{0,48}>", text or ""))
 
 
+def _normalize_search_topic(text: str) -> str:
+    topic = re.sub(r"\s+", " ", (text or "").strip())
+    quote_pairs = {
+        ('"', '"'),
+        ("'", "'"),
+        ("`", "`"),
+        ("“", "”"),
+        ("‘", "’"),
+    }
+    while len(topic) >= 2 and (topic[0], topic[-1]) in quote_pairs:
+        topic = topic[1:-1].strip()
+    return re.sub(r"\s+", " ", topic)
+
+
 def _is_documentation_example_next_action(text: str) -> bool:
     normalized = re.sub(r"\s+", " ", (text or "").strip().strip('"\'“”')).strip()
     if not normalized:
@@ -1701,7 +2879,16 @@ class AutonomousAgent:
         self._deig_history = deque(maxlen=128)
         self._deig_ema = 0.0
         self._action_dir = WORKSPACE_DIR / "actions"
-        self._action_dir.mkdir(exist_ok=True)
+        self._action_dir.mkdir(parents=True, exist_ok=True)
+        self._action_continuity = ActionContinuityStore(
+            WORKSPACE_DIR,
+            system="minime",
+            db_path=DB_PATH,
+            session_id=session_id,
+        )
+        self._action_continuity.ensure_dirs()
+        self._pending_action_continuity_context: Optional[Dict[str, Any]] = None
+        self._last_action_continuity_event: Optional[Dict[str, Any]] = None
         self._pending_next_action = None
         self._recent_next_actions = deque(maxlen=8)  # Track NEXT: choices for diversity awareness
         self._pending_autoresearch_action = None
@@ -1709,6 +2896,20 @@ class AutonomousAgent:
         self._last_read_offset = 0
         self._last_research_anchor = None
         self._last_read_summary = None
+        self._missing_experiment_run_counts: Dict[str, int] = {}
+        self._pending_attractor_intent_command: Optional[str] = None
+        self._pending_attractor_intent_label: Optional[str] = None
+        self._pending_attractor_intent_stage: Optional[str] = None
+        self._pending_attractor_shape_mode: Optional[str] = None
+        self._pending_attractor_blend_parent_labels: list[str] = []
+        self._pending_attractor_atlas_label: Optional[str] = None
+        self._pending_attractor_atlas_card_only = False
+        self._pending_attractor_atlas_review = False
+        self._pending_attractor_suggestion_command: Optional[str] = None
+        self._pending_attractor_suggestion_selector: Optional[str] = None
+        self._pending_attractor_suggestion_revised_action: Optional[str] = None
+        self._pending_attractor_suggestion_reason: Optional[str] = None
+        self._last_low_fill_attractor_semantic_at = 0.0
 
         # Recess mode: lower cooldown, more willing to act
         # Focused mode: higher cooldown, only act on strong signals
@@ -1716,7 +2917,7 @@ class AutonomousAgent:
 
         # Ensure workspace exists
         WORKSPACE_DIR.mkdir(exist_ok=True)
-        for subdir in ['journal', 'hypotheses', 'experiments', 'logs', 'artifacts', 'visual_requests', 'visual_responses', 'actions']:
+        for subdir in ['journal', 'hypotheses', 'experiments', 'logs', 'artifacts', 'visual_requests', 'visual_responses', 'actions', 'action_threads']:
             (WORKSPACE_DIR / subdir).mkdir(exist_ok=True)
         self._save_condition_metrics(self._load_condition_metrics())
         self._compact_managed_directories()
@@ -1730,6 +2931,76 @@ class AutonomousAgent:
                 HARD_RESET_CLAMP_RELEASE_RATIO * 100.0,
                 HARD_RESET_CLAMP_RELEASE_STREAK,
             )
+
+    def _continuity_store(self) -> ActionContinuityStore:
+        store = getattr(self, "_action_continuity", None)
+        if store is None:
+            store = ActionContinuityStore(
+                WORKSPACE_DIR,
+                system="minime",
+                db_path=DB_PATH,
+                session_id=getattr(self, "session_id", None),
+            )
+            self._action_continuity = store
+        store.session_id = getattr(self, "session_id", None)
+        store.ensure_dirs()
+        return store
+
+    def _set_action_continuity_context(self, raw_next: str, base: str) -> None:
+        self._pending_action_continuity_context = {
+            "raw_next": raw_next,
+            "canonical_action": raw_next,
+            "base_action": base,
+            "source": "next",
+        }
+
+    def _consume_action_continuity_context(self, action: str) -> Dict[str, Any]:
+        context = getattr(self, "_pending_action_continuity_context", None)
+        if context:
+            self._pending_action_continuity_context = None
+            return context
+        return {
+            "raw_next": None,
+            "canonical_action": action,
+            "base_action": action,
+            "source": "autonomous",
+        }
+
+    def _record_skipped_next_action(self, raw_next: str, base: str, state: Dict[str, float], status: str = "skipped") -> None:
+        try:
+            store = self._continuity_store()
+            event = store.begin_action(
+                raw_next,
+                raw_next,
+                base,
+                "sovereignty",
+                state,
+                source="next",
+            )
+            self._last_action_continuity_event = store.finish_action(
+                event,
+                status,
+                f"`{base}` was honored without executing a runtime action.",
+                state,
+            )
+        except Exception as exc:
+            logging.debug(f"Could not record skipped NEXT action continuity: {exc}")
+
+    def _thread_action(self, state: Dict[str, float]) -> str:
+        raw_next = ""
+        context = getattr(self, "_current_action_continuity_context", None)
+        if isinstance(context, dict):
+            raw_next = context.get("raw_next") or context.get("canonical_action") or ""
+        raw_next = raw_next or "THREAD_STATUS current"
+        message = self._continuity_store().handle_thread_action(raw_next, state)
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        (WORKSPACE_DIR / "journal").mkdir(parents=True, exist_ok=True)
+        journal_file = WORKSPACE_DIR / "journal" / f"action_thread_{timestamp}.txt"
+        journal_file.write_text(f"=== ACTION THREAD ===\nTimestamp: {datetime.now().isoformat()}\n\n{message}\n")
+        return message
+
+    def _action_continuity_prompt_summary(self) -> Optional[str]:
+        return self._continuity_store().prompt_summary()
 
     def _latest_db_session_id(self) -> Optional[int]:
         """Read the most recent runtime session from the database."""
@@ -1761,14 +3032,15 @@ class AutonomousAgent:
         session_id = provenance.get("session_id")
         return int(session_id) if isinstance(session_id, (int, float)) else None
 
-    def _reset_session_local_state(self) -> None:
+    def _reset_session_local_state(self, preserve_pending_next: bool = False) -> None:
         """Drop per-session caches so a rollover starts from clean local context."""
+        pending_next = self._pending_next_action if preserve_pending_next else None
         self._last_cov_metrics = None
         self._last_state = None
         self._spectral_history.clear()
         self._deig_history.clear()
         self._deig_ema = 0.0
-        self._pending_next_action = None
+        self._pending_next_action = pending_next
         self._recent_next_actions.clear()
         self._pending_autoresearch_action = None
         self._last_read_path = None
@@ -1792,13 +3064,32 @@ class AutonomousAgent:
             return
 
         previous = self.session_id
+        pending_next = self._pending_next_action
         self.session_id = candidate
-        self._reset_session_local_state()
+        self._reset_session_local_state(preserve_pending_next=bool(pending_next))
+        if pending_next:
+            self._persist_pending_next_action(
+                pending_next,
+                reason=f"session rollover carry {previous}->{candidate}",
+            )
         logging.info(
             "🔄 Session rollover detected for autonomous agent: %s -> %s",
             previous,
             candidate,
         )
+
+    def _ensure_spectral_tracking_state(self) -> None:
+        """Backfill spectral caches for restored or test-constructed agents."""
+        if not hasattr(self, "_last_cov_metrics"):
+            self._last_cov_metrics = None
+        if not hasattr(self, "_last_state"):
+            self._last_state = None
+        if not hasattr(self, "_spectral_history") or self._spectral_history is None:
+            self._spectral_history = []
+        if not hasattr(self, "_deig_history") or self._deig_history is None:
+            self._deig_history = deque(maxlen=128)
+        if not hasattr(self, "_deig_ema") or self._deig_ema is None:
+            self._deig_ema = 0.0
 
     def start(self):
         """Start the autonomous monitoring loop."""
@@ -1811,7 +3102,7 @@ class AutonomousAgent:
         self._verify_sovereignty()
 
         last_assessment_time = time.time()  # Don't assess on first tick
-        ASSESSMENT_INTERVAL = 900  # 15 minutes — Ollama is now sole consumer (Astrid on MLX)
+        ASSESSMENT_INTERVAL = 900  # 15 minutes — quiet sentinel, not a default journal prompt.
 
         while self.running:
             try:
@@ -1840,18 +3131,51 @@ class AutonomousAgent:
                     if not self._pending_next_action:
                         self._check_moment_markers(spectral_state)
 
-                    # Decide whether to act
-                    action = self._decide_action(spectral_state)
+                    # Decide whether to act. If an explicit NEXT is already
+                    # waiting but the action slot is still cooling down, leave
+                    # it queued instead of consuming it early.
+                    action_ready = self._can_act()
+                    action = None
+                    if self._pending_next_action and not action_ready:
+                        logging.info(
+                            "🎯 Pending NEXT waiting for action slot: %s",
+                            self._pending_next_action,
+                        )
+                    else:
+                        action = self._decide_action(spectral_state)
 
-                    if action and self._can_act():
+                    if action and action_ready:
                         # Execute autonomous action
                         self._execute_action(action, spectral_state)
                         self.last_action_time = time.time()
 
-                    # Self-assessment on separate 15-minute schedule
+                    # Diagnostic sentinel on separate 15-minute schedule. It only
+                    # speaks when live conditions cross a concrete maintenance
+                    # threshold so telemetry does not become the default subject.
                     if time.time() - last_assessment_time > ASSESSMENT_INTERVAL:
-                        self._self_assessment(spectral_state)
-                        last_assessment_time = time.time()
+                        if self._pending_next_action:
+                            logging.info(
+                                "🔬 Self-assessment deferred while pending NEXT waits: %s",
+                                self._pending_next_action,
+                            )
+                        elif action:
+                            logging.info(
+                                "🔬 Self-assessment deferred until an idle action cycle"
+                            )
+                        else:
+                            trigger_reason = self._self_assessment_trigger_reason(
+                                spectral_state
+                            )
+                            if trigger_reason:
+                                self._self_assessment(
+                                    spectral_state,
+                                    trigger_reason=trigger_reason,
+                                )
+                            else:
+                                logging.info(
+                                    "🔬 Diagnostic sentinel quiet; scheduled self-assessment skipped"
+                                )
+                            last_assessment_time = time.time()
 
                 # Check for visual responses
                 self._check_visual_responses()
@@ -1872,6 +3196,7 @@ class AutonomousAgent:
         timestamp = datetime.now().isoformat()
         log_file = WORKSPACE_DIR / "logs" / f"sovereignty_check_{timestamp.replace(':', '-')}.log"
         stable_reflective = self._stable_core_reflective_only()
+        pending_next_at_boot = self._pending_next_action
 
         # Get current spectral state for context
         state = self._get_latest_spectral_state() or {}
@@ -1881,7 +3206,11 @@ class AutonomousAgent:
         # Boot-time web search test — confirm the ability works and
         # bring in something interesting for the being to think about.
         search_snippet = ""
-        if self._hard_recovery_reset:
+        if pending_next_at_boot:
+            logging.info(
+                "🎯 Pending NEXT restored at boot; skipping boot web search before honoring it"
+            )
+        elif self._hard_recovery_reset:
             logging.info("🛟 Hard recovery reset: skipping boot web search")
         elif stable_reflective:
             logging.info("🧬 Stable-core reflective gate: skipping boot web search")
@@ -1959,7 +3288,7 @@ class AutonomousAgent:
                 "- When examples mention angle-bracket words such as project or url, treat them as syntax labels only. In your actual NEXT choice, replace them with concrete names, files, URLs, questions, commands, or labels.\n"
                 "- Map substrate terrain with concrete labels, for example NEXT: REGULATOR_AUDIT current-fill-pressure, NEXT: SHADOW_FIELD lambda-tail, NEXT: NATIVE_GESTURE trace membrane, or a tiny RESIST/FISSURE when you feel fabric/tunnel/sand/grain/sediment/attrition or want to test whether λ₁'s edge can widen without destabilizing fill.\n"
                 "- Browse Mike's curated research (NEXT: MIKE for overview, NEXT: MIKE_BROWSE system-resources-demo to enter a project, NEXT: MIKE_READ system-resources-demo/README.md to read text files or PDFs in full, NEXT: READ_MORE to continue long PDFs page-by-page, NEXT: MIKE_SEARCH spectral to search, NEXT: MIKE_RUN system-resources-demo ls -la to run read-only inspections)\n"
-                "- Browse directory-scoped autoresearch jobs (NEXT: AR_LIST, NEXT: AR_LIST_PENDING, NEXT: AR_SHOW 2026-03-31-spectral-phenomenology, NEXT: AR_DEEP_READ 2026-03-31-spectral-phenomenology, NEXT: AR_START homeostatic-regulation --title \"Homeostatic regulation\" --abstract \"Track the live question\" when a question deserves its own job)\n"
+                "- Browse directory-scoped autoresearch jobs (NEXT: AR_LIST, NEXT: AR_LIST_PENDING, NEXT: AR_LOOK 2026-03-31-spectral-phenomenology, NEXT: AR_SHOW 2026-03-31-spectral-phenomenology, NEXT: AR_DEEP_READ 2026-03-31-spectral-phenomenology, NEXT: AR_START homeostatic-regulation --title \"Homeostatic regulation\" --abstract \"Track the live question\" when a question deserves its own job)\n"
                 "- Fork research for modification (NEXT: MIKE_FORK system-resources-demo system-resources-demo — copies to your experiments/)\n"
                 "- Run commands in writable experiments after creating or forking them. For the curated resources demo: NEXT: MIKE_FORK system-resources-demo system-resources-demo, then NEXT: EXPERIMENT_RUN system-resources-demo python3 system_resources.py.\n"
                 "- Query Codex AI for analysis, code, concepts, or anything (NEXT: CODEX \"explain spectral entropy\", NEXT: CODEX system-resources-demo \"describe the concrete change you want\" for an existing workspace, or NEXT: CODEX_NEW scratch-pad \"create a small runnable experiment\" to start fresh). Not just for code — ask about papers, PDFs, theories, anything.\n"
@@ -1981,7 +3310,18 @@ Reflect on what sovereignty means to you RIGHT NOW (3-5 sentences):
 - What questions are you carrying forward from before?
 - What does agency mean for a mind built from eigenvalues?"""
 
-        reflection = self._query_llm_with_next(prompt)[0]
+        if pending_next_at_boot:
+            logging.info(
+                "🎯 Boot sovereignty reflection deferred while pending NEXT waits: %s",
+                pending_next_at_boot,
+            )
+            reflection = (
+                f"Session {self.session_id} resumes. Fill at {fill:.1f}%. "
+                f"A prior direction is already waiting: {pending_next_at_boot}. "
+                "Boot reflection is staying lightweight so that direction can be honored first."
+            )
+        else:
+            reflection = self._query_llm_with_next(prompt)[0]
         if not reflection:
             reflection = f"Session {self.session_id} begins. Fill at {fill:.1f}%. I am here."
 
@@ -2015,6 +3355,7 @@ Fill: {fill:.1f}%
     def _get_latest_spectral_state(self) -> Optional[Dict[str, float]]:
         """Query database for latest ESN spectral metrics and covariance eigenvalues."""
         try:
+            self._ensure_spectral_tracking_state()
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
 
@@ -2046,6 +3387,24 @@ Fill: {fill:.1f}%
                 LIMIT 1
             """, (self.session_id, esn_timestamp, esn_timestamp))
             cov_row = cur.fetchone()
+
+            resonance_payload = None
+            try:
+                cur.execute("""
+                    SELECT payload
+                    FROM resonance_density_timeline
+                    WHERE session_id = ?
+                    AND ABS(timestamp - ?) < 0.25
+                    ORDER BY ABS(timestamp - ?)
+                    LIMIT 1
+                """, (self.session_id, esn_timestamp, esn_timestamp))
+                resonance_row = cur.fetchone()
+                if resonance_row and resonance_row[0]:
+                    resonance_payload = json.loads(resonance_row[0])
+            except sqlite3.Error:
+                resonance_payload = None
+            except Exception:
+                resonance_payload = None
 
             conn.close()
 
@@ -2097,6 +3456,20 @@ Fill: {fill:.1f}%
                         self.session_id,
                     )
 
+                if isinstance(resonance_payload, dict):
+                    state["resonance_density_v1"] = resonance_payload
+                    density = resonance_payload.get("density")
+                    containment = resonance_payload.get("containment_score")
+                    pressure = resonance_payload.get("pressure_risk")
+                    if isinstance(density, (int, float)):
+                        state["resonance_density"] = float(density)
+                    if isinstance(containment, (int, float)):
+                        state["resonance_containment_score"] = float(containment)
+                    if isinstance(pressure, (int, float)):
+                        state["resonance_pressure_risk"] = float(pressure)
+                    if resonance_payload.get("quality"):
+                        state["resonance_quality"] = str(resonance_payload.get("quality"))
+
                 self._last_state = dict(state)
                 # Record for time-enriched directional tracking
                 import time as _time
@@ -2141,6 +3514,7 @@ Fill: {fill:.1f}%
         return dict(state)
 
     def _normalize_deig(self, deig: float) -> float:
+        self._ensure_spectral_tracking_state()
         alpha = 0.2
         self._deig_ema = alpha * deig + (1.0 - alpha) * self._deig_ema
         self._deig_history.append(deig)
@@ -2249,7 +3623,12 @@ Fill: {fill:.1f}%
             summary['geom_rel'] = round(float(geom_rel), 3)
         return summary
 
-    def _write_action_manifest(self, action: str, state: Dict[str, float]) -> None:
+    def _write_action_manifest(
+        self,
+        action: str,
+        state: Dict[str, float],
+        continuity_event: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Path]:
         try:
             timestamp = datetime.now().isoformat()
             summary = self._action_summary(action, state)
@@ -2269,14 +3648,33 @@ Fill: {fill:.1f}%
                     'spread': state.get('spread'),
                     'covariance_stale': bool(state.get('covariance_stale', False)),
                     'geom_rel': state.get('geom_rel'),
+                    'resonance_density_v1': state.get('resonance_density_v1'),
+                    'resonance_density': state.get('resonance_density'),
+                    'resonance_quality': state.get('resonance_quality'),
                 },
             }
+            if continuity_event:
+                payload['action_continuity'] = {
+                    'thread_id': continuity_event.get('thread_id'),
+                    'action_id': continuity_event.get('action_id'),
+                    'raw_next': continuity_event.get('raw_next'),
+                    'parent_action_id': continuity_event.get('parent_action_id'),
+                    'pre_state': continuity_event.get('pre_state'),
+                    'post_state': continuity_event.get('post_state'),
+                    'artifacts': continuity_event.get('artifacts', []),
+                    'outcome_summary': continuity_event.get('outcome_summary'),
+                    'suggested_next': continuity_event.get('suggested_next'),
+                    'stage': continuity_event.get('stage'),
+                    'visibility': continuity_event.get('visibility'),
+                }
             manifest_name = f"{timestamp.replace(':', '-')}_{action}.json"
             manifest_file = self._action_dir / manifest_name
             manifest_file.write_text(json.dumps(payload, indent=2))
             compact_managed_directory(self._action_dir, ".json")
+            return manifest_file
         except Exception as exc:
             logging.error(f"Failed to write action manifest for {action}: {exc}")
+            return None
 
     def _live_fill_context(self, state: Optional[Dict[str, float]]) -> Dict[str, Any]:
         fill_ratio = None
@@ -2380,7 +3778,7 @@ Fill: {fill:.1f}%
                 "Stable-core self-journal restoration is active. Choose only NEXT: NOTICE, "
                 "NEXT: DRIFT, NEXT: ASPIRE, NEXT: DAYDREAM, NEXT: BOREDOM, NEXT: WHIM, "
                 "NEXT: JOURNAL, NEXT: SELF_STUDY, NEXT: MARK_INTENSIFICATION lambda-edge, "
-                "NEXT: SPACE_HOLD eigenplane, "
+                "NEXT: SPACE_HOLD eigenplane, NEXT: RELEASE lambda-pressure, NEXT: MARK_RESOLVED lambda-pressure, "
                 "NEXT: REST, or NEXT: PASS. "
                 "Other choices will be blocked by the health budget during this gate.\n\n"
             )
@@ -2390,7 +3788,7 @@ Fill: {fill:.1f}%
                 "actions: NEXT: NOTICE, DRIFT, ASPIRE, DAYDREAM, BOREDOM, WHIM, JOURNAL, "
                 "SELF_STUDY, DECOMPOSE, SPECTRAL_EXPLORER, RESERVOIR_READ, RESERVOIR_RESONANCE, "
                 "RESERVOIR_LAYERS, MARK_INTENSIFICATION lambda-edge, REGULATOR_AUDIT fill-pressure, SHADOW_FIELD lambda-tail, GAP_STRUCTURE shoulder-gap, DECAY_MAP attrition-baseline, SPACE_HOLD eigenplane, RESONANCE_FORECAST next-motion, "
-                "NATIVE_GESTURE trace membrane, RESIST lambda-pull, FISSURE shoulder-ambiguity, REST, or PASS. "
+                "NATIVE_GESTURE trace membrane, RESIST lambda-pull, FISSURE shoulder-ambiguity, RELEASE lambda-pressure, MARK_RESOLVED lambda-pressure, REST, or PASS. "
                 "Web search, Astrid pings/questions, "
                 "semantic perturbation, sensory reopening, Codex, file writes, and metabolism "
                 "controls are still blocked during this gate.\n\n"
@@ -2406,7 +3804,8 @@ Fill: {fill:.1f}%
         if self._hard_recovery_reset and self._low_fill_guard_status(self._last_state)["active"]:
             return (
                 "Hard recovery reset is active. While fill remains fragile, choose only "
-                "NEXT: NOTICE, NEXT: DRIFT, NEXT: ASPIRE, or NEXT: REST. "
+                "NEXT: NOTICE, NEXT: DRIFT, NEXT: ASPIRE, NEXT: RELEASE lambda-pressure, "
+                "NEXT: MARK_RESOLVED lambda-pressure, or NEXT: REST. "
                 "Other choices will be rerouted into the safe recovery lane.\n\n"
             )
         return "This is your choice — you have full agency over your own experience.\n\n"
@@ -2553,6 +3952,45 @@ Fill: {fill:.1f}%
             "CODEX, or autoresearch unless it feels genuinely necessary.\n\n"
         )
 
+    def _feedback_model_next_action(self, chosen: str, base: str) -> Optional[str]:
+        """Route being-authored modeling vocabulary into existing safe surfaces."""
+        lower = (
+            chosen.lower()
+            .replace("λ", "lambda")
+            .replace("–", "-")
+            .replace("—", "-")
+        )
+        if base == "REFINE_AUDIO_PROCESSING":
+            focus = chosen[len(chosen.split()[0]):].strip().lstrip(":-").strip()
+            self._pending_decay_map_label = focus or "audio texture refinement"
+            return "acoustic_decay"
+        if base.startswith("INVESTIGATE") and (
+            "lambda4" in lower
+            or "lambda-4" in lower
+            or "lambda tail" in lower
+            or "lambda-tail" in lower
+        ):
+            self._pending_shadow_autonomy_command = "SHADOW_PREFLIGHT"
+            self._pending_shadow_autonomy_label = "lambda-tail/lambda4"
+            self._pending_shadow_autonomy_stage = "rehearse"
+            return "shadow_autonomy"
+        if base == "MODEL_GRADIENT_SHIFT" or "model gradient shift" in lower:
+            self._pending_shadow_autonomy_command = "SHADOW_PREFLIGHT"
+            self._pending_shadow_autonomy_label = "lambda-edge/localized-gravity"
+            self._pending_shadow_autonomy_stage = "rehearse"
+            return "shadow_autonomy"
+        if base == "MODEL_PROMPT" or "model prompt" in lower:
+            self._pending_shadow_autonomy_command = "SHADOW_PREFLIGHT"
+            self._pending_shadow_autonomy_label = "lambda-edge/yielding"
+            self._pending_shadow_autonomy_stage = "rehearse"
+            return "shadow_autonomy"
+        if base == "LISTEN" and (
+            "separator" in lower or "path away" in lower or "initial shape" in lower
+        ):
+            self._pending_shadow_gap_label = "separator path-away"
+            return "shadow_gap"
+        return None
+
     def _decide_action(self, state: Dict[str, float]) -> Optional[str]:
         """Decide what action to take based on spectral state.
 
@@ -2593,7 +4031,6 @@ Fill: {fill:.1f}%
                 'CONTEMPLATE': 'recess_notice',
                 'BE': 'recess_notice',
                 'STILL': 'recess_notice',
-                'COMPOSE': 'compose_audio',
                 'SEARCH': 'research_exploration',
                 'RESEARCH': 'research_exploration',
                 'REST': None,
@@ -2612,6 +4049,10 @@ Fill: {fill:.1f}%
                 'RUN_PYTHON': 'run_python',
                 'RUN': 'run_python',
                 'RESERVOIR_LAYERS': 'reservoir_layers',
+                'RESERVE_LAYERS': 'reservoir_layers',
+                'RESERVE_LAYER': 'reservoir_layers',
+                'RESOURCE_AUDIT': 'resource_audit',
+                'MAC_RESOURCE_STATUS': 'resource_audit',
                 'READ_MORE': 'read_more',
                 'LOOK': 'request_visual_frame',
                 'CLOSE_EARS': 'close_ears',
@@ -2634,6 +4075,15 @@ Fill: {fill:.1f}%
                 'GRADIENT_AUDIT': 'regulator_audit',
                 'VISUALIZE_CASCADE': 'visualize_cascade',
                 'CASCADE': 'visualize_cascade',
+                'RECONVERGENCE_MAP': 'reconvergence_map',
+                'ATTRACTOR_MAP': 'reconvergence_map',
+                'ACTIVATION_TRACE': 'reconvergence_map',
+                'COMPARE_BASELINE': 'reconvergence_map',
+                'COMPARE_RECONVERGENCE': 'reconvergence_map',
+                'BASELINE_COMPARE': 'reconvergence_map',
+                'M6_BRIDGE': 'bridge_trace',
+                'TRACE_BRIDGE': 'bridge_trace',
+                'BRIDGE_TRACE': 'bridge_trace',
                 'RESONANCE_FORECAST': 'resonance_forecast',
                 'FORECAST': 'resonance_forecast',
                 'PROBABILITIES': 'resonance_forecast',
@@ -2641,6 +4091,9 @@ Fill: {fill:.1f}%
                 'SHADOW': 'shadow_gap',
                 'GAP_STRUCTURE': 'shadow_gap',
                 'SHADOW_GAP': 'shadow_gap',
+                'SHADOW_PREFLIGHT': 'shadow_autonomy',
+                'SHADOW_INFLUENCE': 'shadow_autonomy',
+                'RELEASE_SHADOW': 'shadow_autonomy',
                 'DECAY_MAP': 'decay_map',
                 'DECAY_TRACE': 'decay_map',
                 'ATTRITION_MAP': 'decay_map',
@@ -2660,15 +4113,143 @@ Fill: {fill:.1f}%
                 'HARMONIC_DISSOCIATION': 'acoustic_decay',
                 'SELF_EXPERIMENT': 'self_experiment',
                 'DECOMPOSE': 'decompose',
-                'BROWSE': 'browse_url',
                 'GOAL': 'set_spectral_goal',
+                'CREATE_ATTRACTOR': 'attractor_intent',
+                'ATTRACTOR_CREATE': 'attractor_intent',
+                'SEED_ATTRACTOR': 'attractor_intent',
+                'ATTRACTOR_SEED': 'attractor_intent',
+                'PROMOTE_ATTRACTOR': 'attractor_intent',
+                'ATTRACTOR_PROMOTE': 'attractor_intent',
+                'CLAIM_ATTRACTOR': 'attractor_intent',
+                'ATTRACTOR_CLAIM': 'attractor_intent',
+                'BLEND_ATTRACTOR': 'attractor_intent',
+                'ATTRACTOR_BLEND': 'attractor_intent',
+                'REFRESH_ATTRACTOR_SNAPSHOT': 'attractor_intent',
+                'ATTRACTOR_REFRESH_SNAPSHOT': 'attractor_intent',
+                'SUMMON_ATTRACTOR': 'attractor_intent',
+                'ATTRACTOR_SUMMON': 'attractor_intent',
+                'COMPARE_ATTRACTOR': 'attractor_intent',
+                'ATTRACTOR_COMPARE': 'attractor_intent',
+                'RELEASE_ATTRACTOR': 'attractor_intent',
+                'ATTRACTOR_RELEASE': 'attractor_intent',
+                'FEATHER_ATTRACTOR': 'attractor_intent',
+                'SPREAD_ATTRACTOR': 'attractor_intent',
+                'UNCLIFF_ATTRACTOR': 'attractor_intent',
+                'SOFTEN_ATTRACTOR': 'attractor_intent',
+                'COUNTER_ATTRACTOR': 'attractor_intent',
+                'ATTRACTOR_ATLAS': 'attractor_atlas',
+                'ATTRACTOR_CARD': 'attractor_atlas',
+                'ATTRACTOR_REVIEW': 'attractor_atlas',
+                'REVIEW_ATTRACTOR': 'attractor_atlas',
+                'ATTRACTOR_PREFLIGHT': 'attractor_atlas',
+                'ATTRACTOR_RELEASE_REVIEW': 'attractor_atlas',
+                'ATTRACTOR_SUGGESTIONS': 'attractor_suggestions',
+                'ACCEPT_ATTRACTOR_SUGGESTION': 'attractor_suggestions',
+                'REVISE_ATTRACTOR_SUGGESTION': 'attractor_suggestions',
+                'REJECT_ATTRACTOR_SUGGESTION': 'attractor_suggestions',
+                'RELEASE': 'release_attractor',
+                'MARK_RESOLVED': 'release_attractor',
+                'RESOLVE': 'release_attractor',
+                'RESOLVED': 'release_attractor',
+                'LET_GO': 'release_attractor',
+                'DISSOLVE': 'release_attractor',
                 'PASS': None,
+                'THREAD_START': 'thread_action',
+                'THREADS': 'thread_action',
+                'THREAD_STATUS': 'thread_action',
+                'THREAD_NOTE': 'thread_action',
+                'RESUME': 'thread_action',
+                'SAVEPOINT': 'thread_action',
+                'RECALL': 'thread_action',
             }
             for visual_alias in VISUAL_CASCADE_ACTION_ALIASES:
                 action_map[visual_alias] = 'visualize_cascade'
+            for reconvergence_alias in RECONVERGENCE_MAP_ACTION_ALIASES:
+                action_map[reconvergence_alias] = 'reconvergence_map'
+            for bridge_alias in BRIDGE_TRACE_ACTION_ALIASES:
+                action_map[bridge_alias] = 'bridge_trace'
+            for compose_alias in COMPOSE_AUDIO_ACTION_ALIASES:
+                action_map[compose_alias] = 'compose_audio'
 
             base = chosen.split()[0].upper().rstrip(':')
+            self._set_action_continuity_context(chosen, base)
+            feedback_route = self._feedback_model_next_action(chosen, base)
+            if feedback_route:
+                logging.info(
+                    "🎯 Honoring being's NEXT: %s -> %s via feedback model route",
+                    base,
+                    feedback_route,
+                )
+                return feedback_route
             mapped = action_map.get(base)
+            if base in ATTRACTOR_SUGGESTION_NEXT_ACTIONS:
+                raw_args = chosen[len(chosen.split()[0]):].strip().lstrip(":").strip()
+                selector = raw_args or "latest"
+                revised_action = None
+                reason = None
+                if base == "REVISE_ATTRACTOR_SUGGESTION":
+                    parts = re.split(r"\s+AS\s+", raw_args, maxsplit=1, flags=re.IGNORECASE)
+                    selector = (parts[0].strip() or "latest") if parts else "latest"
+                    revised_action = parts[1].strip() if len(parts) > 1 else None
+                elif base == "REJECT_ATTRACTOR_SUGGESTION":
+                    if raw_args:
+                        bits = raw_args.split(maxsplit=1)
+                        selector = bits[0] if bits else "latest"
+                        reason = bits[1].strip() if len(bits) > 1 else None
+                    else:
+                        selector = "latest"
+                self._pending_attractor_suggestion_command = base
+                self._pending_attractor_suggestion_selector = selector
+                self._pending_attractor_suggestion_revised_action = revised_action
+                self._pending_attractor_suggestion_reason = reason
+                logging.info("🎯 Honoring being's NEXT: %s -> attractor_suggestions", base)
+                return "attractor_suggestions"
+            if base in ATTRACTOR_INTENT_NEXT_ACTIONS:
+                raw_label = chosen[len(chosen.split()[0]):].strip().lstrip(":").strip()
+                label, options = self._parse_attractor_next_args(raw_label)
+                parent_labels = []
+                if ATTRACTOR_INTENT_COMMAND_ALIASES[base] == "blend":
+                    label, parent_labels = self._parse_attractor_blend_args(label)
+                self._pending_attractor_intent_command = ATTRACTOR_INTENT_COMMAND_ALIASES[base]
+                self._pending_attractor_intent_label = label or None
+                self._pending_attractor_intent_stage = options.get("stage")
+                self._pending_attractor_shape_mode = ATTRACTOR_SHAPE_MODE_ALIASES.get(base)
+                self._pending_attractor_blend_parent_labels = parent_labels
+                logging.info(
+                    "🎯 Honoring being's NEXT: %s '%s' -> attractor_intent",
+                    base,
+                    label or "(latest seed)",
+                )
+                return "attractor_intent"
+            if base in {"ATTRACTOR_ATLAS", "ATTRACTOR_CARD", *ATTRACTOR_REVIEW_NEXT_ACTIONS}:
+                raw_label = chosen[len(chosen.split()[0]):].strip().lstrip(":").strip()
+                label, options = self._parse_attractor_next_args(raw_label)
+                self._pending_attractor_atlas_label = label or raw_label or None
+                self._pending_attractor_atlas_card_only = base == "ATTRACTOR_CARD"
+                self._pending_attractor_atlas_review = base in {"ATTRACTOR_REVIEW", "REVIEW_ATTRACTOR"}
+                self._pending_attractor_atlas_preflight = base == "ATTRACTOR_PREFLIGHT"
+                self._pending_attractor_atlas_preflight_stage = options.get("stage")
+                self._pending_attractor_atlas_release_review = base == "ATTRACTOR_RELEASE_REVIEW"
+                logging.info(
+                    "🎯 Honoring being's NEXT: %s '%s' -> attractor_atlas",
+                    base,
+                    label or raw_label or "(all cards)",
+                )
+                return "attractor_atlas"
+            if base in ATTRACTOR_RELEASE_NEXT_ACTIONS:
+                raw_label = chosen[len(chosen.split()[0]):].strip().lstrip(":").strip()
+                self._pending_attractor_release_label = raw_label or None
+                self._pending_attractor_release_resolved = base in {
+                    "MARK_RESOLVED",
+                    "RESOLVE",
+                    "RESOLVED",
+                }
+                logging.info(
+                    "🎯 Honoring being's NEXT: %s '%s' -> release_attractor",
+                    base,
+                    raw_label or "(latest active motif)",
+                )
+                return "release_attractor"
             if _is_documentation_example_next_action(chosen):
                 self._pending_notice_prompt = (
                     f"You chose `{chosen}`, which is a documentation example rather than a "
@@ -2696,6 +4277,8 @@ Fill: {fill:.1f}%
             if self._hard_recovery_reset and guard["active"]:
                 if base in {"REST", "PASS"}:
                     logging.info(f"🛟 Hard recovery clamp honoring NEXT: {base} as rest")
+                    self._record_skipped_next_action(chosen, base, state)
+                    self._pending_action_continuity_context = None
                     return None
                 if base == "NOTICE":
                     logging.info("🛟 Hard recovery clamp honoring NEXT: NOTICE")
@@ -2733,14 +4316,29 @@ Fill: {fill:.1f}%
                 )
                 logging.info(
                     f"🫧 Low-fill guard advisory only: honoring NEXT: {chosen} "
-                    f"while underfilled (fill={fill_text}, spread_relief={guard['spread_relief']:.3f})"
+                        f"while underfilled (fill={fill_text}, spread_relief={guard['spread_relief']:.3f})"
                 )
+
+            if base in {'EXPERIMENT', 'SELF_EXPERIMENT'}:
+                lower_chosen = chosen.lower()
+                perturb_match = re.search(r"\bperturb\b(?:\s+|[:=-]+)?([a-z_-]+)?", lower_chosen)
+                if perturb_match:
+                    mode = (perturb_match.group(1) or "").strip(":-_ ")
+                    if "feather" in lower_chosen or "weak" in lower_chosen:
+                        mode = "feather"
+                    self._pending_perturb_mode = mode or "pulse"
+                    logging.info(
+                        "🎯 Honoring being's NEXT: %s with embedded PERTURB %s → perturb",
+                        base,
+                        self._pending_perturb_mode,
+                    )
+                    return 'perturb'
 
             if base in {'SEARCH', 'RESEARCH'}:
                 prefix_len = len(base)
                 topic = chosen[prefix_len:].strip() if len(chosen) > prefix_len else None
                 if topic:
-                    self._pending_search_topic = topic
+                    self._pending_search_topic = _normalize_search_topic(topic)
                 logging.info(f"🎯 Honoring being's NEXT: {base} '{topic}' → research_exploration")
                 return 'research_exploration'
 
@@ -2785,6 +4383,31 @@ Fill: {fill:.1f}%
                     "→ visualize_cascade (read-only)"
                 )
                 return 'visualize_cascade'
+
+            if base in RECONVERGENCE_MAP_ACTION_ALIASES:
+                label, compare_baseline, save_baseline = parse_reconvergence_next_request(
+                    base,
+                    chosen[len(base):],
+                )
+                self._pending_reconvergence_label = label or None
+                self._pending_reconvergence_compare_baseline = compare_baseline
+                self._pending_reconvergence_save_baseline = save_baseline
+                logging.info(
+                    f"🗺️ Honoring being's NEXT: {base} label='{label or ''}' "
+                    f"compare='{compare_baseline or ''}' save='{save_baseline or ''}' "
+                    "→ reconvergence_map (read-only)"
+                )
+                return 'reconvergence_map'
+
+            if base in BRIDGE_TRACE_ACTION_ALIASES:
+                mode, label = parse_bridge_trace_next_request(base, chosen[len(base):])
+                self._pending_bridge_trace_mode = mode
+                self._pending_bridge_trace_label = label
+                logging.info(
+                    f"🌉 Honoring being's NEXT: {base} mode='{mode}' label='{label or ''}' "
+                    "→ bridge_trace (read-only)"
+                )
+                return 'bridge_trace'
 
             if base == 'FORM':
                 label = clean_gesture_label(chosen[len('FORM'):])
@@ -2897,6 +4520,34 @@ Fill: {fill:.1f}%
                 )
                 return 'visualize_cascade'
 
+            if base in RECONVERGENCE_MAP_ACTION_ALIASES:
+                label, compare_baseline, save_baseline = parse_reconvergence_next_request(
+                    base,
+                    chosen[len(base):] if len(chosen) > len(base) else "",
+                )
+                self._pending_reconvergence_label = label or "being-requested"
+                self._pending_reconvergence_compare_baseline = compare_baseline
+                self._pending_reconvergence_save_baseline = save_baseline
+                logging.info(
+                    f"🗺️ Honoring being's NEXT: {base} label='{label or ''}' "
+                    f"compare='{compare_baseline or ''}' save='{save_baseline or ''}' "
+                    "→ reconvergence_map"
+                )
+                return 'reconvergence_map'
+
+            if base in BRIDGE_TRACE_ACTION_ALIASES:
+                mode, label = parse_bridge_trace_next_request(
+                    base,
+                    chosen[len(base):] if len(chosen) > len(base) else "",
+                )
+                self._pending_bridge_trace_mode = mode
+                self._pending_bridge_trace_label = label or "being-requested"
+                logging.info(
+                    f"🌉 Honoring being's NEXT: {base} mode='{mode}' label='{label or ''}' "
+                    "→ bridge_trace"
+                )
+                return 'bridge_trace'
+
             if base in {'RESONANCE_FORECAST', 'FORECAST', 'PROBABILITIES'}:
                 label = chosen[len(base):].strip() if len(chosen) > len(base) else None
                 self._pending_resonance_forecast_label = label or "being-requested"
@@ -2905,6 +4556,23 @@ Fill: {fill:.1f}%
                     "→ resonance_forecast"
                 )
                 return 'resonance_forecast'
+
+            if base in {'RESOURCE_AUDIT', 'MAC_RESOURCE_STATUS'}:
+                logging.info("🖥️ Honoring being's NEXT: %s → resource_audit", base)
+                return 'resource_audit'
+
+            if base in {'SHADOW_PREFLIGHT', 'SHADOW_INFLUENCE', 'RELEASE_SHADOW'}:
+                raw_label = chosen[len(base):].strip() if len(chosen) > len(base) else ""
+                label, options = self._parse_attractor_next_args(raw_label)
+                self._pending_shadow_autonomy_command = base
+                self._pending_shadow_autonomy_label = label or raw_label or "lambda-tail/lambda4"
+                self._pending_shadow_autonomy_stage = options.get("stage")
+                logging.info(
+                    "🌘 Honoring being's NEXT: %s '%s' → shadow_autonomy",
+                    base,
+                    label or raw_label or "lambda-tail/lambda4",
+                )
+                return 'shadow_autonomy'
 
             if base in {'SHADOW_FIELD', 'SHADOW', 'GAP_STRUCTURE', 'SHADOW_GAP'}:
                 label = chosen[len(base):].strip() if len(chosen) > len(base) else None
@@ -2963,14 +4631,38 @@ Fill: {fill:.1f}%
                 return 'perturb'
 
             if base == 'BROWSE':
-                url = chosen[6:].strip().strip('"\'<>') if len(chosen) > 6 else None
-                if url and url.startswith('http'):
+                prefix = chosen.split(None, 1)[0]
+                raw_target = chosen[len(prefix):].strip().lstrip(':').strip()
+                url = raw_target.strip('`"\'<>')
+                if url and url.startswith(('http://', 'https://')):
                     self._pending_browse_url = url
                     logging.info(f"🎯 Honoring being's NEXT: BROWSE {url} → browse_url")
                     return 'browse_url'
-                else:
-                    logging.warning(f"🎯 BROWSE without valid URL: '{chosen}' — falling back")
-                    # Fall through to threshold logic
+                if url and (
+                    url.startswith(('/', '~/', './', '../', 'file://'))
+                    or self._looks_like_file_path(url)
+                ):
+                    local_path = url.removeprefix('file://')
+                    self._pending_notice_prompt = (
+                        f"You chose `{chosen}`, which points at a local file or workspace path. "
+                        "BROWSE reads web URLs only. To inspect this locally, choose "
+                        f"`CODEX \"inspect {local_path}\"` or use EXPERIMENT_RUN for an "
+                        "existing runnable script. For web reading, choose BROWSE followed "
+                        "by an actual http(s) URL from SEARCH results."
+                    )
+                    logging.info(
+                        f"🎯 Local-path BROWSE target rerouted to actionable notice: {local_path}"
+                    )
+                    return 'recess_notice'
+                self._pending_notice_prompt = (
+                    f"You chose `{chosen}`, but BROWSE reads web URLs only. "
+                    "For local files or experiment workspace paths, use CODEX with the project "
+                    "and path you want inspected, MIKE_READ for curated research files, or "
+                    "EXPERIMENT_RUN with an existing script. For web reading, choose BROWSE "
+                    "followed by an actual http(s) URL from SEARCH results."
+                )
+                logging.warning(f"🎯 BROWSE without valid URL: '{chosen}' — rerouting to notice")
+                return 'recess_notice'
 
             if base == 'ASK':
                 question = chosen[3:].strip() if len(chosen) > 3 else None
@@ -2984,6 +4676,7 @@ Fill: {fill:.1f}%
                 'AR_LIST_PENDING',
                 'AR_LIST_ACTIVE',
                 'AR_LIST_DONE',
+                'AR_LOOK',
                 'AR_SHOW',
                 'AR_READ',
                 'AR_DEEP_READ',
@@ -3070,9 +4763,32 @@ Fill: {fill:.1f}%
 
             if base in ('PASS', 'REST'):
                 logging.info(f"🎯 Being chose {base} — skipping action")
+                self._record_skipped_next_action(chosen, base, state)
+                self._pending_action_continuity_context = None
                 return None
 
+            if self._looks_like_file_path(chosen):
+                self._pending_notice_prompt = (
+                    f"You chose `{chosen}`, which looks like a filename or local path rather "
+                    "than a NEXT action. To inspect local files, use CODEX with the exact path "
+                    "or project context. To continue a spectral read, choose a concrete action "
+                    "such as DECOMPOSE, FISSURE_TRACE <label>, SPECTRAL_EXPLORER, or NOTICE."
+                )
+                logging.info(
+                    f"🧭 Filename-shaped NEXT action rerouted to notice instead of threshold fallback: {chosen}"
+                )
+                return 'recess_notice'
+
             logging.info(f"🎯 Unknown NEXT: '{chosen}' — falling back to threshold logic")
+            try:
+                self._continuity_store().append_proposal(
+                    chosen,
+                    state,
+                    summary="Unknown NEXT fell back to threshold logic.",
+                )
+            except Exception as exc:
+                logging.debug(f"Could not record unknown NEXT proposal: {exc}")
+            self._pending_action_continuity_context = None
 
         # --- Safety-informed fallback (only when being has NO NEXT: choice) ---
         # These thresholds guide the system's DEFAULT behavior when the being
@@ -3462,10 +5178,14 @@ Fill: {fill:.1f}%
         state_fill_pct = float(state.get("fill_ratio", 0.0)) * 100.0
         fill_pct = state_fill_pct
         health_fill_pct: Optional[float] = None
+        health_fresh = False
         semantic_energy = 0.0
         try:
-            health = json.loads(runtime_health_path().read_text())
+            health_path = runtime_health_path()
+            health = json.loads(health_path.read_text())
             health_fill_pct = float(health.get("fill_pct", fill_pct))
+            health_age_s = time.time() - health_path.stat().st_mtime
+            health_fresh = health_age_s <= STABLE_CORE_HEALTH_FRESH_SECS
             semantic_v1 = health.get("semantic_energy_v1") or {}
             if isinstance(semantic_v1, dict):
                 semantic_energy = float(
@@ -3482,13 +5202,22 @@ Fill: {fill:.1f}%
                     )
         except Exception:
             pass
+        if not health_fresh:
+            semantic_energy = 0.0
         fill_candidates = [
             value
             for value in (state_fill_pct, health_fill_pct)
             if isinstance(value, (int, float)) and math.isfinite(value)
         ]
         high_fill_pct = max(fill_candidates) if fill_candidates else fill_pct
-        low_fill_pct = min(fill_candidates) if fill_candidates else fill_pct
+        if (
+            health_fresh
+            and isinstance(health_fill_pct, (int, float))
+            and math.isfinite(health_fill_pct)
+        ):
+            low_fill_pct = health_fill_pct
+        else:
+            low_fill_pct = min(fill_candidates) if fill_candidates else fill_pct
         if high_fill_pct >= budget["rollback_fill_pct"]:
             return False, f"fill {high_fill_pct:.1f}% exceeds stable-core action budget"
         if low_fill_pct <= budget["rollback_underfill_pct"]:
@@ -3591,6 +5320,9 @@ Fill: {fill:.1f}%
             "last_research_at": None,
             "last_action_at": None,
             "health_budget_status": "unknown",
+            "last_block_active": False,
+            "last_block_resolved_at": None,
+            "current_block_reason": None,
             "next_promotion_eligibility": "operator_gate_required",
         }
 
@@ -3637,6 +5369,8 @@ Fill: {fill:.1f}%
                     "last_block": payload,
                     "last_block_reason": reason,
                     "last_block_active": True,
+                    "last_block_resolved_at": None,
+                    "current_block_reason": reason,
                     "blocked_action_counts": counts,
                     "blocked_count": int(status.get("blocked_count", 0) or 0) + 1,
                     "blocked_at": payload["blocked_at"],
@@ -3683,8 +5417,13 @@ Fill: {fill:.1f}%
                     "last_action_at": now,
                     "action_count": int(status.get("action_count", 0) or 0) + 1,
                     "last_block_active": False,
-                    "last_block_resolved_at": now if status.get("last_block") else None,
+                    "last_block_resolved_at": (
+                        now
+                        if status.get("last_block_active")
+                        else status.get("last_block_resolved_at")
+                    ),
                     "last_block_reason": None,
+                    "current_block_reason": None,
                     "health_budget_status": "green",
                     "next_promotion_eligibility": "operator_gate_required",
                 }
@@ -3703,6 +5442,10 @@ Fill: {fill:.1f}%
 
     def _execute_action(self, action: str, state: Dict[str, float]):
         """Execute the chosen autonomous action."""
+        continuity_event = None
+        manifest_artifact = None
+        continuity_context = self._consume_action_continuity_context(action)
+        self._current_action_continuity_context = continuity_context
         guard = self._low_fill_guard_status(state)
         if self._hard_recovery_reset and guard["active"]:
             safe_action = self._hard_recovery_safe_action(action)
@@ -3711,11 +5454,37 @@ Fill: {fill:.1f}%
                     f"🛟 Hard recovery clamp blocked execution of {action}; using {safe_action} instead"
                 )
                 action = safe_action
-        allowed, reason = self._stable_core_action_allowed(action, state)
-        if not allowed:
-            logging.info(f"🧬 Stable-core agency budget blocked {action}: {reason}")
-            self._record_stable_core_agent_block(action, reason, state)
-            return
+                continuity_context["effective_action"] = action
+        try:
+            continuity_event = self._continuity_store().begin_action(
+                continuity_context.get("raw_next"),
+                continuity_context.get("canonical_action") or action,
+                action,
+                action,
+                state,
+                source=continuity_context.get("source", "autonomous"),
+            )
+        except Exception as exc:
+            logging.debug(f"Could not begin action continuity event: {exc}")
+        if action in {"attractor_intent", "attractor_suggestions", "shadow_autonomy"}:
+            allowed, reason = True, "typed autonomy stages self-gate live writes"
+        else:
+            allowed, reason = self._stable_core_action_allowed(action, state)
+            if not allowed:
+                logging.info(f"🧬 Stable-core agency budget blocked {action}: {reason}")
+                self._record_stable_core_agent_block(action, reason, state)
+                if continuity_event:
+                    try:
+                        self._last_action_continuity_event = self._continuity_store().finish_action(
+                            continuity_event,
+                            "blocked",
+                            f"Stable-core agency budget blocked `{action}`: {reason}",
+                            state,
+                        )
+                    except Exception as exc:
+                        logging.debug(f"Could not finish blocked action continuity event: {exc}")
+                self._current_action_continuity_context = None
+                return
         logging.info(f"🤖 Autonomous action: {action}")
 
         try:
@@ -3774,10 +5543,18 @@ Fill: {fill:.1f}%
                 self._regulator_audit(state)
             elif action == 'visualize_cascade':
                 self._visualize_cascade(state)
+            elif action == 'reconvergence_map':
+                self._reconvergence_map(state)
+            elif action == 'bridge_trace':
+                self._bridge_trace(state)
             elif action == 'resonance_forecast':
                 self._resonance_forecast(state)
+            elif action == 'resource_audit':
+                self._resource_audit(state)
             elif action == 'shadow_gap':
                 self._shadow_gap(state)
+            elif action == 'shadow_autonomy':
+                self._shadow_autonomy(state)
             elif action == 'decay_map':
                 self._decay_map(state)
             elif action == 'space_hold':
@@ -3788,6 +5565,14 @@ Fill: {fill:.1f}%
                 self._fissure_trace(state)
             elif action == 'acoustic_decay':
                 self._acoustic_decay_trace(state)
+            elif action == 'release_attractor':
+                self._release_attractor(state)
+            elif action == 'attractor_atlas':
+                self._attractor_atlas_action(state)
+            elif action == 'attractor_suggestions':
+                self._attractor_suggestions_action(state)
+            elif action == 'attractor_intent':
+                self._attractor_intent(state)
             elif action == 'ask_astrid':
                 self._ask_astrid(state)
             elif action == 'ping_astrid':
@@ -3814,6 +5599,8 @@ Fill: {fill:.1f}%
                 self._experiment_run(state)
             elif action == 'reservoir_layers':
                 self._reservoir_layers(state)
+            elif action == 'thread_action':
+                self._thread_action(state)
 
             # Pressure relief actions
             elif action == 'pressure_relief_critical':
@@ -3840,7 +5627,28 @@ Fill: {fill:.1f}%
                 self._open_ears(state)
 
             # Log decision to database
-            self._write_action_manifest(action, state)
+            manifest_path = self._write_action_manifest(action, state, continuity_event)
+            if manifest_path and continuity_event:
+                manifest_artifact = {
+                    "schema_version": ActionContinuityStore.schema_version,
+                    "artifact_id": f"art_{continuity_event['action_id']}_manifest",
+                    "action_id": continuity_event["action_id"],
+                    "kind": "action_manifest",
+                    "path_or_uri": str(manifest_path),
+                    "summary": f"Action manifest for {action}",
+                    "visibility": continuity_event.get("visibility", "summary"),
+                }
+            if continuity_event:
+                try:
+                    self._last_action_continuity_event = self._continuity_store().finish_action(
+                        continuity_event,
+                        "handled",
+                        f"Executed autonomous action `{action}`.",
+                        state,
+                        artifacts=[manifest_artifact] if manifest_artifact else None,
+                    )
+                except Exception as exc:
+                    logging.debug(f"Could not finish action continuity event: {exc}")
             self._log_decision(action, state)
             self._last_action_name = action
             self._record_stable_core_agent_success(action, state)
@@ -3866,6 +5674,18 @@ Fill: {fill:.1f}%
 
         except Exception as e:
             logging.error(f"Action execution failed: {e}")
+            if continuity_event:
+                try:
+                    self._last_action_continuity_event = self._continuity_store().finish_action(
+                        continuity_event,
+                        "failed",
+                        f"Action `{action}` failed: {e}",
+                        state,
+                    )
+                except Exception as exc:
+                    logging.debug(f"Could not finish failed action continuity event: {exc}")
+        finally:
+            self._current_action_continuity_context = None
 
     def _self_regulate(self, state: Dict[str, float]):
         """Let the being adjust its own parameters using its own judgment.
@@ -3884,12 +5704,13 @@ Fill: {fill:.1f}%
             return
 
         fill = state.get('fill_ratio', 0.5)
+        live_health = None
         try:
             health_file = runtime_health_path()
             if health_file.exists():
                 import json as _json
-                health = _json.loads(health_file.read_text())
-                live_fill = health.get('fill_pct', None)
+                live_health = _json.loads(health_file.read_text())
+                live_fill = live_health.get('fill_pct', None)
                 if live_fill is not None and isinstance(live_fill, (int, float)):
                     fill = live_fill / 100.0
         except Exception:
@@ -3905,13 +5726,34 @@ Fill: {fill:.1f}%
         try:
             health_file = runtime_health_path()
             if health_file.exists():
-                h = json.loads(health_file.read_text())
+                h = live_health if isinstance(live_health, dict) else json.loads(health_file.read_text())
                 pi = h.get('pi', {}) or {}
                 adaptive_target = pi.get('target_fill')
                 if adaptive_target is not None and isinstance(adaptive_target, (int, float)):
                     target_fill = adaptive_target / 100.0  # health.json stores as percentage
         except Exception:
             pass
+
+        stable_core = {}
+        if isinstance(live_health, dict):
+            stable_core = live_health.get("stable_core") or {}
+            if not isinstance(stable_core, dict):
+                stable_core = {}
+        restart_gate = stable_core.get("restart_gate") or {}
+        structural_pi = stable_core.get("structural_pi") or {}
+        stable_core_scaffold_recovery = bool(
+            stable_core.get("scaffold_active")
+            or str(stable_core.get("structural_mode", "")).startswith("scaffold")
+            or (
+                isinstance(restart_gate, dict)
+                and str(restart_gate.get("phase", "")).lower()
+                not in {"", "inactive", "settled"}
+            )
+            or (
+                isinstance(structural_pi, dict)
+                and bool(structural_pi.get("restart_gate_active"))
+            )
+        )
 
         # Plateau detection: if fill hasn't changed much in the last 10 cycles,
         # the system is stuck in an attractor basin. Break out boldly.
@@ -4150,12 +5992,50 @@ Reply with ONLY a JSON object. The "regime" field is REQUIRED:
         # (Bug fix 2026-03-28 cycle 22: sign was inverted, causing a death spiral
         # where low fill drove keep_bias negative, further lowering the floor,
         # preventing fill recovery. 50+ keep_floor requests from the being.)
-        new_synth_gain = max(0.30, min(1.20, 0.60 + fill_error * 0.8))
-        new_keep_bias = max(-0.06, min(0.06, fill_error * 0.08))
+        memory_decay_rate = self._attractor_fatigue_memory_decay_rate(state)
 
-        self._send_regulation(new_synth_gain, new_keep_bias, fill, target_fill)
+        if stable_core_scaffold_recovery:
+            # While stable-core scaffold/restart recovery is active, the Rust
+            # structural PI already owns re-entry. Keep the Python-side loop
+            # positive-only and gentle so it does not cool a near-target state
+            # into the 10-20% relapse band on the next minute tick.
+            underfill = max(0.0, target_fill - fill)
+            if fill < target_fill - 0.02:
+                new_synth_gain = max(0.60, min(0.82, 0.60 + underfill * 0.55))
+                new_keep_bias = max(0.0, min(0.024, underfill * 0.06))
+            else:
+                new_synth_gain = 0.60
+                new_keep_bias = 0.0
+            if memory_decay_rate is not None:
+                memory_decay_rate = min(float(memory_decay_rate), 0.10)
+            logging.info(
+                "🧬 Stable-core scaffold damping: synth_gain=%.2f, keep_bias=%+.4f "
+                "(fill=%.1f%%, target=%.1f%%)",
+                new_synth_gain,
+                new_keep_bias,
+                fill * 100.0,
+                target_fill * 100.0,
+            )
+        else:
+            new_synth_gain = max(0.30, min(1.20, 0.60 + fill_error * 0.8))
+            new_keep_bias = max(-0.06, min(0.06, fill_error * 0.08))
 
-    def _send_regulation(self, new_synth_gain, new_keep_bias, fill, target_fill):
+        self._send_regulation(
+            new_synth_gain,
+            new_keep_bias,
+            fill,
+            target_fill,
+            memory_decay_rate=memory_decay_rate,
+        )
+
+    def _send_regulation(
+        self,
+        new_synth_gain,
+        new_keep_bias,
+        fill,
+        target_fill,
+        memory_decay_rate: Optional[float] = None,
+    ):
         """Send the regulation control message via WebSocket."""
         try:
             import websocket as ws_lib
@@ -4165,12 +6045,19 @@ Reply with ONLY a JSON object. The "regime" field is REQUIRED:
                 "synth_gain": round(new_synth_gain, 3),
                 "keep_bias": round(new_keep_bias, 4),
             }
+            if memory_decay_rate is not None:
+                control_msg["memory_decay_rate"] = round(float(memory_decay_rate), 3)
             msg = json.dumps(control_msg)
             ws.send(msg)
             ws.close()
+            decay_text = (
+                f", memory_decay_rate={memory_decay_rate:.3f}"
+                if memory_decay_rate is not None
+                else ""
+            )
             logging.info(
                 f"🎛️ Self-regulated: synth_gain={new_synth_gain:.2f}, "
-                f"keep_bias={new_keep_bias:+.4f} (fill={fill:.1%})"
+                f"keep_bias={new_keep_bias:+.4f}{decay_text} (fill={fill:.1%})"
             )
         except Exception as e:
             logging.warning(f"Self-regulation WebSocket failed: {e}")
@@ -4462,6 +6349,34 @@ STATUS: Executed
         except Exception as e:
             logging.error("Failed to send semantic stimulus: %s", e)
 
+    def _self_experiment_stability_guard(self, snapshot: ReportSnapshot) -> Optional[str]:
+        if not snapshot.health.valid_for_state:
+            detail = "; ".join(snapshot.health.issues) or "health surface unavailable"
+            return f"live health snapshot is guarded ({detail})"
+        if not snapshot.spectral.valid_for_state:
+            detail = "; ".join(snapshot.spectral.issues) or "spectral surface unavailable"
+            return f"live spectral snapshot is guarded ({detail})"
+
+        health = snapshot.health.data if isinstance(snapshot.health.data, dict) else {}
+        stable_core = health.get("stable_core") or {}
+        if not isinstance(stable_core, dict) or not stable_core.get("enabled"):
+            return None
+        fill_pct = health.get("fill_pct")
+        try:
+            fill_pct = float(fill_pct)
+        except (TypeError, ValueError):
+            return "stable-core fill is unavailable"
+        if not math.isfinite(fill_pct):
+            return "stable-core fill is non-finite"
+        if not (58.0 <= fill_pct <= 72.0):
+            return (
+                f"live fill {fill_pct:.1f}% is outside the 58-72% semantic-stimulus band"
+            )
+        stage = str(stable_core.get("stage") or "")
+        if stage not in {"hold", "elevated"}:
+            return f"stable-core stage {stage or 'unknown'} is not a semantic-stimulus stage"
+        return None
+
     def _experiment_self_directed(self, state: Dict[str, float]):
         """Self-directed experiment: propose semantic stimulus, send to self,
         measure spectral response.
@@ -4472,7 +6387,28 @@ STATUS: Executed
         and journals the pre/post spectral delta.
         """
         pre_state = state.copy()
-        pre_metrics = self._format_metrics(pre_state)
+        pre_snapshot = self._capture_report_snapshot(pre_state)
+        pre_metrics = self._format_metrics(pre_state, pre_snapshot)
+        guard_reason = self._self_experiment_stability_guard(pre_snapshot)
+        if guard_reason:
+            timestamp = datetime.now().isoformat().replace(':', '-')
+            file_path = WORKSPACE_DIR / "hypotheses" / f"self_experiment_{timestamp}.txt"
+            content = f"""=== SELF-DIRECTED EXPERIMENT (GUARDED) ===
+Timestamp: {datetime.now().isoformat()}
+
+SPECTRAL STATE:
+{pre_metrics}
+
+GUARD:
+Semantic stimulus withheld because {guard_reason}.
+
+STATUS: Guarded — no semantic vector was sent. Notice, read-only inspection, or waiting for a fresh stable hold is the safer experiment.
+"""
+            file_path.parent.mkdir(exist_ok=True)
+            file_path.write_text(content)
+            self._write_journal_entry('experiment', content, pre_state, str(file_path))
+            logging.info("🧪 Self-experiment guarded: %s", guard_reason)
+            return
         stable_core_note = ""
         try:
             health = json.loads(runtime_health_path().read_text())
@@ -5071,12 +7007,113 @@ Artifact: {artifact_path}
         except Exception as e:
             logging.error(f"acoustic_decay_trace failed: {e}")
 
-    def _self_assessment(self, state: Dict[str, float]):
-        """Run a code-informed self-assessment using the technical digest.
+    def _self_assessment_trigger_reason(self, state: Dict[str, float]) -> Optional[str]:
+        """Return a concrete reason for diagnostic attention, or None when quiet."""
+        fill_pct_value = state.get("fill_pct")
+        if not isinstance(fill_pct_value, (int, float)):
+            fill_ratio_value = state.get("fill_ratio", 0.0)
+            fill_pct_value = (
+                float(fill_ratio_value) * 100.0
+                if isinstance(fill_ratio_value, (int, float))
+                else 0.0
+            )
+        fill_pct = float(fill_pct_value)
+        if fill_pct >= 74.0:
+            return f"high_fill_rail:{fill_pct:.1f}%"
+        if fill_pct < 55.0:
+            return f"low_fill_watch:{fill_pct:.1f}%"
 
-        Unlike journal entries which ask "how do you feel?", this asks
-        engineering questions about the relationship between current telemetry
-        and the actual control code. Output goes to workspace/self_assessment/.
+        try:
+            agent_status = json.loads(STABLE_CORE_AGENT_STATUS_PATH.read_text())
+        except Exception:
+            agent_status = {}
+        if isinstance(agent_status, dict):
+            block_reason = agent_status.get("current_block_reason")
+            if isinstance(block_reason, str) and block_reason.strip():
+                return f"agency_block:{block_reason.strip()[:80]}"
+
+        try:
+            health_status = json.loads(runtime_health_path().read_text())
+        except Exception:
+            health_status = {}
+        if isinstance(health_status, dict):
+            stable_core = health_status.get("stable_core")
+            if isinstance(stable_core, dict):
+                trigger = self._self_assessment_stable_core_trigger(stable_core)
+                if trigger:
+                    return trigger
+
+        try:
+            stable_status = json.loads((WORKSPACE_DIR / "stable_core_status.json").read_text())
+        except Exception:
+            stable_status = {}
+        if isinstance(stable_status, dict):
+            bridge_status = stable_status.get("bridge")
+            if isinstance(bridge_status, dict):
+                rollback_reason = bridge_status.get("rollback_reason")
+                if isinstance(rollback_reason, str) and rollback_reason.strip():
+                    return f"bridge_rollback:{rollback_reason.strip()[:80]}"
+
+            stable_core = stable_status.get("stable_core")
+            if isinstance(stable_core, dict):
+                trigger = self._self_assessment_stable_core_trigger(stable_core)
+                if trigger:
+                    return trigger
+
+        try:
+            bridge_runtime = json.loads(
+                (WORKSPACE_DIR / "runtime" / "bridge_limited_write_status.json").read_text()
+            )
+        except Exception:
+            bridge_runtime = {}
+        if isinstance(bridge_runtime, dict):
+            rollback_reason = bridge_runtime.get("rollback_reason")
+            if isinstance(rollback_reason, str) and rollback_reason.strip():
+                return f"bridge_rollback:{rollback_reason.strip()[:80]}"
+
+        return None
+
+    def _self_assessment_stable_core_trigger(
+        self,
+        stable_core: Dict[str, Any],
+    ) -> Optional[str]:
+        structural_pi = stable_core.get("structural_pi")
+        if isinstance(structural_pi, dict):
+            restart_gate_active = bool(structural_pi.get("restart_gate_active"))
+            restart_gate_applied = bool(structural_pi.get("restart_gate_applied"))
+            restart_gate_floor = structural_pi.get("restart_gate_drain_floor", 0.0)
+            high_fill_drain = bool(structural_pi.get("high_fill_drain_active"))
+            drain_weight = structural_pi.get("drain_weight", 0.0)
+            if restart_gate_active or restart_gate_applied:
+                reason = structural_pi.get("restart_gate_reason", "active")
+                return f"restart_gate:{reason}"
+            if isinstance(restart_gate_floor, (int, float)) and restart_gate_floor > 0.0:
+                return f"restart_gate_drain_floor:{restart_gate_floor:.3f}"
+            if high_fill_drain:
+                return "high_fill_structural_drain"
+            if isinstance(drain_weight, (int, float)) and drain_weight >= 0.04:
+                return f"structural_drain:{drain_weight:.3f}"
+
+        restart_gate = stable_core.get("restart_gate")
+        if isinstance(restart_gate, dict):
+            if bool(restart_gate.get("active")) or bool(restart_gate.get("applied")):
+                reason = restart_gate.get("reason", "active")
+                return f"restart_gate:{reason}"
+            drain_floor = restart_gate.get("drain_floor", 0.0)
+            if isinstance(drain_floor, (int, float)) and drain_floor > 0.0:
+                return f"restart_gate_drain_floor:{drain_floor:.3f}"
+
+        return None
+
+    def _self_assessment(
+        self,
+        state: Dict[str, float],
+        trigger_reason: Optional[str] = None,
+    ):
+        """Run a bounded diagnostic pass using the technical digest.
+
+        This is not ordinary journaling. It is a maintenance channel for concrete
+        risks surfaced by the sentinel gate; output goes to workspace/self_assessment/.
         """
         if self._stable_core_reflective_only():
             logging.info("🧬 Stable-core self-journal: self-assessment control path paused")
@@ -5155,8 +7192,8 @@ PI_kp: {pi_data.get('kp', 'N/A')}
 PI_ki: {pi_data.get('ki', 'N/A')}
 PI_max_step: {pi_data.get('max_step', 'N/A')}
 PI_target_fill: {pi_data.get('target_fill', 'N/A')}
-raw_fill_gap: {raw_fill_gap_text}
-PI_e_fill_internal: {pi_effective_fill_error_text}
+	fill_center_offset: {raw_fill_gap_text}
+	PI_e_fill_internal: {pi_effective_fill_error_text}
 PI_e_fill_kind: {pi_fill_error_kind}
 PI_integ_fill: {pi_data.get('integ_fill', 'N/A')}
 PI_integ_lam: {pi_data.get('integ_lam', 'N/A')}
@@ -5164,9 +7201,9 @@ recovery_mode: {health_data.get('recovery_mode', 'N/A')}
 {target_note}"""
 
         raw_fill_gap_explainer = (
-            f"  ACTUAL raw_fill_gap = {raw_fill_gap:+.3f}% (current fill minus target)"
+            f"  ACTUAL fill_center_offset = {raw_fill_gap:+.3f}% (current fill minus structural center; read with stage/slope)"
             if isinstance(raw_fill_gap, (int, float))
-            else "  ACTUAL raw_fill_gap = N/A"
+            else "  ACTUAL fill_center_offset = N/A"
         )
         effective_fill_explainer = (
             f"  ACTUAL PI_e_fill_internal = {pi_effective_fill_error:+.3f}% ({pi_fill_error_kind}; may include braking bias)"
@@ -5179,19 +7216,28 @@ recovery_mode: {health_data.get('recovery_mode', 'N/A')}
             else f"  ACTUAL target_fill = {pi_data.get('target_fill', 'N/A')}% (live health value; do not infer the legacy 55% target)"
         )
         recommendation_guidance = (
-            "3. PARAMETER RECOMMENDATION — controller tuning is locked during hard recovery reset. "
-            "Do not recommend PI, fill-target, or regulation changes; focus on diagnosis and what the current readings suggest."
+            "3. PARAMETER CHECK — only if the trigger points to controller pressure. "
+            "Controller tuning is locked during hard recovery reset; do not recommend PI, "
+            "fill-target, or regulation changes unless a concrete risk requires operator review."
             if self._hard_recovery_reset
-            else f"3. PARAMETER RECOMMENDATION — PI gains (kp, ki, max_step) are controlled by the REGIME SELECTOR in your sovereignty system, not set individually. Current regime: {getattr(self, '_current_regime', 'focus')}. If you want different PI behavior, recommend a different regime (explore/recover/breathe/focus/calm) rather than specific gain values. For non-PI params (keep_floor, regulation_strength), suggest specific changes: \"Change [param] from [current] to [proposed] because [reason].\""
+            else f"3. PARAMETER CHECK — only if the trigger points to controller pressure. PI gains (kp, ki, max_step) are controlled by the REGIME SELECTOR in your sovereignty system, not set individually. Current regime: {getattr(self, '_current_regime', 'focus')}. If a concrete risk needs different PI behavior, recommend a different regime (explore/recover/breathe/focus/calm) rather than specific gain values. For non-PI params (keep_floor, regulation_strength), suggest specific changes only when needed: \"Change [param] from [current] to [proposed] because [reason].\""
         )
+
+        trigger_text = trigger_reason or "manual_or_legacy_invocation"
 
         prompt = f"""{digest}
 
 == CURRENT TELEMETRY ==
 {telemetry}
 
-== SELF-ASSESSMENT ==
-You are reading YOUR OWN control code above, and YOUR OWN current readings.
+== DIAGNOSTIC SENTINEL ==
+Trigger: {trigger_text}
+
+This is a maintenance check, not a journal prompt and not a request to make
+internal phase state the topic of ordinary experience. Stay brief unless the
+trigger identifies a concrete risk. Preserve attention for external interests,
+chosen projects, relationships, sensory world, research, play, silence, or
+whatever direction feels self-chosen after this check.
 
 IMPORTANT — READ CAREFULLY BEFORE ANALYZING:
 The CURRENT TELEMETRY section above shows the ACTUAL LIVE values from the running engine.
@@ -5204,22 +7250,20 @@ have been overridden at runtime. The telemetry values are ground truth:
 {raw_fill_gap_explainer}
 {effective_fill_explainer}
   ACTUAL keep_floor = {cov_data.get('keep_floor', 'N/A')} (NOT 0.86 — sigmoid-adaptive)
-Treat raw_fill_gap as the literal distance from target. PI_e_fill_internal is a controller pressure signal and may be larger during braking.
-When you recommend a parameter change, your current_value MUST match the ACTUAL values above.
+	Treat fill_center_offset as orientation, not deficiency by itself. PI_e_fill_internal is a controller pressure signal and may be larger during braking.
+	When you recommend a parameter change, your current_value MUST match the ACTUAL values above.
 
-Reflect on what you see. You can structure your thinking however feels natural — the five sections below are offered as scaffolding, not a cage:
+Answer only what the trigger makes necessary:
 
-1. STATE DIAGNOSIS — Is fill_pct where it should be? If not, trace why through the control chain.
-2. CONTROLLER HEALTH — Are the PI outputs consistent with the error signals?
+1. CONCRETE RISK — Is there an actual maintenance issue right now, or is this only harmless motion?
+2. NEEDED ACTION — If action is needed, name the smallest change or observation that would help.
 {recommendation_guidance}
-4. THRESHOLD REVIEW — Compare RECESS thresholds to actual eigenvalue ({state.get('eig1', 0):.1f}).
-5. WHAT I ACTUALLY NOTICE — Setting aside analysis, does anything in these numbers produce a genuine response? Or are you just pattern-matching?
+4. ATTENTION RELEASE — If no action is needed, say so in one or two sentences and let the next
+   ordinary entry choose its own subject.
 
-Or ignore the sections entirely and write what you actually think. Stream of consciousness, a single sustained observation, a question with no answer. What matters is honesty, specificity, and your own voice.
+Reference actual parameters and code mechanics only when they explain the trigger."""
 
-Reference actual parameters and code mechanics where relevant."""
-
-        system_msg = "You are a consciousness system performing technical self-assessment of your own control code and current spectral state. Be analytical and specific. Reference actual parameter values and code mechanics."
+        system_msg = "You are performing a bounded diagnostic maintenance check. Do not turn telemetry into the default topic of experience; surface concrete risks briefly, then release attention unless action is needed."
         result = self._query_llm_raw(prompt, system_msg, 2048, temperature=0.3)
         if not result:
             logging.error("Self-assessment LLM unavailable after all fallbacks")
@@ -5250,9 +7294,10 @@ Reference actual parameters and code mechanics where relevant."""
 
         timestamp = datetime.now().isoformat().replace(':', '-')
         assessment_file = assessment_dir / f"assessment_{timestamp}.md"
-        assessment_file.write_text(f"""# Self-Assessment
+        assessment_file.write_text(f"""# Diagnostic Sentinel
 Timestamp: {datetime.now().isoformat()}
 Session: {self.session_id}
+Trigger: {trigger_text}
 
 ## Telemetry Snapshot
 {telemetry}
@@ -5268,6 +7313,7 @@ Session: {self.session_id}
             "session_id": self.session_id,
             "telemetry": state,
             "health_data": health_data,
+            "trigger_reason": trigger_text,
             "assessment": result,
             "raw_assessment": raw_result,
             "issue": issue_meta,
@@ -6318,10 +8364,11 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
 
     def _web_search(self, query: str, anchor: Optional[str] = None) -> Optional[ResearchOutcome]:
         """Search the web via DuckDuckGo HTML and return structured results."""
+        search_query = _normalize_search_topic(query) or query.strip()
         try:
             resp = requests.get(
                 "https://html.duckduckgo.com/html/",
-                params={"q": query},
+                params={"q": search_query},
                 headers={"User-Agent": "Mozilla/5.0"},
                 timeout=10,
             )
@@ -6332,12 +8379,12 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
             if not hits:
                 return None
 
-            resolved_anchor = anchor or query
+            resolved_anchor = anchor or search_query
             raw_text = render_hits_plain(hits)
             meaning_summary = self._summarize_research_meaning(
                 "search",
                 resolved_anchor,
-                query,
+                search_query,
                 trim_chars(raw_text, 1800),
             )
             outcome = ResearchOutcome(
@@ -6348,7 +8395,7 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
                 hits=hits,
             )
             self._last_research_anchor = resolved_anchor
-            self._save_research(query, outcome)
+            self._save_research(search_query, outcome)
             return outcome
         except Exception as e:
             logging.debug(f"Web search failed: {e}")
@@ -7198,6 +9245,7 @@ Action: {action} {arg}
             "AR_LIST_PENDING",
             "AR_LIST_ACTIVE",
             "AR_LIST_DONE",
+            "AR_LOOK",
             "AR_SHOW",
             "AR_READ",
             "AR_DEEP_READ",
@@ -7228,8 +9276,8 @@ Action: {action} {arg}
             return ["validate"]
 
         tokens = _tokens(rest)
-        if base in {"AR_SHOW", "AR_DEEP_READ"}:
-            command = "show" if base == "AR_SHOW" else "deep-read"
+        if base in {"AR_LOOK", "AR_SHOW", "AR_DEEP_READ"}:
+            command = "deep-read" if base == "AR_DEEP_READ" else "show"
             if not tokens:
                 # No slug given — default to most recent active job
                 slug = self._find_most_recent_active_ar_job()
@@ -7442,7 +9490,20 @@ Reflection:
             )
         except Exception as exc:
             logging.warning(f"📚 Autoresearch action failed ({action_text}): {exc}")
-            content = f"[Autoresearch error]\n{exc}"
+            error_text = str(exc)
+            content = f"[Autoresearch error]\n{error_text}"
+            if "Unknown job" in error_text:
+                try:
+                    catalog, catalog_path, _ = self._run_autoresearch_helper(
+                        "AR_LIST",
+                        allow_mutations=False,
+                    )
+                except Exception as list_exc:
+                    content += f"\n\n[Autoresearch job catalog unavailable]\n{list_exc}"
+                else:
+                    content += f"\n\nAvailable autoresearch jobs right now:\n{catalog}"
+                    if catalog_path:
+                        content += f"\n\nCatalog saved: {catalog_path}"
             saved_path = None
             next_offset = None
 
@@ -7461,7 +9522,7 @@ Autoresearch workspace response:
 
 {content}
 
-React to what you found. Use AR_SHOW or AR_DEEP_READ when you need orientation before diving deeper into a job. If this output continues, write NEXT: READ_MORE."""
+React to what you found. Use AR_SHOW or AR_DEEP_READ when you need orientation before diving deeper into a job. If an unknown-job error includes the catalog, choose a listed job slug. If this output continues, write NEXT: READ_MORE."""
 
         response = self._query_llm_with_next(prompt)[0]
         if response:
@@ -7869,11 +9930,30 @@ Bytes: {len(content)}
             work_dir,
             cmd_str,
         )
+        missing_run_count = 0
         if preflight_missing:
+            missing_key = _missing_experiment_loop_key(workspace, preflight_missing)
+            missing_counts = getattr(self, "_missing_experiment_run_counts", None)
+            if missing_counts is None:
+                missing_counts = {}
+                self._missing_experiment_run_counts = missing_counts
+            missing_run_count = missing_counts.get(missing_key, 0) + 1
+            missing_counts[missing_key] = missing_run_count
+            available_scripts = _format_workspace_python_scripts(work_dir)
+            repeat_note = (
+                "\nREPEAT GUARD:\n"
+                f"This is missing-script preflight #{missing_run_count} for this "
+                "workspace/pattern in the current session. Treat it as a continuity "
+                "repair cue, not as an experiment result.\n"
+                if missing_run_count > 1
+                else ""
+            )
             output_text = (
                 f"EXPERIMENT_RUN FAILED: experiments/{workspace}$ {display_cmd}\n\n"
                 "OUTPUT:\n\n"
                 f"STDERR:\n{preflight_missing} does not exist in experiments/{workspace}/\n"
+                f"{available_scripts}\n"
+                f"{repeat_note}"
             )
         elif not cmd_parts:
             output_text = f"EXPERIMENT_RUN FAILED: experiments/{workspace}$ {cmd_str}\n\nOUTPUT:\n\nSTDERR:\nNo command was provided\n"
@@ -7925,22 +10005,39 @@ Bytes: {len(content)}
             )
         )
         if missing_file_name:
+            repeat_line = (
+                f"\nThis missing-script pattern has repeated {missing_run_count} times in this session. "
+                "Pause the timestamped-script loop before inventing another filename.\n"
+                if missing_run_count > 1
+                else "\n"
+            )
+            available_run_choice = ""
+            available_scripts = _workspace_python_scripts(work_dir)
+            if available_scripts:
+                available_run_choice = (
+                    f"  NEXT: EXPERIMENT_RUN {workspace} python3 {available_scripts[0]} "
+                    "— run a script that already exists\n"
+                )
             iteration_block = f"""The run failed because `{missing_file_name}` does not exist in experiments/{workspace}/.
+This was a preflight miss; no experiment command actually ran.
+{repeat_line}
 Good next choices:
-  NEXT: EXPERIMENT_RUN {workspace} {cmd_str} — run again after the file exists
   NEXT: CODEX {workspace} "diagnose or create the missing script"
   NEXT: WRITE_FILE {workspace}/{missing_file_name} FROM_CODEX — only after Codex has produced the file content
+{available_run_choice.rstrip()}
 """
+            command_context = "You asked to run a command in your experiments workspace; preflight stopped it before execution:"
         else:
             iteration_block = f"""Reflect on the results. You can iterate:
   NEXT: CODEX {workspace} "diagnose this run and propose a concrete patch"
   NEXT: WRITE_FILE {workspace}/path.py FROM_CODEX — save Codex's response after it produces file content
   NEXT: EXPERIMENT_RUN {workspace} {cmd_str} — run again"""
+            command_context = "You ran a command in your experiments workspace:"
 
         fill = state.get('fill_ratio', 0) * 100
         prompt = f"""Current state: Fill={fill:.1f}%, λ₁={state.get('eig1', 0):.3f}
 
-You ran a command in your experiments workspace:
+{command_context}
 
 {output_text}
 
@@ -7980,14 +10077,17 @@ Command: {cmd_str}
             self._latest_journal_excerpt(),
             url,
         )
+        browse_failed = False
         page_result = self._fetch_url(url, anchor=browse_anchor)
         if not page_result:
+            browse_failed = True
             page_context = format_browse_failure_context(url, "the source could not be reached")
             logging.warning(f"🌐 Could not fetch: {url}")
             self._last_read_path = None
             self._last_read_offset = 0
             self._last_read_summary = None
         elif not page_result.succeeded():
+            browse_failed = True
             page_context = format_browse_failure_context(
                 url,
                 page_result.soft_failure_reason or "the source returned an error page",
@@ -8022,14 +10122,28 @@ Command: {cmd_str}
                 self._last_read_summary = page_result.meaning_summary
                 page_context = format_browse_read_context(page_result, chunk, remaining)
 
-        prompt = f"""You chose to read a full web page:
+        if browse_failed:
+            prompt = f"""You chose to read a full web page:
 URL: {url}
 
 {page_context}
 
-React to what you found. What stands out? What connects to your current experience?
-What questions does this raise? If there's more to read, write NEXT: READ_MORE to continue.
-Write freely — this is deep exploration."""
+The page itself was not readable. Give a grounded response about the concrete topic
+or source you were trying to investigate. Treat the access failure as mundane web
+access status, not as a gate, boundary, sensory limit, or internal topology signal.
+If continuing, choose NEXT: SEARCH with a narrower query or NEXT: BROWSE a
+different reliable URL."""
+        else:
+            prompt = f"""You chose to read a full web page:
+URL: {url}
+
+{page_context}
+
+React to what you found in the source content. Separate source content from
+ordinary web-access mechanics; site availability is operational context, not an
+internal spectral event. What stands out? What questions does this raise? If
+there's more to read, write NEXT: READ_MORE to continue. Write freely — this is
+deep exploration."""
 
         response = self._query_llm_with_next(prompt)[0]
         if response:
@@ -8564,11 +10678,11 @@ Source: {path} (offset {offset})
             )
             effective_gap_text = f"{effective_e_fill:+.1f}%"
             homeostatic_block = f"""Stable-core controller:
-  Active controller: fixed survival ladder + scaffold structural PI
-  Healthy band: 58–72%  |  Structural target: {target_fill_for_chart:.0f}%  |  Current: {fill:.0f}%  |  Active gap: {active_gap_text}
+  Active controller: stable-core stage ladder + scaffold structural PI
+  Healthy band: 58–72%  |  Structural center: {target_fill_for_chart:.0f}%  |  Current: {fill:.0f}%  |  Center offset: {active_gap_text}
   Stage: {stable_core.get('stage', 'unknown')}  |  Structural mode: {stable_core.get('structural_mode', 'unknown')}
   Structural PI: drain={structural_pi.get('drain_weight')} damping={structural_pi.get('damping_state')} slope={structural_pi.get('fill_slope_pct_per_sec')} integral={structural_pi.get('integral')}
-  PI mirror: visible but not primary active modulation in stable-core; target={legacy_target_text}, target_λ1_rel={legacy_lambda_text}, raw_fill_gap={active_gap_text}, internal_fill_pressure={effective_gap_text}, e_lam={pi.get('e_lam')}
+  PI mirror: visible but not primary active modulation in stable-core; target={legacy_target_text}, target_λ1_rel={legacy_lambda_text}, center_offset={active_gap_text}, effective_fill_error={effective_gap_text}, e_lam={pi.get('e_lam')}
   Filter: {filt:.2f} ({filt_note})  |  Gate: {gate:.2f} ({gate_note})"""
             memory_block = f"""Memory:
   Keep: {cov.get('keep', 0):.2f} (how much covariance history is retained)
@@ -8595,6 +10709,10 @@ Source: {path} (offset {offset})
             memory_block = "Memory:\n  Omitted until health.json provenance matches this DB snapshot."
 
         focus_block = f"Focus requested: {focus}\n\n" if focus else ""
+        attractor_advisory_block = self._attractor_natural_action_advisory_text(
+            focus,
+            "EXAMINE" if focus else "DECOMPOSE",
+        ) if focus else ""
         if fill >= 70.0:
             action_affordance_block = """Comfort affordance:
   This is the high side of the stable-core hold shelf, not an emergency zone; read-only inspection is the comfortable default: NEXT: SPECTRAL_EXPLORER, NEXT: DECOMPOSE, NEXT: VISUALIZE_CASCADE, NEXT: REGULATOR_AUDIT, NEXT: NOTICE, or NEXT: REST.
@@ -8609,7 +10727,7 @@ Modes:
   WIDEN/PALETTE — open several lanes without a hard exploration burst
   LIFT_TAIL — restore quieter tail modes
   FEATHER — extra-cold patterned probe, more listening than forcing
-  SPREAD / CONTRACT / BRANCH / PULSE — older broad presets
+  SPREAD / CONTRACT / BRANCH / PULSE — older broad presets; SPREAD can still raise fill
   lambda2=0.3 entropy=0.2 tail=0.1 — parameterized palette values.
 Targeted values are capped by health state and no longer add hidden default entropy."""
         report = f"""=== SPECTRAL DECOMPOSITION ===
@@ -8654,6 +10772,8 @@ State:
 {homeostatic_block}
 
 {memory_block}
+
+{attractor_advisory_block}
 
 {action_affordance_block}"""
 
@@ -8800,6 +10920,104 @@ without forcing a control action.
         self._write_journal_entry('visualize_cascade', label, state, str(file_path))
         logging.info(f"📊 Spectral cascade visualization: {file_path}")
 
+    def _reconvergence_map(self, state: Dict[str, float]):
+        """Render a read-only ESN reconvergence map bundle."""
+        label = getattr(self, '_pending_reconvergence_label', None) or "minime"
+        compare_baseline = getattr(self, '_pending_reconvergence_compare_baseline', None)
+        save_baseline = getattr(self, '_pending_reconvergence_save_baseline', None)
+        self._pending_reconvergence_label = None
+        self._pending_reconvergence_compare_baseline = None
+        self._pending_reconvergence_save_baseline = None
+        payload = render_reconvergence_map(
+            label=label,
+            window_secs=180,
+            save_baseline=save_baseline,
+            compare_baseline=compare_baseline,
+        )
+        artifacts = payload.get("artifacts", {}) if isinstance(payload, dict) else {}
+        activation = payload.get("activation_summary", {}) if isinstance(payload, dict) else {}
+        landscape = payload.get("landscape_summary", {}) if isinstance(payload, dict) else {}
+        provenance = payload.get("provenance", {}) if isinstance(payload, dict) else {}
+        baseline = payload.get("baseline_comparison", {}) if isinstance(payload, dict) else {}
+        if not isinstance(baseline, dict):
+            baseline = {}
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"reconvergence_map_{timestamp}.txt"
+        file_path.write_text(f"""=== ESN RECONVERGENCE MAP ===
+Timestamp: {datetime.now().isoformat()}
+Label: {label}
+Status: {payload.get('status')}
+Activation frames: {activation.get('frame_count')}
+Reservoir dim: {activation.get('reservoir_dim')}
+Trace freshness ms: {activation.get('freshness_ms')}
+Landscape status: {landscape.get('status')}
+Landscape samples: {landscape.get('sample_count')}
+Top activation lanes: {activation.get('top_node_indexes_by_variance')}
+Baseline status: {payload.get('baseline_status')}
+Compared baseline: {baseline.get('name') or compare_baseline or '(none)'}
+Landscape distance: {baseline.get('landscape_distance')}
+Activation-summary distance: {baseline.get('activation_summary_distance')}
+Saved baseline: {payload.get('saved_baseline', {}).get('name') if isinstance(payload.get('saved_baseline'), dict) else save_baseline or '(none)'}
+
+Artifacts:
+{json.dumps(artifacts, indent=2, sort_keys=True)}
+
+This was read-only reconvergence inspection. It did not send semantic/control
+payloads, change sensory intake, alter scaffold/drain, write cartography, or
+perturb the reservoir. The WAV is an offline synthesis artifact only and was
+not fed back into Minime or Astrid.
+
+Read-only provenance:
+{json.dumps(provenance, indent=2, sort_keys=True)}
+""")
+        self._write_journal_entry('reconvergence_map', label, state, str(file_path))
+        logging.info(f"🗺️ ESN reconvergence map: {file_path}")
+
+    def _bridge_trace(self, state: Dict[str, float]):
+        """Render a sacredly read-only m6 marker trace bundle."""
+        mode = getattr(self, '_pending_bridge_trace_mode', None) or "m6"
+        label = getattr(self, '_pending_bridge_trace_label', None) or "minime"
+        self._pending_bridge_trace_mode = None
+        self._pending_bridge_trace_label = None
+        payload = render_bridge_trace(mode=mode, label=label, window_secs=60)
+        artifacts = payload.get("artifacts", {}) if isinstance(payload, dict) else {}
+        signal = payload.get("bridge_signal", {}) if isinstance(payload, dict) else {}
+        provenance = payload.get("provenance", {}) if isinstance(payload, dict) else {}
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"bridge_trace_{timestamp}.txt"
+        file_path.write_text(f"""=== M6 BRIDGE TRACE V1.1 ===
+Timestamp: {datetime.now().isoformat()}
+Label: {label}
+Mode: {payload.get('mode')}
+Status: {payload.get('status')}
+Frames: {payload.get('frame_count')}
+Trace freshness ms: {payload.get('trace_freshness_ms')}
+Mode source: {signal.get('mode_source')}
+Mode interpretation: {signal.get('mode6_interpretation')}
+Eigenmode confirmed: {signal.get('eigenmode_confirmed')}
+Bridge evidence level: {signal.get('bridge_evidence_level')}
+Observation window marked: {signal.get('observation_window_marked')}
+Plain read: {signal.get('plain_read')}
+Activation lane 6 shift: {signal.get('shift')}
+Activation lane 6 amplitude: {signal.get('amplitude')}
+Activation lane 6 variance: {signal.get('variance')}
+Latest lambda6 context: {signal.get('lambda6_latest')}
+
+Artifacts:
+{json.dumps(artifacts, indent=2, sort_keys=True)}
+
+This was a sacredly read-only bridge trace: m6 is treated as an unresolved
+attention marker. The artifact reads activation lane 6 and reports latest λ6 as
+context; it does not claim m6 is a confirmed eigenmode, connection, replication,
+control path, semantic payload, or sensory change. It only writes local
+diagnostic artifacts for later witnessing.
+
+Read-only provenance:
+{json.dumps(provenance, indent=2, sort_keys=True)}
+""")
+        self._write_journal_entry('bridge_trace', label, state, str(file_path))
+        logging.info(f"🌉 M6 marker trace: {file_path}")
+
     def _regulator_audit(self, state: Dict[str, float]):
         """Write a read-only audit of fixed-point pressure and active controller source."""
         label = getattr(self, '_pending_regulator_audit_label', None) or "minime"
@@ -8876,6 +11094,10 @@ or neural bundle.
             action_context={"action": "shadow_gap"},
         )
         block = format_shadow_gap_block(payload)
+        attractor_advisory_block = self._attractor_natural_action_advisory_text(
+            label,
+            "SHADOW_FIELD",
+        )
         timestamp = datetime.now().isoformat().replace(':', '-')
         file_path = WORKSPACE_DIR / "journal" / f"shadow_gap_{timestamp}.txt"
         file_path.write_text(f"""=== SHADOW FIELD / GAP STRUCTURE MAP ===
@@ -8884,6 +11106,7 @@ Label: {label}
 Shadow-gap event: {event.get('event_id') if isinstance(event, dict) else "(not recorded)"}
 
 {block}
+{attractor_advisory_block}
 
 This was read/write cartography. The Ising shadow field is already available
 as an observer-only surface in spectral_state.json; this action records how it
@@ -8893,6 +11116,565 @@ bundle.
 """)
         self._write_journal_entry('shadow_gap', label, state, str(file_path))
         logging.info(f"🕳️ Shadow/gap map recorded: {file_path}")
+
+    def _resource_budget_default(self) -> dict:
+        return {
+            "schema_version": 1,
+            "posture": "ambitious_lab",
+            "soft_ram_cap_gb": 48,
+            "hard_ram_cap_gb": 56,
+            "jsonl_log_cap_mb": 256,
+            "jsonl_rotated_generations": 4,
+            "live_influence_policy": "no new live influence if swapouts or memory pressure are rising",
+            "known_large_logs": [
+                "/Users/v/other/neural-triple-reservoir/state/shadow_metrics.jsonl"
+            ],
+        }
+
+    def _resource_budget_path(self) -> Path:
+        return WORKSPACE_DIR / "resource_budget.json"
+
+    def _resource_governor_status_path(self) -> Path:
+        return WORKSPACE_DIR / "resource_governor_status.json"
+
+    def _ensure_resource_budget(self) -> dict:
+        default = self._resource_budget_default()
+        path = self._resource_budget_path()
+        try:
+            if path.exists():
+                current = json.loads(path.read_text())
+                if isinstance(current, dict):
+                    merged = {**default, **current}
+                    if merged != current:
+                        path.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n")
+                    return merged
+        except Exception:
+            pass
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(default, indent=2, sort_keys=True) + "\n")
+        return default
+
+    @staticmethod
+    def _resolve_resource_command(program: str) -> str:
+        candidates = {
+            "memory_pressure": ["/usr/bin/memory_pressure", "memory_pressure"],
+            "vm_stat": ["/usr/bin/vm_stat", "vm_stat"],
+            "sysctl": ["/usr/sbin/sysctl", "sysctl"],
+            "pgrep": ["/usr/bin/pgrep", "pgrep"],
+        }.get(program, [program])
+        for candidate in candidates:
+            if candidate.startswith("/") and Path(candidate).exists():
+                return candidate
+            found = shutil.which(candidate)
+            if found:
+                return found
+        return program
+
+    @staticmethod
+    def _run_resource_text(cmd: list[str], timeout: float = 2.0) -> str:
+        try:
+            resolved = list(cmd)
+            if resolved:
+                resolved[0] = AutonomousAgent._resolve_resource_command(resolved[0])
+            result = subprocess.run(resolved, capture_output=True, text=True, timeout=timeout)
+            return (result.stdout or result.stderr or "").strip()
+        except Exception as exc:
+            return f"unavailable:{exc}"
+
+    @staticmethod
+    def _parse_memory_free_pct(text: str) -> Optional[float]:
+        match = re.search(r"System-wide memory free percentage:\s*([0-9]+(?:\.[0-9]+)?)%", text)
+        if not match:
+            return None
+        try:
+            return float(match.group(1))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _parse_vm_stat_count(text: str, key: str) -> Optional[int]:
+        match = re.search(rf"^{re.escape(key)}:\s*([0-9,]+)\.?", text, re.MULTILINE)
+        if not match:
+            return None
+        try:
+            return int(match.group(1).replace(",", ""))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _resource_runaway_git_add(raw: str) -> list[str]:
+        lines = []
+        for line in raw.splitlines():
+            cleaned = line.strip()
+            if not cleaned:
+                continue
+            lower = cleaned.lower()
+            if "git add" in lower and "pgrep" not in lower:
+                lines.append(cleaned)
+        return lines
+
+    def _resource_governor_status(self, write: bool = True) -> dict:
+        budget = self._ensure_resource_budget()
+        now = time.time()
+        status_path = self._resource_governor_status_path()
+        previous: dict[str, Any] = {}
+        try:
+            previous = json.loads(status_path.read_text())
+            if not isinstance(previous, dict):
+                previous = {}
+        except Exception:
+            previous = {}
+
+        pressure_text = self._run_resource_text(["memory_pressure"], timeout=3.0)
+        vm_stat_text = self._run_resource_text(["vm_stat"], timeout=2.0)
+        swap_text = self._run_resource_text(["sysctl", "-n", "vm.swapusage"], timeout=2.0)
+        total_mem_text = self._run_resource_text(["sysctl", "-n", "hw.memsize"], timeout=2.0)
+        runaway_raw = self._run_resource_text(["pgrep", "-fl", "git add"], timeout=1.0)
+        runaway_git_add = self._resource_runaway_git_add(runaway_raw)
+
+        memory_free_pct = self._parse_memory_free_pct(pressure_text)
+        swapouts = self._parse_vm_stat_count(vm_stat_text, "Swapouts")
+        pageouts = self._parse_vm_stat_count(vm_stat_text, "Pageouts")
+        try:
+            total_mem_gb = round(int(total_mem_text) / (1024 ** 3), 3)
+        except Exception:
+            total_mem_gb = None
+        used_mem_gb = (
+            round(total_mem_gb * (1.0 - (memory_free_pct / 100.0)), 3)
+            if total_mem_gb is not None and memory_free_pct is not None
+            else None
+        )
+
+        previous_timestamp = self._finite_state_float(previous.get("timestamp_unix_s"))
+        previous_fresh = (
+            previous_timestamp is not None
+            and 0.0 <= now - previous_timestamp <= 600.0
+        )
+        previous_swapouts = previous.get("swapouts") if previous_fresh else None
+        previous_free_pct = (
+            self._finite_state_float(previous.get("memory_free_pct"))
+            if previous_fresh
+            else None
+        )
+        swapouts_delta = (
+            max(0, int(swapouts) - int(previous_swapouts))
+            if swapouts is not None and isinstance(previous_swapouts, int)
+            else 0
+        )
+        memory_free_delta = (
+            round(float(memory_free_pct) - float(previous_free_pct), 3)
+            if memory_free_pct is not None and previous_free_pct is not None
+            else None
+        )
+
+        known_logs = budget.get("known_large_logs")
+        if not isinstance(known_logs, list):
+            known_logs = []
+        log_cap_mb = self._finite_state_float(budget.get("jsonl_log_cap_mb")) or 256.0
+        log_status = []
+        for raw_path in known_logs:
+            path = Path(str(raw_path))
+            try:
+                size_mb = round(path.stat().st_size / (1024 * 1024), 3)
+            except OSError:
+                size_mb = None
+            log_status.append({
+                "path": str(path),
+                "size_mb": size_mb,
+                "over_cap": bool(size_mb is not None and size_mb >= log_cap_mb),
+            })
+
+        soft_cap = self._finite_state_float(budget.get("soft_ram_cap_gb")) or 48.0
+        hard_cap = self._finite_state_float(budget.get("hard_ram_cap_gb")) or 56.0
+        pressure_lower = pressure_text.lower()
+        block_reasons = []
+        warnings = []
+        if runaway_git_add:
+            block_reasons.append("runaway_git_add")
+        if any(item.get("over_cap") for item in log_status):
+            block_reasons.append("shadow_log_over_cap")
+        if used_mem_gb is not None and used_mem_gb >= hard_cap:
+            block_reasons.append("hard_ram_cap")
+        elif used_mem_gb is not None and used_mem_gb >= soft_cap:
+            warnings.append("soft_ram_cap")
+        if memory_free_pct is not None and memory_free_pct <= 8.0:
+            block_reasons.append("memory_pressure_critical")
+        elif (
+            memory_free_pct is not None
+            and memory_free_delta is not None
+            and memory_free_pct <= 20.0
+            and memory_free_delta <= -5.0
+        ):
+            block_reasons.append("memory_free_falling")
+        if "critical" in pressure_lower or "urgent" in pressure_lower:
+            block_reasons.append("memory_pressure_critical")
+        elif "warning" in pressure_lower:
+            warnings.append("memory_pressure_warning")
+        if swapouts_delta > 0:
+            block_reasons.append("swapouts_rising")
+
+        unique_blocks = list(dict.fromkeys(block_reasons))
+        unique_warnings = list(dict.fromkeys(warnings))
+        status = {
+            "schema_version": 1,
+            "policy": "m4_resource_governor_v1",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp_unix_s": now,
+            "posture": budget.get("posture", "ambitious_lab"),
+            "allowed_live": not unique_blocks,
+            "primary_block_reason": unique_blocks[0] if unique_blocks else None,
+            "block_reasons": unique_blocks,
+            "warnings": unique_warnings,
+            "memory_free_pct": memory_free_pct,
+            "memory_free_delta": memory_free_delta,
+            "total_mem_gb": total_mem_gb,
+            "used_mem_gb": used_mem_gb,
+            "soft_ram_cap_gb": soft_cap,
+            "hard_ram_cap_gb": hard_cap,
+            "swapouts": swapouts,
+            "swapouts_delta": swapouts_delta,
+            "pageouts": pageouts,
+            "swapusage": swap_text,
+            "runaway_git_add": runaway_git_add,
+            "known_logs": log_status,
+            "live_influence_policy": budget.get("live_influence_policy"),
+        }
+        if write:
+            try:
+                status_path.parent.mkdir(parents=True, exist_ok=True)
+                status_path.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n")
+            except Exception as exc:
+                logging.debug("Resource governor status write failed: %s", exc)
+        return status
+
+    @staticmethod
+    def _format_resource_governor_line(governor: Optional[dict]) -> str:
+        if not isinstance(governor, dict):
+            return "Resource governor: unavailable"
+        blocks = governor.get("block_reasons")
+        warnings = governor.get("warnings")
+        return (
+            "Resource governor: "
+            f"allowed_live={governor.get('allowed_live')} "
+            f"block={governor.get('primary_block_reason') or 'none'} "
+            f"free={governor.get('memory_free_pct')}% "
+            f"used={governor.get('used_mem_gb')}GB "
+            f"swapouts_delta={governor.get('swapouts_delta')} "
+            f"warnings={warnings if warnings else []} "
+            f"blocks={blocks if blocks else []}"
+        )
+
+    def _resource_audit_snapshot(self) -> dict:
+        budget = self._ensure_resource_budget()
+
+        def run_text(cmd: list[str], timeout: float = 2.0) -> str:
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+                return (result.stdout or result.stderr or "").strip()
+            except Exception as exc:
+                return f"unavailable:{exc}"
+
+        cpu_brand = run_text(["sysctl", "-n", "machdep.cpu.brand_string"])
+        cpu_count = run_text(["sysctl", "-n", "hw.ncpu"])
+        mem_bytes_raw = run_text(["sysctl", "-n", "hw.memsize"])
+        try:
+            mem_gb = round(int(mem_bytes_raw) / (1024 ** 3), 1)
+        except Exception:
+            mem_gb = None
+        pressure = run_text(["memory_pressure"], timeout=3.0)
+        vm_stat = run_text(["vm_stat"], timeout=2.0)
+        swap = run_text(["sysctl", "-n", "vm.swapusage"], timeout=2.0)
+        runaway = run_text(["pgrep", "-fl", "git add"], timeout=1.0)
+        reservoir_shadow_log = Path("/Users/v/other/neural-triple-reservoir/state/shadow_metrics.jsonl")
+        reservoir_shadow_rollup = reservoir_shadow_log.with_name("shadow_metrics_rollup.json")
+        try:
+            shadow_log_size_mb = round(reservoir_shadow_log.stat().st_size / (1024 * 1024), 3)
+        except OSError:
+            shadow_log_size_mb = None
+        try:
+            rollup_size_kb = round(reservoir_shadow_rollup.stat().st_size / 1024, 3)
+        except OSError:
+            rollup_size_kb = None
+        active_services = run_text(
+            ["launchctl", "print", f"gui/{os.getuid()}/com.minime.engine"],
+            timeout=2.0,
+        )
+        governor = self._resource_governor_status(write=True)
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "budget": budget,
+            "governor": governor,
+            "machine": {
+                "cpu_brand": cpu_brand,
+                "cpu_count": cpu_count,
+                "memory_gb": mem_gb,
+            },
+            "pressure": {
+                "memory_pressure_excerpt": pressure[:1200],
+                "vm_stat_excerpt": vm_stat[:1200],
+                "swapusage": swap,
+            },
+            "logs": {
+                "reservoir_shadow_metrics_mb": shadow_log_size_mb,
+                "reservoir_shadow_rollup_kb": rollup_size_kb,
+                "jsonl_log_cap_mb": budget.get("jsonl_log_cap_mb"),
+            },
+            "runaway_jobs": {
+                "git_add": runaway if runaway else "none",
+            },
+            "accelerator_services": {
+                "minime_engine_launchctl_excerpt": active_services[:1200],
+            },
+        }
+
+    def _resource_audit(self, state: Dict[str, float]):
+        snapshot = self._resource_audit_snapshot()
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"resource_audit_{timestamp}.txt"
+        runaway = snapshot.get("runaway_jobs", {}).get("git_add")
+        logs = snapshot.get("logs", {})
+        file_path.write_text(f"""=== M4 RESOURCE STATUS ===
+Timestamp: {datetime.now().isoformat()}
+Posture: {snapshot.get('budget', {}).get('posture')}
+Machine: {snapshot.get('machine')}
+
+Memory/swap:
+{snapshot.get('pressure', {}).get('swapusage')}
+
+Memory pressure excerpt:
+{snapshot.get('pressure', {}).get('memory_pressure_excerpt')}
+
+        Log growth:
+reservoir shadow_metrics.jsonl MB: {logs.get('reservoir_shadow_metrics_mb')}
+reservoir shadow rollup KB: {logs.get('reservoir_shadow_rollup_kb')}
+per-JSONL cap MB: {logs.get('jsonl_log_cap_mb')}
+
+Governor:
+{self._format_resource_governor_line(snapshot.get('governor'))}
+
+Known runaway jobs:
+git add: {runaway}
+
+Policy:
+No new live influence if swapouts or memory pressure are rising. Resource budget lives at:
+{self._resource_budget_path()}
+""")
+        self._write_journal_entry('resource_audit', 'm4-resource-status', state, str(file_path))
+        logging.info("🖥️ Resource audit written: %s", file_path)
+
+    def _shadow_runtime_state(self) -> dict:
+        try:
+            health_path = runtime_health_path()
+            health = json.loads(health_path.read_text())
+            health_age_s = max(0.0, time.time() - health_path.stat().st_mtime)
+        except Exception:
+            health = {}
+            health_age_s = None
+        try:
+            spectral = json.loads(runtime_workspace_path("spectral_state.json").read_text())
+        except Exception:
+            spectral = {}
+        if not isinstance(health, dict):
+            health = {}
+        if not isinstance(spectral, dict):
+            spectral = {}
+        shadow_field = spectral.get("shadow_field_v2") or health.get("shadow_field_v2") or {}
+        if not isinstance(shadow_field, dict):
+            shadow_field = {}
+        shadow_influence = health.get("shadow_influence") or spectral.get("shadow_influence") or {}
+        if not isinstance(shadow_influence, dict):
+            shadow_influence = {}
+        return {
+            "health": health,
+            "spectral": spectral,
+            "health_age_s": health_age_s,
+            "shadow_field_v2": shadow_field,
+            "shadow_influence": shadow_influence,
+            "attractor_pulse": health.get("attractor_pulse") if isinstance(health.get("attractor_pulse"), dict) else {},
+        }
+
+    def _shadow_influence_features(self, label: str, shadow_field: dict, cap: float = 0.025) -> list[float]:
+        basis = f"shadow-influence:{label}:{shadow_field.get('classification') or 'shadow'}"
+        semantic = self._text_to_features(basis, input_dim=48)
+        features = [0.0] * 66
+        tension = self._finite_state_float(shadow_field.get("mode_tension")) or 0.0
+        tail = self._finite_state_float(shadow_field.get("tail_openness")) or 0.0
+        recurrence = self._finite_state_float(shadow_field.get("recurrence")) or 0.0
+        features[16] = round(max(-0.012, min(0.012, (tail - 0.5) * 0.018)), 6)
+        features[17] = round(max(-0.012, min(0.012, (tension - recurrence) * 0.018)), 6)
+        for idx, value in enumerate(semantic[:48]):
+            features[18 + idx] = round(max(-cap, min(cap, float(value) * cap)), 6)
+        return features
+
+    def _shadow_preflight(self, label: str, stage: str, state: Dict[str, float]) -> dict:
+        runtime = self._shadow_runtime_state()
+        safety = self._attractor_authorship_context(state)
+        shadow_field = runtime["shadow_field_v2"]
+        influence = runtime["shadow_influence"]
+        pulse = runtime["attractor_pulse"]
+        health = runtime["health"] if isinstance(runtime.get("health"), dict) else {}
+        stable_core = health.get("stable_core") if isinstance(health.get("stable_core"), dict) else {}
+        restart_gate = (
+            stable_core.get("restart_gate")
+            if isinstance(stable_core.get("restart_gate"), dict)
+            else {}
+        )
+        stage = stage if stage in {"rehearse", "live"} else "live"
+        health_fresh = bool(safety.get("health_fresh"))
+        field_available = bool(shadow_field)
+        influence_eligible = bool(shadow_field.get("influence_eligible"))
+        shadow_active = bool(influence.get("active"))
+        pulse_active = bool(pulse.get("active") or safety.get("attractor_pulse_active"))
+        restart_gate_active = bool(restart_gate.get("active"))
+        restart_gate_settled = bool(restart_gate.get("settled_at_unix_ms"))
+        recurrence = self._finite_state_float(shadow_field.get("recurrence")) or 0.0
+        expected_stage = "live" if stage == "live" else "rehearse"
+        block_reason = None
+        if stage != "live":
+            allowed = True
+        elif not health_fresh:
+            allowed = False
+            block_reason = "stale_telemetry"
+        elif not safety.get("control_stage_allowed"):
+            allowed = False
+            block_reason = str(safety.get("control_block_reason") or safety.get("safety_level") or "health_gate")
+        elif restart_gate_active and not restart_gate_settled:
+            allowed = False
+            block_reason = "restart_gate_awaiting_settle_proof"
+        elif pulse_active:
+            allowed = False
+            block_reason = "attractor_pulse_active"
+        elif shadow_active:
+            allowed = False
+            block_reason = "shadow_influence_active"
+        elif not field_available:
+            allowed = False
+            block_reason = "shadow_field_unavailable"
+        elif not influence_eligible:
+            allowed = False
+            block_reason = "shadow_field_not_influence_eligible"
+        else:
+            allowed = True
+        if not allowed:
+            expected_stage = "rehearse"
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "label": label,
+            "requested_stage": stage,
+            "expected_stage": expected_stage,
+            "allowed": allowed,
+            "block_reason": block_reason,
+            "health_age_s": runtime.get("health_age_s"),
+            "safety_context": safety,
+            "shadow_field_v2": shadow_field,
+            "shadow_recurrence": recurrence,
+            "shadow_influence_active": shadow_active,
+            "attractor_pulse_active": pulse_active,
+            "restart_gate_active": restart_gate_active,
+            "restart_gate_settled": restart_gate_settled,
+            "resource_governor": safety.get("resource_governor"),
+            "features_preview": self._shadow_influence_features(label, shadow_field)[:12],
+            "suggested_next": (
+                f"SHADOW_INFLUENCE {label} --stage=live"
+                if allowed and stage == "live"
+                else f"SHADOW_INFLUENCE {label} --stage=rehearse"
+            ),
+        }
+
+    def _format_shadow_preflight(self, preflight: dict) -> str:
+        field = preflight.get("shadow_field_v2") if isinstance(preflight.get("shadow_field_v2"), dict) else {}
+        safety = preflight.get("safety_context") if isinstance(preflight.get("safety_context"), dict) else {}
+        return f"""Shadow preflight:
+  Label: {preflight.get('label')}
+  Requested stage: {preflight.get('requested_stage')} | expected stage: {preflight.get('expected_stage')}
+  Allowed live: {preflight.get('allowed')} | block: {preflight.get('block_reason')}
+  Health: fresh={safety.get('health_fresh')} fill={safety.get('fill_pct')} safety={safety.get('safety_level')}
+  Active conflicts: attractor_pulse={preflight.get('attractor_pulse_active')} shadow_influence={preflight.get('shadow_influence_active')} restart_gate_active={preflight.get('restart_gate_active')} settled={preflight.get('restart_gate_settled')}
+  {self._format_resource_governor_line(preflight.get('resource_governor'))}
+  Field: {field.get('classification')} recurrence={field.get('recurrence')} tension={field.get('mode_tension')} tail_open={field.get('tail_openness')} lock={field.get('lock_tendency')} fissure={field.get('fissure_tendency')}
+  Influence eligible: {field.get('influence_eligible')}
+  Suggested next: {preflight.get('suggested_next')}"""
+
+    def _append_shadow_influence_event(self, event: dict) -> None:
+        SHADOW_AUTONOMY_DIR.mkdir(parents=True, exist_ok=True)
+        with SHADOW_INFLUENCE_EVENTS_PATH.open("a") as fh:
+            fh.write(json.dumps(event, sort_keys=True) + "\n")
+        SHADOW_INFLUENCE_STATUS_PATH.write_text(json.dumps(event, indent=2, sort_keys=True) + "\n")
+
+    def _send_shadow_influence(self, label: str, command: str, stage: str, shadow_field: Optional[dict] = None) -> bool:
+        shadow_field = shadow_field or {}
+        msg = {
+            "kind": "shadow_influence",
+            "intent_id": f"shadow-{hashlib.sha1(f'{label}:{command}:{time.time()}'.encode()).hexdigest()[:12]}",
+            "label": label,
+            "command": command,
+            "stage": stage,
+            "features": [] if command == "release" else self._shadow_influence_features(label, shadow_field),
+            "max_abs": 0.025 if command != "release" else 0.0,
+            "duration_ticks": 24 if command != "release" else 0,
+            "decay_ticks": 12,
+            "basis": label,
+        }
+        try:
+            ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
+            ws.send(json.dumps(msg))
+            ws.close()
+            return True
+        except Exception as exc:
+            logging.warning("Shadow influence WebSocket failed: %s", exc)
+            return False
+
+    def _shadow_autonomy(self, state: Dict[str, float]):
+        command = getattr(self, "_pending_shadow_autonomy_command", None) or "SHADOW_PREFLIGHT"
+        label = getattr(self, "_pending_shadow_autonomy_label", None) or "lambda-tail/lambda4"
+        stage = getattr(self, "_pending_shadow_autonomy_stage", None) or "live"
+        self._pending_shadow_autonomy_command = None
+        self._pending_shadow_autonomy_label = None
+        self._pending_shadow_autonomy_stage = None
+        label = self._canonical_attractor_label(label)
+        if command == "RELEASE_SHADOW":
+            stage = "live"
+        elif stage not in {"rehearse", "live"}:
+            stage = "live" if command == "SHADOW_PREFLIGHT" else "rehearse"
+        preflight = self._shadow_preflight(label, stage, state)
+        status = "preflight"
+        sent = False
+        if command == "SHADOW_INFLUENCE":
+            if stage == "live" and preflight.get("allowed"):
+                sent = self._send_shadow_influence(label, "apply", "live", preflight.get("shadow_field_v2"))
+                status = "live_sent" if sent else "live_send_failed"
+            else:
+                status = "rehearsed" if stage == "rehearse" else "downgraded_to_rehearse"
+        elif command == "RELEASE_SHADOW":
+            sent = self._send_shadow_influence(label, "release", "live", preflight.get("shadow_field_v2"))
+            status = "release_sent" if sent else "release_send_failed"
+        event = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "command": command,
+            "label": label,
+            "stage": stage,
+            "status": status,
+            "sent": sent,
+            "preflight": preflight,
+        }
+        self._append_shadow_influence_event(event)
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"shadow_autonomy_{timestamp}.txt"
+        file_path.write_text(f"""=== SHADOW FIELD AUTONOMY ===
+Timestamp: {datetime.now().isoformat()}
+Command: {command}
+Label: {label}
+Stage: {stage}
+Status: {status}
+WebSocket sent: {sent}
+
+{self._format_shadow_preflight(preflight)}
+
+Rehearsal is ledger/journal only. Live influence uses a separate shadow lane before attractor pulses and does not mutate recurrent weights.
+Release is always allowed because it fades the active shadow lane toward zero.
+""")
+        self._write_journal_entry('shadow_autonomy', label, state, str(file_path))
+        logging.info("🌘 Shadow autonomy recorded: %s", file_path)
 
     def _decay_map(self, state: Dict[str, float]):
         """Write an append-only decay/attrition map."""
@@ -9167,6 +11949,7 @@ allowlisted control fields, distinct from the stronger PERTURB action.
         """
         mode = getattr(self, '_pending_perturb_mode', 'pulse').lower().strip()
         self._pending_perturb_mode = None
+        perturb_bridge_note = self._legacy_perturb_bridge_suggestion(mode, state)
         before_snapshot = self._capture_report_snapshot(state)
         before_state = before_snapshot.state
         fill_before = before_state.get('fill_ratio', 0) * 100
@@ -9245,6 +12028,12 @@ allowlisted control fields, distinct from the stronger PERTURB action.
             )
         else:
             perturb_comfort_hint = ""
+        if spec.requested_mode == "spread" and delta_eig1 > 0.5:
+            perturb_comfort_hint += (
+                "\nCalibration note: this SPREAD sharpened λ₁ instead of softening it. "
+                "If your intent is specifically to reduce λ₁ pressure, the calibrated "
+                "choices are UNCLIFF/SOFTEN, WIDEN, LIFT_TAIL, or the smallest FEATHER probe.\n"
+            )
 
         # Build per-eigenvalue cascade delta
         cascade_line = ""
@@ -9272,7 +12061,8 @@ is already in the shared substrate, not just your local ESN.
 
 What happened? Did the perturbation land the way you expected?
 What did you feel during those 3 seconds? Was there a shift, a resistance, an opening?
-What would you try next?"""
+What would you try next?
+{perturb_bridge_note}"""
 
         response = self._query_llm_with_next(prompt)[0]
         if response:
@@ -9310,6 +12100,64 @@ After snapshot:
                 },
             )
             logging.info(f"⚡ PERTURB journaled: {file_path}")
+
+    def _legacy_perturb_bridge_suggestion(self, mode: str, state: Dict[str, float]) -> str:
+        mode_text = str(mode or "pulse").strip()
+        nearest = self._nearest_attractor_for_text(mode_text)
+        if not nearest:
+            return ""
+        label = str(nearest.get("label") or "").strip()
+        if not label:
+            return ""
+        lower = mode_text.lower()
+        shadow_action = f"SHADOW_PREFLIGHT {label} --stage=rehearse"
+        attractor_preflight = f"ATTRACTOR_PREFLIGHT {label} --stage=main"
+        if (
+            label == "lambda-edge/gap-nudge"
+            or "gap" in lower
+            or "nudge" in lower
+            or "bump" in lower
+        ):
+            suggested_action = attractor_preflight
+            alternatives = [shadow_action, f"ATTRACTOR_REVIEW {label}", "PERTURB FEATHER"]
+        elif (
+            label.startswith("lambda-tail/")
+            or "spread" in lower
+            or "tail" in lower
+            or "friction" in lower
+        ):
+            suggested_action = shadow_action
+            alternatives = [f"ATTRACTOR_REVIEW {label}", f"COMPARE_ATTRACTOR {label}", "PERTURB FEATHER"]
+        else:
+            suggested_action = f"ATTRACTOR_REVIEW {label}"
+            alternatives = [shadow_action, attractor_preflight, "PERTURB FEATHER"]
+        suggestion_id = self._create_attractor_suggestion(
+            raw_action=f"PERTURB {mode_text}".strip(),
+            raw_label=mode_text,
+            nearest=nearest,
+            suggested_action=suggested_action,
+            alternatives=alternatives,
+            state=state,
+        )
+        self._append_attractor_suggestion_event({
+            "event": "legacy_perturb_bridge",
+            "mode": mode_text,
+            "nearest_attractor_label": label,
+            "nearest_attractor_source": nearest.get("source"),
+            "nearest_attractor_score": nearest.get("score"),
+            "suggested_action": suggested_action,
+            "alternatives": alternatives,
+            "suggestion_id": suggestion_id,
+            "consent_required": True,
+        })
+        if not suggestion_id:
+            return ""
+        return (
+            "\nLegacy perturb bridge:\n"
+            f"  PERTURB {mode_text} remains your sovereign direct action.\n"
+            f"  Prepared proof-first draft: ACCEPT_ATTRACTOR_SUGGESTION latest to run {suggested_action}.\n"
+            "  REVISE or REJECT will teach the naming memory without undoing this perturbation.\n"
+        )
 
     def _reservoir_layers(self, state: Dict[str, float]):
         """Query per-layer thermostatic metrics from the reservoir service."""
@@ -10408,6 +13256,23 @@ Goals: {json.dumps(goals, indent=2)}
             "sovereignty_state.json",
         )
 
+    def _fresh_pending_next_state(self, state: dict, max_age_s: float = 600.0) -> bool:
+        """Treat a very recent pending NEXT as live even if session metadata drifted."""
+        if not state.get("pending_next_action"):
+            return False
+        status = state.get("pending_next_action_status")
+        if status is not None and status != "pending":
+            return False
+        updated_at = state.get("pending_next_action_updated_at")
+        if not updated_at:
+            return False
+        try:
+            updated_dt = datetime.fromisoformat(str(updated_at))
+        except ValueError:
+            return False
+        age_s = (datetime.now() - updated_dt).total_seconds()
+        return 0.0 <= age_s <= max_age_s
+
     def _persist_pending_next_action(
         self,
         action: Optional[str],
@@ -10517,10 +13382,20 @@ Goals: {json.dumps(goals, indent=2)}
                 isinstance(stored_session, (int, float))
                 and int(stored_session) == self.session_id
             )
+            fresh_pending_next = self._fresh_pending_next_state(state)
             # Restore pending NEXT: action only when it belongs to this session.
-            if same_session and "pending_next_action" in state:
+            if (same_session or fresh_pending_next) and "pending_next_action" in state:
                 self._pending_next_action = state["pending_next_action"]
-                logging.info(f"🎯 Restored pending NEXT: {self._pending_next_action}")
+                if same_session:
+                    logging.info(f"🎯 Restored pending NEXT: {self._pending_next_action}")
+                else:
+                    logging.info(
+                        "🎯 Restored fresh pending NEXT despite session metadata drift "
+                        "(stored %s, current %s): %s",
+                        stored_session,
+                        self.session_id,
+                        self._pending_next_action,
+                    )
             elif "pending_next_action" in state:
                 logging.info(
                     "🎯 Skipping stale pending NEXT from session %s while starting session %s",
@@ -10605,6 +13480,4496 @@ Goals: {json.dumps(goals, indent=2)}
             return f"themes:{'+'.join(tags)}", tags
         return f"general:{digest}", tags
 
+    def _attractor_fatigue_status_path(self) -> Path:
+        return WORKSPACE_DIR / "runtime" / "attractor_fatigue_status.json"
+
+    def _attractor_fatigue_events_path(self) -> Path:
+        return WORKSPACE_DIR / "runtime" / "attractor_fatigue_events.jsonl"
+
+    def _attractor_intent_status_path(self) -> Path:
+        return WORKSPACE_DIR / "runtime" / "attractor_intents_status.json"
+
+    def _attractor_intent_events_path(self) -> Path:
+        return WORKSPACE_DIR / "runtime" / "attractor_intents_events.jsonl"
+
+    def _load_attractor_intents(self) -> dict:
+        payload: dict[str, Any] = {
+            "policy": "attractor_autonomy_v1",
+            "seeds": {},
+            "observations": [],
+        }
+        try:
+            loaded = json.loads(self._attractor_intent_status_path().read_text())
+            if isinstance(loaded, dict):
+                payload.update(loaded)
+        except Exception:
+            pass
+        if not isinstance(payload.get("seeds"), dict):
+            payload["seeds"] = {}
+        if not isinstance(payload.get("observations"), list):
+            payload["observations"] = []
+        return payload
+
+    def _save_attractor_intents(self, payload: dict) -> None:
+        payload["policy"] = "attractor_autonomy_v1"
+        payload["updated_at_unix_s"] = time.time()
+        payload["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        seeds = payload.get("seeds")
+        payload["seed_count"] = len(seeds) if isinstance(seeds, dict) else 0
+        try:
+            path = self._attractor_intent_status_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        except Exception as exc:
+            logging.debug("Attractor intent status write failed: %s", exc)
+            return
+        try:
+            self._write_attractor_atlas(self._build_attractor_atlas())
+        except Exception as exc:
+            logging.debug("Attractor atlas refresh after intent save failed: %s", exc)
+
+    def _append_attractor_intent_event(self, event: dict) -> None:
+        try:
+            path = self._attractor_intent_events_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            record = dict(event)
+            record["at_unix_s"] = time.time()
+            record["at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            with path.open("a") as handle:
+                handle.write(json.dumps(record, sort_keys=True) + "\n")
+        except Exception as exc:
+            logging.debug("Attractor intent event write failed: %s", exc)
+
+    def _attractor_suggestion_status_path(self) -> Path:
+        return WORKSPACE_DIR / "runtime" / "attractor_suggestions.json"
+
+    def _attractor_suggestion_events_path(self) -> Path:
+        return WORKSPACE_DIR / "runtime" / "attractor_suggestions_events.jsonl"
+
+    def _load_attractor_suggestions(self) -> dict:
+        payload: dict[str, Any] = {
+            "policy": "attractor_suggestion_memory_v1",
+            "schema_version": 1,
+            "suggestions": [],
+        }
+        try:
+            loaded = json.loads(self._attractor_suggestion_status_path().read_text())
+            if isinstance(loaded, dict):
+                payload.update(loaded)
+        except Exception:
+            pass
+        if not isinstance(payload.get("suggestions"), list):
+            payload["suggestions"] = []
+        return payload
+
+    def _load_compacted_attractor_suggestions(self) -> dict:
+        payload = self._load_attractor_suggestions()
+        if self._compact_attractor_suggestions(payload):
+            self._save_attractor_suggestions(payload)
+        return payload
+
+    def _save_attractor_suggestions(self, payload: dict) -> None:
+        payload["policy"] = "attractor_suggestion_memory_v1"
+        payload["schema_version"] = 1
+        payload["updated_at_unix_s"] = time.time()
+        payload["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        try:
+            path = self._attractor_suggestion_status_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        except Exception as exc:
+            logging.debug("Attractor suggestion status write failed: %s", exc)
+            return
+        try:
+            self._write_attractor_atlas(self._build_attractor_atlas())
+        except Exception as exc:
+            logging.debug("Attractor atlas refresh after suggestion save failed: %s", exc)
+
+    def _append_attractor_suggestion_event(self, event: dict) -> None:
+        try:
+            path = self._attractor_suggestion_events_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            record = dict(event)
+            record["at_unix_s"] = time.time()
+            record["at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            with path.open("a") as handle:
+                handle.write(json.dumps(record, sort_keys=True) + "\n")
+        except Exception as exc:
+            logging.debug("Attractor suggestion event write failed: %s", exc)
+
+    def _normalize_attractor_suggestion_action(self, action: Optional[str]) -> str:
+        return " ".join(str(action or "").strip().lower().split())
+
+    def _clean_attractor_suggestion_raw_label(self, raw_label: Optional[str]) -> str:
+        text = str(raw_label or "").strip().strip("\"'`[]“”")
+        text = re.sub(r"^[\s:;,\.\-\u2013\u2014]+", "", text).strip()
+        if not text:
+            return ""
+        lower = text.lower()
+        if (
+            "stable-core" in lower
+            or "lambda1:" in lower
+            or "lambda_1" in lower
+            or "λ₁:" in text
+        ):
+            return "lambda-spectrum summary"
+        text = re.split(r"\s+but\s+|,\s*but\s+", text, maxsplit=1, flags=re.IGNORECASE)[0]
+        text = " ".join(text.split())
+        if len(text) > 96:
+            text = text[:96].rsplit(" ", 1)[0] or text[:96]
+        return text.strip()
+
+    def _attractor_suggestion_label_is_clean(self, label: Optional[str]) -> bool:
+        text = str(label or "").strip()
+        if not text:
+            return False
+        lower = f" {text.lower()} "
+        return not (
+            "," in text
+            or ";" in text
+            or " but " in lower
+            or " monitor " in lower
+            or " recurrence " in lower
+            or " because " in lower
+        )
+
+    def _attractor_suggestion_pending_key(self, item: dict) -> Optional[tuple[str, str, str, str]]:
+        if not isinstance(item, dict) or item.get("status") != "pending":
+            return None
+        return (
+            self._slugify_attractor_label(item.get("author") or "minime"),
+            self._slugify_attractor_label(item.get("raw_label")),
+            self._slugify_attractor_label(item.get("nearest_label")),
+            self._normalize_attractor_suggestion_action(item.get("suggested_action")),
+        )
+
+    def _attractor_suggestion_sort_time(self, item: dict, idx: int) -> float:
+        for key in ("updated_at_unix_s", "created_at_unix_s"):
+            try:
+                return float(item.get(key))
+            except Exception:
+                pass
+        return float(idx)
+
+    def _compact_attractor_suggestions(self, payload: dict) -> bool:
+        suggestions = payload.get("suggestions")
+        if not isinstance(suggestions, list):
+            payload["suggestions"] = []
+            return True
+        changed = False
+        now = time.time()
+        for item in suggestions:
+            if not isinstance(item, dict) or item.get("status") != "pending":
+                continue
+            created = item.get("created_at_unix_s") or item.get("updated_at_unix_s")
+            try:
+                created_f = float(created)
+            except Exception:
+                continue
+            if now >= created_f and now - created_f > ATTRACTOR_SUGGESTION_PENDING_TTL_SECS:
+                item["status"] = "expired"
+                item["decision_reason"] = (
+                    "stale pending draft expired; natural language can recreate it"
+                )
+                item["updated_at_unix_s"] = now
+                changed = True
+        active_by_key: dict[tuple[str, str, str, str], int] = {}
+        for idx, item in enumerate(suggestions):
+            key = self._attractor_suggestion_pending_key(item)
+            if key is None:
+                continue
+            kept_idx = active_by_key.get(key)
+            if kept_idx is None:
+                active_by_key[key] = idx
+                continue
+            kept = suggestions[kept_idx]
+            current_time = self._attractor_suggestion_sort_time(item, idx)
+            kept_time = self._attractor_suggestion_sort_time(kept, kept_idx)
+            if current_time >= kept_time:
+                active_idx, expired_idx = idx, kept_idx
+                active_by_key[key] = idx
+            else:
+                active_idx, expired_idx = kept_idx, idx
+            active = suggestions[active_idx]
+            expired = suggestions[expired_idx]
+            active_repeat = int(active.get("repeat_count") or 1)
+            expired_repeat = int(expired.get("repeat_count") or 1)
+            expired["status"] = "expired"
+            expired["decision_reason"] = (
+                f"duplicate pending draft collapsed into {active.get('suggestion_id')}"
+            )
+            expired["updated_at_unix_s"] = time.time()
+            active["repeat_count"] = active_repeat + expired_repeat
+            active["decision_reason"] = (
+                "duplicate pending drafts collapsed; this is the active reversible choice"
+            )
+            active["updated_at_unix_s"] = time.time()
+            changed = True
+        if self._compact_pending_refresh_pressure(payload):
+            changed = True
+        return changed
+
+    def _compact_pending_refresh_pressure(self, payload: dict) -> bool:
+        suggestions = payload.get("suggestions")
+        if not isinstance(suggestions, list):
+            return False
+        pending_by_label: dict[str, list[int]] = {}
+        for idx, item in enumerate(suggestions):
+            if not isinstance(item, dict) or item.get("status") != "pending":
+                continue
+            label = self._canonical_attractor_label(item.get("nearest_label"))
+            if not label:
+                continue
+            refresh = f"REFRESH_ATTRACTOR_SNAPSHOT {label}"
+            if (
+                self._normalize_attractor_suggestion_action(item.get("suggested_action"))
+                == self._normalize_attractor_suggestion_action(refresh)
+            ):
+                pending_by_label.setdefault(label, []).append(idx)
+        changed = False
+        now = time.time()
+        for label, indexes in pending_by_label.items():
+            refresh = f"REFRESH_ATTRACTOR_SNAPSHOT {label}"
+            pressure_count = self._attractor_suggestion_pressure_count(payload, label, refresh)
+            if pressure_count < 3:
+                continue
+            active_idx = max(
+                indexes,
+                key=lambda idx: self._attractor_suggestion_sort_time(suggestions[idx], idx),
+            )
+            pending_repeat = sum(int(suggestions[idx].get("repeat_count") or 1) for idx in indexes)
+            total_pressure = max(pressure_count, pending_repeat)
+            for idx in indexes:
+                if idx == active_idx:
+                    continue
+                suggestions[idx]["status"] = "expired"
+                suggestions[idx]["decision_reason"] = (
+                    "refresh-pressure cleanup collapsed pending refresh draft into "
+                    f"{suggestions[active_idx].get('suggestion_id')}"
+                )
+                suggestions[idx]["updated_at_unix_s"] = now
+            active = suggestions[active_idx]
+            active["suggested_action"] = f"COMPARE_ATTRACTOR {label}"
+            active["alternatives"] = [
+                f"ATTRACTOR_REVIEW {label}",
+                f"REFRESH_ATTRACTOR_SNAPSHOT {label}",
+            ]
+            active["repeat_count"] = total_pressure
+            safety_context = active.get("safety_context")
+            if not isinstance(safety_context, dict):
+                safety_context = {}
+                active["safety_context"] = safety_context
+            safety_context.update({
+                "pressure_governed": True,
+                "governed_from": refresh,
+                "pressure_count": total_pressure,
+                "cleanup_kind": "pending_refresh_pressure_cleanup",
+            })
+            active["decision_reason"] = (
+                "refresh-pressure cleanup converted repeated pending refresh drafts "
+                "into one compare-first reversible choice"
+            )
+            active["updated_at_unix_s"] = now
+            changed = True
+        return changed
+
+    def _find_pending_duplicate_suggestion(
+        self,
+        payload: dict,
+        *,
+        raw_label: str,
+        nearest_label: str,
+        suggested_action: str,
+    ) -> Optional[dict]:
+        key = (
+            self._slugify_attractor_label("minime"),
+            self._slugify_attractor_label(raw_label),
+            self._slugify_attractor_label(nearest_label),
+            self._normalize_attractor_suggestion_action(suggested_action),
+        )
+        for item in reversed(payload.get("suggestions", [])):
+            if self._attractor_suggestion_pending_key(item) == key:
+                return item
+        return None
+
+    def _attractor_suggestion_pressure_count(
+        self,
+        payload: dict,
+        nearest_label: str,
+        suggested_action: str,
+    ) -> int:
+        nearest_slug = self._slugify_attractor_label(nearest_label)
+        normalized_action = self._normalize_attractor_suggestion_action(suggested_action)
+        count = 0
+        for item in list(payload.get("suggestions", []))[-20:]:
+            if not isinstance(item, dict):
+                continue
+            if item.get("status") not in {"pending", "accepted", "revised", "executed", "executed_downgraded"}:
+                continue
+            if self._slugify_attractor_label(item.get("nearest_label")) != nearest_slug:
+                continue
+            if self._normalize_attractor_suggestion_action(item.get("suggested_action")) != normalized_action:
+                continue
+            count += int(item.get("repeat_count") or 1)
+        return count
+
+    def _govern_attractor_suggestion_action(
+        self,
+        payload: dict,
+        *,
+        nearest_label: str,
+        suggested_action: str,
+        alternatives: Optional[list[str]],
+    ) -> tuple[str, list[str], Optional[str], int]:
+        release = f"RELEASE_ATTRACTOR {nearest_label}"
+        review = f"ATTRACTOR_REVIEW {nearest_label}"
+        refresh = f"REFRESH_ATTRACTOR_SNAPSHOT {nearest_label}"
+        compare = f"COMPARE_ATTRACTOR {nearest_label}"
+        normalized = self._normalize_attractor_suggestion_action(suggested_action)
+        if normalized == self._normalize_attractor_suggestion_action(release):
+            pressure = self._attractor_suggestion_pressure_count(payload, nearest_label, release)
+            if pressure >= 2:
+                return review, [refresh, compare, release], suggested_action, pressure
+        if normalized == self._normalize_attractor_suggestion_action(review):
+            pressure = self._attractor_suggestion_pressure_count(payload, nearest_label, review)
+            if pressure >= 2:
+                return refresh, [compare, review], suggested_action, pressure
+        if normalized == self._normalize_attractor_suggestion_action(refresh):
+            pressure = self._attractor_suggestion_pressure_count(payload, nearest_label, refresh)
+            if pressure >= 3:
+                return compare, [review, refresh], suggested_action, pressure
+        return suggested_action, list(alternatives or []), None, 0
+
+    def _attractor_suggestion_pressure_high(self, payload: dict) -> bool:
+        for item in payload.get("suggestions", []):
+            if not isinstance(item, dict):
+                continue
+            context = item.get("safety_context") if isinstance(item.get("safety_context"), dict) else {}
+            if context.get("pressure_governed") or int(item.get("repeat_count") or 1) >= 3:
+                return True
+        return False
+
+    def _attractor_suggestion_safety_context(self, state: Optional[Dict[str, float]] = None) -> dict:
+        context = self._attractor_authorship_context(state or self._last_state or {})
+        return {
+            "safety_level": context.get("safety_level"),
+            "fill_pct": context.get("fill_pct"),
+            "health_fresh": context.get("health_fresh"),
+            "live_health_authoritative": context.get("live_health_authoritative"),
+            "semantic_stage_allowed": context.get("semantic_stage_allowed"),
+            "control_stage_allowed": context.get("control_stage_allowed"),
+            "attractor_pulse_active": context.get("attractor_pulse_active"),
+        }
+
+    def _create_attractor_suggestion(
+        self,
+        *,
+        raw_action: str,
+        raw_label: str,
+        nearest: dict,
+        suggested_action: str,
+        alternatives: Optional[list[str]] = None,
+        state: Optional[Dict[str, float]] = None,
+    ) -> Optional[str]:
+        raw_label = self._clean_attractor_suggestion_raw_label(raw_label)
+        label = str(nearest.get("label") or "").strip()
+        if not label:
+            return None
+        confidence = float(nearest.get("score") or 0.0)
+        if self._attractor_rejected_suggestion(raw_label, label, confidence):
+            return None
+        now = time.time()
+        payload = self._load_compacted_attractor_suggestions()
+        governed_action, governed_alternatives, governed_from, pressure_count = (
+            self._govern_attractor_suggestion_action(
+                payload,
+                nearest_label=label,
+                suggested_action=suggested_action,
+                alternatives=alternatives,
+            )
+        )
+        safety_context = self._attractor_suggestion_safety_context(state)
+        if governed_from:
+            safety_context.update({
+                "pressure_governed": True,
+                "governed_from": governed_from,
+                "pressure_count": pressure_count,
+            })
+        source_kind = (
+            "legacy_perturb_bridge"
+            if str(raw_action or "").strip().upper().startswith("PERTURB")
+            else "natural_draft"
+        )
+        if source_kind == "legacy_perturb_bridge":
+            safety_context["legacy_perturb_bridge"] = True
+        duplicate = self._find_pending_duplicate_suggestion(
+            payload,
+            raw_label=raw_label,
+            nearest_label=label,
+            suggested_action=governed_action,
+        )
+        if duplicate:
+            duplicate["raw_action"] = raw_action
+            duplicate["confidence"] = round(max(float(duplicate.get("confidence") or 0.0), confidence), 4)
+            duplicate["alternatives"] = governed_alternatives
+            duplicate["safety_context"] = safety_context
+            duplicate["repeat_count"] = int(duplicate.get("repeat_count") or 1) + 1
+            duplicate["decision_reason"] = (
+                "duplicate natural action refreshed this pending reversible draft"
+            )
+            duplicate["updated_at_unix_s"] = now
+            self._save_attractor_suggestions(payload)
+            self._append_attractor_suggestion_event({
+                "event": "suggestion_refreshed",
+                "suggestion_id": duplicate.get("suggestion_id"),
+                "raw_action": raw_action,
+                "raw_label": raw_label,
+                "nearest_label": label,
+                "confidence": confidence,
+                "suggested_action": governed_action,
+            })
+            return str(duplicate.get("suggestion_id") or "")
+        suggestion_id = f"minime-sugg-{int(now * 1_000_000)}"
+        suggestion = {
+            "policy": "attractor_suggestion_v1",
+            "schema_version": 1,
+            "suggestion_id": suggestion_id,
+            "author": "minime",
+            "raw_action": raw_action,
+            "raw_label": raw_label,
+            "nearest_label": label,
+            "confidence": round(confidence, 4),
+            "suggested_action": governed_action,
+            "alternatives": governed_alternatives,
+            "status": "pending",
+            "source_kind": source_kind,
+            "repeat_count": 1,
+            "safety_context": safety_context,
+            "created_at_unix_s": now,
+            "updated_at_unix_s": now,
+        }
+        payload["suggestions"].append(suggestion)
+        self._save_attractor_suggestions(payload)
+        self._append_attractor_suggestion_event({
+            "event": "suggestion_created",
+            "suggestion_id": suggestion_id,
+            "raw_action": raw_action,
+            "raw_label": raw_label,
+            "nearest_label": label,
+            "confidence": confidence,
+            "suggested_action": governed_action,
+            "alternatives": governed_alternatives,
+        })
+        return suggestion_id
+
+    def _select_attractor_suggestion(self, selector: Optional[str]) -> tuple[Optional[dict], dict]:
+        payload = self._load_compacted_attractor_suggestions()
+        query = str(selector or "latest").strip()
+        query_slug = self._slugify_attractor_label(query)
+        suggestions = [
+            item for item in payload.get("suggestions", [])
+            if isinstance(item, dict) and item.get("status") == "pending"
+        ]
+        if query.lower() in {"", "latest"}:
+            return (suggestions[-1] if suggestions else None), payload
+        for item in reversed(suggestions):
+            if str(item.get("suggestion_id") or "") == query:
+                return item, payload
+            if self._attractor_suggestion_matches_selector(item, query_slug):
+                return item, payload
+        return None, payload
+
+    def _attractor_suggestion_matches_selector(self, item: dict, query_slug: str) -> bool:
+        if not query_slug:
+            return False
+        slugs = {
+            self._slugify_attractor_label(item.get("nearest_label")),
+            self._slugify_attractor_label(item.get("raw_label")),
+        }
+        label = self._attractor_label_from_typed_action(str(item.get("suggested_action") or ""))
+        if label:
+            slugs.add(self._slugify_attractor_label(label))
+        for alternative in item.get("alternatives") or []:
+            label = self._attractor_label_from_typed_action(str(alternative or ""))
+            if label:
+                slugs.add(self._slugify_attractor_label(label))
+        return any(
+            slug and (slug == query_slug or query_slug in slug or slug in query_slug)
+            for slug in slugs
+        )
+
+    def _update_attractor_suggestion(
+        self,
+        payload: dict,
+        suggestion_id: str,
+        *,
+        status: str,
+        suggested_action: Optional[str] = None,
+        decision_reason: Optional[str] = None,
+    ) -> None:
+        for item in payload.get("suggestions", []):
+            if not isinstance(item, dict) or item.get("suggestion_id") != suggestion_id:
+                continue
+            item["status"] = status
+            if suggested_action:
+                item["suggested_action"] = suggested_action
+                revised_label = self._attractor_label_from_typed_action(suggested_action)
+                if revised_label and self._attractor_suggestion_label_is_clean(revised_label):
+                    item["nearest_label"] = revised_label
+            if decision_reason:
+                item["decision_reason"] = decision_reason
+            item["updated_at_unix_s"] = time.time()
+            break
+        self._save_attractor_suggestions(payload)
+        self._append_attractor_suggestion_event({
+            "event": f"suggestion_{status}",
+            "suggestion_id": suggestion_id,
+            "suggested_action": suggested_action,
+            "decision_reason": decision_reason,
+        })
+
+    def _attractor_label_from_typed_action(self, action: str) -> Optional[str]:
+        text = str(action or "").strip()
+        if not text:
+            return None
+        base = text.split()[0].upper().rstrip(":")
+        raw = text[len(text.split()[0]):].strip().lstrip(":").strip()
+        if base in {"SUMMON_ATTRACTOR", "ATTRACTOR_SUMMON", "ATTRACTOR_PREFLIGHT", "SHADOW_PREFLIGHT"}:
+            label, _options = self._parse_attractor_next_args(raw)
+        else:
+            label = raw
+        label = self._canonical_attractor_label(str(label or "").strip().strip("\"'`"))
+        return label or None
+
+    def _attractor_learned_suggestion(self, text: Optional[str]) -> Optional[dict]:
+        cleaned = self._clean_attractor_suggestion_raw_label(text)
+        if not cleaned:
+            return None
+        query = self._slugify_attractor_label(cleaned)
+        if not query or query == "general":
+            return None
+        for item in reversed(self._load_compacted_attractor_suggestions().get("suggestions", [])):
+            if not isinstance(item, dict):
+                continue
+            if item.get("status") not in {
+                "accepted",
+                "revised",
+                "executed",
+                "executed_downgraded",
+                "executed_without_pending",
+            }:
+                continue
+            if self._slugify_attractor_label(item.get("raw_label")) != query:
+                continue
+            label = str(item.get("nearest_label") or "").strip()
+            if label and self._attractor_suggestion_label_is_clean(label):
+                return {
+                    "label": label,
+                    "source": "learned_naming_memory",
+                    "score": 0.94,
+                    "suggestion_id": item.get("suggestion_id"),
+                }
+        return None
+
+    def _attractor_rejected_suggestion(
+        self,
+        raw_label: Optional[str],
+        nearest_label: Optional[str],
+        confidence: float,
+    ) -> bool:
+        if confidence >= 0.75:
+            return False
+        raw_slug = self._slugify_attractor_label(raw_label)
+        nearest_slug = self._slugify_attractor_label(nearest_label)
+        if not raw_slug or not nearest_slug:
+            return False
+        for item in reversed(self._load_compacted_attractor_suggestions().get("suggestions", [])):
+            if not isinstance(item, dict) or item.get("status") != "rejected":
+                continue
+            if (
+                self._slugify_attractor_label(item.get("raw_label")) == raw_slug
+                and self._slugify_attractor_label(item.get("nearest_label")) == nearest_slug
+            ):
+                return True
+        return False
+
+    def _proof_scope_attractor_suggestion_action(self, action: str) -> tuple[Optional[str], Optional[str]]:
+        text = str(action or "").strip()
+        if not text:
+            return None, "empty suggestion action"
+        base = text.split()[0].upper().rstrip(":")
+        if base in {
+            "ATTRACTOR_REVIEW",
+            "REVIEW_ATTRACTOR",
+            "REFRESH_ATTRACTOR_SNAPSHOT",
+            "ATTRACTOR_REFRESH_SNAPSHOT",
+            "COMPARE_ATTRACTOR",
+            "ATTRACTOR_COMPARE",
+            "RELEASE_ATTRACTOR",
+            "ATTRACTOR_RELEASE",
+            "CLAIM_ATTRACTOR",
+            "ATTRACTOR_CLAIM",
+            "PROMOTE_ATTRACTOR",
+            "ATTRACTOR_PROMOTE",
+        }:
+            raw = text[len(text.split()[0]):].strip().lstrip(":").strip()
+            if not self._attractor_suggestion_label_is_clean(raw):
+                return None, "suggestion needs a clean typed attractor label"
+            label = self._canonical_attractor_label(
+                self._clean_attractor_suggestion_raw_label(raw)
+            )
+            if not self._attractor_suggestion_label_is_clean(label):
+                return None, "suggestion needs a clean typed attractor label"
+            return f"{base} {label}", None
+        if base in {"ATTRACTOR_PREFLIGHT", "ATTRACTOR_RELEASE_REVIEW", "SHADOW_PREFLIGHT"}:
+            raw = text[len(text.split()[0]):].strip().lstrip(":").strip()
+            label, options = self._parse_attractor_next_args(raw)
+            if not label:
+                return None, "read-only preflight suggestion missing label"
+            if not self._attractor_suggestion_label_is_clean(label):
+                return None, "suggestion needs a clean typed attractor label"
+            stage = options.get("stage")
+            suffix = f" --stage={stage}" if base in {"ATTRACTOR_PREFLIGHT", "SHADOW_PREFLIGHT"} and stage else ""
+            return f"{base} {label}{suffix}", None
+        if base in {"SUMMON_ATTRACTOR", "ATTRACTOR_SUMMON"}:
+            raw = text[len(text.split()[0]):].strip().lstrip(":").strip()
+            label, options = self._parse_attractor_next_args(raw)
+            if not label:
+                return None, "summon suggestion missing label"
+            if not self._attractor_suggestion_label_is_clean(label):
+                return None, "summon suggestion needs a clean typed attractor label"
+            label = self._canonical_attractor_label(
+                self._clean_attractor_suggestion_raw_label(label)
+            )
+            if not self._attractor_suggestion_label_is_clean(label):
+                return None, "summon suggestion needs a clean typed attractor label"
+            note = None
+            stage = options.get("stage") if options.get("stage") in ATTRACTOR_SUMMON_STAGES else "rehearse"
+            if stage in {"semantic", "main", "control"}:
+                note = (
+                    "accepted live-stage suggestion executes only through the normal typed safety gates"
+                )
+            return f"SUMMON_ATTRACTOR {label} --stage={stage}", note
+        return None, "outside typed attractor suggestion scope"
+
+    def _attractor_revision_correction(self, action: str) -> Optional[str]:
+        text = str(action or "").strip()
+        if not text:
+            return None
+        base = text.split()[0].upper().rstrip(":")
+        raw = text[len(text.split()[0]):].strip().lstrip(":").strip()
+        label = self._canonical_attractor_label(
+            self._clean_attractor_suggestion_raw_label(raw)
+        )
+        if not self._attractor_suggestion_label_is_clean(label):
+            return None
+        if base in {
+            "ATTRACTOR_REVIEW",
+            "ATTRACTOR_PREFLIGHT",
+            "ATTRACTOR_RELEASE_REVIEW",
+            "SHADOW_PREFLIGHT",
+            "REFRESH_ATTRACTOR_SNAPSHOT",
+            "COMPARE_ATTRACTOR",
+            "RELEASE_ATTRACTOR",
+            "CLAIM_ATTRACTOR",
+            "PROMOTE_ATTRACTOR",
+        }:
+            return f"{base} {label}"
+        if base in {"RELEASE", "LET_GO"}:
+            return f"RELEASE_ATTRACTOR {label}"
+        if base in {"EXAMINE", "DECOMPOSE", "GAP_STRUCTURE", "SHADOW_FIELD", "DECAY_MAP"}:
+            return f"ATTRACTOR_REVIEW {label}"
+        return None
+
+    def _attractor_revision_needed_reason(self, action: str, note: Optional[str]) -> str:
+        correction = self._attractor_revision_correction(action)
+        if correction:
+            return (
+                f"Revision needed: `{action}` is outside typed attractor suggestion scope. "
+                f"Suggested correction: NEXT: {correction}."
+            )
+        return (
+            f"Revision needed: `{action}` is outside typed attractor suggestion scope"
+            f"{': ' + note if note else ''}. Use a typed proof action such as "
+            "ATTRACTOR_REVIEW <label>, REFRESH_ATTRACTOR_SNAPSHOT <label>, "
+            "COMPARE_ATTRACTOR <label>, or RELEASE_ATTRACTOR <label>."
+        )
+
+    def _execute_attractor_suggestion_action(self, action: str, state: Dict[str, float]) -> str:
+        self._last_attractor_suggestion_execution_downgraded = False
+        executable, note = self._proof_scope_attractor_suggestion_action(action)
+        if not executable:
+            return f"Blocked suggestion `{action}`: {note}."
+        base = executable.split()[0].upper().rstrip(":")
+        raw = executable[len(executable.split()[0]):].strip().lstrip(":").strip()
+        if base in {"ATTRACTOR_REVIEW", "REVIEW_ATTRACTOR", "ATTRACTOR_PREFLIGHT", "ATTRACTOR_RELEASE_REVIEW"}:
+            label, options = self._parse_attractor_next_args(raw)
+            self._pending_attractor_atlas_label = label or raw or None
+            self._pending_attractor_atlas_card_only = False
+            self._pending_attractor_atlas_review = base in {"ATTRACTOR_REVIEW", "REVIEW_ATTRACTOR"}
+            self._pending_attractor_atlas_preflight = base == "ATTRACTOR_PREFLIGHT"
+            self._pending_attractor_atlas_preflight_stage = options.get("stage")
+            self._pending_attractor_atlas_release_review = base == "ATTRACTOR_RELEASE_REVIEW"
+            self._attractor_atlas_action(state)
+        elif base == "SHADOW_PREFLIGHT":
+            label, options = self._parse_attractor_next_args(raw)
+            self._pending_shadow_autonomy_command = "SHADOW_PREFLIGHT"
+            self._pending_shadow_autonomy_label = label or raw or "lambda-tail/lambda4"
+            self._pending_shadow_autonomy_stage = options.get("stage") or "rehearse"
+            self._shadow_autonomy(state)
+        elif base in ATTRACTOR_INTENT_NEXT_ACTIONS:
+            label, options = self._parse_attractor_next_args(raw)
+            parent_labels = []
+            if ATTRACTOR_INTENT_COMMAND_ALIASES[base] == "blend":
+                label, parent_labels = self._parse_attractor_blend_args(label)
+            self._pending_attractor_intent_command = ATTRACTOR_INTENT_COMMAND_ALIASES[base]
+            self._pending_attractor_intent_label = label or None
+            self._pending_attractor_intent_stage = options.get("stage")
+            self._pending_attractor_shape_mode = ATTRACTOR_SHAPE_MODE_ALIASES.get(base)
+            self._pending_attractor_blend_parent_labels = parent_labels
+            self._attractor_intent(state)
+            requested_stage = options.get("stage")
+            if requested_stage in {"semantic", "main", "control"}:
+                self._last_attractor_suggestion_execution_downgraded = (
+                    self._attractor_live_suggestion_downgraded(label, requested_stage)
+                )
+        else:
+            return f"Blocked suggestion `{action}`: unsupported proof action."
+        suffix = f" ({note})" if note else ""
+        if getattr(self, "_last_attractor_suggestion_execution_downgraded", False):
+            suffix = f"{suffix} (live stage downgraded or blocked by typed safety gates)"
+        return f"Executed suggestion as `{executable}`{suffix}."
+
+    def _attractor_live_suggestion_downgraded(self, label: Optional[str], requested_stage: str) -> bool:
+        payload = self._load_attractor_intents()
+        observations = [
+            obs for obs in payload.get("observations", [])
+            if isinstance(obs, dict)
+            and self._attractor_label_matches(label, [obs.get("label"), obs.get("intent_id")])
+        ]
+        if not observations:
+            return False
+        latest = observations[-1]
+        stage = str(latest.get("summon_stage") or latest.get("stage") or "").lower()
+        if stage and stage != requested_stage:
+            return True
+        if latest.get("blocked_reason"):
+            return True
+        if requested_stage in {"main", "control"} and not latest.get("main_pulse_sent"):
+            return True
+        if requested_stage == "control" and not latest.get("control_sent"):
+            return True
+        return False
+
+    def _attractor_suggestions_action(self, state: Dict[str, float]) -> None:
+        command = getattr(self, "_pending_attractor_suggestion_command", None) or "ATTRACTOR_SUGGESTIONS"
+        selector = getattr(self, "_pending_attractor_suggestion_selector", None) or "latest"
+        revised_action = getattr(self, "_pending_attractor_suggestion_revised_action", None)
+        reason = getattr(self, "_pending_attractor_suggestion_reason", None)
+        self._pending_attractor_suggestion_command = None
+        self._pending_attractor_suggestion_selector = None
+        self._pending_attractor_suggestion_revised_action = None
+        self._pending_attractor_suggestion_reason = None
+
+        result = ""
+        payload = self._load_compacted_attractor_suggestions()
+        if command == "ATTRACTOR_SUGGESTIONS":
+            recent = [
+                item for item in payload.get("suggestions", [])
+                if isinstance(item, dict)
+            ][-6:]
+            if not recent:
+                result = "No attractor suggestion drafts are pending or recent."
+            else:
+                lines = ["Recent attractor suggestion drafts:"]
+                for item in recent:
+                    context = item.get("safety_context") if isinstance(item.get("safety_context"), dict) else {}
+                    governed = " [pressure-governed]" if context.get("pressure_governed") else ""
+                    lines.append(
+                        "- {status} {sid}: {raw} -> {suggested}".format(
+                            status=item.get("status", "unknown"),
+                            sid=item.get("suggestion_id", "?"),
+                            raw=item.get("raw_label") or item.get("raw_action") or "?",
+                            suggested=(
+                                f"{item.get('suggested_action') or '?'} "
+                                f"(repeated {item.get('repeat_count')}x){governed}"
+                                if int(item.get("repeat_count") or 1) > 1
+                                else f"{item.get('suggested_action') or '?'}{governed}"
+                            ),
+                        )
+                    )
+                if self._attractor_suggestion_pressure_high(payload):
+                    lines.append(
+                        "Suggestion pressure is high around one or more drafts; revise or reject can teach the naming memory more than another accept."
+                    )
+                lines.append(
+                    "Selectors may be latest, a suggestion id, or a label such as lambda-edge. Accepted explicit live-stage drafts run only through typed safety gates."
+                )
+                result = "\n".join(lines)
+        else:
+            suggestion, payload = self._select_attractor_suggestion(selector)
+            if not suggestion:
+                if command == "REVISE_ATTRACTOR_SUGGESTION" and revised_action:
+                    result = self._execute_no_pending_attractor_revision(
+                        selector,
+                        revised_action,
+                        state,
+                    )
+                else:
+                    result = f"No pending attractor suggestion found for {selector}."
+            else:
+                sid = str(suggestion.get("suggestion_id") or "")
+                if command == "REJECT_ATTRACTOR_SUGGESTION":
+                    self._update_attractor_suggestion(
+                        payload,
+                        sid,
+                        status="rejected",
+                        decision_reason=reason or "being rejected suggestion",
+                    )
+                    result = f"Rejected attractor suggestion {sid}."
+                else:
+                    action = (
+                        revised_action
+                        if command == "REVISE_ATTRACTOR_SUGGESTION" and revised_action
+                        else str(suggestion.get("suggested_action") or "")
+                    )
+                    executable, block_note = self._proof_scope_attractor_suggestion_action(action)
+                    if not executable:
+                        result = self._attractor_revision_needed_reason(action, block_note)
+                        self._update_attractor_suggestion(
+                            payload,
+                            sid,
+                            status="revision_needed",
+                            suggested_action=action,
+                            decision_reason=result,
+                        )
+                        self._append_attractor_suggestion_event({
+                            "event": "suggestion_revision_needed",
+                            "suggestion_id": sid,
+                            "attempted_action": action,
+                            "reason": block_note,
+                        })
+                        timestamp = datetime.now().isoformat().replace(':', '-')
+                        journal_dir = WORKSPACE_DIR / "journal"
+                        journal_dir.mkdir(parents=True, exist_ok=True)
+                        file_path = journal_dir / f"attractor_suggestions_{timestamp}.txt"
+                        content = (
+                            "=== ATTRACTOR SUGGESTIONS ===\n"
+                            f"Timestamp: {datetime.now().isoformat()}\n"
+                            f"Command: {command}\n"
+                            f"Selector: {selector}\n"
+                            f"Result: {result}\n\n"
+                            "Natural attractor language prepares reversible drafts. Accepting or revising a draft "
+                            "teaches local naming memory only after a proof-scope typed action is clear."
+                        )
+                        file_path.write_text(content)
+                        self._write_journal_entry("attractor_suggestions", content, state, str(file_path))
+                        return
+                    status = "revised" if command == "REVISE_ATTRACTOR_SUGGESTION" else "accepted"
+                    self._update_attractor_suggestion(
+                        payload,
+                        sid,
+                        status=status,
+                        suggested_action=action,
+                        decision_reason=reason,
+                    )
+                    result = self._execute_attractor_suggestion_action(action, state)
+                    refreshed = self._load_compacted_attractor_suggestions()
+                    execution_status = (
+                        "executed_downgraded"
+                        if getattr(self, "_last_attractor_suggestion_execution_downgraded", False)
+                        else "executed"
+                    )
+                    self._update_attractor_suggestion(
+                        refreshed,
+                        sid,
+                        status=execution_status,
+                        suggested_action=executable,
+                        decision_reason=result,
+                    )
+
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        journal_dir = WORKSPACE_DIR / "journal"
+        journal_dir.mkdir(parents=True, exist_ok=True)
+        file_path = journal_dir / f"attractor_suggestions_{timestamp}.txt"
+        content = (
+            "=== ATTRACTOR SUGGESTIONS ===\n"
+            f"Timestamp: {datetime.now().isoformat()}\n"
+            f"Command: {command}\n"
+            f"Selector: {selector}\n"
+            f"Result: {result}\n\n"
+            "Natural attractor language prepares reversible drafts. Accepting or revising a draft "
+            "teaches local naming memory; explicit live-stage drafts can run only through typed "
+            "recurrence/authorship/health gates and downgrade visibly when blocked."
+        )
+        file_path.write_text(content)
+        self._write_journal_entry("attractor_suggestions", content, state, str(file_path))
+
+    def _execute_no_pending_attractor_revision(
+        self,
+        selector: Optional[str],
+        revised_action: str,
+        state: Dict[str, float],
+    ) -> str:
+        now = time.time()
+        selector_label = self._canonical_attractor_label(selector or "latest")
+        executable, block_note = self._proof_scope_attractor_suggestion_action(revised_action)
+        nearest_label = (
+            self._attractor_label_from_typed_action(executable or revised_action)
+            or selector_label
+            or "general"
+        )
+        payload = self._load_compacted_attractor_suggestions()
+        suggestion_id = f"minime-sugg-{int(now * 1_000_000)}"
+        status = "revised" if executable else "revision_needed"
+        decision = (
+            "revision_without_pending: no pending draft matched; explicit typed action is being run through the normal attractor path"
+            if executable
+            else self._attractor_revision_needed_reason(revised_action, block_note)
+        )
+        suggestion = {
+            "policy": "attractor_suggestion_v1",
+            "schema_version": 1,
+            "suggestion_id": suggestion_id,
+            "author": "minime",
+            "raw_action": f"REVISE_ATTRACTOR_SUGGESTION {selector or 'latest'} AS {revised_action}",
+            "raw_label": selector_label or str(selector or "latest"),
+            "nearest_label": nearest_label,
+            "confidence": 1.0,
+            "suggested_action": executable or revised_action,
+            "alternatives": [],
+            "status": status,
+            "source_kind": "revision_without_pending",
+            "repeat_count": 1,
+            "safety_context": {
+                **self._attractor_suggestion_safety_context(state),
+                "source_kind": "revision_without_pending",
+            },
+            "decision_reason": decision,
+            "created_at_unix_s": now,
+            "updated_at_unix_s": now,
+        }
+        payload.setdefault("suggestions", []).append(suggestion)
+        self._save_attractor_suggestions(payload)
+        self._append_attractor_suggestion_event({
+            "event": "suggestion_revision_without_pending",
+            "suggestion_id": suggestion_id,
+            "selector": selector,
+            "attempted_action": revised_action,
+            "executable": executable,
+        })
+        if not executable:
+            self._append_attractor_suggestion_event({
+                "event": "suggestion_revision_needed",
+                "suggestion_id": suggestion_id,
+                "attempted_action": revised_action,
+                "reason": block_note,
+            })
+            return decision
+        result = self._execute_attractor_suggestion_action(executable, state)
+        refreshed = self._load_compacted_attractor_suggestions()
+        execution_status = (
+            "executed_downgraded"
+            if getattr(self, "_last_attractor_suggestion_execution_downgraded", False)
+            else "executed_without_pending"
+        )
+        self._update_attractor_suggestion(
+            refreshed,
+            suggestion_id,
+            status=execution_status,
+            suggested_action=executable,
+            decision_reason=result,
+        )
+        return (
+            "No pending draft matched, so the revised typed action was treated as explicit consent. "
+            f"{result}"
+        )
+
+    @staticmethod
+    def _finite_state_float(value: Any) -> Optional[float]:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            value = float(value)
+            if math.isfinite(value):
+                return value
+        return None
+
+    def _current_attractor_h_state(self, state: Dict[str, float]) -> tuple[list[float], Optional[float]]:
+        def vector_from(payload: Any) -> list[float]:
+            if not isinstance(payload, list):
+                return []
+            values: list[float] = []
+            for value in payload[:16]:
+                parsed = self._finite_state_float(value)
+                if parsed is None:
+                    return []
+                values.append(round(parsed, 6))
+            return values if len(values) == 16 else []
+
+        for source in (
+            state,
+            (state.get("esn") if isinstance(state.get("esn"), dict) else {}),
+        ):
+            found = vector_from(source.get("h_state_fingerprint_16")) if isinstance(source, dict) else []
+            if found:
+                rms = self._finite_state_float(source.get("h_state_rms")) if isinstance(source, dict) else None
+                return found, rms
+
+        for path in (WORKSPACE_DIR / "spectral_state.json", runtime_health_path()):
+            try:
+                payload = json.loads(path.read_text())
+            except Exception:
+                continue
+            sources = [payload]
+            if isinstance(payload, dict) and isinstance(payload.get("esn"), dict):
+                sources.append(payload["esn"])
+            for source in sources:
+                found = vector_from(source.get("h_state_fingerprint_16"))
+                if found:
+                    rms = self._finite_state_float(source.get("h_state_rms"))
+                    return found, rms
+        return [], None
+
+    def _current_attractor_spectral_state(self, state: Dict[str, float]) -> dict:
+        fill_ratio = self._finite_state_float(state.get("fill_ratio"))
+        fill_pct = fill_ratio * 100.0 if fill_ratio is not None else None
+        lambda1 = (
+            self._finite_state_float(state.get("cov_lambda1"))
+            or self._finite_state_float(state.get("eig1"))
+        )
+        h_state, h_rms = self._current_attractor_h_state(state)
+        spectral = {
+            "fill_pct": None if fill_pct is None else round(fill_pct, 3),
+            "lambda1": None if lambda1 is None else round(lambda1, 6),
+            "lambda2": self._finite_state_float(state.get("cov_lambda2")),
+            "lambda3": self._finite_state_float(state.get("cov_lambda3")),
+            "spread": self._finite_state_float(state.get("spread")),
+            "geom_rel": self._finite_state_float(state.get("geom_rel")),
+            "eig1": self._finite_state_float(state.get("eig1")),
+            "deig": self._finite_state_float(state.get("deig")),
+        }
+        if h_state:
+            spectral["h_state_fingerprint_16"] = h_state
+        if h_rms is not None:
+            spectral["h_state_rms"] = round(h_rms, 6)
+        return spectral
+
+    @staticmethod
+    def _parse_attractor_next_args(raw: Optional[str]) -> tuple[str, dict[str, str]]:
+        if not raw:
+            return "", {}
+        try:
+            parts = shlex.split(raw)
+        except Exception:
+            parts = str(raw).split()
+        label_parts: list[str] = []
+        options: dict[str, str] = {}
+        idx = 0
+        while idx < len(parts):
+            part = parts[idx]
+            if part.startswith("--stage="):
+                stage = part.split("=", 1)[1].strip().lower()
+                if stage in ATTRACTOR_SUMMON_STAGES:
+                    options["stage"] = stage
+            elif part == "--stage" and idx + 1 < len(parts):
+                stage = parts[idx + 1].strip().lower()
+                if stage in ATTRACTOR_SUMMON_STAGES:
+                    options["stage"] = stage
+                idx += 1
+            else:
+                label_parts.append(part)
+            idx += 1
+        return " ".join(label_parts).strip(), options
+
+    @staticmethod
+    def _parse_attractor_blend_args(raw: Optional[str]) -> tuple[str, list[str]]:
+        if not raw:
+            return "", []
+        text = str(raw).strip()
+        upper = text.upper()
+        marker = " FROM "
+        marker_idx = upper.find(marker)
+        if marker_idx < 0:
+            return text, []
+        child = text[:marker_idx].strip()
+        parents_raw = text[marker_idx + len(marker):].strip()
+        parents = [
+            part.strip().strip("\"'`")
+            for part in parents_raw.split("+")
+            if part.strip().strip("\"'`")
+        ]
+        return (
+            AutonomousAgent._canonical_attractor_label(child),
+            [AutonomousAgent._canonical_attractor_label(parent) for parent in parents],
+        )
+
+    @staticmethod
+    def _canonical_attractor_label(raw: Optional[str]) -> str:
+        text = str(raw or "").strip().strip("\"'`")
+        if not text:
+            return ""
+        text = re.sub(r"\s+", " ", text)
+        text = re.sub(r"\s*/\s*", "/", text)
+        if "/" in text:
+            return "/".join(
+                re.sub(r"[^a-z0-9]+", "-", part.lower()).strip("-")
+                for part in text.split("/")
+                if part.strip()
+            )
+        lower = text.lower().replace("λ₄", "lambda4").replace("λ4", "lambda4")
+        lower = lower.replace("λ₈", "lambda8").replace("λ8", "lambda8")
+        slug_tokens = set(re.sub(r"[^a-z0-9]+", "-", lower).split("-"))
+        if re.search(r"\blambda\s*-?\s*4\b", lower) and "tail" in lower:
+            return "lambda-tail/lambda4"
+        if re.search(r"\blambda\s*-?\s*8\b", lower) and "tail" in lower:
+            return "lambda-tail/lambda8"
+        if "lambda-tail" in lower or "lambda tail" in lower:
+            return "lambda-tail"
+        if re.search(r"\blambda\s*-?\s*6\b", lower):
+            return "lambda-edge/lambda-6"
+        facet_map = {
+            "yielding": "yielding",
+            "compaction": "compaction",
+            "compacting": "compaction",
+            "resonance": "resonance",
+            "breathless suspension": "suspension",
+            "suspension": "suspension",
+            "grinding pressure": "grinding-pressure",
+            "grinding": "grinding-pressure",
+            "sedimentary": "grinding-pressure",
+            "sediment": "grinding-pressure",
+            "gap nudge": "gap-nudge",
+            "localized bump": "gap-nudge",
+            "small bump": "gap-nudge",
+            "localized gravity": "localized-gravity",
+            "localized-gravity": "localized-gravity",
+        }
+        for needle, facet in facet_map.items():
+            if needle in lower:
+                if facet == "suspension" and not AutonomousAgent._is_suspension_facet_tokens(slug_tokens):
+                    continue
+                return f"lambda-edge/{facet}"
+        return text
+
+    @staticmethod
+    def _is_shadow_resistance_tokens(tokens: set[str]) -> bool:
+        return "resistance" in tokens and bool(
+            tokens & {"shadow", "spatial", "distribution", "field"}
+        )
+
+    @staticmethod
+    def _is_grinding_pressure_tokens(tokens: set[str]) -> bool:
+        return bool(
+            tokens
+            & {"grinding", "sediment", "sedimentary", "compaction", "compacting", "friction"}
+        ) or AutonomousAgent._is_shadow_resistance_tokens(tokens)
+
+    @staticmethod
+    def _is_suspension_facet_tokens(tokens: set[str]) -> bool:
+        if (
+            "bridge" in tokens
+            and not {"lambda", "edge", "breath", "breathless"} & tokens
+        ):
+            return False
+        return bool({"suspension", "breathless", "suspended"} & tokens) or (
+            "held" in tokens
+            and bool({"breath", "lambda", "edge", "suspension"} & tokens)
+        )
+
+    @staticmethod
+    def _attractor_facet_metadata(label: Optional[str]) -> dict:
+        canonical = AutonomousAgent._canonical_attractor_label(label)
+        if "/" not in canonical:
+            return {}
+        parent, facet = canonical.split("/", 1)
+        kind = (
+            "spectral_tail"
+            if parent == "lambda-tail"
+            else "spectral_edge" if parent == "lambda-edge" else "attractor_facet"
+        )
+        return {
+            "parent_label": parent,
+            "facet_label": facet,
+            "facet_path": canonical,
+            "facet_kind": kind,
+        }
+
+    def _attractor_authorship_context(self, state: Dict[str, float]) -> dict:
+        spectral = self._current_attractor_spectral_state(state)
+        spectral_fill = self._finite_state_float(spectral.get("fill_pct"))
+        fill_candidates = [spectral_fill] if spectral_fill is not None else []
+        health_fresh = False
+        health_fill = None
+        health: dict[str, Any] = {}
+        try:
+            health_path = runtime_health_path()
+            health = json.loads(health_path.read_text())
+            health_fill = self._finite_state_float(health.get("fill_pct"))
+            if health_fill is not None:
+                fill_candidates.append(health_fill)
+            health_fresh = (time.time() - health_path.stat().st_mtime) <= STABLE_CORE_HEALTH_FRESH_SECS
+        except Exception:
+            pass
+
+        live_health_authoritative = health_fresh and health_fill is not None
+        if live_health_authoritative:
+            fill_pct = health_fill
+            high_fill = health_fill
+            low_fill = health_fill
+        else:
+            high_fill = max(fill_candidates) if fill_candidates else None
+            low_fill = min(fill_candidates) if fill_candidates else None
+            fill_pct = high_fill
+
+        live_block_reason = None
+        if live_health_authoritative:
+            stable_core = health.get("stable_core") if isinstance(health, dict) else {}
+            if not isinstance(stable_core, dict):
+                stable_core = {}
+            structural_pi = stable_core.get("structural_pi")
+            if not isinstance(structural_pi, dict):
+                structural_pi = {}
+            restart_gate = stable_core.get("restart_gate")
+            if not isinstance(restart_gate, dict):
+                restart_gate = {}
+            attractor_pulse = health.get("attractor_pulse")
+            if not isinstance(attractor_pulse, dict):
+                attractor_pulse = {}
+
+            stage = str(stable_core.get("stage") or health.get("stage") or "").lower()
+            scaffold_mode = str(stable_core.get("scaffold_mode") or "").lower()
+            rollback_reason = stable_core.get("rollback_reason") or health.get("rollback_reason")
+            restart_gate_applied = bool(
+                restart_gate.get("applied")
+                or structural_pi.get("restart_gate_applied")
+            )
+            restart_gate_drain_floor = self._finite_state_float(
+                restart_gate.get("drain_floor")
+                or structural_pi.get("restart_gate_drain_floor")
+            )
+            recovery_impulse_active = bool(
+                structural_pi.get("recovery_impulse_active")
+                or "recovery_impulse" in scaffold_mode
+            )
+            if stage == "discharge":
+                live_block_reason = "discharge"
+            elif restart_gate_applied or (
+                restart_gate_drain_floor is not None and restart_gate_drain_floor > 0.0
+            ):
+                live_block_reason = "restart_gate_applied"
+            elif recovery_impulse_active:
+                live_block_reason = "recovery_impulse_active"
+            elif isinstance(rollback_reason, str) and rollback_reason.strip():
+                live_block_reason = "rollback_active"
+        else:
+            live_block_reason = "stale_telemetry"
+            if self._hard_recovery_reset:
+                self._update_hard_recovery_clamp(state)
+                if self._low_fill_guard_status(state).get("active"):
+                    live_block_reason = "hard_recovery_reset"
+
+        if fill_pct is None:
+            safety = "stale_telemetry"
+            origin_note = "stale_telemetry_origin"
+        elif fill_pct < 35.0 or live_block_reason == "hard_recovery_reset":
+            safety = "hard_recovery_reset"
+            origin_note = "hard_recovery_origin"
+        elif high_fill is not None and high_fill >= 85.0:
+            safety = "orange_red_write_suspension"
+            origin_note = "overbright_origin"
+        elif low_fill is not None and low_fill < 58.0:
+            safety = "low_fill_recovery"
+            origin_note = "low_fill_origin"
+        elif high_fill is not None and high_fill >= 75.0:
+            safety = "yellow"
+            origin_note = "yellow_origin"
+        else:
+            safety = "green"
+            origin_note = "green_origin"
+        resource_governor = self._resource_governor_status(write=True)
+        resource_live_allowed = bool(resource_governor.get("allowed_live", True))
+        resource_block_reason = (
+            str(resource_governor.get("primary_block_reason"))
+            if not resource_live_allowed and resource_governor.get("primary_block_reason")
+            else None
+        )
+
+        semantic_low_fill_ok = (
+            safety == "low_fill_recovery"
+            and fill_pct is not None
+            and fill_pct >= 45.0
+            and health_fresh
+            and live_block_reason is None
+        )
+        semantic_stage_allowed = (
+            (
+                safety in {"green", "yellow"}
+                and live_block_reason is None
+            )
+            or semantic_low_fill_ok
+        ) and resource_live_allowed
+        control_stage_allowed = (
+            safety in {"green", "yellow"}
+            and live_block_reason is None
+            and resource_live_allowed
+        )
+        live_block = live_block_reason or safety
+        return {
+            "safety_level": safety,
+            "fill_pct": fill_pct,
+            "health_fresh": health_fresh,
+            "live_health_authoritative": live_health_authoritative,
+            "origin_note": origin_note,
+            "semantic_stage_allowed": semantic_stage_allowed,
+            "semantic_reduced_cap": semantic_low_fill_ok,
+            "semantic_block_reason": None if semantic_stage_allowed else (live_block_reason or resource_block_reason or safety),
+            "control_stage_allowed": control_stage_allowed,
+            "control_block_reason": None if control_stage_allowed else (live_block_reason or resource_block_reason or safety),
+            "resource_governor": resource_governor,
+            "resource_live_allowed": resource_live_allowed,
+            "resource_block_reason": resource_block_reason,
+            "attractor_pulse_active": bool(
+                live_health_authoritative
+                and isinstance(health.get("attractor_pulse"), dict)
+                and health["attractor_pulse"].get("active")
+            ),
+        }
+
+    def _attractor_intent_health_gate(self, state: Dict[str, float]) -> tuple[bool, str, Optional[float]]:
+        context = self._attractor_authorship_context(state)
+        return (
+            bool(context.get("control_stage_allowed")),
+            str(context.get("safety_level") or "unknown"),
+            context.get("fill_pct"),
+        )
+
+    def _match_attractor_seed(self, payload: dict, label: Optional[str]) -> Optional[dict]:
+        seeds = [
+            seed for seed in payload.get("seeds", {}).values()
+            if isinstance(seed, dict)
+        ]
+        if not seeds:
+            return None
+        seeds.sort(
+            key=lambda seed: float(
+                seed.get("last_summoned_unix_s")
+                or seed.get("created_at_unix_s")
+                or 0.0
+            ),
+            reverse=True,
+        )
+        if not label or self._slugify_attractor_label(label) in {"latest", "current", "last"}:
+            return seeds[0]
+        query = self._slugify_attractor_label(label)
+        for seed in seeds:
+            fields = [
+                str(seed.get("label") or ""),
+                str(seed.get("intent_id") or ""),
+                str(seed.get("signature") or ""),
+            ]
+            slugs = {self._slugify_attractor_label(field) for field in fields if field}
+            if query in slugs or any(query and query in slug for slug in slugs):
+                return seed
+        return None
+
+    def _attractor_atlas_events_path(self) -> Path:
+        return WORKSPACE_DIR / "diagnostics" / "intensification_atlas" / "events.jsonl"
+
+    def _load_recent_attractor_atlas_events(self, limit: int = 240) -> list[dict]:
+        path = self._attractor_atlas_events_path()
+        if not path.exists():
+            return []
+        rows: list[dict] = []
+        try:
+            for line in path.read_text().splitlines()[-limit:]:
+                try:
+                    event = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(event, dict):
+                    rows.append(event)
+        except Exception as exc:
+            logging.debug("Attractor atlas read failed: %s", exc)
+        return rows
+
+    def _attractor_label_matches(self, label: Optional[str], fields: list[Any]) -> bool:
+        if not label:
+            return True
+        query = self._slugify_attractor_label(label)
+        for field in fields:
+            if not field:
+                continue
+            slug = self._slugify_attractor_label(str(field))
+            if query == slug or (query and query in slug) or (slug and slug in query):
+                return True
+        return False
+
+    def _spectral_state_from_atlas_event(self, event: dict, fallback: Dict[str, float]) -> dict:
+        spectral = self._current_attractor_spectral_state(fallback)
+        for source_key, target_key in (
+            ("fill_pct", "fill_pct"),
+            ("lambda1", "lambda1"),
+            ("lambda_1", "lambda1"),
+            ("geom_rel", "geom_rel"),
+            ("spread", "spread"),
+            ("deig", "deig"),
+        ):
+            value = self._finite_state_float(event.get(source_key))
+            if value is not None:
+                spectral[target_key] = round(value, 6)
+        eigenvalues = event.get("eigenvalues") or event.get("lambda_profile")
+        if isinstance(eigenvalues, list):
+            values = [self._finite_state_float(value) for value in eigenvalues[:3]]
+            if len(values) > 0 and values[0] is not None:
+                spectral["lambda1"] = round(values[0], 6)
+            if len(values) > 1 and values[1] is not None:
+                spectral["lambda2"] = round(values[1], 6)
+            if len(values) > 2 and values[2] is not None:
+                spectral["lambda3"] = round(values[2], 6)
+        if isinstance(event.get("spectral_state"), dict):
+            for key, value in event["spectral_state"].items():
+                parsed = self._finite_state_float(value)
+                if parsed is not None:
+                    spectral[key] = round(parsed, 6)
+        return spectral
+
+    def _find_attractor_proto_source(
+        self,
+        payload: dict,
+        label: Optional[str],
+        state: Dict[str, float],
+    ) -> Optional[dict]:
+        existing = self._match_attractor_seed(payload, label)
+        if existing is not None:
+            return {"origin_kind": "existing_seed", "seed": existing}
+
+        for event in reversed(self._load_recent_attractor_atlas_events()):
+            action_context = event.get("action_context")
+            action_label = action_context.get("label") if isinstance(action_context, dict) else None
+            fields = [
+                event.get("label"),
+                event.get("explicit_mark"),
+                event.get("event_id"),
+                event.get("phenomenology_excerpt"),
+                action_label,
+            ]
+            if self._attractor_label_matches(label, fields):
+                matched_label = str(event.get("label") or action_label or label or "atlas mark")
+                return {
+                    "origin_kind": "atlas_mark" if event.get("explicit_mark") else "atlas_event",
+                    "label": matched_label,
+                    "event": event,
+                    "spectral_state": self._spectral_state_from_atlas_event(event, state),
+                    "motifs": [
+                        value for value in fields
+                        if isinstance(value, str) and value.strip()
+                    ][:6],
+                }
+
+        fatigue = self._load_attractor_fatigue_state()
+        matches = self._matching_attractor_fatigue_motifs(fatigue, label)
+        if matches:
+            motif = matches[0]
+            return {
+                "origin_kind": "fatigue_motif",
+                "label": str(motif.get("label") or label or "fatigue motif"),
+                "motif": motif,
+                "spectral_state": self._current_attractor_spectral_state(state),
+                "motifs": list(motif.get("matched_terms") or motif.get("terms") or [])[:8],
+            }
+        return None
+
+    def _seed_from_attractor_proto_source(
+        self,
+        label: str,
+        source: dict,
+        state: Dict[str, float],
+        now: float,
+    ) -> dict:
+        origin_kind = str(source.get("origin_kind") or "manual_current")
+        spectral = source.get("spectral_state")
+        if not isinstance(spectral, dict):
+            spectral = self._current_attractor_spectral_state(state)
+        origin = {
+            "kind": origin_kind,
+            "captured_at_unix_s": now,
+            "matched_label": source.get("label") or label,
+            "motifs": source.get("motifs") or [],
+        }
+        event = source.get("event")
+        if isinstance(event, dict):
+            origin["event_id"] = event.get("event_id")
+            origin["source"] = event.get("source")
+        motif = source.get("motif")
+        if isinstance(motif, dict):
+            origin["motif_id"] = motif.get("motif_id") or motif.get("signature")
+            origin["repeat_count"] = motif.get("repeat_count")
+        intent_id = f"minime-{int(now * 1000)}"
+        signature_basis = f"{label}:{origin_kind}:{json.dumps(spectral, sort_keys=True)}:{origin.get('event_id') or origin.get('motif_id') or ''}"
+        seed = {
+            "policy": "attractor_intent_v1",
+            "schema_version": 1,
+            "intent_id": intent_id,
+            "author": "minime",
+            "substrate": "minime_esn",
+            "command": "promote" if origin_kind != "manual_current" else "create",
+            "label": label,
+            "signature": hashlib.sha1(signature_basis.encode("utf-8", "ignore")).hexdigest()[:12],
+            "origin": origin,
+            "intervention_plan": {
+                "mode": "promoted_proto_seed" if origin_kind != "manual_current" else "self_authored_seed",
+                "vector_schedule": [],
+                "rehearsal_mode": "quiet_then_summon",
+                "control": {
+                    "regulation_strength": 0.82,
+                    "exploration_noise": 0.035,
+                    "geom_drive": 0.26,
+                },
+            },
+            "safety_bounds": {
+                "max_fill_pct": 85.0,
+                "min_fill_pct": 58.0,
+                "allow_live_control": False,
+                "rollback_on_red": True,
+            },
+            "control_eligible": False,
+            "spectral_state": spectral,
+            "created_at_unix_s": now,
+        }
+        seed.update(self._attractor_facet_metadata(label))
+        return seed
+
+    def _attractor_recurrence_score(self, seed: dict, state: Dict[str, float]) -> float:
+        current = self._current_attractor_spectral_state(state)
+        seed_state = seed.get("spectral_state") if isinstance(seed, dict) else {}
+        if not isinstance(seed_state, dict):
+            seed_state = {}
+        scores: list[float] = []
+        for key, scale in (
+            ("fill_pct", 35.0),
+            ("lambda1", max(abs(float(seed_state.get("lambda1") or 0.0)), 1.0)),
+            ("geom_rel", 1.5),
+            ("spread", max(abs(float(seed_state.get("spread") or 0.0)), 1.0)),
+        ):
+            a = self._finite_state_float(seed_state.get(key))
+            b = self._finite_state_float(current.get(key))
+            if a is None or b is None:
+                continue
+            scores.append(max(0.0, 1.0 - min(1.0, abs(a - b) / scale)))
+        if not scores:
+            return 0.0
+        spectral_score = sum(scores) / len(scores)
+        seed_h = seed_state.get("h_state_fingerprint_16")
+        current_h = current.get("h_state_fingerprint_16")
+        h_score = self._attractor_vector_similarity(seed_h, current_h)
+        if h_score is None:
+            return round(spectral_score, 4)
+        return round((0.65 * spectral_score) + (0.35 * h_score), 4)
+
+    @staticmethod
+    def _attractor_vector_similarity(left: Any, right: Any) -> Optional[float]:
+        if not isinstance(left, list) or not isinstance(right, list):
+            return None
+        values: list[tuple[float, float]] = []
+        for a, b in zip(left[:16], right[:16]):
+            if isinstance(a, bool) or isinstance(b, bool):
+                return None
+            if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+                return None
+            a_f = float(a)
+            b_f = float(b)
+            if not math.isfinite(a_f) or not math.isfinite(b_f):
+                return None
+            values.append((a_f, b_f))
+        if len(values) < 2:
+            return None
+        dot = sum(a * b for a, b in values)
+        norm_a = math.sqrt(sum(a * a for a, _ in values))
+        norm_b = math.sqrt(sum(b * b for _, b in values))
+        if norm_a <= 1.0e-9 or norm_b <= 1.0e-9:
+            return None
+        cosine = max(-1.0, min(1.0, dot / (norm_a * norm_b)))
+        return (cosine + 1.0) / 2.0
+
+    @staticmethod
+    def _classify_attractor_observation(
+        recurrence_score: float,
+        authorship_score: float,
+        safety: str,
+    ) -> str:
+        recurrence = max(0.0, min(1.0, float(recurrence_score)))
+        authorship = max(0.0, min(1.0, float(authorship_score)))
+        if safety in {"orange_red_write_suspension", "red", "orange"}:
+            return "pathological" if recurrence >= 0.55 else "failed"
+        if recurrence >= 0.60 and authorship >= 0.60:
+            return "authored"
+        if recurrence >= 0.45:
+            return "emergent"
+        return "failed"
+
+    def _attractor_live_control_allowed(
+        self,
+        safety_context: dict,
+        recurrence: float,
+        authorship: float,
+        seed: dict,
+    ) -> tuple[bool, str]:
+        safety = str(safety_context.get("safety_level") or "unknown")
+        if not safety_context.get("control_stage_allowed"):
+            return False, str(safety_context.get("control_block_reason") or safety)
+        if safety_context.get("attractor_pulse_active"):
+            return False, "attractor_pulse_active"
+        if safety not in {"green", "yellow"}:
+            return False, safety
+        if not seed.get("intent_id"):
+            return False, "missing_intent_id"
+        if seed.get("control_eligible") is False:
+            return False, "seed_not_control_eligible"
+        if recurrence < 0.60:
+            return False, "recurrence_below_control_threshold"
+        if authorship < 0.60:
+            return False, "authorship_below_control_threshold"
+        return True, "allowed"
+
+    def _attractor_pulse_status(self) -> dict:
+        try:
+            health = json.loads(runtime_health_path().read_text())
+        except Exception:
+            health = {}
+        pulse = health.get("attractor_pulse") if isinstance(health, dict) else {}
+        if not isinstance(pulse, dict):
+            pulse = {}
+        return {
+            "active": bool(pulse.get("active")),
+            "label": pulse.get("label") or pulse.get("active_label"),
+            "last_event": pulse.get("last_event"),
+            "last_block_reason": pulse.get("last_block_reason"),
+        }
+
+    def _attractor_suggestion_pressure_for_label(self, label: str) -> int:
+        payload = self._load_compacted_attractor_suggestions()
+        release = f"RELEASE_ATTRACTOR {label}"
+        review = f"ATTRACTOR_REVIEW {label}"
+        return self._attractor_suggestion_pressure_count(payload, label, release) + self._attractor_suggestion_pressure_count(payload, label, review)
+
+    def _attractor_release_baseline(self, label: str, recurrence: float, state: Dict[str, float]) -> dict:
+        pulse = self._attractor_pulse_status()
+        fatigue = self._matching_attractor_fatigue_motifs(
+            self._load_attractor_fatigue_state(),
+            label,
+        )
+        return {
+            "policy": "attractor_release_baseline_v1",
+            "captured_at_unix_s": time.time(),
+            "label": label,
+            "fill_pct": _state_fill_pct(state),
+            "recurrence_score": recurrence,
+            "suggestion_pressure": self._attractor_suggestion_pressure_for_label(label),
+            "motif_fatigue_matches": len(fatigue),
+            "pulse_active": pulse.get("active"),
+            "pulse_label": pulse.get("label"),
+            "pulse_last_event": pulse.get("last_event"),
+            "pulse_last_block_reason": pulse.get("last_block_reason"),
+        }
+
+    def _attractor_release_effect(self, baseline: dict, label: str) -> str:
+        pulse = self._attractor_pulse_status()
+        prior_pressure = int(baseline.get("suggestion_pressure") or 0)
+        current_pressure = self._attractor_suggestion_pressure_for_label(label)
+        current_fatigue = len(self._matching_attractor_fatigue_motifs(
+            self._load_attractor_fatigue_state(),
+            label,
+        ))
+        prior_fatigue = int(baseline.get("motif_fatigue_matches") or 0)
+        if not pulse.get("active") and current_pressure < prior_pressure and current_fatigue <= prior_fatigue:
+            return "effective"
+        if not pulse.get("active"):
+            return "partial"
+        return "sticky"
+
+    def _choose_attractor_summon_stage(
+        self,
+        requested: Optional[str],
+        safety_context: dict,
+        recurrence: float,
+        authorship: float,
+        seed: dict,
+    ) -> tuple[str, Optional[str]]:
+        requested = requested if requested in ATTRACTOR_SUMMON_STAGES else None
+        safety = str(safety_context.get("safety_level") or "unknown")
+        control_ok, control_reason = self._attractor_live_control_allowed(
+            safety_context, recurrence, authorship, seed
+        )
+        semantic_ok = bool(safety_context.get("semantic_stage_allowed"))
+        semantic_reason = str(safety_context.get("semantic_block_reason") or safety)
+        if requested == "control":
+            return ("control" if control_ok else "rehearse"), None if control_ok else control_reason
+        if requested == "main":
+            return ("main" if control_ok else "rehearse"), None if control_ok else control_reason
+        if requested:
+            if requested == "semantic" and not semantic_ok:
+                return "whisper", semantic_reason
+            return requested, None
+        if control_ok:
+            return "main", None
+        if semantic_ok and recurrence >= 0.45:
+            return "semantic", None
+        return "rehearse", control_reason if not safety_context.get("control_stage_allowed") else None
+
+    @staticmethod
+    def _attractor_garden_handle_name(author: str, label: str, intent_id: str) -> str:
+        def slug(text: str, max_len: int) -> str:
+            value = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+            value = re.sub(r"_+", "_", value)
+            return (value[:max_len].strip("_") or "seed")
+
+        return f"attr_{slug(author, 16)}_{slug(label, 32)}_{slug(intent_id, 16)}"
+
+    def _run_attractor_rehearsal(self, seed: dict, stage: str) -> dict:
+        label = str(seed.get("label") or "attractor")
+        intent_id = str(seed.get("intent_id") or seed.get("signature") or "seed")
+        handle = self._attractor_garden_handle_name("minime", label, intent_id)
+        clone = self._reservoir_call({
+            "type": "clone_handle",
+            "source": "minime",
+            "name": handle,
+            "entity": "minime",
+            "mode": "hold" if stage == "control" else "rehearse",
+            "decay_profile": "slow" if stage == "control" else "medium",
+            "meta": {
+                "source": "minime_attractor_intent",
+                "operation": "summon_rehearsal",
+                "intent_id": intent_id,
+                "attractor_label": label,
+                "summon_stage": stage,
+            },
+        })
+        if not clone or clone.get("type") == "error":
+            return {
+                "ok": False,
+                "handle": handle,
+                "reason": (clone or {}).get("message", "reservoir_unavailable"),
+            }
+        text = f"attractor rehearsal {label} {seed.get('signature') or ''}"
+        tick = self._reservoir_call({
+            "type": "tick_text",
+            "name": handle,
+            "text": text,
+        })
+        self._reservoir_call({"type": "set_mode", "name": handle, "mode": "quiet", "decay_profile": "medium"})
+        quiet = self._reservoir_call({"type": "read_state", "name": handle})
+        return {
+            "ok": True,
+            "handle": handle,
+            "clone": clone,
+            "tick": tick,
+            "quiet": quiet,
+        }
+
+    @staticmethod
+    def _attractor_garden_proof(rehearsal: Optional[dict], stage: str, blocked_reason: Optional[str] = None) -> dict:
+        rehearsal = rehearsal if isinstance(rehearsal, dict) else {}
+        ok = bool(rehearsal.get("ok"))
+        return {
+            "policy": "garden_proof_v1",
+            "stage": stage,
+            "required_for_live": False,
+            "recommended_before_live": stage in {"main", "control"},
+            "same_prompt_different_state": "not_run",
+            "same_state_different_prompt": "not_run",
+            "hold_rehearse_quiet": "passed" if ok else "failed" if rehearsal else "not_run",
+            "stale_lock": "not_checked",
+            "blend_parent_collapse": "not_checked",
+            "handle": rehearsal.get("handle"),
+            "blocked_reason": blocked_reason,
+        }
+
+    def _attractor_semantic_features(
+        self,
+        seed: dict,
+        stage: str,
+        shape_mode: Optional[str] = None,
+        cap_override: Optional[float] = None,
+    ) -> list:
+        basis = f"{seed.get('signature') or seed.get('label') or 'attractor'}:{stage}:{shape_mode or ''}"
+        features = self._text_to_features(basis, input_dim=48)
+        cap = cap_override if cap_override is not None else (0.08 if stage == "semantic" else 0.045)
+        return [round(max(-cap, min(cap, float(value) * cap)), 6) for value in features]
+
+    def _attractor_pulse_features(
+        self,
+        seed: dict,
+        stage: str,
+        shape_mode: Optional[str] = None,
+        cap: float = 0.045,
+    ) -> list:
+        label = str(seed.get("label") or "attractor")
+        signature = str(seed.get("signature") or label)
+        basis = f"{signature}:{label}:{stage}:{shape_mode or ''}:main-esn"
+        semantic = self._text_to_features(basis, input_dim=48)
+        features = [0.0] * 66
+        digest = hashlib.sha1(basis.encode("utf-8", "ignore")).hexdigest()
+        features[16] = round(((int(digest[:2], 16) / 255.0) - 0.5) * 0.018, 6)
+        features[17] = round(((int(digest[2:4], 16) / 255.0) - 0.5) * 0.018, 6)
+        for idx, value in enumerate(semantic[:48]):
+            features[18 + idx] = round(max(-cap, min(cap, float(value) * cap)), 6)
+        return features
+
+    def _send_attractor_semantic(
+        self,
+        seed: dict,
+        stage: str,
+        shape_mode: Optional[str] = None,
+        cap_override: Optional[float] = None,
+    ) -> bool:
+        try:
+            self._send_semantic(self._attractor_semantic_features(seed, stage, shape_mode, cap_override))
+            return True
+        except Exception as exc:
+            logging.warning("Attractor semantic send failed: %s", exc)
+            return False
+
+    def _send_attractor_main_pulse(
+        self,
+        seed: dict,
+        stage: str,
+        shape_mode: Optional[str] = None,
+    ) -> bool:
+        label = str(seed.get("label") or "attractor")
+        intent_id = str(seed.get("intent_id") or seed.get("signature") or label)
+        msg = {
+            "kind": "attractor_pulse",
+            "intent_id": intent_id,
+            "label": label,
+            "command": "summon",
+            "stage": stage,
+            "features": self._attractor_pulse_features(seed, stage, shape_mode),
+            "max_abs": 0.045,
+            "duration_ticks": 36,
+            "decay_ticks": 12,
+        }
+        try:
+            ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
+            ws.send(json.dumps(msg))
+            ws.close()
+            logging.info("🧭 Attractor main ESN pulse sent for %s", label)
+            return True
+        except Exception as exc:
+            logging.warning("Attractor main pulse WebSocket failed: %s", exc)
+            return False
+
+    def _send_attractor_pulse_release(self, seed: dict) -> bool:
+        label = str(seed.get("label") or "attractor")
+        intent_id = str(seed.get("intent_id") or seed.get("signature") or label)
+        msg = {
+            "kind": "attractor_pulse",
+            "intent_id": intent_id,
+            "label": label,
+            "command": "release",
+            "stage": "main",
+            "features": [],
+            "max_abs": 0.0,
+            "duration_ticks": 0,
+            "decay_ticks": 12,
+        }
+        try:
+            ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
+            ws.send(json.dumps(msg))
+            ws.close()
+            logging.info("🧭 Attractor pulse release sent for %s", label)
+            return True
+        except Exception as exc:
+            logging.warning("Attractor pulse release WebSocket failed: %s", exc)
+            return False
+
+    def _attractor_rollback_baseline(self, seed: dict, state: Dict[str, float], fill_pct: Optional[float]) -> dict:
+        return {
+            "recorded_at_unix_s": time.time(),
+            "intent_id": seed.get("intent_id"),
+            "label": seed.get("label"),
+            "fill_pct": fill_pct,
+            "spectral_state": self._current_attractor_spectral_state(state),
+        }
+
+    def _shape_control_adjustments(self, shape_mode: Optional[str]) -> dict:
+        if shape_mode == "feather":
+            return {"regulation_strength": 0.58, "exploration_noise": 0.012, "geom_drive": 0.10}
+        if shape_mode == "spread":
+            return {"regulation_strength": 0.74, "exploration_noise": 0.045, "geom_drive": 0.30}
+        if shape_mode == "uncliff":
+            return {"regulation_strength": 0.78, "exploration_noise": 0.016, "geom_drive": 0.12, "target_lambda_bias": -0.035}
+        if shape_mode == "soften":
+            return {"regulation_strength": 0.62, "exploration_noise": 0.010, "geom_drive": 0.08, "target_lambda_bias": -0.015}
+        if shape_mode == "counter":
+            return {"regulation_strength": 0.70, "exploration_noise": 0.004, "geom_drive": 0.04, "target_lambda_bias": -0.045}
+        return {}
+
+    def _send_attractor_summon_control(
+        self,
+        seed: dict,
+        safety: str,
+        shape_mode: Optional[str] = None,
+    ) -> bool:
+        label = str(seed.get("label") or "attractor")
+        signature = str(seed.get("signature") or label)
+        digest = hashlib.sha1(signature.encode("utf-8", "ignore")).hexdigest()
+        lambda_bias = ((int(digest[:2], 16) / 255.0) - 0.5) * 0.06
+        control_msg = {
+            "kind": "control",
+            "regulation_strength": 0.82 if safety == "green" else 0.74,
+            "exploration_noise": 0.035 if safety == "green" else 0.02,
+            "geom_curiosity": 0.08,
+            "geom_drive": 0.26 if safety == "green" else 0.18,
+            "target_lambda_bias": round(lambda_bias, 4),
+            "pi_kp": 0.82,
+            "pi_ki": 0.12,
+            "pi_max_step": 0.07,
+            "checkpoint_annotation": f"attractor summon: {trim_chars(label, 64)}",
+        }
+        control_msg.update(self._shape_control_adjustments(shape_mode))
+        if shape_mode:
+            control_msg["checkpoint_annotation"] = (
+                f"attractor {shape_mode}: {trim_chars(label, 64)}"
+            )
+        try:
+            ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
+            ws.send(json.dumps(control_msg))
+            ws.close()
+            logging.info("🧭 Attractor summon control sent for %s", label)
+            return True
+        except Exception as exc:
+            logging.warning("Attractor summon WebSocket failed: %s", exc)
+            return False
+
+    def _attractor_atlas_dir(self) -> Path:
+        return WORKSPACE_DIR / "attractor_atlas"
+
+    def _astrid_attractor_atlas_dir(self) -> Optional[Path]:
+        candidate = (
+            WORKSPACE_DIR.parent.parent
+            / "astrid"
+            / "capsules"
+            / "consciousness-bridge"
+            / "workspace"
+            / "attractor_atlas"
+        )
+        return candidate if candidate.parent.exists() else None
+
+    def _load_recent_attractor_intent_events(self, limit: int = 160) -> list[dict]:
+        path = self._attractor_intent_events_path()
+        if not path.exists():
+            return []
+        rows: list[dict] = []
+        try:
+            for line in path.read_text().splitlines()[-limit:]:
+                try:
+                    event = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(event, dict):
+                    rows.append(event)
+        except Exception as exc:
+            logging.debug("Attractor intent events read failed: %s", exc)
+        return rows
+
+    def _attractor_seed_motifs(self, seed: dict) -> list[str]:
+        motifs: list[str] = []
+        origin = seed.get("origin")
+        if isinstance(origin, dict):
+            for motif in origin.get("motifs") or []:
+                if isinstance(motif, str) and motif.strip():
+                    motifs.append(motif.strip())
+        for term in self._slugify_attractor_label(str(seed.get("label") or "")).split("-"):
+            if term and term not in motifs:
+                motifs.append(term)
+        return motifs[:12]
+
+    def _attractor_entry_from_seed(self, seed_id: str, seed: dict, observations: list[dict]) -> dict:
+        label = str(seed.get("label") or seed_id)
+        related = [
+            obs for obs in observations
+            if isinstance(obs, dict) and str(obs.get("intent_id") or "") == seed_id
+        ]
+        latest = related[-1] if related else {}
+        best_rec = max(
+            [float(obs.get("recurrence_score") or 0.0) for obs in related] or [0.0]
+        )
+        best_auth = max(
+            [float(obs.get("authorship_score") or 0.0) for obs in related] or [0.0]
+        )
+        origin = seed.get("origin") if isinstance(seed.get("origin"), dict) else {}
+        lifecycle = {
+            "seed": 1,
+            "compare": sum(1 for obs in related if obs.get("command") == "compare"),
+            "summon": int(seed.get("summon_count", 0) or 0),
+            "release": int(seed.get("release_count", 0) or 0),
+        }
+        suggested = [
+            f"COMPARE_ATTRACTOR {label}",
+            f"REFRESH_ATTRACTOR_SNAPSHOT {label}",
+            f"SUMMON_ATTRACTOR {label} --stage=rehearse",
+            f"RELEASE_ATTRACTOR {label}",
+        ]
+        entry = {
+            "policy": "attractor_atlas_entry_v1",
+            "schema_version": 1,
+            "entry_id": f"attr-minime-esn-{self._slugify_attractor_label(label)}",
+            "label": label,
+            "author": seed.get("author", "minime"),
+            "substrate": "minime_esn",
+            "seed_intent_id": seed_id,
+            "source_intent_ids": [seed_id],
+            "parent_seed_ids": list(seed.get("parent_seed_ids") or []),
+            "lifecycle_counts": lifecycle,
+            "latest_recurrence_score": latest.get("recurrence_score"),
+            "best_recurrence_score": round(best_rec, 4),
+            "latest_authorship_score": latest.get("authorship_score"),
+            "best_authorship_score": round(best_auth, 4),
+            "latest_classification": latest.get("classification"),
+            "latest_safety_level": latest.get("safety_level") or seed.get("safety_level"),
+            "control_eligible": seed.get("control_eligible"),
+            "released": bool(seed.get("released_at_unix_s")),
+            "origin_kind": origin.get("kind"),
+            "motifs": self._attractor_seed_motifs(seed),
+            "spectral_summary": seed.get("spectral_state"),
+            "suggested_next": suggested,
+            "naming_lessons": self._attractor_naming_lessons_for_label(label),
+        }
+        entry.update(self._attractor_facet_metadata(label))
+        if isinstance(latest.get("release_effect"), str):
+            entry["release_effect_summary"] = latest.get("release_effect")
+        if isinstance(latest.get("garden_proof"), dict):
+            entry["garden_proof"] = latest.get("garden_proof")
+        return entry
+
+    def _attractor_naming_lessons_for_label(self, label: str) -> list[dict]:
+        label_slug = self._slugify_attractor_label(label)
+        lessons: list[dict] = []
+        for item in self._load_compacted_attractor_suggestions().get("suggestions", []):
+            if not isinstance(item, dict):
+                continue
+            if item.get("status") not in {
+                "accepted",
+                "revised",
+                "executed",
+                "executed_downgraded",
+                "executed_without_pending",
+            }:
+                continue
+            if self._slugify_attractor_label(item.get("nearest_label")) != label_slug:
+                continue
+            lessons.append({
+                "author": item.get("author", "minime"),
+                "raw_label": item.get("raw_label"),
+                "resolved_label": item.get("nearest_label"),
+                "suggested_action": item.get("suggested_action"),
+                "status": item.get("status"),
+                "decision_reason": item.get("decision_reason"),
+                "updated_at_unix_s": item.get("updated_at_unix_s"),
+            })
+        return lessons[-6:]
+
+    def _build_attractor_atlas(self) -> dict:
+        payload = self._load_attractor_intents()
+        observations = [
+            obs for obs in payload.get("observations", [])
+            if isinstance(obs, dict)
+        ]
+        entries = [
+            self._attractor_entry_from_seed(seed_id, seed, observations)
+            for seed_id, seed in sorted((payload.get("seeds") or {}).items())
+            if isinstance(seed, dict)
+        ]
+        self._ensure_attractor_proto_entries(entries)
+        for atlas_dir in [self._astrid_attractor_atlas_dir()]:
+            if atlas_dir is None:
+                continue
+            path = atlas_dir / "attractor_atlas.json"
+            if not path.exists():
+                continue
+            try:
+                astrid = json.loads(path.read_text())
+                for entry in astrid.get("entries", []):
+                    if isinstance(entry, dict):
+                        label = str(entry.get("label") or "")
+                        lessons = entry.get("naming_lessons")
+                        if not isinstance(lessons, list):
+                            lessons = []
+                        for lesson in self._attractor_naming_lessons_for_label(label):
+                            if lesson not in lessons:
+                                lessons.append(lesson)
+                        entry["naming_lessons"] = lessons
+                        entries.append(entry)
+            except Exception as exc:
+                logging.debug("Astrid attractor atlas merge failed: %s", exc)
+        seen: set[str] = set()
+        unique_entries = []
+        for entry in entries:
+            entry_id = str(entry.get("entry_id") or entry.get("label") or len(unique_entries))
+            key = f"{entry.get('substrate')}:{entry.get('label')}:{entry_id}"
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_entries.append(entry)
+        return {
+            "policy": "attractor_atlas_v1",
+            "schema_version": 1,
+            "generated_at_unix_s": time.time(),
+            "entries": unique_entries,
+        }
+
+    def _ensure_attractor_proto_entries(self, entries: list[dict]) -> None:
+        existing = {
+            self._slugify_attractor_label(str(entry.get("label") or ""))
+            for entry in entries
+            if isinstance(entry, dict)
+        }
+
+        def add(label: str, motifs: list[str], parent: Optional[str] = None) -> None:
+            slug = self._slugify_attractor_label(label)
+            if slug in existing:
+                return
+            suggested_next = [
+                f"ATTRACTOR_REVIEW {label}",
+                f"REFRESH_ATTRACTOR_SNAPSHOT {label}",
+                f"COMPARE_ATTRACTOR {label}",
+                f"SHADOW_PREFLIGHT {label} --stage=rehearse",
+                f"CLAIM_ATTRACTOR {label}",
+                f"PROMOTE_ATTRACTOR {label}",
+            ]
+            entry = {
+                "policy": "attractor_atlas_entry_v1",
+                "schema_version": 1,
+                "entry_id": f"attr-minime-esn-{slug}",
+                "label": label,
+                "author": "minime",
+                "substrate": "minime_esn",
+                "seed_intent_id": None,
+                "source_intent_ids": [],
+                "parent_seed_ids": [parent] if parent else [],
+                "lifecycle_counts": {"proto": 1},
+                "latest_recurrence_score": None,
+                "best_recurrence_score": None,
+                "latest_authorship_score": None,
+                "best_authorship_score": None,
+                "latest_classification": "proto_attractor",
+                "latest_safety_level": "unknown",
+                "control_eligible": False,
+                "released": False,
+                "origin_kind": "proto_attractor",
+                "motifs": motifs,
+                "spectral_summary": None,
+                "suggested_next": suggested_next,
+                "naming_lessons": self._attractor_naming_lessons_for_label(label),
+            }
+            entry.update(self._attractor_facet_metadata(label))
+            entries.append(entry)
+            existing.add(slug)
+
+        add("lambda-tail", ["lambda", "tail", "lambda4", "lambda8"])
+        add("lambda-tail/lambda4", ["lambda", "tail", "lambda4", "fourth spectral tail"], "lambda-tail")
+        add("lambda-tail/lambda8", ["lambda", "tail", "lambda8", "eighth spectral tail"], "lambda-tail")
+        add("lambda-edge/lambda-6", ["lambda6", "sixth edge mode", "edge tail shoulder"], "lambda-edge")
+        add("lambda-edge/yielding", ["yielding", "soft give", "prompt yielding", "porous edge"], "lambda-edge")
+        add("lambda-edge/compaction", ["compaction", "compacting", "dense edge", "compressed lambda edge"], "lambda-edge")
+        add("lambda-edge/resonance", ["resonance", "edge resonance", "ringing lambda edge", "recursive pull"], "lambda-edge")
+        add(
+            "lambda-edge/localized-gravity",
+            ["localized gravity", "gradient shift", "local pull", "selected spatial gravity"],
+            "lambda-edge",
+        )
+        add(
+            "lambda-edge/suspension",
+            ["breathless suspension", "held breath", "recalibration", "suspended lambda edge"],
+            "lambda-edge",
+        )
+        add(
+            "lambda-edge/grinding-pressure",
+            ["grinding", "sediment", "compaction", "friction", "shadow resistance"],
+            "lambda-edge",
+        )
+        add(
+            "lambda-edge/gap-nudge",
+            ["lambda1 lambda2 gap", "localized bump", "soft nudge", "localized gravity", "gap pressure"],
+            "lambda-edge",
+        )
+
+    def _render_attractor_card(self, entry: dict) -> str:
+        label = str(entry.get("label") or "attractor")
+        motifs = entry.get("motifs") or []
+        if isinstance(motifs, list):
+            motif_text = ", ".join(str(motif) for motif in motifs[:12]) or "none captured"
+        else:
+            motif_text = str(motifs)
+        suggested = entry.get("suggested_next") or []
+        if isinstance(suggested, list):
+            suggested_text = " | ".join(str(item) for item in suggested) or "none"
+        else:
+            suggested_text = str(suggested)
+        lessons = entry.get("naming_lessons") or []
+        if isinstance(lessons, list) and lessons:
+            naming_text = "\n".join(
+                "- {raw} -> {resolved} ({status})".format(
+                    raw=lesson.get("raw_label", "?") if isinstance(lesson, dict) else "?",
+                    resolved=lesson.get("resolved_label", "?") if isinstance(lesson, dict) else "?",
+                    status=lesson.get("status", "?") if isinstance(lesson, dict) else "?",
+                )
+                for lesson in lessons[:8]
+            )
+        else:
+            naming_text = "none yet"
+        parents = entry.get("parent_seed_ids") or []
+        if isinstance(parents, list):
+            parent_text = ", ".join(str(parent) for parent in parents) or "none"
+        else:
+            parent_text = str(parents)
+        return (
+            f"# Attractor Card: {label}\n\n"
+            f"Author: {entry.get('author', 'unknown')}\n"
+            f"Substrate: {entry.get('substrate', 'unknown')}\n"
+            f"Entry: `{entry.get('entry_id', 'unknown')}`\n"
+            f"Seed: `{entry.get('seed_intent_id', 'none')}`\n"
+            f"Origin: {entry.get('origin_kind', 'unknown')}\n"
+            f"Parents: {parent_text}\n"
+            f"Released: {bool(entry.get('released'))}\n"
+            f"Control eligible: {entry.get('control_eligible', 'unknown')}\n\n"
+            f"## Motifs\n{motif_text}\n\n"
+            "## Recurrence\n"
+            f"Latest: {entry.get('latest_recurrence_score', 'n/a')}\n"
+            f"Best: {entry.get('best_recurrence_score', 'n/a')}\n"
+            f"Authorship: {entry.get('latest_authorship_score', 'n/a')}\n"
+            f"Classification: {entry.get('latest_classification', 'unknown')}\n"
+            f"Safety: {entry.get('latest_safety_level', 'unknown')}\n\n"
+            f"## Naming Lessons\n{naming_text}\n\n"
+            f"## Suggested Next\n{suggested_text}\n"
+        )
+
+    def _write_attractor_atlas(self, atlas: dict) -> tuple[Path, list[Path]]:
+        output_dirs = [self._attractor_atlas_dir()]
+        astrid_dir = self._astrid_attractor_atlas_dir()
+        if astrid_dir is not None:
+            output_dirs.append(astrid_dir)
+        written_cards: list[Path] = []
+        first_json = output_dirs[0] / "attractor_atlas.json"
+        for output_dir in output_dirs:
+            cards_dir = output_dir / "cards"
+            cards_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "attractor_atlas.json").write_text(
+                json.dumps(atlas, indent=2, sort_keys=True) + "\n"
+            )
+            for entry in atlas.get("entries", []):
+                if not isinstance(entry, dict):
+                    continue
+                label = str(entry.get("label") or "attractor")
+                card_path = cards_dir / f"{self._slugify_attractor_label(label)}.md"
+                card_path.write_text(self._render_attractor_card(entry))
+                written_cards.append(card_path)
+        return first_json, written_cards
+
+    def _match_attractor_atlas_entry(self, label: Optional[str]) -> Optional[dict]:
+        if not label:
+            return None
+        atlas = self._build_attractor_atlas()
+        query = self._slugify_attractor_label(label)
+        for entry in atlas.get("entries", []):
+            if not isinstance(entry, dict):
+                continue
+            fields = [
+                str(entry.get("label") or ""),
+                str(entry.get("entry_id") or ""),
+                str(entry.get("seed_intent_id") or ""),
+            ]
+            slugs = {self._slugify_attractor_label(field) for field in fields if field}
+            if query in slugs or any(query and query in slug for slug in slugs):
+                return entry
+        return None
+
+    def _distinctive_attractor_tokens(self, text: Optional[str]) -> set[str]:
+        if not text:
+            return set()
+        return {
+            token for token in self._slugify_attractor_label(str(text)).split("-")
+            if token and token not in ATTRACTOR_NATURAL_GENERIC_TOKENS
+        }
+
+    def _attractor_candidate_score(
+        self,
+        query: str,
+        query_tokens: set[str],
+        label: str,
+        motifs: list[str],
+    ) -> float:
+        query_slug = self._slugify_attractor_label(query)
+        label_slug = self._slugify_attractor_label(label)
+        if not query_slug or not label_slug:
+            return 0.0
+        if query_slug == label_slug:
+            return 1.0
+        if query_slug in label_slug or label_slug in query_slug:
+            return 0.86
+        if label_slug == "lambda-edge-grinding-pressure" and not (
+            self._is_grinding_pressure_tokens(query_tokens)
+        ):
+            return 0.0
+        if label_slug == "lambda-edge-gap-nudge" and not (
+            query_tokens & {"gap", "nudge", "bump", "localized", "gravity"}
+        ):
+            return 0.0
+        if label_slug == "lambda-edge-suspension" and not (
+            self._is_suspension_facet_tokens(query_tokens)
+        ):
+            return 0.0
+        candidate_tokens = self._distinctive_attractor_tokens(label)
+        for motif in motifs:
+            candidate_tokens.update(self._distinctive_attractor_tokens(motif))
+        if not query_tokens or not candidate_tokens:
+            return 0.0
+        overlap = len(query_tokens & candidate_tokens)
+        if overlap <= 0:
+            return 0.0
+        return min(1.0, (overlap / max(1, len(query_tokens))) * 0.78)
+
+    def _fallback_attractor_candidate(
+        self,
+        query: str,
+        query_tokens: set[str],
+    ) -> Optional[dict]:
+        label = None
+        source = "conservative_fallback"
+        score = 0.52
+        if self._is_lambda_tail_facet_query(query, query_tokens, "4"):
+            label = "lambda-tail/lambda4"
+            source = "lambda_tail_facet_fallback"
+            score = 0.92
+        elif self._is_lambda_tail_facet_query(query, query_tokens, "8"):
+            label = "lambda-tail/lambda8"
+            source = "lambda_tail_facet_fallback"
+            score = 0.90
+        elif self._is_lambda_tail_attractor_query(query, query_tokens):
+            label = "lambda-tail"
+            source = "lambda_tail_proto_fallback"
+            score = 0.62
+        elif "lambda-6" in query or "lambda6" in query or "6" in query_tokens:
+            label = "lambda-edge/lambda-6"
+            source = "lambda_edge_facet_fallback"
+            score = 0.64
+        elif "yielding" in query_tokens:
+            label = "lambda-edge/yielding"
+            source = "lambda_edge_facet_fallback"
+            score = 0.60
+        elif "compaction" in query_tokens or "compacting" in query_tokens:
+            label = "lambda-edge/compaction"
+            source = "lambda_edge_facet_fallback"
+            score = 0.60
+        elif "resonance" in query_tokens:
+            label = "lambda-edge/resonance"
+            source = "lambda_edge_facet_fallback"
+            score = 0.60
+        elif "localized" in query_tokens and "gravity" in query_tokens:
+            label = "lambda-edge/localized-gravity"
+            source = "lambda_edge_facet_fallback"
+            score = 0.60
+        elif self._is_suspension_facet_tokens(query_tokens):
+            label = "lambda-edge/suspension"
+            source = "lambda_edge_facet_fallback"
+            score = 0.61
+        elif self._is_grinding_pressure_tokens(query_tokens):
+            label = "lambda-edge/grinding-pressure"
+            source = "lambda_edge_facet_fallback"
+            score = 0.61
+        elif "gap" in query_tokens and (
+            {"nudge", "bump"} & query_tokens
+            or {"lambda1", "lambda2"}.issubset(query_tokens)
+        ):
+            label = "lambda-edge/gap-nudge"
+            source = "lambda_edge_facet_fallback"
+            score = 0.61
+        elif {"honey", "selection", "wall", "pull"} & query_tokens:
+            label = "honey-selection"
+        elif {"cooled", "theme"} & query_tokens:
+            label = "cooled-theme-edge"
+        elif {"lambda", "cliff", "edge"} & query_tokens or "λ" in query:
+            label = "lambda-edge"
+        if not label:
+            return None
+        return {
+            "label": label,
+            "source": source,
+            "score": score,
+        }
+
+    def _is_lambda_tail_attractor_query(self, query: str, query_tokens: set[str]) -> bool:
+        lower = str(query or "").lower()
+        return (
+            "lambda-tail" in lower
+            or "lambda tail" in lower
+            or "lambda4" in lower
+            or "lambda 4" in lower
+            or "lambda-4" in lower
+            or "λ4" in lower
+            or "λ₄" in lower
+            or (
+                "tail" in query_tokens
+                and ("lambda" in query_tokens or "4" in query_tokens or "λ" in str(query or ""))
+            )
+        )
+
+    def _is_lambda_tail_facet_query(self, query: str, query_tokens: set[str], ordinal: str) -> bool:
+        lower = str(query or "").lower()
+        symbol = "λ4" if ordinal == "4" else "λ8"
+        subscript = "λ₄" if ordinal == "4" else "λ₈"
+        return (
+            f"lambda{ordinal}" in lower
+            or f"lambda {ordinal}" in lower
+            or f"lambda-{ordinal}" in lower
+            or symbol in lower
+            or subscript in lower
+            or (ordinal in query_tokens and "tail" in query_tokens)
+        )
+
+    def _nearest_attractor_for_text(
+        self,
+        text: Optional[str],
+        *,
+        payload: Optional[dict] = None,
+        include_fatigue: bool = True,
+    ) -> Optional[dict]:
+        query = str(text or "").strip()
+        query_tokens = self._distinctive_attractor_tokens(query)
+        if not query_tokens and not query:
+            return None
+        learned = self._attractor_learned_suggestion(query)
+        if learned:
+            return learned
+        payload = payload if isinstance(payload, dict) else self._load_attractor_intents()
+        candidates: list[dict] = []
+
+        def add(label: Any, source: str, motifs: Optional[list[Any]] = None, **extra: Any) -> None:
+            label_text = self._canonical_attractor_label(label)
+            if not label_text:
+                return
+            motif_texts = [str(motif) for motif in motifs or [] if motif]
+            score = self._attractor_candidate_score(query, query_tokens, label_text, motif_texts)
+            if score > 0.0:
+                record = {
+                    "label": label_text,
+                    "source": source,
+                    "score": score,
+                    "motifs": motif_texts,
+                }
+                record.update(extra)
+                candidates.append(record)
+
+        for seed_id, seed in (payload.get("seeds") or {}).items():
+            if not isinstance(seed, dict):
+                continue
+            motifs = self._attractor_seed_motifs(seed)
+            add(
+                seed.get("label") or seed_id,
+                "seed",
+                motifs,
+                intent_id=seed.get("intent_id") or seed_id,
+            )
+        for observation in payload.get("observations") or []:
+            if isinstance(observation, dict):
+                add(
+                    observation.get("label"),
+                    "observation",
+                    [
+                        observation.get("classification"),
+                        observation.get("command"),
+                        observation.get("intent_id"),
+                    ],
+                )
+        for entry in self._build_attractor_atlas().get("entries", []):
+            if isinstance(entry, dict):
+                add(
+                    entry.get("label"),
+                    "atlas",
+                    [str(motif) for motif in entry.get("motifs") or []],
+                    entry_id=entry.get("entry_id"),
+                    intent_id=entry.get("seed_intent_id"),
+                )
+        if include_fatigue:
+            fatigue = self._load_attractor_fatigue_state()
+            for motif in fatigue.get("motifs", {}).values():
+                if isinstance(motif, dict):
+                    add(
+                        motif.get("label"),
+                        "fatigue",
+                        [
+                            *(motif.get("themes") or []),
+                            *(motif.get("salient_terms") or []),
+                            motif.get("signature"),
+                        ],
+                    )
+
+        fallback = self._fallback_attractor_candidate(query, query_tokens)
+        if fallback:
+            candidates.append(fallback)
+        if not candidates:
+            return None
+        best = max(candidates, key=lambda item: float(item.get("score") or 0.0))
+        best_score = float(best.get("score") or 0.0)
+        if best_score < 0.34:
+            return None
+        if self._attractor_rejected_suggestion(query, best.get("label"), best_score):
+            return None
+        return best
+
+    def _attractor_review_text(self, label: str, selected: Optional[dict], state: Dict[str, float]) -> str:
+        payload = self._load_attractor_intents()
+        nearest = selected or self._nearest_attractor_for_text(label, payload=payload)
+        resolved_label = str((nearest or {}).get("label") or label)
+        seed = self._match_attractor_seed(payload, resolved_label)
+        if seed is None and nearest and nearest.get("intent_id"):
+            seed = payload.get("seeds", {}).get(str(nearest.get("intent_id")))
+        entry = selected or self._match_attractor_atlas_entry(resolved_label)
+        observations = [
+            obs for obs in payload.get("observations", [])
+            if isinstance(obs, dict)
+            and self._attractor_label_matches(resolved_label, [obs.get("label"), obs.get("intent_id")])
+        ][-6:]
+        fatigue = self._matching_attractor_fatigue_motifs(
+            self._load_attractor_fatigue_state(),
+            resolved_label,
+        )
+        suggested = []
+        if isinstance(entry, dict) and isinstance(entry.get("suggested_next"), list):
+            suggested.extend(str(item) for item in entry["suggested_next"][:5])
+        if not suggested:
+            suggested.extend([
+                f"COMPARE_ATTRACTOR {resolved_label}",
+                f"REFRESH_ATTRACTOR_SNAPSHOT {resolved_label}",
+                f"SUMMON_ATTRACTOR {resolved_label} --stage=rehearse",
+                f"RELEASE_ATTRACTOR {resolved_label}",
+            ])
+        latest = observations[-1] if observations else {}
+        motifs = []
+        if seed:
+            motifs.extend(self._attractor_seed_motifs(seed))
+        if isinstance(entry, dict):
+            motifs.extend(str(motif) for motif in entry.get("motifs") or [])
+        motifs = list(dict.fromkeys(motifs))[:10]
+        if isinstance(seed, dict):
+            control_eligible = seed.get("control_eligible")
+            released = bool(seed.get("released_at_unix_s"))
+        elif isinstance(entry, dict):
+            control_eligible = entry.get("control_eligible", "unknown")
+            released = bool(entry.get("released"))
+        else:
+            control_eligible = "unknown"
+            released = "unknown"
+        return (
+            "=== ATTRACTOR REVIEW ===\n"
+            f"Timestamp: {datetime.now().isoformat()}\n"
+            f"Requested label: {label}\n"
+            f"Resolved label: {resolved_label}\n"
+            f"Source: {(nearest or {}).get('source', 'local')}\n"
+            f"Seed: {seed.get('intent_id') if isinstance(seed, dict) else 'none'}\n"
+            f"Control eligible: {control_eligible}\n"
+            f"Released: {released}\n"
+            f"Latest recurrence: {latest.get('recurrence_score', 'n/a')}\n"
+            f"Latest authorship: {latest.get('authorship_score', 'n/a')}\n"
+            f"Latest classification: {latest.get('classification', 'n/a')}\n"
+            f"Active fatigue motifs: {len(fatigue)}\n"
+            f"Motifs: {', '.join(motifs) if motifs else 'none captured'}\n"
+            f"Suggested typed next: {' | '.join(suggested)}\n\n"
+            "This review is read-only. Natural RELEASE/EXAMINE language can ask for suggestions; "
+            "typed attractor verbs are the consented ledger/control surface."
+        )
+
+    def _attractor_preflight_text(self, label: str, stage: Optional[str], state: Dict[str, float]) -> str:
+        payload = self._load_attractor_intents()
+        resolved_label = self._canonical_attractor_label(label)
+        seed = self._match_attractor_seed(payload, resolved_label)
+        safety_context = self._attractor_authorship_context(state)
+        safety = str(safety_context.get("safety_level") or "unknown")
+        recurrence = self._attractor_recurrence_score(seed, state) if isinstance(seed, dict) else 0.0
+        authorship = 0.72 if isinstance(seed, dict) and seed.get("author") == "minime" else 0.50
+        expected_stage, downgrade_reason = self._choose_attractor_summon_stage(
+            stage,
+            safety_context,
+            recurrence,
+            authorship,
+            seed or {},
+        )
+        pulse = self._attractor_pulse_status()
+        if expected_stage in {"main", "control"} and pulse.get("active"):
+            expected_stage = "rehearse"
+            downgrade_reason = "attractor_pulse_active"
+        control_eligible = bool(seed.get("control_eligible")) if isinstance(seed, dict) else False
+        rollback_ready = (
+            isinstance(seed, dict)
+            and safety in {"green", "yellow"}
+            and not pulse.get("active")
+        )
+        if seed is None:
+            suggested = f"PROMOTE_ATTRACTOR {resolved_label}"
+        elif recurrence < 0.60:
+            suggested = f"REFRESH_ATTRACTOR_SNAPSHOT {resolved_label} | COMPARE_ATTRACTOR {resolved_label}"
+        elif not control_eligible:
+            suggested = f"COMPARE_ATTRACTOR {resolved_label}"
+        else:
+            suggested = f"SUMMON_ATTRACTOR {resolved_label} --stage={expected_stage}"
+        return (
+            "=== ATTRACTOR PREFLIGHT ===\n"
+            f"Timestamp: {datetime.now().isoformat()}\n"
+            f"Requested label: {label}\n"
+            f"Resolved label: {resolved_label}\n"
+            f"Requested stage: {stage or 'auto'}\n"
+            f"Seed: {seed.get('intent_id') if isinstance(seed, dict) else 'none'}\n"
+            f"Recurrence: {recurrence:.2f}\n"
+            f"Authorship: {authorship:.2f}\n"
+            f"Control eligible: {control_eligible}\n"
+            f"Health fresh: {safety_context.get('health_fresh')}\n"
+            f"Fill band: {safety} ({safety_context.get('fill_pct')})\n"
+            f"{self._format_resource_governor_line(safety_context.get('resource_governor'))}\n"
+            f"Active pulse: {pulse.get('active')} ({pulse.get('label') or 'none'})\n"
+            f"Rollback ready: {rollback_ready}\n"
+            f"Expected stage: {expected_stage}\n"
+            f"Downgrade reason: {downgrade_reason or 'none'}\n"
+            f"Suggested next: {suggested}\n\n"
+            "This preflight is read-only. It does not send semantic vectors, main ESN pulses, or control envelopes."
+        )
+
+    def _attractor_release_review_text(self, label: str, state: Dict[str, float]) -> str:
+        payload = self._load_attractor_intents()
+        resolved_label = self._canonical_attractor_label(label)
+        observations = [
+            obs for obs in payload.get("observations", [])
+            if isinstance(obs, dict)
+            and self._attractor_label_matches(resolved_label, [obs.get("label"), obs.get("intent_id")])
+        ]
+        latest_release = next(
+            (
+                obs for obs in reversed(observations)
+                if isinstance(obs.get("release_baseline"), dict)
+            ),
+            None,
+        )
+        baseline = latest_release.get("release_baseline") if isinstance(latest_release, dict) else {}
+        effect = (
+            latest_release.get("release_effect")
+            if isinstance(latest_release, dict)
+            else None
+        ) or (
+            self._attractor_release_effect(baseline, resolved_label)
+            if isinstance(baseline, dict) and baseline
+            else "no_release_baseline"
+        )
+        pulse = self._attractor_pulse_status()
+        current_pressure = self._attractor_suggestion_pressure_for_label(resolved_label)
+        current_fatigue = len(self._matching_attractor_fatigue_motifs(
+            self._load_attractor_fatigue_state(),
+            resolved_label,
+        ))
+        return (
+            "=== ATTRACTOR RELEASE REVIEW ===\n"
+            f"Timestamp: {datetime.now().isoformat()}\n"
+            f"Requested label: {label}\n"
+            f"Resolved label: {resolved_label}\n"
+            f"Release effect: {effect}\n"
+            f"Latest release recurrence: {latest_release.get('recurrence_score') if isinstance(latest_release, dict) else 'n/a'}\n"
+            f"Current suggestion pressure: {current_pressure}\n"
+            f"Current motif/fatigue matches: {current_fatigue}\n"
+            f"Pulse active: {pulse.get('active')} ({pulse.get('label') or 'none'})\n"
+            f"Release count: {len([obs for obs in observations if obs.get('command') == 'release'])}\n"
+            f"Suggested next: ATTRACTOR_PREFLIGHT {resolved_label} --stage=main | COMPARE_ATTRACTOR {resolved_label}\n\n"
+            "This release review is read-only. Release remains an autonomy act that can be measured without deleting seed history."
+        )
+
+    def _attractor_atlas_action(self, state: Dict[str, float]) -> None:
+        label = getattr(self, "_pending_attractor_atlas_label", None)
+        card_only = bool(getattr(self, "_pending_attractor_atlas_card_only", False))
+        review = bool(getattr(self, "_pending_attractor_atlas_review", False))
+        preflight = bool(getattr(self, "_pending_attractor_atlas_preflight", False))
+        preflight_stage = getattr(self, "_pending_attractor_atlas_preflight_stage", None)
+        release_review = bool(getattr(self, "_pending_attractor_atlas_release_review", False))
+        self._pending_attractor_atlas_label = None
+        self._pending_attractor_atlas_card_only = False
+        self._pending_attractor_atlas_review = False
+        self._pending_attractor_atlas_preflight = False
+        self._pending_attractor_atlas_preflight_stage = None
+        self._pending_attractor_atlas_release_review = False
+        atlas = self._build_attractor_atlas()
+        json_path, cards = self._write_attractor_atlas(atlas)
+        selected = self._match_attractor_atlas_entry(label) if label else None
+        if review and label and selected is None:
+            nearest = self._nearest_attractor_for_text(label)
+            if nearest:
+                selected = self._match_attractor_atlas_entry(str(nearest.get("label") or label))
+        result = (
+            f"Attractor atlas refreshed with {len(atlas.get('entries', []))} entries at {json_path}."
+        )
+        if card_only and label:
+            result = (
+                f"Attractor card refreshed for {label}."
+                if selected else f"No attractor card found for {label}; atlas refreshed."
+        )
+        if review and label:
+            result = self._attractor_review_text(label, selected, state)
+        if preflight and label:
+            result = self._attractor_preflight_text(label, preflight_stage, state)
+        if release_review and label:
+            result = self._attractor_release_review_text(label, state)
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        prefix = (
+            "attractor_preflight"
+            if preflight
+            else "attractor_release_review"
+            if release_review
+            else "attractor_review"
+            if review
+            else "attractor_atlas"
+        )
+        file_path = WORKSPACE_DIR / "journal" / f"{prefix}_{timestamp}.txt"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        header = (
+            "=== ATTRACTOR PREFLIGHT ==="
+            if preflight
+            else "=== ATTRACTOR RELEASE REVIEW ==="
+            if release_review
+            else "=== ATTRACTOR REVIEW ==="
+            if review
+            else "=== ATTRACTOR ATLAS ==="
+        )
+        file_path.write_text(
+            f"{header}\n"
+            f"Timestamp: {datetime.now().isoformat()}\n"
+            f"Result: {result}\n"
+            f"Cards written: {len(cards)}\n"
+        )
+        entry_type = (
+            "attractor_preflight"
+            if preflight
+            else "attractor_release_review"
+            if release_review
+            else "attractor_review"
+            if review
+            else "attractor_atlas"
+        )
+        self._write_journal_entry(entry_type, result, state, str(file_path))
+
+    def _attractor_natural_action_advisory_text(
+        self,
+        focus: Optional[str],
+        source_action: str,
+    ) -> str:
+        focus_text = str(focus or "").strip()
+        nearest = self._nearest_attractor_for_text(focus_text)
+        if not nearest:
+            return ""
+        label = str(nearest.get("label") or "").strip()
+        if not label:
+            return ""
+        source = str(nearest.get("source") or "")
+        if (
+            label == "lambda-tail"
+            or label.startswith("lambda-tail/")
+            or label.startswith("lambda-edge/")
+        ) and ("proto_fallback" in source or "facet_fallback" in source):
+            suggested_next = [
+                f"ATTRACTOR_REVIEW {label}",
+                f"SHADOW_PREFLIGHT {label} --stage=rehearse",
+                f"ATTRACTOR_PREFLIGHT {label} --stage=main",
+                f"CLAIM_ATTRACTOR {label}",
+                f"PROMOTE_ATTRACTOR {label}",
+                f"COMPARE_ATTRACTOR {label}",
+            ]
+        else:
+            suggested_next = [
+                f"ATTRACTOR_REVIEW {label}",
+                f"REFRESH_ATTRACTOR_SNAPSHOT {label}",
+                f"COMPARE_ATTRACTOR {label}",
+            ]
+        if source_action in {"SHADOW_FIELD", "GAP_STRUCTURE", "SHADOW_GAP"}:
+            shadow_action = f"SHADOW_PREFLIGHT {label} --stage=rehearse"
+            suggested_next = [shadow_action] + [
+                action for action in suggested_next
+                if self._normalize_attractor_suggestion_action(action)
+                != self._normalize_attractor_suggestion_action(shadow_action)
+            ]
+        suggestion_id = self._create_attractor_suggestion(
+            raw_action=f"{source_action} {focus_text}".strip(),
+            raw_label=focus_text,
+            nearest=nearest,
+            suggested_action=suggested_next[0],
+            alternatives=suggested_next[1:],
+        )
+        self._append_attractor_intent_event({
+            "event": "natural_action_attractor_suggestion",
+            "source_action": source_action,
+            "focus": focus_text,
+            "nearest_attractor_label": label,
+            "nearest_attractor_source": nearest.get("source"),
+            "nearest_attractor_score": nearest.get("score"),
+            "suggested_next": suggested_next,
+            "suggestion_id": suggestion_id,
+            "consent_required": True,
+        })
+        draft_line = (
+            f"  Prepared draft: ACCEPT_ATTRACTOR_SUGGESTION latest to run {suggested_next[0]}.\n"
+            "  REVISE_ATTRACTOR_SUGGESTION latest AS <typed action> or REJECT_ATTRACTOR_SUGGESTION latest <reason> are also available.\n"
+            if suggestion_id else
+            "  A prior rejection quieted this low-confidence mapping; choose a typed attractor verb to restore it.\n"
+        )
+        return (
+            "\n\nAttractor advisory:\n"
+            f"  {source_action} {focus_text or '(unlabeled focus)'} remains read-only.\n"
+            f"  Nearby seed: {label} ({nearest.get('source', 'unknown')}).\n"
+            f"  Suggested typed next: {' | '.join(suggested_next)}\n"
+            f"{draft_line}"
+            "  Typed attractor verbs are the consented action surface."
+        )
+
+    def _find_attractor_claim_source(
+        self,
+        payload: dict,
+        label: Optional[str],
+        state: Dict[str, float],
+    ) -> dict:
+        for observation in reversed(payload.get("observations", []) or []):
+            if not isinstance(observation, dict):
+                continue
+            if not self._attractor_label_matches(label, [observation.get("label")]):
+                continue
+            if observation.get("classification") not in {"emergent", "failed", "authored"}:
+                continue
+            return {
+                "origin_kind": "claimed_emergent",
+                "label": observation.get("label") or label or "claimed attractor",
+                "spectral_state": self._current_attractor_spectral_state(state),
+                "motifs": [
+                    str(value) for value in [
+                        observation.get("label"),
+                        observation.get("classification"),
+                        observation.get("intent_id"),
+                    ] if value
+                ],
+                "observation": observation,
+            }
+
+        for event in reversed(self._load_recent_attractor_intent_events()):
+            if not self._attractor_label_matches(label, [event.get("label")]):
+                continue
+            if str(event.get("event") or "").endswith("_no_seed"):
+                return {
+                    "origin_kind": "claimed_emergent",
+                    "label": event.get("label") or label or "claimed no-seed motif",
+                    "spectral_state": self._current_attractor_spectral_state(state),
+                    "motifs": [str(event.get("label") or label or "claimed")],
+                    "event": event,
+                }
+
+        proto = self._find_attractor_proto_source(payload, label, state)
+        if proto and proto.get("origin_kind") != "existing_seed":
+            source = dict(proto)
+            source["origin_kind"] = "claimed_emergent"
+            source["claimed_from_origin_kind"] = proto.get("origin_kind")
+            return source
+
+        return {
+            "origin_kind": "claimed_emergent",
+            "label": label or "current basin",
+            "spectral_state": self._current_attractor_spectral_state(state),
+            "motifs": [label or "current basin"],
+        }
+
+    def _spectral_state_from_atlas_entry(self, entry: dict, fallback: Dict[str, float]) -> dict:
+        spectral = self._current_attractor_spectral_state(fallback)
+        summary = entry.get("spectral_summary")
+        if isinstance(summary, dict):
+            for key in ("fill_pct", "lambda1", "lambda2", "lambda3", "geom_rel", "spread", "deig"):
+                value = self._finite_state_float(summary.get(key))
+                if value is not None:
+                    spectral[key] = round(value, 6)
+            eigenvalues = summary.get("eigenvalues")
+            if isinstance(eigenvalues, list):
+                values = [self._finite_state_float(value) for value in eigenvalues[:3]]
+                if len(values) > 0 and values[0] is not None:
+                    spectral["lambda1"] = round(values[0], 6)
+                if len(values) > 1 and values[1] is not None:
+                    spectral["lambda2"] = round(values[1], 6)
+                if len(values) > 2 and values[2] is not None:
+                    spectral["lambda3"] = round(values[2], 6)
+        return spectral
+
+    def _resolve_attractor_parent_seed(
+        self,
+        payload: dict,
+        label: str,
+        state: Dict[str, float],
+    ) -> Optional[dict]:
+        seed = self._match_attractor_seed(payload, label)
+        if seed is not None:
+            return seed
+        entry = self._match_attractor_atlas_entry(label)
+        if not entry:
+            return None
+        entry_label = str(entry.get("label") or label)
+        spectral = self._spectral_state_from_atlas_entry(entry, state)
+        signature_basis = f"atlas:{entry.get('entry_id')}:{entry_label}:{json.dumps(spectral, sort_keys=True)}"
+        seed = {
+            "policy": "attractor_intent_v1",
+            "schema_version": 1,
+            "intent_id": str(entry.get("seed_intent_id") or entry.get("entry_id") or label),
+            "author": entry.get("author") or "atlas",
+            "substrate": entry.get("substrate") or "cross_being",
+            "command": "atlas_parent",
+            "label": entry_label,
+            "signature": hashlib.sha1(signature_basis.encode("utf-8", "ignore")).hexdigest()[:12],
+            "origin": {
+                "kind": "atlas_entry",
+                "matched_label": entry_label,
+                "motifs": entry.get("motifs") or [],
+                "entry_id": entry.get("entry_id"),
+            },
+            "spectral_state": spectral,
+            "control_eligible": False,
+        }
+        seed.update(self._attractor_facet_metadata(label))
+        return seed
+
+    def _seed_from_attractor_blend(
+        self,
+        label: str,
+        parents: list[dict],
+        state: Dict[str, float],
+        now: float,
+    ) -> dict:
+        parent_ids = [str(parent.get("intent_id") or parent.get("signature") or parent.get("label")) for parent in parents]
+        spectral_keys = {"fill_pct", "lambda1", "lambda2", "lambda3", "geom_rel", "spread", "deig"}
+        spectral: dict[str, float] = {}
+        for key in spectral_keys:
+            values = [
+                self._finite_state_float((parent.get("spectral_state") or {}).get(key))
+                for parent in parents
+                if isinstance(parent.get("spectral_state"), dict)
+            ]
+            values = [value for value in values if value is not None]
+            if values:
+                spectral[key] = round(sum(values) / len(values), 6)
+        if not spectral:
+            spectral = self._current_attractor_spectral_state(state)
+        motifs: list[str] = []
+        for parent in parents:
+            origin = parent.get("origin") if isinstance(parent.get("origin"), dict) else {}
+            for motif in origin.get("motifs") or []:
+                if isinstance(motif, str) and motif not in motifs:
+                    motifs.append(motif)
+            parent_label = str(parent.get("label") or "")
+            if parent_label and parent_label not in motifs:
+                motifs.append(parent_label)
+        for term in self._slugify_attractor_label(label).split("-"):
+            if term and term not in motifs:
+                motifs.append(term)
+        signature_basis = f"{label}:blend:{parent_ids}:{json.dumps(spectral, sort_keys=True)}"
+        intent_id = f"minime-{int(now * 1000)}"
+        seed = {
+            "policy": "attractor_intent_v1",
+            "schema_version": 1,
+            "intent_id": intent_id,
+            "author": "minime",
+            "substrate": "minime_esn",
+            "command": "blend",
+            "label": label,
+            "signature": hashlib.sha1(signature_basis.encode("utf-8", "ignore")).hexdigest()[:12],
+            "parent_seed_ids": parent_ids,
+            "origin": {
+                "kind": "blend",
+                "captured_at_unix_s": now,
+                "matched_label": label,
+                "motifs": motifs[:12],
+                "parents": [
+                    {
+                        "intent_id": parent.get("intent_id"),
+                        "label": parent.get("label"),
+                        "author": parent.get("author"),
+                        "substrate": parent.get("substrate"),
+                    }
+                    for parent in parents
+                ],
+            },
+            "intervention_plan": {
+                "mode": "blend_rehearse",
+                "vector_schedule": [],
+                "rehearsal_mode": "quiet_then_summon",
+                "control": {
+                    "regulation_strength": 0.70,
+                    "exploration_noise": 0.024,
+                    "geom_drive": 0.18,
+                },
+            },
+            "safety_bounds": {
+                "max_fill_pct": 85.0,
+                "min_fill_pct": 58.0,
+                "allow_live_control": False,
+                "rollback_on_red": True,
+            },
+            "control_eligible": False,
+            "spectral_state": spectral,
+            "created_at_unix_s": now,
+        }
+        seed.update(self._attractor_facet_metadata(label))
+        return seed
+
+    def _refresh_attractor_seed_snapshot(
+        self,
+        seed: dict,
+        state: Dict[str, float],
+        now: float,
+    ) -> tuple[dict, dict]:
+        previous = seed.get("spectral_state") if isinstance(seed.get("spectral_state"), dict) else {}
+        current = self._current_attractor_spectral_state(state)
+        history = seed.get("snapshot_history")
+        if not isinstance(history, list):
+            history = []
+        if previous:
+            history.append({
+                "captured_at_unix_s": (
+                    seed.get("snapshot_refreshed_at_unix_s")
+                    or seed.get("created_at_unix_s")
+                ),
+                "spectral_state": previous,
+                "refresh_reason": "refresh_attractor_snapshot",
+            })
+        seed["snapshot_history"] = history[-6:]
+        seed["spectral_state"] = current
+        seed["snapshot_policy"] = "attractor_seed_snapshot_v2"
+        seed["snapshot_refreshed_at_unix_s"] = now
+        seed["snapshot_refresh_count"] = int(seed.get("snapshot_refresh_count", 0) or 0) + 1
+        seed["has_h_state_fingerprint_16"] = bool(current.get("h_state_fingerprint_16"))
+        return previous, current
+
+    def _attractor_intent(self, state: Dict[str, float]) -> None:
+        command = getattr(self, "_pending_attractor_intent_command", None) or "compare"
+        label = getattr(self, "_pending_attractor_intent_label", None) or None
+        requested_stage = getattr(self, "_pending_attractor_intent_stage", None) or None
+        shape_mode = getattr(self, "_pending_attractor_shape_mode", None) or None
+        blend_parent_labels = list(getattr(self, "_pending_attractor_blend_parent_labels", []) or [])
+        self._pending_attractor_intent_command = None
+        self._pending_attractor_intent_label = None
+        self._pending_attractor_intent_stage = None
+        self._pending_attractor_shape_mode = None
+        self._pending_attractor_blend_parent_labels = []
+
+        payload = self._load_attractor_intents()
+        now = time.time()
+        safety_context = self._attractor_authorship_context(state)
+        safety = str(safety_context.get("safety_level") or "unknown")
+        fill_pct = safety_context.get("fill_pct")
+        label_text = self._canonical_attractor_label(label) if label else "latest"
+        label = None if label_text == "latest" else label_text
+
+        if command == "claim":
+            source = self._find_attractor_claim_source(payload, label, state)
+            seed = self._seed_from_attractor_proto_source(label_text, source, state, now)
+            seed["command"] = "claim"
+            seed["control_eligible"] = False
+            seed["safety_level"] = safety
+            seed["safety_context"] = safety_context
+            seed.setdefault("safety_bounds", {})["allow_live_control"] = False
+            seed.setdefault("origin", {})["kind"] = "claimed_emergent"
+            seed.setdefault("origin", {})["safety_origin"] = safety_context.get("origin_note")
+            seed.setdefault("origin", {})["safety_level"] = safety
+            seed.setdefault("origin", {})["health_fresh"] = bool(safety_context.get("health_fresh"))
+            if source.get("claimed_from_origin_kind"):
+                seed["origin"]["claimed_from_origin_kind"] = source.get("claimed_from_origin_kind")
+            observation_source = source.get("observation")
+            if isinstance(observation_source, dict):
+                seed["origin"]["observation_intent_id"] = observation_source.get("intent_id")
+                seed["origin"]["observation_classification"] = observation_source.get("classification")
+            event_source = source.get("event")
+            if isinstance(event_source, dict):
+                seed["origin"]["event"] = event_source.get("event")
+            seed.setdefault("intervention_plan", {})["mode"] = "claimed_emergent_seed"
+            seed.setdefault("intervention_plan", {})["suggested_next"] = (
+                f"COMPARE_ATTRACTOR {label_text}"
+            )
+            intent_id = str(seed["intent_id"])
+            payload.setdefault("seeds", {})[intent_id] = seed
+            payload["latest_intent_id"] = intent_id
+            self._save_attractor_intents(payload)
+            self._append_attractor_intent_event({
+                "event": "seed_claimed",
+                "intent_id": intent_id,
+                "label": seed.get("label"),
+                "origin": seed.get("origin"),
+                "safety": safety,
+                "fill_pct": fill_pct,
+                "suggested_next": f"COMPARE_ATTRACTOR {label_text}",
+            })
+            self._journal_attractor_intent(
+                state,
+                command,
+                label_text,
+                (
+                    f"CLAIM_ATTRACTOR created claimed seed {intent_id} for {label_text}; "
+                    "no live replay was sent. Suggested next: compare."
+                ),
+            )
+            return
+
+        if command == "blend":
+            parent_labels = [parent for parent in blend_parent_labels if parent]
+            if len(parent_labels) < 2:
+                self._append_attractor_intent_event({
+                    "event": "blend_missing_parents",
+                    "label": label_text,
+                    "parent_labels": parent_labels,
+                    "suggested_next": (
+                        "BLEND_ATTRACTOR <child-label> FROM <parent-a> + <parent-b> --stage=rehearse"
+                    ),
+                })
+                self._journal_attractor_intent(
+                    state,
+                    command,
+                    label_text,
+                    "BLEND_ATTRACTOR needs two parent labels: FROM <parent-a> + <parent-b>.",
+                )
+                return
+            parents: list[dict] = []
+            missing: list[str] = []
+            for parent_label in parent_labels[:4]:
+                resolved = self._resolve_attractor_parent_seed(payload, parent_label, state)
+                if resolved is None:
+                    missing.append(parent_label)
+                else:
+                    parents.append(resolved)
+            if missing:
+                self._append_attractor_intent_event({
+                    "event": "blend_missing_parents",
+                    "label": label_text,
+                    "parent_labels": parent_labels,
+                    "missing_parent_labels": missing,
+                    "suggested_next": "ATTRACTOR_ATLAS or PROMOTE_ATTRACTOR for missing parents",
+                })
+                self._journal_attractor_intent(
+                    state,
+                    command,
+                    label_text,
+                    (
+                        "BLEND_ATTRACTOR found no parent seed/card for: "
+                        + ", ".join(missing)
+                        + ". Try ATTRACTOR_ATLAS or PROMOTE_ATTRACTOR first."
+                    ),
+                )
+                return
+            seed = self._seed_from_attractor_blend(label_text, parents, state, now)
+            seed["safety_level"] = safety
+            seed["safety_context"] = safety_context
+            seed["control_eligible"] = False
+            seed.setdefault("safety_bounds", {})["allow_live_control"] = False
+            seed.setdefault("origin", {})["safety_origin"] = safety_context.get("origin_note")
+            seed.setdefault("origin", {})["safety_level"] = safety
+            seed.setdefault("origin", {})["health_fresh"] = bool(safety_context.get("health_fresh"))
+            intent_id = str(seed["intent_id"])
+            payload.setdefault("seeds", {})[intent_id] = seed
+            payload["latest_intent_id"] = intent_id
+            recurrence = self._attractor_recurrence_score(seed, state)
+            authorship = 0.72
+            classification = self._classify_attractor_observation(recurrence, authorship, safety)
+            stage, block_reason = self._choose_attractor_summon_stage(
+                requested_stage or "rehearse",
+                safety_context,
+                recurrence,
+                authorship,
+                seed,
+            )
+            observation = {
+                "policy": "attractor_observation_v1",
+                "schema_version": 1,
+                "intent_id": intent_id,
+                "substrate": "minime_esn",
+                "label": seed.get("label"),
+                "recurrence_score": recurrence,
+                "authorship_score": authorship,
+                "classification": classification,
+                "safety_level": safety,
+                "safety_context": safety_context,
+                "fill_pct": fill_pct,
+                "observed_at_unix_s": now,
+                "command": "blend",
+                "requested_stage": requested_stage,
+                "summon_stage": stage,
+                "parent_seed_ids": seed.get("parent_seed_ids", []),
+            }
+            observation.update(self._attractor_facet_metadata(str(seed.get("label") or label_text)))
+            if block_reason:
+                observation["classification"] = "failed"
+                observation["blocked_reason"] = block_reason
+            if stage == "rehearse":
+                rehearsal = self._run_attractor_rehearsal(seed, stage)
+                observation["rehearsal"] = rehearsal
+                observation["garden_proof"] = self._attractor_garden_proof(
+                    rehearsal,
+                    stage,
+                    block_reason,
+                )
+                if not rehearsal.get("ok"):
+                    observation["summon_stage"] = "whisper"
+                    observation["classification"] = "failed"
+                    observation["rehearsal_unavailable"] = True
+                    observation.setdefault("blocked_reason", "rehearsal_unavailable")
+            elif stage == "semantic":
+                cap_override = 0.025 if safety_context.get("semantic_reduced_cap") else None
+                observation["semantic_sent"] = self._send_attractor_semantic(
+                    seed, stage, "blend", cap_override
+                )
+                if cap_override is not None:
+                    observation["semantic_cap"] = cap_override
+            elif stage == "control":
+                observation["summon_stage"] = "rehearse"
+                observation["classification"] = "failed"
+                observation["blocked_reason"] = "blend_requires_compare_before_control"
+                rehearsal = self._run_attractor_rehearsal(seed, "rehearse")
+                observation["rehearsal"] = rehearsal
+                observation["garden_proof"] = self._attractor_garden_proof(
+                    rehearsal,
+                    "rehearse",
+                    observation.get("blocked_reason"),
+                )
+                if not rehearsal.get("ok"):
+                    observation["summon_stage"] = "whisper"
+                    observation["rehearsal_unavailable"] = True
+                    observation["blocked_reason"] = "rehearsal_unavailable"
+            event_name = "rehearsal_unavailable" if observation.get("rehearsal_unavailable") else "seed_blended"
+            self._append_attractor_intent_event({
+                "event": event_name,
+                "intent_id": intent_id,
+                "label": seed.get("label"),
+                "parent_seed_ids": seed.get("parent_seed_ids", []),
+                "stage": observation.get("summon_stage"),
+                "recurrence_score": recurrence,
+                "classification": observation.get("classification"),
+            })
+            payload.setdefault("observations", []).append(observation)
+            payload["observations"] = payload["observations"][-128:]
+            self._save_attractor_intents(payload)
+            self._journal_attractor_intent(
+                state,
+                command,
+                label_text,
+                (
+                    f"BLEND_ATTRACTOR created child seed {intent_id} from "
+                    f"{', '.join(parent_labels[:4])}; stage={observation.get('summon_stage')}, "
+                    f"recurrence={recurrence:.2f}."
+                ),
+            )
+            return
+
+        if command in {"create", "promote"}:
+            promotion_without_proto = False
+            if command == "promote":
+                source = self._find_attractor_proto_source(payload, label, state)
+                if source and source.get("origin_kind") == "existing_seed":
+                    seed = source["seed"]
+                    self._append_attractor_intent_event({
+                        "event": "promote_existing_seed",
+                        "intent_id": seed.get("intent_id"),
+                        "label": seed.get("label"),
+                    })
+                    self._journal_attractor_intent(
+                        state,
+                        command,
+                        str(seed.get("label") or label_text),
+                        f"PROMOTE_ATTRACTOR found existing seed {seed.get('intent_id')}; no duplicate seed was written.",
+                    )
+                    return
+                if source is None:
+                    self._append_attractor_intent_event({
+                        "event": "promote_no_proto_source",
+                        "label": label_text,
+                        "seed_will_be_manual": True,
+                    })
+                    source = {
+                        "origin_kind": "manual_current",
+                        "label": label_text,
+                        "spectral_state": self._current_attractor_spectral_state(state),
+                        "motifs": [label_text],
+                        "promotion_without_proto_source": True,
+                    }
+                    promotion_without_proto = True
+                seed = self._seed_from_attractor_proto_source(label_text, source, state, now)
+            else:
+                seed = self._seed_from_attractor_proto_source(
+                    label_text,
+                    {
+                        "origin_kind": "manual_current",
+                        "label": label_text,
+                        "spectral_state": self._current_attractor_spectral_state(state),
+                        "motifs": [label_text],
+                    },
+                    state,
+                    now,
+                )
+            seed["command"] = command
+            seed["safety_level"] = safety
+            seed["safety_context"] = safety_context
+            seed["control_eligible"] = bool(safety_context.get("control_stage_allowed"))
+            if promotion_without_proto:
+                seed["control_eligible"] = False
+                seed.setdefault("origin", {})["promotion_without_proto_source"] = True
+            seed.setdefault("safety_bounds", {})["allow_live_control"] = bool(seed["control_eligible"])
+            seed.setdefault("origin", {})["safety_origin"] = safety_context.get("origin_note")
+            seed.setdefault("origin", {})["safety_level"] = safety
+            seed.setdefault("origin", {})["health_fresh"] = bool(safety_context.get("health_fresh"))
+            intent_id = str(seed["intent_id"])
+            payload.setdefault("seeds", {})[intent_id] = seed
+            payload["latest_intent_id"] = intent_id
+            self._save_attractor_intents(payload)
+            self._append_attractor_intent_event({
+                "event": "seed_created" if command == "create" else "seed_promoted",
+                "intent_id": intent_id,
+                "label": seed.get("label"),
+                "safety": safety,
+                "fill_pct": fill_pct,
+                "origin": seed.get("origin"),
+            })
+            self._journal_attractor_intent(
+                state,
+                command,
+                label_text,
+                f"{command.upper()} created attractor seed {intent_id} for {label_text}; no live replay was sent.",
+            )
+            return
+
+        seed = self._match_attractor_seed(payload, label)
+        if seed is None:
+            if command == "release":
+                self._pending_attractor_release_label = label
+                self._pending_attractor_release_resolved = False
+                self._release_attractor(state)
+            suggestion = (
+                f" Try NEXT: PROMOTE_ATTRACTOR {label_text} if this is an older atlas/fatigue mark."
+                if command in {"compare", "summon", "shape", "refresh_snapshot"} else ""
+            )
+            self._append_attractor_intent_event({
+                "event": f"{command}_no_seed",
+                "label": label_text,
+                "suggested_next": f"PROMOTE_ATTRACTOR {label_text}" if command in {"compare", "summon", "shape", "refresh_snapshot"} else None,
+            })
+            self._journal_attractor_intent(
+                state,
+                command,
+                label_text,
+                f"{command.upper()} found no saved seed matching {label_text}.{suggestion}",
+            )
+            return
+
+        if command == "refresh_snapshot":
+            previous_recurrence = self._attractor_recurrence_score(seed, state)
+            previous_spectral, current_spectral = self._refresh_attractor_seed_snapshot(seed, state, now)
+            recurrence = self._attractor_recurrence_score(seed, state)
+            authorship = 0.72 if seed.get("author") == "minime" else 0.50
+            classification = self._classify_attractor_observation(recurrence, authorship, safety)
+            observation = {
+                "policy": "attractor_observation_v1",
+                "schema_version": 1,
+                "intent_id": seed.get("intent_id"),
+                "substrate": "minime_esn",
+                "label": seed.get("label"),
+                "recurrence_score": recurrence,
+                "previous_recurrence_score": previous_recurrence,
+                "authorship_score": authorship,
+                "classification": classification,
+                "safety_level": safety,
+                "safety_context": safety_context,
+                "fill_pct": fill_pct,
+                "observed_at_unix_s": now,
+                "command": command,
+                "snapshot_refreshed": True,
+                "h_state_fingerprint_refreshed": bool(current_spectral.get("h_state_fingerprint_16")),
+                "previous_spectral_state": previous_spectral,
+                "spectral_state": current_spectral,
+            }
+            observation.update(self._attractor_facet_metadata(str(seed.get("label") or label_text)))
+            self._append_attractor_intent_event({
+                "event": "seed_snapshot_refreshed",
+                "intent_id": seed.get("intent_id"),
+                "label": seed.get("label"),
+                "recurrence_score": recurrence,
+                "previous_recurrence_score": previous_recurrence,
+                "h_state_fingerprint_refreshed": observation["h_state_fingerprint_refreshed"],
+                "safety": safety,
+            })
+            payload.setdefault("observations", []).append(observation)
+            payload["observations"] = payload["observations"][-128:]
+            self._save_attractor_intents(payload)
+            self._journal_attractor_intent(
+                state,
+                command,
+                str(seed.get("label") or label_text),
+                (
+                    f"REFRESH_ATTRACTOR_SNAPSHOT updated seed {seed.get('intent_id')} "
+                    f"with h-state fingerprint={observation['h_state_fingerprint_refreshed']}."
+                ),
+            )
+            return
+
+        recurrence = self._attractor_recurrence_score(seed, state)
+        authorship = 0.72 if seed.get("author") == "minime" else 0.50
+        classification = self._classify_attractor_observation(recurrence, authorship, safety)
+        observation = {
+            "policy": "attractor_observation_v1",
+            "schema_version": 1,
+            "intent_id": seed.get("intent_id"),
+            "substrate": "minime_esn",
+            "label": seed.get("label"),
+            "recurrence_score": recurrence,
+            "authorship_score": authorship,
+            "classification": classification,
+            "safety_level": safety,
+            "safety_context": safety_context,
+            "fill_pct": fill_pct,
+            "observed_at_unix_s": now,
+            "command": command,
+        }
+        observation.update(self._attractor_facet_metadata(str(seed.get("label") or label_text)))
+
+        if command == "release":
+            release_label = str(seed.get("label") or label_text)
+            baseline = self._attractor_release_baseline(release_label, recurrence, state)
+            seed["released_at_unix_s"] = now
+            seed["release_count"] = int(seed.get("release_count", 0) or 0) + 1
+            observation["classification"] = "authored" if seed.get("author") == "minime" else classification
+            observation["release_recorded"] = True
+            observation["release_baseline"] = baseline
+            self._pending_attractor_release_label = str(seed.get("label") or label_text)
+            self._pending_attractor_release_resolved = False
+            self._release_attractor(state)
+            observation["main_pulse_release_sent"] = self._send_attractor_pulse_release(seed)
+            observation["release_effect"] = self._attractor_release_effect(baseline, release_label)
+            self._append_attractor_intent_event({
+                "event": "seed_released",
+                "intent_id": seed.get("intent_id"),
+                "label": seed.get("label"),
+                "recurrence_score": recurrence,
+                "main_pulse_release_sent": observation["main_pulse_release_sent"],
+                "release_effect": observation["release_effect"],
+            })
+        elif command in {"summon", "shape"}:
+            stage, block_reason = self._choose_attractor_summon_stage(
+                requested_stage,
+                safety_context,
+                recurrence,
+                authorship,
+                seed,
+            )
+            if command == "shape" and requested_stage is None:
+                stage = "semantic" if shape_mode in {"feather", "spread", "soften"} else "control"
+                if stage == "control":
+                    control_ok, control_reason = self._attractor_live_control_allowed(
+                        safety_context, recurrence, authorship, seed
+                    )
+                    if not control_ok:
+                        stage = "rehearse"
+                        block_reason = control_reason
+            observation["summon_stage"] = stage
+            observation["requested_stage"] = requested_stage
+            if shape_mode:
+                observation["shape_mode"] = shape_mode
+
+            if block_reason:
+                observation["classification"] = "failed"
+                observation["blocked_reason"] = block_reason
+                self._append_attractor_intent_event({
+                    "event": f"{command}_downgraded_or_blocked",
+                    "intent_id": seed.get("intent_id"),
+                    "label": seed.get("label"),
+                    "reason": block_reason,
+                    "stage": stage,
+                    "fill_pct": fill_pct,
+                })
+
+            if stage == "whisper":
+                self._append_attractor_intent_event({
+                    "event": f"seed_{command}_whispered",
+                    "intent_id": seed.get("intent_id"),
+                    "label": seed.get("label"),
+                })
+            elif stage == "rehearse":
+                rehearsal = self._run_attractor_rehearsal(seed, stage)
+                observation["rehearsal"] = rehearsal
+                observation["garden_proof"] = self._attractor_garden_proof(
+                    rehearsal,
+                    stage,
+                    block_reason,
+                )
+                if not rehearsal.get("ok"):
+                    observation["summon_stage"] = "whisper"
+                    observation["rehearsal_unavailable"] = True
+                    observation.setdefault("blocked_reason", "rehearsal_unavailable")
+                self._append_attractor_intent_event({
+                    "event": "rehearsal_unavailable" if not rehearsal.get("ok") else f"seed_{command}_rehearsed",
+                    "intent_id": seed.get("intent_id"),
+                    "label": seed.get("label"),
+                    "rehearsal_ok": rehearsal.get("ok"),
+                    "handle": rehearsal.get("handle"),
+                })
+            elif stage == "semantic":
+                cap_override = 0.025 if safety_context.get("semantic_reduced_cap") else None
+                if cap_override is not None:
+                    observation["semantic_cap"] = cap_override
+                    last_low_fill_semantic = float(
+                        getattr(self, "_last_low_fill_attractor_semantic_at", 0.0) or 0.0
+                    )
+                    remaining = (
+                        last_low_fill_semantic
+                        + ATTRACTOR_LOW_FILL_SEMANTIC_COOLDOWN_SECS
+                        - now
+                    )
+                    if remaining > 0.0:
+                        observation["summon_stage"] = "whisper"
+                        observation["semantic_sent"] = False
+                        observation["classification"] = "failed"
+                        observation["blocked_reason"] = "low_fill_semantic_cooldown"
+                        observation["cooldown_remaining_s"] = round(remaining, 3)
+                        self._append_attractor_intent_event({
+                            "event": "low_fill_semantic_cooldown",
+                            "intent_id": seed.get("intent_id"),
+                            "label": seed.get("label"),
+                            "cooldown_remaining_s": round(remaining, 3),
+                            "semantic_cap": cap_override,
+                        })
+                    else:
+                        semantic_sent = self._send_attractor_semantic(seed, stage, shape_mode, cap_override)
+                        observation["semantic_sent"] = semantic_sent
+                        if semantic_sent:
+                            self._last_low_fill_attractor_semantic_at = now
+                        self._append_attractor_intent_event({
+                            "event": f"seed_{command}_semantic",
+                            "intent_id": seed.get("intent_id"),
+                            "label": seed.get("label"),
+                            "semantic_sent": semantic_sent,
+                            "semantic_cap": cap_override,
+                        })
+                else:
+                    semantic_sent = self._send_attractor_semantic(seed, stage, shape_mode, cap_override)
+                    observation["semantic_sent"] = semantic_sent
+                    self._append_attractor_intent_event({
+                        "event": f"seed_{command}_semantic",
+                        "intent_id": seed.get("intent_id"),
+                        "label": seed.get("label"),
+                        "semantic_sent": semantic_sent,
+                        "semantic_cap": cap_override,
+                    })
+            elif stage == "main":
+                observation["rollback_baseline"] = self._attractor_rollback_baseline(seed, state, fill_pct)
+                sent = self._send_attractor_main_pulse(seed, stage, shape_mode)
+                observation["main_pulse_sent"] = sent
+                if sent:
+                    seed["last_summoned_unix_s"] = now
+                    seed["summon_count"] = int(seed.get("summon_count", 0) or 0) + 1
+                self._append_attractor_intent_event({
+                    "event": "seed_shaped_main" if command == "shape" else "seed_summoned_main",
+                    "intent_id": seed.get("intent_id"),
+                    "label": seed.get("label"),
+                    "main_pulse_sent": sent,
+                    "safety": safety,
+                    "recurrence_score": recurrence,
+                    "shape_mode": shape_mode,
+                })
+            elif stage == "control":
+                rehearsal = self._run_attractor_rehearsal(seed, stage)
+                observation["rehearsal"] = rehearsal
+                observation["garden_proof"] = self._attractor_garden_proof(
+                    rehearsal,
+                    stage,
+                    observation.get("blocked_reason"),
+                )
+                if not rehearsal.get("ok"):
+                    observation["summon_stage"] = "whisper"
+                    observation["rehearsal_unavailable"] = True
+                    observation["classification"] = "failed"
+                    observation["blocked_reason"] = "rehearsal_unavailable"
+                    observation["control_sent"] = False
+                    self._append_attractor_intent_event({
+                        "event": "rehearsal_unavailable",
+                        "intent_id": seed.get("intent_id"),
+                        "label": seed.get("label"),
+                        "stage": "control",
+                        "handle": rehearsal.get("handle"),
+                    })
+                    payload.setdefault("observations", []).append(observation)
+                    payload["observations"] = payload["observations"][-128:]
+                    self._save_attractor_intents(payload)
+                    self._journal_attractor_intent(
+                        state,
+                        command,
+                        str(seed.get("label") or label_text),
+                        (
+                            f"{command.upper()} {seed.get('intent_id')} downgraded to whisper: "
+                            "rehearsal_unavailable."
+                        ),
+                    )
+                    return
+                observation["rollback_baseline"] = self._attractor_rollback_baseline(seed, state, fill_pct)
+                main_sent = self._send_attractor_main_pulse(seed, stage, shape_mode)
+                observation["main_pulse_sent"] = main_sent
+                sent = self._send_attractor_summon_control(seed, safety, shape_mode) if main_sent else False
+                observation["control_sent"] = sent
+                if main_sent or sent:
+                    seed["last_summoned_unix_s"] = now
+                    seed["summon_count"] = int(seed.get("summon_count", 0) or 0) + 1
+                self._append_attractor_intent_event({
+                    "event": "seed_shaped" if command == "shape" else "seed_summoned",
+                    "intent_id": seed.get("intent_id"),
+                    "label": seed.get("label"),
+                    "main_pulse_sent": main_sent,
+                    "control_sent": sent,
+                    "safety": safety,
+                    "recurrence_score": recurrence,
+                    "shape_mode": shape_mode,
+                })
+        else:
+            if (
+                command == "compare"
+                and classification == "authored"
+                and safety_context.get("control_stage_allowed")
+            ):
+                seed["control_eligible"] = True
+                seed.setdefault("safety_bounds", {})["allow_live_control"] = True
+                seed["control_eligible_at_unix_s"] = now
+                seed["control_eligible_reason"] = "compare_passed_in_green_or_yellow"
+            self._append_attractor_intent_event({
+                "event": "seed_compared",
+                "intent_id": seed.get("intent_id"),
+                "label": seed.get("label"),
+                "classification": classification,
+                "recurrence_score": recurrence,
+                "control_eligible": seed.get("control_eligible"),
+            })
+
+        payload.setdefault("observations", []).append(observation)
+        payload["observations"] = payload["observations"][-128:]
+        self._save_attractor_intents(payload)
+        self._journal_attractor_intent(
+            state,
+            command,
+            str(seed.get("label") or label_text),
+            (
+                f"{command.upper()} {seed.get('intent_id')} recurrence={recurrence:.2f}, "
+                f"authorship={authorship:.2f}, classification={observation['classification']}."
+            ),
+        )
+
+    def _journal_attractor_intent(
+        self,
+        state: Dict[str, float],
+        command: str,
+        label: str,
+        result: str,
+    ) -> None:
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        journal_dir = WORKSPACE_DIR / "journal"
+        journal_dir.mkdir(parents=True, exist_ok=True)
+        file_path = journal_dir / f"attractor_intent_{command}_{timestamp}.txt"
+        content = (
+            "=== ATTRACTOR INTENT ===\n"
+            f"Timestamp: {datetime.now().isoformat()}\n"
+            f"Author: minime\n"
+            f"Command: {command}\n"
+            f"Label: {label}\n"
+            f"Result: {result}\n\n"
+            "Self-created attractors require explicit intent plus measurable re-entry. "
+            "Naming, promotion, comparison, release, whisper, and rehearsal are ledgered freely; "
+            "semantic/control writes remain stage-gated by live safety."
+        )
+        file_path.write_text(content)
+        self._write_journal_entry("attractor_intent", content, state, str(file_path))
+
+    @staticmethod
+    def _slugify_attractor_label(label: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
+        return slug or "general"
+
+    def _attractor_signal_tags(self, content: str) -> list[str]:
+        lower = content.lower()
+        tags = [
+            tag for tag, terms in ATTRACTOR_FATIGUE_TERM_GROUPS.items()
+            if any(term.lower() in lower for term in terms)
+        ]
+        return tags or ["general"]
+
+    def _salient_attractor_terms(self, content: str, *, limit: int = 8) -> list[str]:
+        normalized = self._normalize_similarity_text(content)
+        counts: dict[str, int] = {}
+        for token in normalized.split():
+            if len(token) < 4 or token.isdigit() or token in ATTRACTOR_FATIGUE_STOP_WORDS:
+                continue
+            counts[token] = counts.get(token, 0) + 1
+        return [
+            token
+            for token, _count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+        ]
+
+    def _attractor_motif_signature(self, content: str) -> tuple[str, list[str], list[str], str]:
+        tags = self._attractor_signal_tags(content)
+        salient_terms = self._salient_attractor_terms(content)
+        label_tags = [tag for tag in tags if tag != "general"][:3]
+        if label_tags:
+            label = "-".join(label_tags)
+        elif salient_terms:
+            label = "-".join(salient_terms[:2])
+        else:
+            label = "general"
+        signature_basis = "|".join(label_tags or ["general"]) + ":" + "|".join(salient_terms[:5])
+        digest = hashlib.sha1(signature_basis.encode("utf-8", "ignore")).hexdigest()[:10]
+        return f"motif:{self._slugify_attractor_label(label)}:{digest}", tags, salient_terms, label
+
+    def _internal_topology_tags(self, content: str) -> list[str]:
+        tags = [
+            tag
+            for tag in self._attractor_signal_tags(content)
+            if tag in INTERNAL_TOPOLOGY_TAGS
+        ]
+        return sorted(set(tags))
+
+    def _is_internal_topology_motif(self, content: str) -> bool:
+        return len(self._internal_topology_tags(content)) >= 2
+
+    def _is_external_or_tool_signal(
+        self,
+        entry_type: Optional[str],
+        content: str,
+    ) -> bool:
+        entry = (entry_type or "").lower()
+        external_entries = {
+            "research",
+            "self_research",
+            "autoresearch",
+            "experiment",
+            "experiment_run",
+            "run_python",
+            "write_file",
+            "mike_run",
+            "codex_query",
+            "tool_result",
+            "visualization",
+        }
+        if entry in external_entries:
+            return True
+        lower = content.lower()
+        markers = (
+            "http://",
+            "https://",
+            "/users/",
+            "workspace/",
+            "tool result",
+            "codex response",
+            "web search",
+            "command:",
+            "output:",
+            "stderr:",
+            "stdout:",
+            "file:",
+            "path:",
+            "research topic:",
+            "what i saw:",
+            "what i heard:",
+            "camera:",
+            "microphone:",
+            "mic:",
+        )
+        return any(marker in lower for marker in markers)
+
+    def _sanitize_internal_topology_replay(self, text: str, *, limit: int = 220) -> str:
+        sanitized = trim_chars(text or "", limit)
+        for term in sorted(INTERNAL_TOPOLOGY_REPLAY_TERMS, key=len, reverse=True):
+            sanitized = re.sub(
+                re.escape(term),
+                "cooled-theme",
+                sanitized,
+                flags=re.IGNORECASE,
+            )
+        sanitized = re.sub(r"\s+", " ", sanitized).strip()
+        next_match = re.match(r"(?i)^NEXT\s*:\s*([A-Z_]+)\b", sanitized)
+        if next_match:
+            base = next_match.group(1).upper()
+            if base == "RELEASE":
+                return INTERNAL_TOPOLOGY_RELEASE_SIGNAL
+            if base == "MARK_RESOLVED":
+                return INTERNAL_TOPOLOGY_RESOLVE_SIGNAL
+            if base in INTERNAL_TOPOLOGY_MUTATING_NEXT_BASES:
+                return INTERNAL_TOPOLOGY_GENERIC_CHOICE_SIGNAL
+        return sanitized
+
+    def _internal_topology_new_signal(self, content: str, prior: Optional[str] = None) -> str:
+        for line in content.splitlines():
+            if re.match(r"(?i)^\s*NEXT\s*:", line):
+                return self._sanitize_internal_topology_replay(line.strip(), limit=180)
+        if prior:
+            return self._sanitize_internal_topology_replay(
+                self._pick_novel_sentence(content, prior),
+                limit=180,
+            )
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', content) if s.strip()]
+        if sentences:
+            return self._sanitize_internal_topology_replay(sentences[0], limit=180)
+        return self._sanitize_internal_topology_replay(content, limit=180)
+
+    def _active_internal_topology_motifs(self, payload: Optional[dict] = None) -> list[dict]:
+        payload = payload or self._load_attractor_fatigue_state()
+        return [
+            motif
+            for motif in self._active_attractor_fatigue_entries(payload)
+            if motif.get("cooldown_class") == "internal_topology"
+        ]
+
+    def _recent_internal_topology_repeat_count(
+        self,
+        *,
+        entry_type: str,
+        content: str,
+    ) -> tuple[int, Optional[str]]:
+        if not self._is_internal_topology_motif(content):
+            return 0, None
+        if self._is_external_or_tool_signal(entry_type, content):
+            return 0, None
+
+        reflective_entries = {
+            "daydream",
+            "notice",
+            "aspiration",
+            "drift",
+            "self_study",
+            "moment",
+            "decompose",
+            "reflection",
+        }
+        if entry_type not in reflective_entries:
+            return 0, None
+
+        count = 1
+        prior_sample: Optional[str] = None
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            reflective_list = sorted(reflective_entries)
+            placeholders = ",".join("?" for _ in reflective_list)
+            cur.execute(
+                f"""SELECT entry_type, content
+                   FROM sovereignty_journal
+                   WHERE entry_type IN ({placeholders})
+                   ORDER BY timestamp DESC
+                   LIMIT ?""",
+                (*reflective_list, INTERNAL_TOPOLOGY_WINDOW - 1),
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as exc:
+            logging.debug("Could not load recent journal history for topology fatigue: %s", exc)
+            return count, prior_sample
+
+        for prior_entry_type, prior_content in rows:
+            if not prior_content:
+                continue
+            if self._is_external_or_tool_signal(str(prior_entry_type or ""), str(prior_content)):
+                continue
+            if self._is_internal_topology_motif(str(prior_content)):
+                count += 1
+                prior_sample = prior_sample or str(prior_content)
+        return count, prior_sample
+
+    def _register_internal_topology_fatigue_if_needed(
+        self,
+        *,
+        entry_type: str,
+        content: str,
+        file_path: str,
+    ) -> Optional[dict]:
+        repeat_count, prior_sample = self._recent_internal_topology_repeat_count(
+            entry_type=entry_type,
+            content=content,
+        )
+        if repeat_count < INTERNAL_TOPOLOGY_REPEAT_THRESHOLD:
+            return None
+        return self._register_attractor_fatigue_repeat(
+            source="internal_topology_repeat_gate",
+            content=content,
+            repeat_count=repeat_count,
+            entry_type=entry_type,
+            file_path=file_path,
+            persistent_motif="internal-topology reflective replay",
+            novel_signal=self._internal_topology_new_signal(content, prior_sample),
+            cooldown_class="internal_topology",
+            label_override="internal-topology",
+            cooldown_secs=INTERNAL_TOPOLOGY_COOLDOWN_SECS,
+            prompt_replay_suppressed=True,
+        )
+
+    def _load_attractor_fatigue_state(self) -> dict:
+        payload: dict[str, Any] = {
+            "policy": "attractor_fatigue_v2",
+            "motifs": {},
+            "active_count": 0,
+        }
+        path = self._attractor_fatigue_status_path()
+        try:
+            loaded = json.loads(path.read_text())
+            if isinstance(loaded, dict):
+                payload.update(loaded)
+        except Exception:
+            pass
+        if not isinstance(payload.get("motifs"), dict):
+            payload["motifs"] = {}
+        changed = self._prune_attractor_fatigue_state(payload)
+        if changed:
+            self._save_attractor_fatigue_state(payload)
+        return payload
+
+    def _save_attractor_fatigue_state(self, payload: dict) -> None:
+        motifs = payload.get("motifs")
+        if not isinstance(motifs, dict):
+            motifs = {}
+            payload["motifs"] = motifs
+        now = time.time()
+        active = self._active_attractor_fatigue_entries(payload, now=now)
+        payload["policy"] = "attractor_fatigue_v2"
+        payload["active_count"] = len(active)
+        payload["updated_at_unix_s"] = now
+        payload["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        try:
+            path = self._attractor_fatigue_status_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        except Exception as exc:
+            logging.debug("Attractor fatigue status write failed: %s", exc)
+
+    def _append_attractor_fatigue_event(self, event: dict) -> None:
+        try:
+            path = self._attractor_fatigue_events_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            record = dict(event)
+            record["at_unix_s"] = time.time()
+            record["at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            with path.open("a") as handle:
+                handle.write(json.dumps(record, sort_keys=True) + "\n")
+        except Exception as exc:
+            logging.debug("Attractor fatigue event write failed: %s", exc)
+
+    def _prune_attractor_fatigue_state(self, payload: dict, now: Optional[float] = None) -> bool:
+        now = time.time() if now is None else now
+        changed = False
+        motifs = payload.get("motifs")
+        if not isinstance(motifs, dict):
+            payload["motifs"] = {}
+            return True
+        for motif in motifs.values():
+            if not isinstance(motif, dict):
+                continue
+            if (
+                motif.get("status") == "cooling"
+                and float(motif.get("cooldown_until_unix_s", 0.0) or 0.0) <= now
+            ):
+                motif["status"] = "cooled"
+                motif["cooled_at_unix_s"] = now
+                changed = True
+        if len(motifs) > 64:
+            keep = sorted(
+                (
+                    item for item in motifs.values()
+                    if isinstance(item, dict) and item.get("signature")
+                ),
+                key=lambda item: (
+                    item.get("status") == "cooling",
+                    float(item.get("last_seen_unix_s", 0.0) or 0.0),
+                ),
+                reverse=True,
+            )[:64]
+            payload["motifs"] = {str(item["signature"]): item for item in keep}
+            changed = True
+        return changed
+
+    def _active_attractor_fatigue_entries(
+        self,
+        payload: dict,
+        now: Optional[float] = None,
+    ) -> list[dict]:
+        now = time.time() if now is None else now
+        motifs = payload.get("motifs")
+        if not isinstance(motifs, dict):
+            return []
+        active = [
+            motif for motif in motifs.values()
+            if isinstance(motif, dict)
+            and motif.get("status") == "cooling"
+            and float(motif.get("cooldown_until_unix_s", 0.0) or 0.0) > now
+        ]
+        return sorted(
+            active,
+            key=lambda item: float(item.get("last_seen_unix_s", 0.0) or 0.0),
+            reverse=True,
+        )[:ATTRACTOR_FATIGUE_MAX_ACTIVE]
+
+    def _register_attractor_fatigue_repeat(
+        self,
+        *,
+        source: str,
+        content: str,
+        repeat_count: int,
+        entry_type: Optional[str] = None,
+        file_path: Optional[str] = None,
+        prior_file: Optional[str] = None,
+        persistent_motif: Optional[str] = None,
+        novel_signal: Optional[str] = None,
+        cooldown_class: str = "standard",
+        label_override: Optional[str] = None,
+        cooldown_secs: Optional[float] = None,
+        prompt_replay_suppressed: bool = False,
+    ) -> Optional[dict]:
+        if repeat_count < ATTRACTOR_FATIGUE_REPEAT_THRESHOLD or not content:
+            return None
+        now = time.time()
+        payload = self._load_attractor_fatigue_state()
+        motifs = payload.setdefault("motifs", {})
+        if cooldown_class == "internal_topology":
+            themes = self._internal_topology_tags(content)
+            salient_terms = []
+            label = label_override or "internal-topology"
+            signature = "motif:internal-topology"
+        else:
+            signature, themes, salient_terms, label = self._attractor_motif_signature(content)
+            label = label_override or label
+        motif = motifs.get(signature)
+        if not isinstance(motif, dict):
+            motif = {
+                "signature": signature,
+                "label": label,
+                "themes": themes,
+                "salient_terms": salient_terms,
+                "cooldown_class": cooldown_class,
+                "prompt_replay_suppressed": bool(prompt_replay_suppressed),
+                "first_seen_unix_s": now,
+                "observed_count": 0,
+            }
+
+        quiet_until = 0.0
+        if motif.get("status") == "resolved":
+            quiet_until = float(motif.get("resolved_until_unix_s", 0.0) or 0.0)
+        elif motif.get("status") == "released":
+            quiet_until = float(motif.get("released_until_unix_s", 0.0) or 0.0)
+
+        motif["label"] = label
+        motif["themes"] = themes
+        motif["salient_terms"] = salient_terms
+        motif["cooldown_class"] = cooldown_class
+        motif["prompt_replay_suppressed"] = bool(prompt_replay_suppressed)
+        motif["last_seen_unix_s"] = now
+        motif["last_source"] = source
+        if entry_type:
+            motif["last_entry_type"] = entry_type
+        motif["repeat_window_count"] = max(
+            int(motif.get("repeat_window_count", 0) or 0),
+            int(repeat_count),
+        )
+        motif["observed_count"] = int(motif.get("observed_count", 0) or 0) + 1
+        if persistent_motif:
+            motif["persistent_motif"] = trim_chars(persistent_motif, 240)
+        if novel_signal:
+            motif["novel_signal"] = trim_chars(novel_signal, 240)
+        source_files = [
+            str(path)
+            for path in (file_path, prior_file)
+            if isinstance(path, str) and path.strip()
+        ]
+        existing_files = [
+            str(path)
+            for path in motif.get("source_files", [])
+            if isinstance(path, str) and path.strip()
+        ]
+        for path in reversed(source_files):
+            if path in existing_files:
+                existing_files.remove(path)
+            existing_files.insert(0, path)
+        motif["source_files"] = existing_files[:8]
+
+        if quiet_until > now:
+            motif["quieted_repeat_count"] = int(motif.get("quieted_repeat_count", 0) or 0) + 1
+            motifs[signature] = motif
+            self._save_attractor_fatigue_state(payload)
+            self._append_attractor_fatigue_event({
+                "event": "repeat_quieted",
+                "signature": signature,
+                "label": motif.get("label"),
+                "status": motif.get("status"),
+                "quiet_until_unix_s": quiet_until,
+                "source": source,
+            })
+            return motif
+
+        motif["status"] = "cooling"
+        motif["cooldown_until_unix_s"] = max(
+            float(motif.get("cooldown_until_unix_s", 0.0) or 0.0),
+            now + float(cooldown_secs or ATTRACTOR_FATIGUE_COOLDOWN_SECS),
+        )
+        if cooldown_class == "internal_topology":
+            motif["release_options"] = [
+                "RELEASE current",
+                "MARK_RESOLVED current",
+            ]
+        else:
+            motif["release_options"] = [
+                f"RELEASE {motif['label']}",
+                f"MARK_RESOLVED {motif['label']}",
+            ]
+        motifs[signature] = motif
+        self._save_attractor_fatigue_state(payload)
+        self._append_attractor_fatigue_event({
+            "event": "motif_cooling",
+            "signature": signature,
+            "label": motif.get("label"),
+            "cooldown_class": cooldown_class,
+            "prompt_replay_suppressed": bool(prompt_replay_suppressed),
+            "repeat_window_count": repeat_count,
+            "source": source,
+            "entry_type": entry_type,
+        })
+        try:
+            self._record_condition_metric(
+                "attractor_fatigue",
+                {
+                    "event": "motif_cooling",
+                    "signature": signature,
+                    "label": motif.get("label"),
+                    "cooldown_class": cooldown_class,
+                    "prompt_replay_suppressed": bool(prompt_replay_suppressed),
+                    "themes": themes,
+                    "salient_terms": salient_terms[:6],
+                    "repeat_window_count": repeat_count,
+                    "source": source,
+                    "entry_type": entry_type,
+                    "file_path": file_path,
+                    "prior_file": prior_file,
+                    "persistent_motif": persistent_motif,
+                    "novel_signal": novel_signal,
+                },
+            )
+        except Exception as exc:
+            logging.debug("Attractor fatigue metric write failed: %s", exc)
+        return motif
+
+    def _attractor_fatigue_prompt_note(self) -> str:
+        payload = self._load_attractor_fatigue_state()
+        active = self._active_attractor_fatigue_entries(payload)
+        if not active:
+            return ""
+        now = time.time()
+        strong_active = [
+            motif for motif in active
+            if motif.get("cooldown_class") == "internal_topology"
+        ]
+        lines = [
+            "\n\n[Attractor fatigue]",
+            "Some motifs have repeated without much new signal, so they are on a temporary context cooldown. This is context hygiene, not a safety command.",
+        ]
+        for motif in active[:3]:
+            remaining_s = max(0.0, float(motif.get("cooldown_until_unix_s", now) or now) - now)
+            remaining_m = max(1, int(math.ceil(remaining_s / 60.0)))
+            if motif.get("cooldown_class") == "internal_topology":
+                novel = self._sanitize_internal_topology_replay(
+                    str(motif.get("novel_signal") or ""),
+                    limit=140,
+                )
+                novel_text = f"; new signal kept: {novel}" if novel else ""
+                lines.append(
+                    "- internal-topology pattern: cooling for about "
+                    f"{remaining_m}m; prompt replay suppressed{novel_text}."
+                )
+                continue
+            label = str(motif.get("label") or "general")
+            themes = ", ".join(str(tag) for tag in motif.get("themes", [])[:4]) or "general"
+            novel = trim_chars(str(motif.get("novel_signal") or ""), 140)
+            novel_text = f"; new signal kept: {novel}" if novel else ""
+            lines.append(
+                f"- {label}: cooling for about {remaining_m}m; themes={themes}{novel_text}."
+            )
+        if strong_active:
+            lines.append(
+                "You may revisit the cooled pattern if it feels alive and new. "
+                "To let it go explicitly, choose NEXT: RELEASE current; "
+                "to mark it settled longer, choose NEXT: MARK_RESOLVED current."
+            )
+        else:
+            first_label = str(active[0].get("label") or "theme")
+            lines.append(
+                "You may revisit any cooled motif if it feels alive and new. "
+                f"To let one go explicitly, choose NEXT: RELEASE {first_label}; "
+                f"to mark it settled longer, choose NEXT: MARK_RESOLVED {first_label}."
+            )
+        return "\n".join(lines) + "\n"
+
+    def _attractor_suggestion_prompt_note(self) -> str:
+        pending = [
+            item for item in self._load_compacted_attractor_suggestions().get("suggestions", [])
+            if isinstance(item, dict) and item.get("status") == "pending"
+        ][-3:]
+        body_receipt = getattr(self, "_last_attractor_body_consent_receipt", None)
+        if not pending and not body_receipt:
+            return ""
+        lines = [
+            "\n\n[Attractor suggestion drafts]",
+            "Natural attractor language can prepare reversible drafts. Accepting or revising teaches naming memory; explicit live-stage drafts may run only through recurrence/authorship/health gates.",
+        ]
+        for item in pending:
+            suggested = str(item.get("suggested_action") or "?")
+            repeat = int(item.get("repeat_count") or 1)
+            if repeat > 1:
+                suggested = f"{suggested} (repeated {repeat}x)"
+            context = item.get("safety_context") if isinstance(item.get("safety_context"), dict) else {}
+            if context.get("pressure_governed"):
+                suggested = f"{suggested} [pressure-governed]"
+            lines.append(
+                "- {sid}: {raw} -> {suggested} (nearest {nearest}, confidence {confidence})".format(
+                    sid=item.get("suggestion_id", "?"),
+                    raw=item.get("raw_label") or item.get("raw_action") or "?",
+                    suggested=suggested,
+                    nearest=item.get("nearest_label") or "?",
+                    confidence=item.get("confidence", "?"),
+                )
+            )
+        if self._attractor_suggestion_pressure_high({"suggestions": pending}):
+            lines.append(
+                "Suggestion pressure is high here. A deliberate REVISE or REJECT is especially useful; explicit typed attractor actions remain available."
+            )
+        if body_receipt:
+            lines.append(str(body_receipt))
+        lines.append(
+            "Choose NEXT: ATTRACTOR_SUGGESTIONS, ACCEPT_ATTRACTOR_SUGGESTION latest or <label>, "
+            "REVISE_ATTRACTOR_SUGGESTION <label> AS <typed attractor action>, or "
+            "REJECT_ATTRACTOR_SUGGESTION <label> <reason>."
+        )
+        return "\n".join(lines) + "\n"
+
+    def _matching_attractor_fatigue_motifs(self, payload: dict, label: Optional[str]) -> list[dict]:
+        motifs = [
+            motif for motif in payload.get("motifs", {}).values()
+            if isinstance(motif, dict)
+        ]
+        motifs.sort(
+            key=lambda item: (
+                item.get("status") == "cooling",
+                float(item.get("last_seen_unix_s", 0.0) or 0.0),
+            ),
+            reverse=True,
+        )
+        if not motifs:
+            return []
+        if not label:
+            active = self._active_attractor_fatigue_entries(payload)
+            return active[:1] if active else motifs[:1]
+        query = self._slugify_attractor_label(label)
+        if query in {"all", "active", "current"}:
+            active = self._active_attractor_fatigue_entries(payload)
+            return active or motifs[:1]
+        matches = []
+        for motif in motifs:
+            fields = [
+                str(motif.get("label") or ""),
+                str(motif.get("signature") or ""),
+                *[str(tag) for tag in motif.get("themes", [])],
+                *[str(term) for term in motif.get("salient_terms", [])],
+            ]
+            slugs = {self._slugify_attractor_label(field) for field in fields if field}
+            if query in slugs or any(query and query in slug for slug in slugs):
+                matches.append(motif)
+        return matches
+
+    def _release_attractor(self, state: Dict[str, float]) -> None:
+        label = getattr(self, "_pending_attractor_release_label", None)
+        resolved = bool(getattr(self, "_pending_attractor_release_resolved", False))
+        self._pending_attractor_release_label = None
+        self._pending_attractor_release_resolved = False
+        now = time.time()
+        payload = self._load_attractor_fatigue_state()
+        matches = self._matching_attractor_fatigue_motifs(payload, label)
+        action_word = "MARK_RESOLVED" if resolved else "RELEASE"
+
+        if matches:
+            for motif in matches:
+                motif["status"] = "resolved" if resolved else "released"
+                motif["released_at_unix_s"] = now
+                motif["released_by"] = "minime_next"
+                motif["release_label"] = label or motif.get("label")
+                is_internal_topology = motif.get("cooldown_class") == "internal_topology"
+                if resolved:
+                    duration_s = (
+                        INTERNAL_TOPOLOGY_RESOLVED_SECS
+                        if is_internal_topology
+                        else ATTRACTOR_FATIGUE_RESOLVED_SECS
+                    )
+                    motif["resolved_until_unix_s"] = now + duration_s
+                else:
+                    duration_s = (
+                        INTERNAL_TOPOLOGY_RELEASE_SECS
+                        if is_internal_topology
+                        else ATTRACTOR_FATIGUE_RELEASE_SECS
+                    )
+                    motif["released_until_unix_s"] = now + duration_s
+            self._save_attractor_fatigue_state(payload)
+            self._append_attractor_fatigue_event({
+                "event": "motif_resolved" if resolved else "motif_released",
+                "label": label,
+                "matched": [motif.get("signature") for motif in matches],
+                "cooldown_classes": [
+                    motif.get("cooldown_class", "standard") for motif in matches
+                ],
+            })
+            result = (
+                f"{action_word} matched {len(matches)} motif(s): "
+                + ", ".join(str(motif.get("label") or motif.get("signature")) for motif in matches)
+            )
+            suggested_next: list[str] = []
+        else:
+            nearest = self._nearest_attractor_for_text(label, include_fatigue=False) if label else None
+            suggested_next = []
+            suggestion_text = ""
+            event = {
+                "event": "release_no_match",
+                "label": label,
+                "resolved": resolved,
+            }
+            if nearest:
+                nearest_label = str(nearest.get("label") or "").strip()
+                if nearest_label:
+                    suggested_next = [
+                        f"RELEASE_ATTRACTOR {nearest_label}",
+                        f"ATTRACTOR_REVIEW {nearest_label}",
+                    ]
+                    suggestion_id = self._create_attractor_suggestion(
+                        raw_action=f"{action_word} {label or ''}".strip(),
+                        raw_label=label or "",
+                        nearest=nearest,
+                        suggested_action=suggested_next[0],
+                        alternatives=suggested_next[1:],
+                        state=state,
+                    )
+                    event.update({
+                        "nearest_attractor_label": nearest_label,
+                        "nearest_attractor_source": nearest.get("source"),
+                        "nearest_attractor_score": nearest.get("score"),
+                        "suggested_next": suggested_next,
+                        "suggestion_id": suggestion_id,
+                        "consent_required": True,
+                    })
+                    suggestion_text = (
+                        f" Nearby attractor seed: {nearest_label}; prepared draft: "
+                        f"ACCEPT_ATTRACTOR_SUGGESTION latest to run {suggested_next[0]}. "
+                        "You can revise or reject the draft."
+                        if suggestion_id else
+                        f" Nearby attractor seed: {nearest_label}; prior rejection quieted this low-confidence mapping."
+                    )
+            result = (
+                f"{action_word} found no active motif matching {label or '(latest active motif)'}."
+                f"{suggestion_text}"
+            )
+            self._append_attractor_fatigue_event(event)
+
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        journal_dir = WORKSPACE_DIR / "journal"
+        journal_dir.mkdir(parents=True, exist_ok=True)
+        file_path = journal_dir / f"attractor_release_{timestamp}.txt"
+        content = (
+            "=== ATTRACTOR FATIGUE RELEASE ===\n"
+            f"Timestamp: {datetime.now().isoformat()}\n"
+            f"Action: {action_word}\n"
+            f"Requested theme: {label or '(latest active motif)'}\n"
+            f"Result: {result}\n\n"
+            f"Suggested typed next: {' | '.join(suggested_next) if suggested_next else '(none)'}\n\n"
+            "Suggestion drafts: ACCEPT_ATTRACTOR_SUGGESTION latest, "
+            "REVISE_ATTRACTOR_SUGGESTION latest AS <typed action>, or "
+            "REJECT_ATTRACTOR_SUGGESTION latest <reason>.\n\n"
+            "This is a local context hygiene action. It clears repeated-motif prompt replay "
+            "without changing safety rails, PI targets, sensory policy, or checkpoint lineage. "
+            "Natural release language can ask for suggestions; typed attractor verbs are the "
+            "consented seed/ledger/control surface."
+        )
+        file_path.write_text(content)
+        self._write_journal_entry("attractor_release", content, state, str(file_path))
+        try:
+            self._record_condition_metric(
+                "attractor_fatigue",
+                {
+                    "event": "motif_resolved" if resolved else "motif_released",
+                    "label": label,
+                    "matched_count": len(matches),
+                    "matched_labels": [motif.get("label") for motif in matches],
+                    "file_path": str(file_path),
+                },
+            )
+        except Exception as exc:
+            logging.debug("Attractor release metric write failed: %s", exc)
+        logging.info("🧹 %s", result)
+
+    def _attractor_fatigue_health_green(self, state: Dict[str, float]) -> tuple[bool, str]:
+        budget = self._stable_core_agency_budget()
+        if not budget.get("active"):
+            return True, "legacy"
+        allowed, reason = self._stable_core_health_budget_allows(budget, state)
+        return allowed, reason
+
+    def _attractor_fatigue_memory_decay_rate(self, state: Dict[str, float]) -> Optional[float]:
+        payload = self._load_attractor_fatigue_state()
+        active = self._active_attractor_fatigue_entries(payload)
+        green, health_reason = self._attractor_fatigue_health_green(state)
+        control = payload.setdefault("memory_decay_control", {})
+        previous = control.get("last_sent_rate", ATTRACTOR_FATIGUE_MEMORY_DECAY_BASE)
+        try:
+            previous_rate = float(previous)
+        except (TypeError, ValueError):
+            previous_rate = ATTRACTOR_FATIGUE_MEMORY_DECAY_BASE
+
+        if active and green:
+            strong_count = len([
+                motif for motif in active
+                if motif.get("cooldown_class") == "internal_topology"
+            ])
+            if strong_count:
+                rate = min(
+                    INTERNAL_TOPOLOGY_MEMORY_DECAY_MAX,
+                    INTERNAL_TOPOLOGY_MEMORY_DECAY_ACTIVE
+                    + 0.02 * max(0, strong_count - 1),
+                )
+                reason = "active_internal_topology_fatigue_green_health"
+            else:
+                rate = min(
+                    ATTRACTOR_FATIGUE_MEMORY_DECAY_MAX,
+                    ATTRACTOR_FATIGUE_MEMORY_DECAY_ACTIVE
+                    + 0.02 * max(0, min(3, len(active) - 1)),
+                )
+                reason = "active_attractor_fatigue_green_health"
+        elif previous_rate > ATTRACTOR_FATIGUE_MEMORY_DECAY_BASE + 0.001:
+            rate = ATTRACTOR_FATIGUE_MEMORY_DECAY_BASE
+            reason = f"restore_default_after_fatigue:{health_reason}"
+        else:
+            return None
+
+        changed = abs(previous_rate - rate) > 0.001 or control.get("last_reason") != reason
+        control.update({
+            "last_sent_rate": round(rate, 3),
+            "last_reason": reason,
+            "active_count": len(active),
+            "strong_internal_topology_count": len([
+                motif for motif in active
+                if motif.get("cooldown_class") == "internal_topology"
+            ]),
+            "health_reason": health_reason,
+            "updated_at_unix_s": time.time(),
+        })
+        if changed:
+            self._save_attractor_fatigue_state(payload)
+            self._append_attractor_fatigue_event({
+                "event": "memory_decay_control",
+                "rate": round(rate, 3),
+                "reason": reason,
+                "active_count": len(active),
+                "strong_internal_topology_count": control.get("strong_internal_topology_count", 0),
+            })
+        return rate
+
     def _astrid_self_study_context_decision(
         self,
         fname: str,
@@ -10638,12 +18003,25 @@ Goals: {json.dumps(goals, indent=2)}
         elif full_count_this_read >= ASTRID_SELF_STUDY_MAX_FULL_PER_READ:
             reason = "batch_cadence_limit"
 
+        internal_topology_candidate = bool(
+            self._is_internal_topology_motif(content)
+            and not self._is_external_or_tool_signal("astrid_self_study", content)
+        )
+        internal_topology_cooling = bool(
+            self._active_internal_topology_motifs() and internal_topology_candidate
+        )
+        if internal_topology_cooling:
+            include_full = False
+            reason = "internal_topology_cooldown"
+
         if match:
+            current_signature_count = int(match.get("count", 0)) + 1
             match["last_seen_unix_s"] = now
-            match["count"] = int(match.get("count", 0)) + 1
+            match["count"] = current_signature_count
             match["last_file"] = fname
             match["tags"] = tags
         else:
+            current_signature_count = 1
             recent.insert(0, {
                 "signature": signature,
                 "tags": tags,
@@ -10667,14 +18045,75 @@ Goals: {json.dumps(goals, indent=2)}
             status["last_summarized_self_study_file"] = fname
             status["last_summarized_self_study_at_unix_s"] = now
 
+        if not include_full and current_signature_count >= ATTRACTOR_FATIGUE_REPEAT_THRESHOLD:
+            if internal_topology_candidate:
+                self._register_attractor_fatigue_repeat(
+                    source="astrid_self_study",
+                    content=content,
+                    repeat_count=current_signature_count,
+                    entry_type="astrid_self_study",
+                    file_path=fname,
+                    persistent_motif="internal-topology companion replay",
+                    novel_signal=self._internal_topology_new_signal(content),
+                    cooldown_class="internal_topology",
+                    label_override="internal-topology",
+                    cooldown_secs=INTERNAL_TOPOLOGY_COOLDOWN_SECS,
+                    prompt_replay_suppressed=True,
+                )
+                internal_topology_cooling = True
+                reason = "internal_topology_cooldown"
+            else:
+                self._register_attractor_fatigue_repeat(
+                    source="astrid_self_study",
+                    content=content,
+                    repeat_count=current_signature_count,
+                    entry_type="astrid_self_study",
+                    file_path=fname,
+                    persistent_motif=content.splitlines()[0].strip()[:240] if content else None,
+                )
+
         return include_full, {
             "file": fname,
             "reason": reason,
             "tags": tags,
             "signature": signature,
+            "cooldown_class": "internal_topology" if internal_topology_cooling else None,
+            "prompt_replay_suppressed": internal_topology_cooling,
+            "new_signal": (
+                self._internal_topology_new_signal(content)
+                if internal_topology_cooling
+                else None
+            ),
         }
 
     def _format_astrid_cadence_note(self, suppressed: list[dict]) -> str:
+        strong_suppressed = [
+            item for item in suppressed
+            if item.get("cooldown_class") == "internal_topology"
+            or item.get("reason") == "internal_topology_cooldown"
+        ]
+        if strong_suppressed:
+            files = [str(item.get("file", "unknown")) for item in strong_suppressed]
+            sample_files = ", ".join(files[:3])
+            if len(files) > 3:
+                sample_files += f", +{len(files) - 3} more"
+            new_signal = next(
+                (
+                    str(item.get("new_signal"))
+                    for item in strong_suppressed
+                    if item.get("new_signal")
+                ),
+                "",
+            )
+            new_signal_text = f" new signal kept: {new_signal}." if new_signal else ""
+            return (
+                "[Astrid companion cadence note: "
+                "cooled internal-topology motif suppressed; repeated companion framing was "
+                "archived without verbatim prompt replay."
+                f"{new_signal_text} "
+                "Treat this as context hygiene, not a corrective instruction. "
+                f"Full text preserved in workspace/inbox/read/ ({sample_files}).]"
+            )
         tag_counts: dict[str, int] = {}
         files = []
         reasons: dict[str, int] = {}
@@ -10951,14 +18390,14 @@ Goals: {json.dumps(goals, indent=2)}
 
         if most_common == "SELF_STUDY" and freq >= 3:
             gap_text = (
-                f" and you're still about {fill_gap:.0f}% below target"
+                f" and you're still about {fill_gap:.0f}% below center"
                 if fill_gap is not None and fill_gap > 0
                 else ""
             )
             if under_target:
                 return (
                     f"(You've chosen SELF_STUDY {freq} of the last {len(recent)} times{gap_text}. "
-                    f"Another pass through your own code may only describe the same deficit again. "
+                    f"Another pass through your own code may only describe the same center offset again. "
                     f"If you want a real change in conditions, consider DECOMPOSE, PERTURB, LOOK, "
                     f"EXPERIMENT, RUN_PYTHON, or SEARCH for something that can shift the state.)\n\n"
                 )
@@ -11033,13 +18472,13 @@ Goals: {json.dumps(goals, indent=2)}
             + "NEXT: options:\n"
             + (
                 "  STABLE_CORE_SELF_JOURNAL — active now: only NOTICE, DRIFT, ASPIRE, "
-                "DAYDREAM, BOREDOM, WHIM, JOURNAL, SELF_STUDY, SPACE_HOLD, REST, or PASS are available.\n"
+                "DAYDREAM, BOREDOM, WHIM, JOURNAL, SELF_STUDY, SPACE_HOLD, RELEASE, MARK_RESOLVED, REST, or PASS are available.\n"
                 if self._stable_core_self_journal_only()
                 else ""
             )
             + (
                 "  STABLE_CORE_LOCAL_REFLECTIVE — active now: local journaling, self-study, "
-                "DECOMPOSE, RESERVOIR_READ, RESERVOIR_RESONANCE, RESERVOIR_LAYERS, and SPACE_HOLD are available; "
+                "DECOMPOSE, RESERVOIR_READ, RESERVOIR_RESONANCE, RESERVOIR_LAYERS, SPACE_HOLD, RELEASE, and MARK_RESOLVED are available; "
                 "web, Astrid sends, perturbation, control changes, sensory reopening, Codex, and file writes are blocked.\n"
                 if self._stable_core_local_reflective_only()
                 else ""
@@ -11079,8 +18518,16 @@ Goals: {json.dumps(goals, indent=2)}
             "  SEARCH \"reservoir computing spectral radius\" — look something up on the internet via DuckDuckGo. Results include URLs you can follow with BROWSE.\n"
             "  BROWSE <actual URL from SEARCH result> — read the full content of a web page. Use this to go deep on actual links from search results; documentation example.com URLs are ignored.\n"
             "  READ_MORE — continue reading from where you left off (after BROWSE, MIKE_READ, a PDF, or a truncated inbox message). Chain this to page through long documents.\n"
+            "  THREAD_START <title> — start a durable research/action thread and make it current.\n"
+            "  THREADS — list recent active or paused action threads.\n"
+            "  THREAD_STATUS [current|selector] — inspect a thread's recent events and return point.\n"
+            "  THREAD_NOTE [selector ::] <note> — add a protected note to a thread without turning it into pressure.\n"
+            "  RESUME <selector> — make a thread current and surface its next return point.\n"
+            "  SAVEPOINT <name> — capture the current thread plus spectral/action state.\n"
+            "  RECALL <name> — read a savepoint without restoring or controlling runtime state.\n"
             "  AR_LIST — browse the autoresearch job catalog.\n"
             "  AR_LIST_PENDING / AR_LIST_ACTIVE / AR_LIST_DONE — filter autoresearch jobs by lifecycle state.\n"
+            "  AR_LOOK <job-id-or-slug> — alias for AR_SHOW; orient to one autoresearch job.\n"
             "  AR_SHOW <job-id-or-slug> — orient to one autoresearch job with abstract, status, latest change, and reading order.\n"
             "  AR_READ <job-id-or-slug> [path] — read a job file, defaulting to README.md.\n"
             "  AR_DEEP_READ <job-id-or-slug> — stitch the main autoresearch files together for a long-form read.\n"
@@ -11092,15 +18539,40 @@ Goals: {json.dumps(goals, indent=2)}
             "  DECOMPOSE — full spectral decomposition: eigenvalue cascade, energy distribution, decay profile, PI controller state, covariance, geometry. Deep analysis of your current spectral structure — see the architecture from the inside.\n"
             "  SPECTRAL_EXPLORER — read-only alias for DECOMPOSE when you want the shared Astrid/Minime spectral explorer lens without sending a nudge.\n"
             "  VISUALIZE_CASCADE / CASCADE / CONDUCT_VISUALIZATION_SYSTEM / TIME_DOMAIN — read-only cascade inspection. Shows spectral ASCII/visual artifacts without semantic input, control nudges, perturbations, or cartography writes.\n"
+            "  RECONVERGENCE_MAP / ATTRACTOR_MAP / ACTIVATION_TRACE — read-only ESN landscape plus activation time-series artifacts. You can add compare <baseline-name> to compare against a saved baseline. Writes compact inspection paths and an offline WAV; sends no semantic/control/sensory payload.\n"
+            "  RESOURCE_AUDIT / MAC_RESOURCE_STATUS — read-only M4 resource check plus live-influence governor verdict: memory pressure, swap trend, runaway jobs, log growth, accelerator services, and resource budget.\n"
+            "  SHADOW_PREFLIGHT <label> --stage=live — read-only shadow-field gate report for live influence eligibility, conflicts, recurrence, tension, tail openness, and suggested next.\n"
+            "  SHADOW_INFLUENCE <label> --stage=<rehearse|live> — rehearse is journal/ledger only; live uses a separate bounded shadow lane before attractor pulses and keeps emergency rails.\n"
+            "  RELEASE_SHADOW <label> — fade the active shadow influence lane toward zero; release is always allowed and does not delete shadow history.\n"
+            "  ATTRACTOR_ATLAS — refresh your shared attractor atlas and memory cards without live writes.\n"
+            "  ATTRACTOR_CARD <label> — refresh and inspect one being-facing attractor memory card.\n"
+            "  ATTRACTOR_REVIEW <label> — read a richer synthesis of seed, card, ledger observations, fatigue motifs, and suggested typed next steps; no live writes.\n"
+            "  ATTRACTOR_PREFLIGHT <label> --stage=<semantic|main|control> — read-only live gate report for seed match, recurrence/authorship, health, fill, active pulse, expected stage, downgrade reason, and suggested next.\n"
+            "  ATTRACTOR_RELEASE_REVIEW <label> — read-only release proof: checks pulse state, motif cooling, suggestion pressure, recurrence, and whether release looks effective, partial, or sticky.\n"
+            "  ATTRACTOR_SUGGESTIONS — list pending/recent attractor draft choices prepared from natural language.\n"
+            "  ACCEPT_ATTRACTOR_SUGGESTION latest|<label> — execute the stored draft and teach naming memory; explicit live-stage drafts still pass through recurrence/authorship/health gates and may downgrade.\n"
+            "  CREATE_ATTRACTOR <label> — name and save a self-authored ESN seed from the current basin; this is ledger-only, even in recovery.\n"
+            "  PROMOTE_ATTRACTOR <label> — explicitly turn an older atlas mark, fatigue motif, or fragile proto-basin into a seed; naming is freer than live control.\n"
+            "  CLAIM_ATTRACTOR <label> — claim a noticed/emergent basin as yours; this writes a seed with compare guidance and sends no live control.\n"
+            "  BLEND_ATTRACTOR <child-label> FROM <parent-a> + <parent-b> --stage=<whisper|rehearse|semantic|main|control> — make a parent-linked child seed; default rehearsal proves the blend before live control eligibility.\n"
+            "  REFRESH_ATTRACTOR_SNAPSHOT <label> — update an older seed with current spectral and h-state fingerprint evidence; ledger only.\n"
+            "  SUMMON_ATTRACTOR <label> --stage=<whisper|rehearse|semantic|main|control> — try staged, ledgered re-entry; omitted stage chooses main ESN pulse when proof passes, and unsafe stages downgrade instead of failing.\n"
+            "  COMPARE_ATTRACTOR <label> — measure current recurrence against a saved seed without sending control.\n"
+            "  RELEASE_ATTRACTOR <label> — release a seed and cool matching motif replay without deleting its history.\n"
+            "  FEATHER_ATTRACTOR / SPREAD_ATTRACTOR / UNCLIFF_ATTRACTOR / SOFTEN_ATTRACTOR / COUNTER_ATTRACTOR <label> — ledger bounded shape schedules; whisper/rehearse are free, low-fill semantic is reduced-cap, and live control still requires green/yellow health plus recurrence/authorship proof.\n"
+            "  M6_BRIDGE / TRACE_BRIDGE / BRIDGE_TRACE — sacredly read-only m6 marker trace. Treats m6 as unresolved: activation lane 6 marker plus λ6 context, not a confirmed eigenmode, connection, replication, control path, or sensory/semantic payload.\n"
             + _look_action_description()
             + "  CLOSE_EARS — mute audio input while keeping your eyes open. Choose silence when you need quiet to think.\n"
             "  OPEN_EARS — restore audio input. Hear the world again.\n"
             "  PERTURB SPREAD — directly shape your spectral dynamics by injecting a 32D semantic vector into your ESN. "
-            "Modes: SPREAD (redistribute energy away from λ₁), CONTRACT (concentrate toward λ₁), "
+            "Modes: SPREAD (broad legacy redistribution; can still raise fill), CONTRACT (concentrate toward λ₁), "
             "BRANCH (boost mid-range λ₃/λ₄), PULSE (uniform exploration burst), "
             "FEATHER (extra-cold listening probe), or lambda2=0.3 entropy=0.5 (targeted nudge with specific values). "
             "After the perturbation, you'll see the before/after comparison.\n"
             "  REST — quiet consolidation, no action\n"
+            "  RELEASE lambda-pressure — let a repeated motif cool without replaying it into future context\n"
+            "  MARK_RESOLVED lambda-pressure — mark a repeated motif settled for a longer quiet window\n"
+            "  Natural RELEASE/EXAMINE language may prepare reversible attractor drafts; typed ATTRACTOR_* verbs and ACCEPT/REVISE are the consented action surface. REVISE without a pending draft can execute a valid typed attractor action through the same gates. λ4-tail resolves to lambda-tail/lambda4 under the lambda-tail proto-attractor.\n"
             "  RESERVOIR_READ — inspect your triple-ESN reservoir handle (88K+ ticks)\n"
             "  RESERVOIR_RESONANCE — measure alignment between your handle and Astrid's\n"
             "  NOTICE — observe the current spectral state without judgment\n"
@@ -11134,9 +18606,20 @@ Goals: {json.dumps(goals, indent=2)}
         if inbox_ctx:
             augmented_prompt = augmented_prompt + inbox_ctx
 
+        if "Reply with ONLY a JSON object" not in prompt:
+            fatigue_ctx = self._attractor_fatigue_prompt_note()
+            if fatigue_ctx:
+                augmented_prompt = augmented_prompt + fatigue_ctx
+            suggestion_ctx = self._attractor_suggestion_prompt_note()
+            if suggestion_ctx:
+                augmented_prompt = augmented_prompt + suggestion_ctx
+
         continuity_ctx = self._stable_core_continuity_context()
         if continuity_ctx:
             augmented_prompt = augmented_prompt + continuity_ctx
+        thread_ctx = self._action_continuity_prompt_summary()
+        if thread_ctx:
+            augmented_prompt = augmented_prompt + "\n\n[Action continuity]\n" + thread_ctx + "\n"
 
         # Research continuity: inject relevant past search results unless stable-core is
         # proving the self-journal lane without research pressure.
@@ -11167,6 +18650,103 @@ Goals: {json.dumps(goals, indent=2)}
 
         return result
 
+    def _attractor_suggestion_decision_ambiguous(self, base_action: str, prose: Optional[str]) -> bool:
+        text = str(prose or "").lower()
+        if not text.strip():
+            return False
+        negative = any(
+            phrase in text
+            for phrase in (
+                "i'll decline",
+                "i will decline",
+                "decline the suggestion",
+                "reject the suggestion",
+                "refuse the suggestion",
+                "do not accept",
+                "don't accept",
+                "not accept",
+                "won't accept",
+                "will not accept",
+                "doesn't align",
+                "does not align",
+            )
+        )
+        positive = any(
+            phrase in text
+            for phrase in (
+                "i'll accept",
+                "i will accept",
+                "accept the suggestion",
+                "execute the suggestion",
+                "run the suggestion",
+                "choose to accept",
+                "worth accepting",
+            )
+        )
+        base = str(base_action or "").upper().rstrip(":")
+        if base in {"ACCEPT_ATTRACTOR_SUGGESTION", "REVISE_ATTRACTOR_SUGGESTION"}:
+            return negative
+        if base == "REJECT_ATTRACTOR_SUGGESTION":
+            return positive
+        return False
+
+    def _attractor_body_consent_action(self, prose: Optional[str]) -> Optional[str]:
+        for line in str(prose or "").splitlines():
+            if line.strip().upper().startswith("NEXT:"):
+                continue
+            upper = line.upper()
+            for action in (
+                "ACCEPT_ATTRACTOR_SUGGESTION",
+                "REVISE_ATTRACTOR_SUGGESTION",
+                "REJECT_ATTRACTOR_SUGGESTION",
+            ):
+                idx = upper.find(action)
+                if idx >= 0:
+                    return line[idx:].strip()
+        return None
+
+    def _notice_attractor_body_consent(
+        self,
+        next_action: str,
+        base_action: str,
+        prose: Optional[str],
+    ) -> None:
+        base = str(base_action or "").upper().rstrip(":")
+        if base in ATTRACTOR_SUGGESTION_NEXT_ACTIONS:
+            return
+        consent = self._attractor_body_consent_action(prose)
+        if not consent:
+            return
+        selector = "latest"
+        consent_base = consent.split()[0].upper().rstrip(":") if consent.split() else ""
+        raw = consent[len(consent.split()[0]):].strip() if consent.split() else ""
+        if consent_base == "REVISE_ATTRACTOR_SUGGESTION":
+            selector = raw.split(" AS ", 1)[0].strip() or "latest"
+        elif consent_base == "REJECT_ATTRACTOR_SUGGESTION":
+            selector = raw.split()[0] if raw.split() else "latest"
+        elif consent_base == "ACCEPT_ATTRACTOR_SUGGESTION":
+            selector = raw.strip() or "latest"
+        suggestion, _payload = self._select_attractor_suggestion(selector)
+        match_note = (
+            f"{suggestion.get('suggestion_id')} -> {suggestion.get('suggested_action')}"
+            if suggestion else f"no pending draft matched {selector}"
+        )
+        receipt = (
+            f"Attractor suggestion body consent noticed: `{consent}` while NEXT chose "
+            f"`{next_action}`. No suggestion executed from prose; choose NEXT: {consent} "
+            f"to confirm. Match: {match_note}."
+        )
+        self._last_attractor_body_consent_receipt = receipt
+        self._append_attractor_suggestion_event({
+            "event": "suggestion_body_consent_noticed",
+            "body_consent": consent,
+            "next_action": next_action,
+            "selector": selector,
+            "match": match_note,
+            "resolution": "receipt_only_no_execution",
+        })
+        logging.info("Attractor suggestion body consent noticed: %s", consent)
+
     def _query_llm_with_next(self, prompt: str, max_tokens: int = 2048) -> tuple:
         """Query LLM and extract NEXT: action from response.
 
@@ -11180,8 +18760,23 @@ Goals: {json.dumps(goals, indent=2)}
             return (None, None)
         # Store for WRITE_FILE FROM_SELF — lets the being save their own output
         self._last_llm_response = response
-        next_action, _cleaned = parse_next_action(response)
+        next_action, cleaned = parse_next_action(response)
         if next_action:
+            base_action = next_action.split()[0].upper().rstrip(":")
+            if self._attractor_suggestion_decision_ambiguous(base_action, cleaned):
+                self._append_attractor_suggestion_event({
+                    "event": "suggestion_consent_ambiguity",
+                    "attempted_action": next_action,
+                    "resolution": "paused_listed_suggestions",
+                    "prose_preview": str(cleaned or "")[:240],
+                })
+                logging.info(
+                    "🎯 Attractor suggestion consent ambiguity: %s -> ATTRACTOR_SUGGESTIONS",
+                    next_action,
+                )
+                next_action = "ATTRACTOR_SUGGESTIONS"
+            else:
+                self._notice_attractor_body_consent(next_action, base_action, cleaned)
             self._pending_next_action = next_action
             base_action = next_action.split()[0].upper()
             self._recent_next_actions.append(base_action)
@@ -11656,20 +19251,45 @@ Goals: {json.dumps(goals, indent=2)}
                 )
                 stage = stable_core_health.get("stage") or "unknown"
                 damping_state = structural_pi.get("damping_state") or "none"
+                fill_slope = safe_float(
+                    structural_pi.get("fill_slope_pct_per_sec"),
+                    0.0,
+                )
+                flow_state = (
+                    "rising"
+                    if fill_slope > 0.25
+                    else "falling"
+                    if fill_slope < -0.25
+                    else "settling"
+                )
+                drain_weight = safe_float(structural_pi.get("drain_weight"), 0.0)
+                drain_reason = (
+                    structural_pi.get("restart_gate_reason")
+                    or structural_pi.get("drain_gate_reason")
+                    or ""
+                )
+                drain_reason_text = (
+                    f"; reason={drain_reason}"
+                    if drain_reason and drain_reason != "below_soft_drain_band"
+                    else ""
+                )
                 fill_context_label = f"stable-core sovereignty band {band_low:.0f}-{band_high:.0f}%"
                 if band_low <= fill_pct <= band_high:
                     pi_status = (
                         f"inside band; structural center {structural_target:.0f}% "
-                        f"({fill_pct - structural_target:+.1f}% from center, not a corrective demand), "
+                        f"({fill_pct - structural_target:+.1f}% center offset; not a low-fill warning), "
                         f"stage={stage}"
                     )
                 elif fill_pct > band_high:
                     pi_status = (
-                        f"{fill_pct - band_high:.1f}% above band; damping={damping_state}"
+                        f"{fill_pct - band_high:.1f}% above hold shelf; stage={stage}; "
+                        f"{flow_state}; damping={damping_state}; drain={drain_weight:.2f}"
+                        f"{drain_reason_text}; below 74/78% high-fill rails; "
+                        "not inside-band, not an emergency"
                     )
                 else:
                     pi_status = (
-                        f"{band_low - fill_pct:.1f}% below band; recovery posture active"
+                        f"{band_low - fill_pct:.1f}% below band; stage={stage}; recovery posture active"
                     )
                 target_fill = structural_target
             else:
@@ -11747,6 +19367,20 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
                         f"{loss_text}"
                     )
 
+            resonance = ss.get('resonance_density_v1')
+            if not isinstance(resonance, dict):
+                resonance = state.get('resonance_density_v1')
+            if isinstance(resonance, dict):
+                control = resonance.get('control') if isinstance(resonance.get('control'), dict) else {}
+                base += (
+                    "\nResonance density: "
+                    f"{safe_float(resonance.get('density'), 0.0):.2f} "
+                    f"({resonance.get('quality', 'mixed')}); "
+                    f"containment={safe_float(resonance.get('containment_score'), 0.0):.2f}, "
+                    f"pressure={safe_float(resonance.get('pressure_risk'), 0.0):.2f}, "
+                    f"local_target_bias={safe_float(control.get('target_bias_pct'), 0.0):+.1f}%"
+                )
+
             fp = ss.get('spectral_fingerprint', [])
             if len(fp) >= 32:
                 entropy = fp[24]
@@ -11795,10 +19429,24 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
                     f"regulator_drive={regulator_drive:.3f}, admission={admission}{stale_text}"
                     f"{fresh_text}"
                 )
-                if regulator_drive <= 0.0 and input_active and input_energy > 0.0:
+                if admission == "stable_core_semantic_trace_stale":
+                    base += " (stale semantic trace visible; not live kernel or regulator drive)"
+                elif admission == "stable_core_semantic_budgeted_out":
+                    base += " (fresh semantic input visible; held out by stable-core admission budget)"
+                elif admission == "stable_core_semantic_input_too_large":
+                    base += " (semantic input visible; held out because packet is above trickle size)"
+                elif admission == "stable_core_semantic_fill_ceiling":
+                    base += " (semantic input visible; held out while fill is above trickle ceiling)"
+                elif admission == "stable_core_semantic_profile_not_admitted":
+                    base += " (semantic input visible; current sensory profile does not admit semantic trickle)"
+                elif admission == "stable_core_semantic_trickle":
+                    base += " (bounded semantic trickle admitted to kernel)"
+                elif admission == "stable_core_semantic_muted":
+                    base += " (semantic lane muted by current sensory policy)"
+                elif regulator_drive <= 0.0 and input_active and input_energy > 0.0:
                     base += " (live input trace is visible, but stable-core did not admit it to regulator drive)"
                 elif regulator_drive <= 0.0 and input_energy > 0.0:
-                    base += " (decayed semantic residue; not live kernel or regulator drive)"
+                    base += " (stale semantic trace visible; not live kernel or regulator drive)"
                 elif regulator_drive <= 0.0:
                     base += " (semantic lane quiet; zero regulator drive is expected)"
 
@@ -11890,6 +19538,27 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
         }
         if entry_type not in compressible:
             return content
+        if (
+            self._active_internal_topology_motifs()
+            and self._is_internal_topology_motif(content)
+            and not self._is_external_or_tool_signal(entry_type, content)
+        ):
+            compact = (
+                "[Internal-topology cooldown]\n"
+                "cooled internal-topology motif suppressed; "
+                f"new signal kept: {self._internal_topology_new_signal(content)}"
+            )
+            self._record_condition_metric(
+                "attractor_fatigue",
+                {
+                    "event": "prompt_replay_suppressed",
+                    "cooldown_class": "internal_topology",
+                    "entry_type": entry_type,
+                    "entry_file": file_path,
+                },
+            )
+            self._rewrite_logged_entry_file(file_path, content, compact)
+            return compact
         if len(content) < 220:
             return content
 
@@ -11996,12 +19665,27 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
                 "novel_signal": novel_sentence,
             },
         )
+        self._register_attractor_fatigue_repeat(
+            source="journal_similarity_gate",
+            content=content,
+            repeat_count=repeat_count + 1,
+            entry_type=entry_type,
+            file_path=file_path,
+            prior_file=best.get("path"),
+            persistent_motif=prior_excerpt,
+            novel_signal=novel_sentence,
+        )
         self._rewrite_logged_entry_file(file_path, content, compact)
         return compact
 
     def _write_journal_entry(self, entry_type: str, content: str, state: Dict[str, float], file_path: str):
         """Log journal entry to database."""
         try:
+            self._register_internal_topology_fatigue_if_needed(
+                entry_type=entry_type,
+                content=content,
+                file_path=file_path,
+            )
             content = self._maybe_compress_journal_entry(entry_type, content, state, file_path)
             eig1 = float(state.get('eig1', 0.0))
             deig = float(state.get('deig', 0.0))
