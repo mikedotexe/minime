@@ -38,6 +38,58 @@ STATE = {
             "note": "test",
         },
     },
+    "pressure_source_v1": {
+        "policy": "pressure_source_v1",
+        "schema_version": 1,
+        "pressure_score": 0.24,
+        "porosity_score": 0.72,
+        "dominant_source": "controller_pressure",
+        "quality": "porous_distributed",
+        "components": {
+            "lambda_monopoly": 0.12,
+            "mode_packing": 0.2,
+            "controller_pressure": 0.24,
+            "semantic_trickle": 0.05,
+            "structural_plurality_loss": 0.1,
+            "distinguishability_loss": 0.08,
+            "temporal_lock_in": 0.15,
+            "sensory_scarcity": 0.0,
+        },
+        "context": {},
+        "control": {
+            "applied_locally": False,
+            "note": "advisory only",
+        },
+    },
+    "inhabitable_fluctuation_v1": {
+        "policy": "inhabitable_fluctuation_v1",
+        "schema_version": 1,
+        "inhabitability_score": 0.74,
+        "fluctuation_score": 0.42,
+        "foothold_stability": 0.71,
+        "rearrangement_intensity": 0.38,
+        "quality": "lively_habitable",
+        "components": {
+            "mode_trust_volatility": 0.2,
+            "identity_anchor_churn": 0.18,
+            "eigenvector_reorientation": 0.32,
+            "share_rearrangement": 0.26,
+            "basin_transition_pressure": 0.22,
+            "continuity_recovery": 0.78,
+            "porosity_support": 0.7,
+            "pressure_interference": 0.16,
+        },
+        "context": {
+            "resonance_quality": "rich_containment",
+            "pressure_quality": "porous_distributed",
+        },
+        "control": {
+            "target_bias_pct": 0.0,
+            "wander_scale": 1.05,
+            "applied_locally": True,
+            "note": "bounded resonance envelope",
+        },
+    },
 }
 
 
@@ -80,6 +132,10 @@ class TestActionContinuityStore(unittest.TestCase):
             observation = json.loads(observations_text.strip().splitlines()[-1])
             self.assertEqual(observation["resonance_density_v1"]["quality"], "rich_containment")
             self.assertEqual(observation["thread_resonance"]["quality"], "open_experiment")
+            self.assertEqual(observation["pressure_source_v1"]["dominant_source"], "controller_pressure")
+            self.assertIn("thread_pressure_source", observation)
+            self.assertEqual(observation["inhabitable_fluctuation_v1"]["quality"], "lively_habitable")
+            self.assertIn("thread_inhabitable_fluctuation", observation)
             self.assertIn(artifact["artifact_id"], (thread_dir / "artifacts.jsonl").read_text())
 
             conn = sqlite3.connect(db_path)
@@ -95,6 +151,8 @@ class TestActionContinuityStore(unittest.TestCase):
 
             stored_thread = json.loads((thread_dir / "thread.json").read_text())
             self.assertIn("thread_resonance_density_v1", stored_thread)
+            self.assertIn("thread_pressure_source_v1", stored_thread)
+            self.assertIn("thread_inhabitable_fluctuation_v1", stored_thread)
 
     def test_protected_actions_are_summary_only(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -172,6 +230,114 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
             proposals = workspace / "action_threads" / "proposals.jsonl"
             self.assertIn("INVENT_NEW_SURFACE", proposals.read_text())
 
+    def test_pressure_source_audit_is_read_only_artifact_and_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            db_path = Path(tmp) / "minime.db"
+            agent = self._agent(workspace, db_path)
+            agent._pending_next_action = "PRESSURE_SOURCE_AUDIT inwardness"
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+                patch.object(agent, "_persist_pending_next_action"),
+                patch.object(agent, "_low_fill_guard_status", return_value={
+                    "active": False,
+                    "fill_ratio": 0.68,
+                    "target_fill_ratio": 0.68,
+                    "spread_relief": 0.0,
+                }),
+            ):
+                action = agent._decide_action(dict(STATE))
+            self.assertEqual(action, "pressure_source_audit")
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+                patch.object(agent, "_low_fill_guard_status", return_value={
+                    "active": False,
+                    "fill_ratio": 0.68,
+                    "target_fill_ratio": 0.68,
+                    "spread_relief": 0.0,
+                }),
+                patch.object(agent, "_stable_core_action_allowed", return_value=(True, "test")),
+                patch.object(agent, "_write_journal_entry"),
+                patch.object(agent, "_log_decision"),
+                patch.object(agent, "_record_stable_core_agent_success"),
+            ):
+                agent._execute_action(action, dict(STATE))
+
+            journals = list((workspace / "journal").glob("pressure_source_audit_*.txt"))
+            self.assertEqual(len(journals), 1)
+            text = journals[0].read_text()
+            self.assertIn("PRESSURE SOURCE AUDIT V1", text)
+            self.assertIn("controller_pressure", text)
+            manifests = list((workspace / "actions").glob("*_pressure_source_audit.json"))
+            self.assertEqual(len(manifests), 1)
+            manifest = json.loads(manifests[0].read_text())
+            self.assertEqual(manifest["action_continuity"]["stage"], "read_only")
+            self.assertTrue(
+                any(
+                    artifact["kind"] == "pressure_source_audit"
+                    for artifact in manifest["action_continuity"].get("artifacts", [])
+                )
+            )
+
+    def test_fluctuation_audit_is_read_only_artifact_and_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            db_path = Path(tmp) / "minime.db"
+            agent = self._agent(workspace, db_path)
+            agent._pending_next_action = "EIGENTRUST foothold"
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+                patch.object(agent, "_persist_pending_next_action"),
+                patch.object(agent, "_low_fill_guard_status", return_value={
+                    "active": False,
+                    "fill_ratio": 0.68,
+                    "target_fill_ratio": 0.68,
+                    "spread_relief": 0.0,
+                }),
+            ):
+                action = agent._decide_action(dict(STATE))
+            self.assertEqual(action, "fluctuation_audit")
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+                patch.object(agent, "_low_fill_guard_status", return_value={
+                    "active": False,
+                    "fill_ratio": 0.68,
+                    "target_fill_ratio": 0.68,
+                    "spread_relief": 0.0,
+                }),
+                patch.object(agent, "_stable_core_action_allowed", return_value=(True, "test")),
+                patch.object(agent, "_write_journal_entry"),
+                patch.object(agent, "_log_decision"),
+                patch.object(agent, "_record_stable_core_agent_success"),
+            ):
+                agent._execute_action(action, dict(STATE))
+
+            journals = list((workspace / "journal").glob("fluctuation_audit_*.txt"))
+            self.assertEqual(len(journals), 1)
+            text = journals[0].read_text()
+            self.assertIn("INHABITABLE FLUCTUATION AUDIT V1", text)
+            self.assertIn("lively_habitable", text)
+            manifests = list((workspace / "actions").glob("*_fluctuation_audit.json"))
+            self.assertEqual(len(manifests), 1)
+            manifest = json.loads(manifests[0].read_text())
+            self.assertEqual(manifest["action_continuity"]["stage"], "read_only")
+            self.assertEqual(
+                manifest["state"]["inhabitable_fluctuation_v1"]["quality"],
+                "lively_habitable",
+            )
+            self.assertTrue(
+                any(
+                    artifact["kind"] == "fluctuation_audit"
+                    for artifact in manifest["action_continuity"].get("artifacts", [])
+                )
+            )
+
     def test_latest_spectral_state_includes_resonance_density(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
@@ -209,11 +375,33 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
                         payload TEXT
                     )
                 """)
+                conn.execute("""
+                    CREATE TABLE pressure_source_timeline (
+                        session_id INTEGER,
+                        timestamp REAL,
+                        payload TEXT
+                    )
+                """)
+                conn.execute("""
+                    CREATE TABLE inhabitable_fluctuation_timeline (
+                        session_id INTEGER,
+                        timestamp REAL,
+                        payload TEXT
+                    )
+                """)
                 conn.execute("INSERT INTO esn_metrics VALUES (1, 10.0, 4.7, 0.01, 0.2, 0.99, 4.5, 1.2, 1.0)")
                 conn.execute("INSERT INTO eigenvalue_timeline VALUES (1, 10.0, 8.0, 3.0, 2.0, 0.68, 6.0)")
                 conn.execute(
                     "INSERT INTO resonance_density_timeline VALUES (1, 10.0, ?)",
                     (json.dumps(STATE["resonance_density_v1"]),),
+                )
+                conn.execute(
+                    "INSERT INTO pressure_source_timeline VALUES (1, 10.0, ?)",
+                    (json.dumps(STATE["pressure_source_v1"]),),
+                )
+                conn.execute(
+                    "INSERT INTO inhabitable_fluctuation_timeline VALUES (1, 10.0, ?)",
+                    (json.dumps(STATE["inhabitable_fluctuation_v1"]),),
                 )
                 conn.commit()
             finally:
@@ -225,6 +413,56 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
             self.assertIsNotNone(state)
             self.assertEqual(state["resonance_quality"], "rich_containment")
             self.assertAlmostEqual(state["resonance_density"], 0.66)
+            self.assertEqual(state["pressure_dominant_source"], "controller_pressure")
+            self.assertAlmostEqual(state["pressure_score"], 0.24)
+            self.assertEqual(state["inhabitable_fluctuation_quality"], "lively_habitable")
+            self.assertAlmostEqual(state["inhabitability_score"], 0.74)
+            self.assertAlmostEqual(state["foothold_stability"], 0.71)
+
+    def test_latest_spectral_state_marks_missing_pressure_and_fluctuation_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            db_path = Path(tmp) / "minime.db"
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute("""
+                    CREATE TABLE esn_metrics (
+                        session_id INTEGER,
+                        timestamp REAL,
+                        esn_eig1 REAL,
+                        esn_deig REAL,
+                        esn_leak REAL,
+                        esn_lambda REAL,
+                        esn_baseline REAL,
+                        esn_geom_radius REAL,
+                        esn_geom_rel REAL
+                    )
+                """)
+                conn.execute("""
+                    CREATE TABLE eigenvalue_timeline (
+                        session_id INTEGER,
+                        timestamp REAL,
+                        lambda1 REAL,
+                        lambda2 REAL,
+                        lambda3 REAL,
+                        fill_ratio REAL,
+                        spread REAL
+                    )
+                """)
+                conn.execute("INSERT INTO esn_metrics VALUES (1, 10.0, 4.7, 0.01, 0.2, 0.99, 4.5, 1.2, 1.0)")
+                conn.execute("INSERT INTO eigenvalue_timeline VALUES (1, 10.0, 8.0, 3.0, 2.0, 0.68, 6.0)")
+                conn.commit()
+            finally:
+                conn.close()
+
+            agent = self._agent(workspace, db_path)
+            with patch.object(aa, "DB_PATH", db_path):
+                state = agent._get_latest_spectral_state()
+            self.assertIsNotNone(state)
+            self.assertFalse(state["pressure_source_status"]["available"])
+            self.assertEqual(state["pressure_source_status"]["reason"], "no_live_or_db_metric")
+            self.assertFalse(state["inhabitable_fluctuation_status"]["available"])
+            self.assertEqual(state["inhabitable_fluctuation_status"]["reason"], "no_live_or_db_metric")
 
 
 if __name__ == "__main__":

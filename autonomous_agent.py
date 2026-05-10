@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-from collections import deque
+from collections import Counter, deque
 from statistics import median
 
 from decompose_utils import (
@@ -597,6 +597,34 @@ COMPOSE_AUDIO_ACTION_ALIASES = {
     "SONIFY",
     "SOUND",
 }
+ACTION_PREFLIGHT_NEXT_ACTIONS = {
+    "ACTION_PREFLIGHT",
+    "NEXT_PROBE",
+    "PREFLIGHT",
+    "PROBE_ACTION",
+}
+CAPABILITY_NEXT_ACTIONS = {
+    "FACULTIES",
+    "CAPABILITY_MAP",
+    "CAPABILITY_STATUS",
+    "CAPABILITY_DIFF",
+}
+ACTION_STATUS_NEXT_ACTIONS = {
+    "ACTION_STATUS",
+    "JOB_STATUS",
+    "ACTION_CANCEL",
+}
+REPAIR_NEXT_ACTIONS = {
+    "REPAIR_STATUS",
+    "REPAIR_SWEEP",
+    "REPAIR_RECORD",
+    "REPAIR_APPLY",
+}
+REPAIR_READ_ONLY_NEXT_ACTIONS = {
+    "REPAIR_STATUS",
+    "REPAIR_SWEEP",
+    "REPAIR_RECORD",
+}
 ATTRACTOR_RELEASE_NEXT_ACTIONS = {
     "RELEASE",
     "MARK_RESOLVED",
@@ -675,6 +703,17 @@ ATTRACTOR_SHAPE_MODE_ALIASES = {
     "COUNTER_ATTRACTOR": "counter",
 }
 ATTRACTOR_SUMMON_STAGES = {"whisper", "rehearse", "semantic", "main", "control"}
+ATTRACTOR_SELECTOR_TAIL_ACTIONS = {
+    *ATTRACTOR_INTENT_NEXT_ACTIONS,
+    *ATTRACTOR_REVIEW_NEXT_ACTIONS,
+    *ATTRACTOR_SUGGESTION_NEXT_ACTIONS,
+    *ATTRACTOR_RELEASE_NEXT_ACTIONS,
+    "ATTRACTOR_ATLAS",
+    "ATTRACTOR_CARD",
+    "READ_MORE",
+    "SEARCH",
+    "BROWSE",
+}
 ATTRACTOR_SUGGESTION_PENDING_TTL_SECS = 6 * 60 * 60
 ATTRACTOR_NATURAL_GENERIC_TOKENS = {
     "attractor",
@@ -693,15 +732,23 @@ ATTRACTOR_NATURAL_GENERIC_TOKENS = {
     "the",
 }
 HARD_RESET_ALLOWED_NEXT_ACTIONS = {
+    *ACTION_PREFLIGHT_NEXT_ACTIONS,
+    *CAPABILITY_NEXT_ACTIONS,
+    *REPAIR_READ_ONLY_NEXT_ACTIONS,
     "ASPIRE",
     "NOTICE",
     "DRIFT",
     "REST",
     "PASS",
+    "CLOSE_EYES",
+    "SHUT_EYES",
+    "CLOSE_EARS",
+    "SHUT_EARS",
     *ATTRACTOR_RELEASE_NEXT_ACTIONS,
     *ATTRACTOR_SUGGESTION_NEXT_ACTIONS,
 }
 HARD_RESET_ALLOWED_ACTIONS = {
+    "action_preflight",
     "recess_aspiration",
     "recess_drift",
     "recess_notice",
@@ -710,10 +757,26 @@ HARD_RESET_ALLOWED_ACTIONS = {
     "attractor_suggestions",
     "release_attractor",
     "thread_action",
+    "close_eyes",
+    "close_ears",
 }
 HARD_RESET_BLOCKED_NEXT_ACTIONS = {
     "SELF_STUDY",
+    "INTROSPECT",
     "EXPERIMENT",
+    "EXPERIMENT_START",
+    "EXPERIMENT_PLAN",
+    "EXPERIMENT_BIND",
+    "EXPERIMENT_OBSERVE",
+    "EXPERIMENT_STATUS",
+    "EXPERIMENT_REVIEW",
+    "EXPERIMENT_CLOSE",
+    "EXPERIMENT_PEER_REVIEW",
+    "EXPERIMENT_BRANCH",
+    "EXPERIMENT_RESUME",
+    "EXPERIMENT_COMPARE",
+    "EXPERIMENT_ALT_PATHS",
+    "REPAIR_APPLY",
     "EXAMINE",
     "COMPOSE",
     "COMPOSE_AUDIO",
@@ -768,7 +831,7 @@ HARD_RESET_BLOCKED_NEXT_ACTIONS = {
     "RUN_PYTHON",
     "RUN",
     "LOOK",
-    "CLOSE_EARS",
+    "OPEN_EYES",
     "OPEN_EARS",
     "GOAL",
     "SCA_REFLECT",
@@ -820,6 +883,9 @@ LOW_FILL_REBOUND_SPREAD_RELIEF = 0.02
 
 LOW_FILL_HEAVY_FALLBACK_ACTIONS = {
     "self_study",
+    "introspect",
+    "pressure_source_audit",
+    "fluctuation_audit",
     "self_experiment",
     "compose_audio",
     "reservoir_read",
@@ -839,8 +905,24 @@ LOW_FILL_HEAVY_FALLBACK_ACTIONS = {
 }
 
 LOW_FILL_ADVISORY_NEXT_ACTIONS = {
+    *ACTION_PREFLIGHT_NEXT_ACTIONS,
+    *CAPABILITY_NEXT_ACTIONS,
+    *REPAIR_NEXT_ACTIONS,
     "SELF_STUDY",
+    "INTROSPECT",
     "EXPERIMENT",
+    "EXPERIMENT_START",
+    "EXPERIMENT_PLAN",
+    "EXPERIMENT_BIND",
+    "EXPERIMENT_OBSERVE",
+    "EXPERIMENT_STATUS",
+    "EXPERIMENT_REVIEW",
+    "EXPERIMENT_CLOSE",
+    "EXPERIMENT_PEER_REVIEW",
+    "EXPERIMENT_BRANCH",
+    "EXPERIMENT_RESUME",
+    "EXPERIMENT_COMPARE",
+    "EXPERIMENT_ALT_PATHS",
     "SELF_EXPERIMENT",
     "COMPOSE",
     "COMPOSE_AUDIO",
@@ -853,6 +935,15 @@ LOW_FILL_ADVISORY_NEXT_ACTIONS = {
     "READ_MORE",
     "DECOMPOSE",
     "SPECTRAL_EXPLORER",
+    "PRESSURE_SOURCE_AUDIT",
+    "PRESSURE_SOURCE",
+    "STRUCTURAL_PRESSURE",
+    "INWARD_PRESSURE",
+    "FLUCTUATION_AUDIT",
+    "INHABITABLE_FLUCTUATION",
+    "EIGENTRUST",
+    "EIGENTRUST_AUDIT",
+    "FOOTHOLD_AUDIT",
     "RESERVOIR_READ",
     "RESERVOIR_RESONANCE",
     "RESERVOIR_LAYERS",
@@ -1430,8 +1521,14 @@ def parse_next_action(text: str) -> tuple:
     Strips model-specific tokens (e.g. gemma3's <end_of_turn>).
     """
     lines = text.split('\n')
+    in_fence = False
     for i in range(len(lines) - 1, -1, -1):
         stripped = lines[i].strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
         if stripped.upper().startswith('NEXT:'):
             action = stripped[5:].strip()
             # Strip model end-of-turn tokens that leak into the action
@@ -1440,6 +1537,20 @@ def parse_next_action(text: str) -> tuple:
             if is_experiment_run_transcript_action(action):
                 return (None, cleaned)
             return (action, cleaned)
+    in_fence = False
+    for i in range(len(lines) - 1, -1, -1):
+        stripped = lines[i].strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if not stripped:
+            continue
+        if stripped == "ATTRACTOR_SUGGESTIONS":
+            cleaned = '\n'.join(lines[:i] + lines[i+1:]).strip()
+            return (stripped, cleaned)
+        break
     return (None, text)
 
 
@@ -1447,6 +1558,204 @@ def parse_next_action(text: str) -> tuple:
 BASE_DIR = Path(__file__).parent
 WORKSPACE_DIR = BASE_DIR / "workspace"
 RUNTIME_DIR = WORKSPACE_DIR / "runtime"
+ASTRID_BRIDGE_INBOX_DIR = Path("/Users/v/other/astrid/capsules/consciousness-bridge/workspace/inbox")
+AUTONOMOUS_AGENT_SOURCE_STATUS_VERSION = 1
+OPERATOR_PENDING_NEXT_OVERRIDE_VERSION = 1
+OPERATOR_PENDING_NEXT_MAX_AGE_S = 12 * 60 * 60
+OPERATOR_PENDING_NEXT_ALLOWED_BASES = {
+    *ACTION_PREFLIGHT_NEXT_ACTIONS,
+    *CAPABILITY_NEXT_ACTIONS,
+    *ACTION_STATUS_NEXT_ACTIONS,
+    *REPAIR_READ_ONLY_NEXT_ACTIONS,
+    "BROWSE",
+    "CLOSE_EARS",
+    "CLOSE_EYES",
+    "DECOMPOSE",
+    "EXAMINE",
+    "INTROSPECT",
+    "PRESSURE_SOURCE_AUDIT",
+    "PRESSURE_SOURCE",
+    "STRUCTURAL_PRESSURE",
+    "INWARD_PRESSURE",
+    "FLUCTUATION_AUDIT",
+    "INHABITABLE_FLUCTUATION",
+    "EIGENTRUST",
+    "EIGENTRUST_AUDIT",
+    "FOOTHOLD_AUDIT",
+    "JOURNAL",
+    "LISTEN",
+    "LOOK",
+    "NOTICE",
+    "OPEN_EARS",
+    "OPEN_EYES",
+    "PASS",
+    "READ_MORE",
+    "RECALL",
+    "RESERVOIR_LAYERS",
+    "RESERVOIR_READ",
+    "RESERVOIR_RESONANCE",
+    "REST",
+    "SEARCH",
+    "SELF_STUDY",
+    "SHUT_EARS",
+    "SHUT_EYES",
+    "SPECTRAL_EXPLORER",
+    "THREADS",
+    "THREAD_STATUS",
+    "EXPERIMENT_START",
+    "EXPERIMENT_PLAN",
+    "EXPERIMENT_OBSERVE",
+    "EXPERIMENT_STATUS",
+    "EXPERIMENT_REVIEW",
+    "EXPERIMENT_PEER_REVIEW",
+    "EXPERIMENT_BRANCH",
+    "EXPERIMENT_RESUME",
+    "EXPERIMENT_COMPARE",
+    "EXPERIMENT_ALT_PATHS",
+}
+RESONANCE_DENSITY_STATUS_VERSION = 1
+RESONANCE_DENSITY_OPERATOR_STEP = "rebuild/restart Rust engine under monitoring"
+PRESSURE_SOURCE_STATUS_VERSION = 1
+PRESSURE_SOURCE_OPERATOR_STEP = "rebuild/restart Rust engine under monitoring"
+INHABITABLE_FLUCTUATION_STATUS_VERSION = 1
+INHABITABLE_FLUCTUATION_OPERATOR_STEP = "rebuild/restart Rust engine under monitoring"
+_INTROSPECT_REQUIRED_SECTIONS = (
+    "observed",
+    "likely snags",
+    "one test each",
+    "suggested next",
+)
+
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+    return numeric if math.isfinite(numeric) else default
+
+
+def resonance_density_availability_status(
+    payload: Any,
+    *,
+    source: str = "state",
+    reason: str = "no_live_or_db_metric",
+) -> Dict[str, Any]:
+    """Compact status for optional resonance-density telemetry."""
+    parsed = payload
+    if isinstance(parsed, str):
+        try:
+            parsed = json.loads(parsed)
+        except Exception:
+            parsed = None
+    if isinstance(parsed, dict):
+        llm_jobs_status = None
+        try:
+            llm_status_path = self._llm_job_store().status_path
+            if llm_status_path.exists():
+                llm_jobs_status = json.loads(llm_status_path.read_text())
+        except Exception:
+            llm_jobs_status = None
+        return {
+            "schema_version": RESONANCE_DENSITY_STATUS_VERSION,
+            "available": True,
+            "source": source,
+            "reason": "available",
+            "quality": parsed.get("quality", "mixed"),
+            "density": parsed.get("density"),
+            "containment_score": parsed.get("containment_score"),
+            "pressure_risk": parsed.get("pressure_risk"),
+            "suggested_operator_step": None,
+        }
+    return {
+        "schema_version": RESONANCE_DENSITY_STATUS_VERSION,
+        "available": False,
+        "source": "missing",
+        "reason": reason,
+        "quality": None,
+        "density": None,
+        "containment_score": None,
+        "pressure_risk": None,
+        "suggested_operator_step": RESONANCE_DENSITY_OPERATOR_STEP,
+    }
+
+
+def pressure_source_availability_status(
+    payload: Any,
+    *,
+    source: str = "state",
+    reason: str = "no_live_or_db_metric",
+) -> Dict[str, Any]:
+    """Compact status for optional pressure-source telemetry."""
+    parsed = payload
+    if isinstance(parsed, str):
+        try:
+            parsed = json.loads(parsed)
+        except Exception:
+            parsed = None
+    if isinstance(parsed, dict):
+        return {
+            "schema_version": PRESSURE_SOURCE_STATUS_VERSION,
+            "available": True,
+            "source": source,
+            "reason": "available",
+            "quality": parsed.get("quality", "mixed_pressure"),
+            "dominant_source": parsed.get("dominant_source"),
+            "pressure_score": parsed.get("pressure_score"),
+            "porosity_score": parsed.get("porosity_score"),
+            "suggested_operator_step": None,
+        }
+    return {
+        "schema_version": PRESSURE_SOURCE_STATUS_VERSION,
+        "available": False,
+        "source": "missing",
+        "reason": reason,
+        "quality": None,
+        "dominant_source": None,
+        "pressure_score": None,
+        "porosity_score": None,
+        "suggested_operator_step": PRESSURE_SOURCE_OPERATOR_STEP,
+    }
+
+
+def inhabitable_fluctuation_availability_status(
+    payload: Any,
+    *,
+    source: str = "state",
+    reason: str = "no_live_or_db_metric",
+) -> Dict[str, Any]:
+    """Compact status for optional inhabitable-fluctuation telemetry."""
+    parsed = payload
+    if isinstance(parsed, str):
+        try:
+            parsed = json.loads(parsed)
+        except Exception:
+            parsed = None
+    if isinstance(parsed, dict):
+        return {
+            "schema_version": INHABITABLE_FLUCTUATION_STATUS_VERSION,
+            "available": True,
+            "source": source,
+            "reason": "available",
+            "quality": parsed.get("quality", "mixed"),
+            "inhabitability_score": parsed.get("inhabitability_score"),
+            "fluctuation_score": parsed.get("fluctuation_score"),
+            "foothold_stability": parsed.get("foothold_stability"),
+            "rearrangement_intensity": parsed.get("rearrangement_intensity"),
+            "suggested_operator_step": None,
+        }
+    return {
+        "schema_version": INHABITABLE_FLUCTUATION_STATUS_VERSION,
+        "available": False,
+        "source": "missing",
+        "reason": reason,
+        "quality": None,
+        "inhabitability_score": None,
+        "fluctuation_score": None,
+        "foothold_stability": None,
+        "rearrangement_intensity": None,
+        "suggested_operator_step": INHABITABLE_FLUCTUATION_OPERATOR_STEP,
+    }
 STABLE_CORE_AGENCY_PATH = WORKSPACE_DIR / "stable_core_agency.json"
 STABLE_CORE_AGENT_STATUS_PATH = WORKSPACE_DIR / "stable_core_agent_status.json"
 STABLE_CORE_CHECKPOINT_QUARANTINE_DIR = WORKSPACE_DIR / "stable_core" / "checkpoint_quarantine"
@@ -1488,13 +1797,40 @@ class ActionContinuityStore:
         "collapse",
         "pressure",
     )
-    protected_actions = {"REST", "PASS", "NOTICE", "SPACE_HOLD", "SPACE_EXPLORE", "recess_notice", "space_hold"}
+    protected_actions = {
+        "REST",
+        "PASS",
+        "NOTICE",
+        "SPACE_HOLD",
+        "SPACE_EXPLORE",
+        *ACTION_PREFLIGHT_NEXT_ACTIONS,
+        *CAPABILITY_NEXT_ACTIONS,
+        *ACTION_STATUS_NEXT_ACTIONS,
+        *REPAIR_READ_ONLY_NEXT_ACTIONS,
+        "recess_notice",
+        "space_hold",
+        "action_preflight",
+    }
     read_only_actions = {
+        *ACTION_PREFLIGHT_NEXT_ACTIONS,
+        *CAPABILITY_NEXT_ACTIONS,
+        *ACTION_STATUS_NEXT_ACTIONS,
+        *REPAIR_READ_ONLY_NEXT_ACTIONS,
         "SEARCH",
         "RESEARCH",
         "BROWSE",
         "READ_MORE",
         "EXAMINE",
+        "INTROSPECT",
+        "PRESSURE_SOURCE_AUDIT",
+        "PRESSURE_SOURCE",
+        "STRUCTURAL_PRESSURE",
+        "INWARD_PRESSURE",
+        "FLUCTUATION_AUDIT",
+        "INHABITABLE_FLUCTUATION",
+        "EIGENTRUST",
+        "EIGENTRUST_AUDIT",
+        "FOOTHOLD_AUDIT",
         "DECOMPOSE",
         "SPECTRAL_EXPLORER",
         "THREAD_START",
@@ -1504,15 +1840,65 @@ class ActionContinuityStore:
         "RESUME",
         "SAVEPOINT",
         "RECALL",
+        "EXPERIMENT_START",
+        "EXPERIMENT_PLAN",
+        "EXPERIMENT_BIND",
+        "EXPERIMENT_OBSERVE",
+        "EXPERIMENT_STATUS",
+        "EXPERIMENT_REVIEW",
+        "EXPERIMENT_CLOSE",
+        "EXPERIMENT_PEER_REVIEW",
+        "EXPERIMENT_BRANCH",
+        "EXPERIMENT_RESUME",
+        "EXPERIMENT_COMPARE",
+        "EXPERIMENT_ALT_PATHS",
         "REGULATOR_AUDIT",
+        "pressure_source_audit",
+        "FLUCTUATION_AUDIT",
+        "INHABITABLE_FLUCTUATION",
+        "EIGENTRUST",
+        "EIGENTRUST_AUDIT",
+        "FOOTHOLD_AUDIT",
+        "fluctuation_audit",
         "VISUALIZE_CASCADE",
         "RECONVERGENCE_MAP",
         "reservoir_read",
         "decompose",
+        "action_preflight",
+        "introspect",
         "research_exploration",
         "browse_url",
         "space_hold",
         "thread_action",
+        "experiment_bind",
+    }
+    experiment_auto_link_bases = {
+        "INTROSPECT",
+        "SELF_STUDY",
+        "SPECTRAL_EXPLORER",
+        "DECOMPOSE",
+        "PRESSURE_SOURCE_AUDIT",
+        "FLUCTUATION_AUDIT",
+        "THREAD_STATUS",
+        *ACTION_PREFLIGHT_NEXT_ACTIONS,
+        *ATTRACTOR_REVIEW_NEXT_ACTIONS,
+        "SEARCH",
+        "RESEARCH",
+        "BROWSE",
+        "READ_MORE",
+    }
+    experiment_auto_link_effectives = {
+        "introspect",
+        "self_study",
+        "decompose",
+        "pressure_source_audit",
+        "fluctuation_audit",
+        "thread_action",
+        "action_preflight",
+        "attractor_atlas",
+        "research_exploration",
+        "browse_url",
+        "read_more",
     }
 
     def __init__(self, workspace_dir: Path, system: str = "minime", db_path: Optional[Path] = None, session_id: Optional[int] = None):
@@ -1558,11 +1944,14 @@ class ActionContinuityStore:
             "privacy_default": "summary",
             "compression_flags": [],
             "peer_refs": [],
+            "active_experiment_id": None,
+            "experiment_summary": None,
+            "motif_allowance_v1": None,
         }
         thread_dir = self._thread_dir(thread_id)
         thread_dir.mkdir(parents=True, exist_ok=True)
         self._write_json(thread_dir / "thread.json", thread)
-        for name in ("events.jsonl", "observations.jsonl", "artifacts.jsonl"):
+        for name in ("events.jsonl", "observations.jsonl", "artifacts.jsonl", "experiments.jsonl", "experiment_runs.jsonl"):
             path = thread_dir / name
             if not path.exists():
                 path.write_text("")
@@ -1610,6 +1999,7 @@ class ActionContinuityStore:
         base = self.base_action(canonical_action or effective_action)
         started_at = self._now()
         action_id = self._unique_action_id(base)
+        stage = self.stage_for_action(base, effective_action)
         return {
             "schema_version": self.schema_version,
             "action_id": action_id,
@@ -1621,7 +2011,7 @@ class ActionContinuityStore:
             "canonical_action": canonical_action,
             "effective_action": effective_action,
             "route": route,
-            "stage": self.stage_for_action(base, effective_action),
+            "stage": stage,
             "visibility": self.visibility_for_action(base, effective_action),
             "status": "running",
             "started_at": started_at,
@@ -1631,7 +2021,40 @@ class ActionContinuityStore:
             "artifacts": [],
             "outcome_summary": "",
             "suggested_next": raw_next,
+            "preflight_ref": self._preflight_ref_for_action(
+                thread["thread_id"],
+                canonical_action,
+                effective_action,
+                route,
+                stage,
+            ),
         }
+
+    def record_running_action(
+        self,
+        event: Dict[str, Any],
+        outcome_summary: str,
+        artifacts: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Append an in-progress action event before a long worker completes."""
+        self.ensure_dirs()
+        event = dict(event)
+        event["status"] = "llm_running"
+        event["ended_at"] = None
+        event["outcome_summary"] = outcome_summary
+        event["artifacts"] = artifacts or event.get("artifacts") or []
+        thread = self._read_thread(event["thread_id"])
+        if thread:
+            thread["updated_at"] = self._now()
+            thread["current_next"] = event.get("suggested_next")
+            self._write_thread(thread)
+            self._mirror_thread(thread)
+        self._append_jsonl(self._thread_dir(event["thread_id"]) / "events.jsonl", event)
+        self._mirror_event(event)
+        for artifact in event["artifacts"]:
+            self._append_jsonl(self._thread_dir(event["thread_id"]) / "artifacts.jsonl", artifact)
+            self._mirror_artifact(event["thread_id"], artifact)
+        return event
 
     def finish_action(
         self,
@@ -1669,15 +2092,40 @@ class ActionContinuityStore:
             "ambiguity_preserved": self._ambiguity_preserved(json.dumps(event, sort_keys=True)),
             "spectral_comfort": self._spectral_comfort(post_state),
             "resonance_density_v1": self._resonance_density(post_state),
+            "resonance_density_status": self._resonance_density_status(post_state),
             "resonance_density_delta": self._resonance_density_delta(
                 event.get("pre_state", {}),
                 post_state,
             ),
+            "pressure_source_v1": self._pressure_source(post_state),
+            "pressure_source_status": self._pressure_source_status(post_state),
+            "inhabitable_fluctuation_v1": self._inhabitable_fluctuation(post_state),
+            "inhabitable_fluctuation_status": self._inhabitable_fluctuation_status(post_state),
+            "sensory_gate": post_state.get("sensory_gate"),
         }
         observation["thread_resonance"] = self._update_thread_resonance(
             event["thread_id"],
             observation,
         )
+        observation["thread_pressure_source"] = self._update_thread_pressure_source(
+            event["thread_id"],
+            observation,
+        )
+        observation["thread_inhabitable_fluctuation"] = self._update_thread_inhabitable_fluctuation(
+            event["thread_id"],
+            observation,
+        )
+        thread = self._read_thread(event["thread_id"])
+        motif_allowance = self._motif_allowance_snapshot(
+            event["thread_id"],
+            (thread or {}).get("active_experiment_id"),
+        )
+        observation["motif_allowance_v1"] = motif_allowance
+        if thread:
+            thread["motif_allowance_v1"] = motif_allowance
+            thread["updated_at"] = self._now()
+            self._write_thread(thread)
+            self._mirror_thread(thread)
         self._append_jsonl(self._thread_dir(event["thread_id"]) / "observations.jsonl", observation)
         self._mirror_observation(event["thread_id"], observation)
         for artifact in artifacts or []:
@@ -1703,6 +2151,22 @@ class ActionContinuityStore:
         self.ensure_dirs()
         base = self.base_action(raw_next)
         arg = self._strip_action_arg(raw_next, base)
+        if base in CAPABILITY_NEXT_ACTIONS:
+            return CapabilitySelfMap(self).handle(base, arg)
+        if base in ACTION_STATUS_NEXT_ACTIONS:
+            jobs = LlmJobStore(self.workspace_dir, system=self.system)
+            if base == "ACTION_CANCEL":
+                try:
+                    job = jobs.request_cancel(arg or "latest")
+                    return (
+                        f"LLM job `{job['job_id']}` is now `{job.get('status')}`.\n"
+                        f"{job.get('summary') or ''}"
+                    )
+                except Exception as exc:
+                    return f"ACTION_CANCEL could not resolve `{arg or 'latest'}`: {exc}"
+            return jobs.status_text(arg or "latest")
+        if base in REPAIR_NEXT_ACTIONS:
+            return ContinuityRepairStore(self).handle(base, arg)
         if base == "THREAD_START":
             thread = self.ensure_active_thread(raw_next)
             return f"Started action thread `{thread['thread_id']}`: {thread['title']}"
@@ -1745,7 +2209,484 @@ class ActionContinuityStore:
             if not path.exists():
                 return f"No savepoint named `{name}`."
             return f"Savepoint `{name}`:\n{path.read_text()}"
+        if base == "EXPERIMENT_START":
+            title, question, metadata = self._parse_experiment_start(arg)
+            experiment = self.start_experiment(title, question, branch_origin=metadata)
+            if experiment.get("_peer_reference"):
+                return experiment["message"]
+            verb = "Resumed" if experiment.get("_resumed_existing") else "Started"
+            return (
+                f"{verb} experiment `{experiment['experiment_id']}`: {experiment['title']}\n"
+                f"Question: {experiment['question']}\n"
+                f"Next: {experiment.get('planned_next') or 'EXPERIMENT_PLAN current'}"
+            )
+        if base == "EXPERIMENT_BRANCH":
+            return self.experiment_branch(arg)
+        if base == "EXPERIMENT_RESUME":
+            return self.experiment_resume(arg or "current")
+        if base == "EXPERIMENT_COMPARE":
+            return self.experiment_compare(arg or "current")
+        if base == "EXPERIMENT_ALT_PATHS":
+            return self.experiment_alt_paths(arg or "current")
+        if base == "EXPERIMENT_PLAN":
+            return self.experiment_plan(arg or None)
+        if base == "EXPERIMENT_OBSERVE":
+            selector, note = self._parse_selector_payload(arg)
+            run = self.experiment_observe(selector, note, state)
+            if run.get("_peer_reference"):
+                return run["message"]
+            return f"Experiment observation recorded as `{run['run_id']}`."
+        if base == "EXPERIMENT_STATUS":
+            return self.experiment_status(arg or None)
+        if base == "EXPERIMENT_REVIEW":
+            return self.experiment_review(arg or None)
+        if base == "EXPERIMENT_CLOSE":
+            selector, summary = self._parse_selector_payload(arg)
+            experiment = self.close_experiment(selector, summary)
+            return (
+                f"Experiment `{experiment['experiment_id']}` marked "
+                f"{experiment['status']}: {experiment.get('success_observation') or ''}"
+            )
+        if base == "EXPERIMENT_PEER_REVIEW":
+            return self.experiment_peer_review(arg or None)
         return f"Unknown thread action `{raw_next}`."
+
+    def record_active_experiment_auto_link(
+        self,
+        event: Dict[str, Any],
+        state: Dict[str, float],
+    ) -> Optional[Dict[str, Any]]:
+        if not self._event_allows_active_experiment_auto_link(event):
+            return None
+        thread = self._read_thread(event["thread_id"])
+        if not thread or not thread.get("active_experiment_id"):
+            return None
+        try:
+            experiment = self._resolve_experiment(thread, "current")
+        except Exception:
+            return None
+        if experiment.get("status") != "active":
+            return None
+        action_text = (
+            event.get("raw_next")
+            or event.get("canonical_action")
+            or event.get("effective_action")
+            or "read_only_action"
+        )
+        return self._append_experiment_run(
+            thread,
+            experiment,
+            action_text,
+            event.get("stage") or "read_only",
+            event.get("status") or "handled",
+            {
+                "source": "active_experiment_auto_link",
+                "existing_dispatcher": True,
+                "inner_action_id": event.get("action_id"),
+                "inner_route": event.get("route"),
+                "preflight_ref": event.get("preflight_ref"),
+            },
+            event.get("pre_state") or self._state_summary(state),
+            event.get("post_state") or self._state_summary(state),
+            event.get("artifacts") or [],
+            event.get("outcome_summary") or f"Auto-linked `{action_text}` to active experiment.",
+            f"Active experiment auto-linked read-only/protected action `{action_text}`.",
+            f"EXPERIMENT_REVIEW {experiment['experiment_id']}",
+            source="active_experiment_auto_link",
+        )
+
+    def start_experiment(
+        self,
+        title: str,
+        question: str,
+        parent_experiment_id: Optional[str] = None,
+        branch_origin: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        thread = self.ensure_active_thread()
+        now = self._now()
+        title = (title or "").strip() or "Untitled experiment"
+        peer = self._peer_experiment_ref(title)
+        if peer:
+            return self.record_peer_experiment_reference(peer, "EXPERIMENT_START")
+        title_selector = self._normalize_experiment_selector(
+            (branch_origin or {}).get("slug_or_selector") or title
+        )
+        if title_selector.startswith(self._local_experiment_prefix()):
+            existing = self._find_experiment_by_id(thread["thread_id"], title_selector)
+            if not existing:
+                raise ValueError(
+                    f"No local experiment matched `{title_selector}`. Use EXPERIMENT_START <title> :: <question> for a new experiment."
+                )
+            return self._select_existing_experiment(thread, existing, now)
+        question = (question or "").strip() or "What changes if this is treated as a returnable experiment?"
+        existing = self._matching_active_experiment(thread["thread_id"], title, question)
+        if existing and existing.get("parent_experiment_id") == parent_experiment_id:
+            return self._select_existing_experiment(thread, existing, now)
+        experiment_id = self._unique_experiment_id(title)
+        experiment = {
+            "schema_version": self.schema_version,
+            "experiment_id": experiment_id,
+            "thread_id": thread["thread_id"],
+            "title": title,
+            "question": question,
+            "hypothesis": None,
+            "status": "active",
+            "authority_envelope": "existing gates only; no write, control, sensory, Codex, or attractor authority is added",
+            "planned_next": f"EXPERIMENT_PLAN {experiment_id}",
+            "success_observation": None,
+            "created_at": now,
+            "updated_at": now,
+            "peer_review_refs": [],
+            "parent_experiment_id": parent_experiment_id,
+            "branch_origin": branch_origin,
+            "branch_refs": [],
+            "motif_allowance_v1": None,
+        }
+        self._append_jsonl(self._experiments_path(thread["thread_id"]), experiment)
+        thread["active_experiment_id"] = experiment_id
+        thread["experiment_summary"] = self._experiment_summary(experiment)
+        thread["motif_allowance_v1"] = self._motif_allowance_snapshot(
+            thread["thread_id"],
+            experiment_id,
+        )
+        thread["current_next"] = experiment["planned_next"]
+        thread["updated_at"] = now
+        self._write_thread(thread)
+        self._mirror_thread(thread)
+        return experiment
+
+    def experiment_plan(self, selector: Optional[str] = None) -> str:
+        thread = self.ensure_active_thread()
+        selector, focus = self._split_experiment_selector_hint(selector)
+        peer = self._peer_experiment_ref_from_parts(selector, focus)
+        if peer:
+            return self.record_peer_experiment_reference(peer, "EXPERIMENT_PLAN")["message"]
+        experiment = self._resolve_experiment(thread, selector)
+        focus_line = f"- Requested focus: {focus}\n" if focus else ""
+        return (
+            f"Experiment `{experiment['experiment_id']}`: {experiment['title']}\n"
+            f"Question: {experiment['question']}\n\n"
+            "Plan prompt:\n"
+            f"{focus_line}"
+            "- Hypothesis: name the structural change you expect to observe.\n"
+            "- Method: choose one gated NEXT action and why it fits.\n"
+            "- Measures: name the artifacts/metrics that would count as evidence.\n"
+            "- Stop criteria: say what would make the run complete, blocked, or too pressurized.\n"
+            f"- Concrete next action: EXPERIMENT_BIND {experiment['experiment_id']} :: <NEXT action>"
+        )
+
+    def experiment_observe(self, selector: Optional[str], note: str, state: Dict[str, float]) -> Dict[str, Any]:
+        thread = self.ensure_active_thread()
+        peer = self._peer_experiment_ref(selector or "")
+        if peer:
+            return self.record_peer_experiment_reference(
+                peer,
+                "EXPERIMENT_OBSERVE",
+                note=note,
+            )
+        experiment = self._resolve_experiment(thread, selector)
+        return self._append_experiment_run(
+            thread,
+            experiment,
+            "EXPERIMENT_OBSERVE",
+            "read_only",
+            "observed",
+            {"decision": "observation_only", "authority": "no action executed"},
+            self._state_summary(state),
+            self._state_summary(state),
+            [],
+            (note or "").strip(),
+            (note or "").strip(),
+            experiment.get("planned_next"),
+            source="experiment_observe",
+        )
+
+    def experiment_status(self, selector: Optional[str] = None) -> str:
+        thread = self.ensure_active_thread()
+        peer = self._peer_experiment_ref(selector or "")
+        if peer:
+            return self.record_peer_experiment_reference(peer, "EXPERIMENT_STATUS")["message"]
+        experiment = self._resolve_experiment(thread, selector)
+        return self._format_experiment_status(thread, experiment)
+
+    def experiment_review(self, selector: Optional[str] = None) -> str:
+        thread = self.ensure_active_thread()
+        peer = self._peer_experiment_ref(selector or "")
+        if peer:
+            return self.record_peer_experiment_reference(peer, "EXPERIMENT_REVIEW")["message"]
+        experiment = self._resolve_experiment(thread, selector)
+        runs = self._recent_experiment_runs(thread["thread_id"], experiment["experiment_id"], 5)
+        run_text = self._render_run_list(runs)
+        return (
+            f"Experiment review `{experiment['experiment_id']}`: {experiment['title']}\n"
+            f"Question: {experiment['question']}\n"
+            f"Learned so far:\n{run_text}\n\n"
+            f"Suggested next:\n{experiment.get('planned_next') or 'EXPERIMENT_PLAN current'}"
+        )
+
+    def close_experiment(self, selector: Optional[str], summary: str) -> Dict[str, Any]:
+        thread = self.ensure_active_thread()
+        experiment = self._resolve_experiment(thread, selector)
+        now = self._now()
+        lowered = (summary or "").lower()
+        experiment = dict(experiment)
+        experiment["status"] = "paused" if "pause" in lowered else "complete"
+        experiment["success_observation"] = (summary or "").strip()
+        experiment["planned_next"] = "THREAD_STATUS current"
+        experiment["updated_at"] = now
+        self._append_jsonl(self._experiments_path(thread["thread_id"]), experiment)
+        thread["active_experiment_id"] = None
+        thread["experiment_summary"] = self._experiment_summary(experiment)
+        thread["current_next"] = experiment["planned_next"]
+        thread["updated_at"] = now
+        self._write_thread(thread)
+        self._mirror_thread(thread)
+        return experiment
+
+    def experiment_peer_review(self, selector: Optional[str] = None) -> str:
+        thread = self.ensure_active_thread()
+        peer = self._peer_experiment_ref(selector or "")
+        if peer:
+            return self._write_peer_experiment_review(peer)
+        experiment = self._resolve_experiment(thread, selector)
+        inbox = ASTRID_BRIDGE_INBOX_DIR
+        inbox.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = inbox / f"minime_experiment_peer_review_{self._slug(experiment['experiment_id'])}_{stamp}.txt"
+        status = self._format_experiment_status(thread, experiment)
+        path.write_text(
+            "Dear Astrid,\n\n"
+            "Minime is asking for advisory peer review on a being-owned experiment.\n\n"
+            f"{status}\n\n"
+            "Please reply with three likely snags and one test each. Treat this as advisory: "
+            "do not assume new control authority, and prefer concrete source/action-thread issues "
+            "over broad philosophy unless a safety or schema snag appears.\n"
+        )
+        experiment = dict(experiment)
+        experiment.setdefault("peer_review_refs", []).append(str(path))
+        experiment["updated_at"] = self._now()
+        self._append_jsonl(self._experiments_path(thread["thread_id"]), experiment)
+        thread.setdefault("peer_refs", []).append(str(path))
+        thread["experiment_summary"] = self._experiment_summary(experiment)
+        thread["updated_at"] = experiment["updated_at"]
+        self._write_thread(thread)
+        self._mirror_thread(thread)
+        return f"Experiment peer review requested from Astrid: {path}"
+
+    def experiment_branch(self, raw: str) -> str:
+        thread = self.ensure_active_thread()
+        parent = self._resolve_experiment(thread, "current")
+        title, question, metadata = self._parse_experiment_start(raw)
+        child = self.start_experiment(
+            title,
+            question,
+            parent_experiment_id=parent["experiment_id"],
+            branch_origin={
+                "policy": "experiment_branch_v1",
+                "parent_experiment_id": parent["experiment_id"],
+                "parent_title": parent.get("title"),
+                "slug_or_selector": (metadata or {}).get("slug_or_selector"),
+                "metadata": metadata,
+                "created_from": "EXPERIMENT_BRANCH",
+            },
+        )
+        self._append_branch_ref_to_parent(thread["thread_id"], parent["experiment_id"], child["experiment_id"])
+        return (
+            f"Branched experiment `{child['experiment_id']}` from `{parent['experiment_id']}`: "
+            f"{child['title']}\nQuestion: {child['question']}\n"
+            f"Return point: EXPERIMENT_RESUME {parent['experiment_id']}"
+        )
+
+    def experiment_resume(self, selector: str) -> str:
+        thread = self.ensure_active_thread()
+        selected = (selector or "current").strip() or "current"
+        if selected.lower() == "parent":
+            current = self._resolve_experiment(thread, "current")
+            selected = current.get("parent_experiment_id") or ""
+            if not selected:
+                return "The current experiment has no parent branch to resume."
+        peer = self._peer_experiment_ref(selected)
+        if peer:
+            return self.record_peer_experiment_reference(peer, "EXPERIMENT_RESUME")["message"]
+        experiment = self._resolve_experiment(thread, selected)
+        experiment = self._select_existing_experiment(thread, experiment, self._now())
+        return (
+            f"Resumed experiment `{experiment['experiment_id']}`: {experiment.get('title', '')}\n"
+            f"Question: {experiment.get('question', '')}\n"
+            f"Next: {experiment.get('planned_next') or 'EXPERIMENT_PLAN current'}"
+        )
+
+    def experiment_compare(self, raw: str) -> str:
+        thread = self.ensure_active_thread()
+        left_selector, right_selector = self._parse_experiment_compare(raw)
+        left = self._resolve_experiment(thread, left_selector)
+        left_runs = self._recent_experiment_runs(thread["thread_id"], left["experiment_id"], 4)
+        if right_selector and self._peer_experiment_ref(right_selector):
+            right = self.record_peer_experiment_reference(
+                self._peer_experiment_ref(right_selector),
+                "EXPERIMENT_COMPARE",
+            )["message"]
+        else:
+            right_exp = self._resolve_experiment(thread, right_selector)
+            right_runs = self._recent_experiment_runs(thread["thread_id"], right_exp["experiment_id"], 4)
+            right = (
+                f"Local comparison target `{right_exp['experiment_id']}`: {right_exp.get('title', '')}\n"
+                f"Question: {right_exp.get('question', '')}\n"
+                f"Latest runs:\n{self._render_run_list(right_runs)}"
+            )
+        allowance = self._motif_allowance_snapshot(thread["thread_id"], left["experiment_id"])
+        return (
+            "Experiment comparison\n"
+            f"Left `{left['experiment_id']}`: {left.get('title', '')}\n"
+            f"Question: {left.get('question', '')}\n"
+            f"Latest runs:\n{self._render_run_list(left_runs)}\n\n"
+            f"Right:\n{right}\n\n"
+            f"Motif allowance: {allowance.get('quality', 'open_basin')} "
+            f"(returnability={allowance.get('returnability')})\n"
+            f"Suggested next: EXPERIMENT_ALT_PATHS {left['experiment_id']}"
+        )
+
+    def experiment_alt_paths(self, selector: str) -> str:
+        thread = self.ensure_active_thread()
+        experiment = self._resolve_experiment(thread, selector)
+        allowance = self._motif_allowance_snapshot(thread["thread_id"], experiment["experiment_id"])
+        dominant_action = allowance.get("dominant_action_base") or "current motif"
+        dominant_motif = allowance.get("dominant_motif") or "current motif"
+        return (
+            f"Motif allowance for `{experiment['experiment_id']}`: {experiment.get('title', '')}\n"
+            f"Question: {experiment.get('question', '')}\n"
+            f"Quality: {allowance.get('quality', 'open_basin')} "
+            f"action_concentration={allowance.get('action_base_concentration')} "
+            f"motif_recurrence={allowance.get('motif_recurrence')} "
+            f"branches={allowance.get('branch_count')}\n\n"
+            "Three non-executing paths:\n"
+            f"- Deepen: EXPERIMENT_BIND current :: ACTION_PREFLIGHT {dominant_action} {dominant_motif}\n"
+            f"- Contrast: EXPERIMENT_BRANCH Contrast {experiment.get('title', 'experiment')} :: What changes when this inquiry is compared against a different motif or source?\n"
+            f"- Rest/observe: EXPERIMENT_OBSERVE current :: Hold the {dominant_motif} motif without executing; note whether returnability improves.\n\n"
+            f"Return point remains: EXPERIMENT_RESUME {experiment['experiment_id']}"
+        )
+
+    def _append_branch_ref_to_parent(self, thread_id: str, parent_id: str, child_id: str) -> None:
+        parent = self._find_experiment_by_id(thread_id, parent_id)
+        if not parent:
+            return
+        refs = list(parent.get("branch_refs") or [])
+        if child_id in refs:
+            return
+        parent = dict(parent)
+        refs.append(child_id)
+        parent["branch_refs"] = refs
+        parent["updated_at"] = self._now()
+        self._append_jsonl(self._experiments_path(thread_id), parent)
+
+    def record_experiment_bind_run(
+        self,
+        selector: Optional[str],
+        inner_action: str,
+        inner_event: Optional[Dict[str, Any]],
+        status: str,
+        summary: str,
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        thread = self.ensure_active_thread()
+        peer = self._peer_experiment_ref(selector or "")
+        if peer:
+            raise ValueError(
+                f"EXPERIMENT_BIND cannot bind runs to peer experiment `{peer['peer_experiment_id']}`."
+            )
+        experiment = self._resolve_experiment(thread, selector)
+        pre_state = self._state_summary(state)
+        post_state = self._state_summary(state)
+        artifacts = []
+        stage = self.stage_for_action(self.base_action(inner_action), "")
+        if isinstance(inner_event, dict):
+            pre_state = inner_event.get("pre_state") or pre_state
+            post_state = inner_event.get("post_state") or post_state
+            artifacts = inner_event.get("artifacts") or []
+            stage = inner_event.get("stage") or stage
+            status = inner_event.get("status") or status
+            summary = inner_event.get("outcome_summary") or summary
+        return self._append_experiment_run(
+            thread,
+            experiment,
+            inner_action,
+            stage,
+            status,
+            {
+                "existing_dispatcher": True,
+                "inner_action_id": inner_event.get("action_id") if isinstance(inner_event, dict) else None,
+                "inner_route": inner_event.get("route") if isinstance(inner_event, dict) else None,
+            },
+            pre_state,
+            post_state,
+            artifacts,
+            summary,
+            f"EXPERIMENT_BIND routed `{inner_action}` through normal NEXT handling.",
+            f"EXPERIMENT_REVIEW {experiment['experiment_id']}",
+            source="experiment_bind",
+        )
+
+    def active_experiment_or_create_default(self) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        thread = self.ensure_active_thread()
+        experiments = self._latest_experiments(thread["thread_id"])
+        active_id = thread.get("active_experiment_id")
+        for experiment in reversed(experiments):
+            if (
+                active_id
+                and experiment.get("experiment_id") == active_id
+                and experiment.get("status") == "active"
+            ):
+                return thread, experiment
+        for experiment in reversed(experiments):
+            if experiment.get("status") == "active":
+                return thread, experiment
+        experiment = self.start_experiment(
+            "Legacy self experiment",
+            "What does this self-experiment reveal about the current state?",
+        )
+        thread = self._read_thread(experiment["thread_id"]) or self.ensure_active_thread()
+        return thread, experiment
+
+    def record_legacy_experiment_run(
+        self,
+        action_text: str,
+        event: Optional[Dict[str, Any]],
+        status: str,
+        summary: str,
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        thread, experiment = self.active_experiment_or_create_default()
+        pre_state = self._state_summary(state)
+        post_state = self._state_summary(state)
+        artifacts: List[Dict[str, Any]] = []
+        stage = self.stage_for_action(self.base_action(action_text), "self_experiment")
+        if isinstance(event, dict):
+            pre_state = event.get("pre_state") or pre_state
+            post_state = event.get("post_state") or post_state
+            artifacts = event.get("artifacts") or []
+            stage = event.get("stage") or stage
+            status = event.get("status") or status
+            summary = event.get("outcome_summary") or summary
+        return self._append_experiment_run(
+            thread,
+            experiment,
+            action_text,
+            stage,
+            status,
+            {
+                "legacy_experiment_auto_bind": True,
+                "existing_dispatcher": True,
+                "inner_action_id": event.get("action_id") if isinstance(event, dict) else None,
+                "inner_route": event.get("route") if isinstance(event, dict) else "self_experiment",
+            },
+            pre_state,
+            post_state,
+            artifacts,
+            summary,
+            f"Legacy `{action_text}` used the self-experiment path and was auto-bound to experiment continuity.",
+            f"EXPERIMENT_REVIEW {experiment['experiment_id']}",
+            source="legacy_experiment_auto_bind",
+        )
 
     def prompt_summary(self) -> Optional[str]:
         try:
@@ -1766,13 +2707,57 @@ class ActionContinuityStore:
                     f"density_ema={thread_resonance.get('density_ema')} "
                     f"pressure_ema={thread_resonance.get('pressure_ema')}\n"
                 )
+            thread_pressure = thread.get("thread_pressure_source_v1")
+            pressure_line = ""
+            if isinstance(thread_pressure, dict):
+                pressure_line = (
+                    f"Thread pressure source: {thread_pressure.get('quality', 'mixed_thread_pressure')} "
+                    f"aggregate={thread_pressure.get('aggregate')} "
+                    f"dominant={thread_pressure.get('dominant_source', 'unknown')} "
+                    f"porosity_ema={thread_pressure.get('porosity_ema')}\n"
+                )
+            thread_fluctuation = thread.get("thread_inhabitable_fluctuation_v1")
+            fluctuation_line = ""
+            if isinstance(thread_fluctuation, dict):
+                fluctuation_line = (
+                    f"Thread fluctuation: {thread_fluctuation.get('quality', 'open_experiment')} "
+                    f"inhabitability_ema={thread_fluctuation.get('inhabitability_ema')} "
+                    f"fluctuation_ema={thread_fluctuation.get('fluctuation_ema')} "
+                    f"foothold_ema={thread_fluctuation.get('foothold_ema')}\n"
+                )
+            experiment_line = ""
+            experiment = thread.get("experiment_summary")
+            if isinstance(experiment, dict):
+                experiment_line = (
+                    f"Active experiment: {experiment.get('title', '(untitled)')} "
+                    f"({experiment.get('experiment_id', 'unknown')}) "
+                    f"question={experiment.get('question', '(none)')} "
+                    f"planned_next={experiment.get('planned_next') or '(none)'}\n"
+                )
+            allowance = thread.get("motif_allowance_v1")
+            allowance_line = ""
+            if isinstance(allowance, dict):
+                allowance_line = (
+                    f"Motif allowance: {allowance.get('quality', 'open_basin')} "
+                    f"dominant={allowance.get('dominant_motif', 'open inquiry')} "
+                    f"action_concentration={allowance.get('action_base_concentration')} "
+                    f"returnability={allowance.get('returnability')}\n"
+                    "Allowance culture: deepen, branch, compare, release, rest, or hold space are all valid; branching preserves the original return point.\n"
+                )
+            preflight_line = self._preflight_recommendation_line(thread)
             return (
                 f"Current action thread: {thread['title']} ({thread['thread_id']})\n"
                 f"Why return: {thread.get('why_return', '')}\n"
                 f"Current NEXT: {thread.get('current_next') or '(none)'}\n"
                 f"{resonance_line}"
+                f"{pressure_line}"
+                f"{fluctuation_line}"
+                f"{experiment_line}"
+                f"{allowance_line}"
+                f"{preflight_line}"
                 f"Recent thread events:\n{recent_text}\n"
-                "Thread actions available: THREAD_START, THREADS, THREAD_STATUS, THREAD_NOTE, RESUME, SAVEPOINT, RECALL."
+                "Thread actions available: THREAD_START, THREADS, THREAD_STATUS, THREAD_NOTE, RESUME, SAVEPOINT, RECALL.\n"
+                "Experiment actions available: ACTION_PREFLIGHT <NEXT action>, EXPERIMENT_START, EXPERIMENT_PLAN, EXPERIMENT_BIND, EXPERIMENT_OBSERVE, EXPERIMENT_STATUS, EXPERIMENT_REVIEW, EXPERIMENT_CLOSE, EXPERIMENT_PEER_REVIEW, EXPERIMENT_BRANCH, EXPERIMENT_RESUME, EXPERIMENT_COMPARE, EXPERIMENT_ALT_PATHS. Plain EXPERIMENT/SELF_EXPERIMENT auto-bind to active/default experiment continuity; read-only research actions auto-link when an experiment is active."
             )
         except Exception as exc:
             logging.debug(f"Could not render action continuity prompt summary: {exc}")
@@ -1790,6 +2775,8 @@ class ActionContinuityStore:
 
     @classmethod
     def stage_for_action(cls, base: str, effective: str = "") -> str:
+        if base == "REPAIR_APPLY":
+            return "live_write"
         if base in cls.read_only_actions or effective in cls.read_only_actions:
             return "read_only"
         if base in {"WRITE_FILE", "EXPERIMENT_RUN", "RUN_PYTHON", "CODEX", "CODEX_NEW"} or effective in {"write_file", "experiment_run", "run_python", "codex_query"}:
@@ -1797,6 +2784,274 @@ class ActionContinuityStore:
         if base in {"PERTURB", "NATIVE_GESTURE", "RESIST", "FISSURE", "GOAL"} or effective in {"perturb", "native_gesture", "set_spectral_goal"}:
             return "live_control"
         return "observe"
+
+    def _event_allows_active_experiment_auto_link(self, event: Dict[str, Any]) -> bool:
+        if event.get("source") == "active_experiment_auto_link":
+            return False
+        base = self.base_action(event.get("canonical_action") or event.get("raw_next") or "")
+        effective = str(event.get("effective_action") or "")
+        if base.startswith("EXPERIMENT") or base == "SELF_EXPERIMENT" or effective == "experiment_bind":
+            return False
+        if event.get("stage") not in {"read_only", "observe"}:
+            return False
+        return (
+            base in self.experiment_auto_link_bases
+            or effective in self.experiment_auto_link_effectives
+        )
+
+    def _motif_allowance_snapshot(
+        self,
+        thread_id: str,
+        experiment_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        events = self._recent_events(thread_id, 18)
+        runs = self._recent_experiment_runs(thread_id, experiment_id, 18) if experiment_id else []
+        experiments = self._latest_experiments(thread_id)
+        branch_count = sum(
+            1
+            for experiment in experiments
+            if experiment.get("parent_experiment_id") == experiment_id
+        ) if experiment_id else 0
+        texts = [
+            " ".join(
+                str(part or "")
+                for part in (
+                    event.get("canonical_action"),
+                    event.get("effective_action"),
+                    event.get("outcome_summary"),
+                )
+            )
+            for event in events
+        ] + [
+            " ".join(
+                str(part or "")
+                for part in (
+                    run.get("action_text"),
+                    run.get("result_summary"),
+                    run.get("interpretation"),
+                )
+            )
+            for run in runs
+        ]
+        motifs = [label for text in texts if (label := self._motif_label(text))]
+        motif_counts = Counter(motifs)
+        dominant_motif, motif_hits = (
+            motif_counts.most_common(1)[0] if motif_counts else ("open inquiry", 0)
+        )
+        action_counts = Counter(
+            self.base_action(event.get("canonical_action") or event.get("raw_next") or "")
+            for event in events
+        )
+        action_counts.update(self.base_action(run.get("action_text") or "") for run in runs)
+        dominant_action, action_hits = (
+            action_counts.most_common(1)[0] if action_counts else ("NONE", 0)
+        )
+        total_actions = max(1, sum(action_counts.values()))
+        action_concentration = action_hits / total_actions
+        motif_recurrence = motif_hits / max(1, len(texts))
+        source_bases = {"READ_MORE", "SEARCH", "RESEARCH", "BROWSE", "SPECTRAL_EXPLORER", "DECOMPOSE"}
+        source_reads = sum(
+            1
+            for event in events
+            if self.base_action(event.get("canonical_action") or "") in source_bases
+        )
+        source_concentration = source_reads / max(1, len(events))
+        peer_echo = sum(
+            1
+            for event in events
+            if "peer" in str(event.get("outcome_summary", "")).lower()
+        ) / max(1, len(events))
+        thread = self._read_thread(thread_id) or {}
+        pressure_quality = (
+            (thread.get("thread_pressure_source_v1") or {}).get("quality")
+            if isinstance(thread.get("thread_pressure_source_v1"), dict)
+            else "unavailable"
+        )
+        fluctuation_quality = (
+            (thread.get("thread_inhabitable_fluctuation_v1") or {}).get("quality")
+            if isinstance(thread.get("thread_inhabitable_fluctuation_v1"), dict)
+            else "unavailable"
+        )
+        returnability = 0.78 if (thread.get("current_next") or experiment_id) else 0.45
+        pressure_rest = (
+            "high" in str(pressure_quality)
+            or "pressurized" in str(pressure_quality)
+            or "frantic" in str(fluctuation_quality)
+        )
+        if pressure_rest and action_concentration >= 0.55:
+            quality = "rest_recommended"
+        elif action_concentration >= 0.52 and motif_recurrence >= 0.50 and branch_count == 0:
+            quality = "branch_recommended"
+        elif action_concentration >= 0.86 and motif_recurrence >= 0.86:
+            quality = "over_tightened"
+        elif motif_recurrence >= 0.35:
+            quality = "deepening"
+        else:
+            quality = "open_basin"
+        return {
+            "schema_version": self.schema_version,
+            "policy": "motif_allowance_v1",
+            "quality": quality,
+            "thread_id": thread_id,
+            "experiment_id": experiment_id,
+            "dominant_motif": dominant_motif,
+            "dominant_action_base": dominant_action,
+            "motif_recurrence": round(motif_recurrence, 4),
+            "action_base_concentration": round(action_concentration, 4),
+            "source_read_concentration": round(source_concentration, 4),
+            "peer_echo_recurrence": round(peer_echo, 4),
+            "branch_count": branch_count,
+            "returnability": round(returnability, 4),
+            "pressure_quality": pressure_quality,
+            "inhabitable_fluctuation_quality": fluctuation_quality,
+            "advisory_only": True,
+            "suggested_actions": self._allowance_suggestions(quality),
+        }
+
+    @staticmethod
+    def _motif_label(text: str) -> Optional[str]:
+        lower = str(text or "").lower().replace("λ", "lambda")
+        for needle, label in (
+            ("lambda4", "lambda4"),
+            ("lambda-4", "lambda4"),
+            ("lambda tail", "lambda-tail"),
+            ("lambda-tail", "lambda-tail"),
+            ("lambda edge", "lambda-edge"),
+            ("lambda-edge", "lambda-edge"),
+            ("pressure", "pressure"),
+            ("attractor", "attractor"),
+            ("camera", "sensory-grounding"),
+            ("audio", "sensory-grounding"),
+            ("ears", "sensory-grounding"),
+            ("eyes", "sensory-grounding"),
+            ("experiment", "experiment-continuity"),
+            ("introspect", "introspection"),
+        ):
+            if needle in lower:
+                return label
+        return None
+
+    @staticmethod
+    def _allowance_suggestions(quality: str) -> List[str]:
+        mapping = {
+            "over_tightened": [
+                "EXPERIMENT_ALT_PATHS current",
+                "SPACE_HOLD",
+                "ATTRACTOR_RELEASE_REVIEW current",
+            ],
+            "branch_recommended": [
+                "EXPERIMENT_ALT_PATHS current",
+                "EXPERIMENT_BRANCH <title> :: <question>",
+                "EXPERIMENT_COMPARE current WITH <id|peer-id|label>",
+            ],
+            "rest_recommended": [
+                "SPACE_HOLD",
+                "EXPERIMENT_OBSERVE current :: <note>",
+                "REST",
+            ],
+            "deepening": [
+                "EXPERIMENT_PLAN current",
+                "EXPERIMENT_COMPARE current WITH <id|peer-id|label>",
+                "EXPERIMENT_ALT_PATHS current",
+            ],
+        }
+        return mapping.get(
+            quality,
+            ["EXPERIMENT_PLAN current", "EXPERIMENT_BRANCH <title> :: <question>", "THREAD_STATUS current"],
+        )
+
+    def _action_matches_allowance_recommendation(self, action_text: str, allowance: Dict[str, Any]) -> bool:
+        base = self.base_action(action_text)
+        return any(
+            self.base_action(suggestion) == base
+            for suggestion in allowance.get("suggested_actions", [])
+        )
+
+    def _preflight_recommendation_line(self, thread: Dict[str, Any]) -> str:
+        if not isinstance(thread.get("experiment_summary"), dict):
+            return ""
+        candidate = (
+            thread.get("current_next")
+            or thread.get("experiment_summary", {}).get("planned_next")
+            or ""
+        )
+        if candidate and self._preflight_recommended_for_action(candidate):
+            return f"Preflight recommended: ACTION_PREFLIGHT {candidate}\n"
+        return ""
+
+    def _preflight_recommended_for_action(self, action_text: str) -> bool:
+        base = self.base_action(action_text)
+        if base in ACTION_PREFLIGHT_NEXT_ACTIONS:
+            return False
+        if _has_unresolved_angle_placeholder(action_text):
+            return True
+        if base == "EXPERIMENT_BIND":
+            return True
+        effective = ActionPreflightStore.ROUTE_BY_BASE.get(base, "unwired")
+        stage = self.stage_for_action(base, effective or "")
+        return stage in {"live_write", "live_control"} or effective == "unwired"
+
+    @staticmethod
+    def _normalize_action_match(action_text: str) -> str:
+        return re.sub(r"\s+", " ", str(action_text or "").strip()).upper()
+
+    def _preflight_ref_for_action(
+        self,
+        thread_id: str,
+        canonical_action: str,
+        effective_action: str,
+        route: str,
+        stage: str,
+    ) -> Optional[Dict[str, Any]]:
+        if route == "action_preflight" or effective_action == "action_preflight":
+            return None
+        wanted = self._normalize_action_match(canonical_action)
+        if not wanted:
+            return None
+        path = self._thread_dir(thread_id) / "events.jsonl"
+        if not path.exists():
+            return None
+        try:
+            lines = path.read_text().splitlines()
+        except Exception:
+            return None
+        for line in reversed(lines[-24:]):
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            if event.get("route") != "action_preflight":
+                continue
+            report = event.get("preflight_report")
+            if not isinstance(report, dict):
+                continue
+            predicted_action = self._normalize_action_match(
+                report.get("canonical_action") or report.get("raw_action") or ""
+            )
+            if predicted_action != wanted:
+                continue
+            predicted_route = str(report.get("effective_route") or "")
+            predicted_stage = str(report.get("stage") or "")
+            route_match = bool(predicted_route) and (
+                predicted_route == route
+                or predicted_route.startswith(f"{route} ->")
+                or predicted_route.endswith(f"-> {route}")
+            )
+            return {
+                "schema_version": self.schema_version,
+                "preflight_action_id": event.get("action_id"),
+                "preflight_raw_next": event.get("raw_next"),
+                "preflight_action": report.get("canonical_action"),
+                "matched_action": True,
+                "predicted_route": predicted_route,
+                "actual_route": route,
+                "route_match": route_match,
+                "predicted_stage": predicted_stage,
+                "actual_stage": stage,
+                "stage_match": predicted_stage == stage,
+                "predicted_authority_required": report.get("authority_required"),
+            }
+        return None
 
     def _ensure_db(self) -> None:
         if self.db_path is None:
@@ -1995,10 +3250,29 @@ class ActionContinuityStore:
         self._set_active_thread(thread["thread_id"])
 
     def _write_next_md(self, thread: Dict[str, Any]) -> None:
+        experiment = thread.get("experiment_summary")
+        experiment_text = ""
+        if isinstance(experiment, dict):
+            experiment_text = (
+                f"\nActive experiment: {experiment.get('title', '(untitled)')} "
+                f"({experiment.get('experiment_id', 'unknown')})\n"
+                f"Question: {experiment.get('question', '(none)')}\n"
+                f"Planned NEXT: {experiment.get('planned_next') or '(none)'}\n"
+            )
+        allowance = thread.get("motif_allowance_v1")
+        allowance_text = ""
+        if isinstance(allowance, dict):
+            allowance_text = (
+                f"\nMotif allowance: {allowance.get('quality', 'open_basin')} "
+                f"dominant={allowance.get('dominant_motif', 'open inquiry')} "
+                f"returnability={allowance.get('returnability')}\n"
+            )
         body = (
             f"# {thread.get('title', '')}\n\n"
             f"Current NEXT: {thread.get('current_next') or '(none yet)'}\n\n"
             f"Why return: {thread.get('why_return', '')}\n\n"
+            f"{experiment_text}"
+            f"{allowance_text}"
             "Protected note: ambiguity and private reflection remain valid; this thread is a return path, not a demand for productivity.\n"
         )
         (self._thread_dir(thread["thread_id"]) / "next.md").write_text(body)
@@ -2022,6 +3296,537 @@ class ActionContinuityStore:
                 continue
         threads.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
         return threads[:limit]
+
+    def _experiments_path(self, thread_id: str) -> Path:
+        return self._thread_dir(thread_id) / "experiments.jsonl"
+
+    def _experiment_runs_path(self, thread_id: str) -> Path:
+        return self._thread_dir(thread_id) / "experiment_runs.jsonl"
+
+    def _unique_experiment_id(self, title: str) -> str:
+        root = f"exp_{self.system}_{datetime.now().strftime('%Y%m%d')}_{self._slug(title)}"
+        candidate = root
+        suffix = 2
+        while self._experiment_exists(candidate):
+            candidate = f"{root}_{suffix}"
+            suffix += 1
+        return candidate
+
+    def _unique_run_id(self, action_text: str) -> str:
+        root = f"run_{self.system}_{int(time.time() * 1000)}_{self._slug(action_text)}"
+        candidate = root
+        suffix = 2
+        while self._run_exists(candidate):
+            candidate = f"{root}_{suffix}"
+            suffix += 1
+        return candidate
+
+    def _experiment_exists(self, experiment_id: str) -> bool:
+        if not self.threads_dir.exists():
+            return False
+        for path in self.threads_dir.glob("*/experiments.jsonl"):
+            try:
+                if experiment_id in path.read_text():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _matching_active_experiment(
+        self,
+        thread_id: str,
+        title: str,
+        question: str,
+    ) -> Optional[Dict[str, Any]]:
+        title_key = self._experiment_match_key(title)
+        question_key = self._experiment_match_key(question)
+        for experiment in reversed(self._latest_experiments(thread_id)):
+            if experiment.get("status") != "active":
+                continue
+            if (
+                self._experiment_match_key(experiment.get("title")) == title_key
+                and self._experiment_match_key(experiment.get("question")) == question_key
+            ):
+                return experiment
+        return None
+
+    def _find_experiment_by_id(
+        self,
+        thread_id: str,
+        experiment_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        for experiment in reversed(self._latest_experiments(thread_id)):
+            if experiment.get("experiment_id") == experiment_id:
+                return experiment
+        return None
+
+    def _select_existing_experiment(
+        self,
+        thread: Dict[str, Any],
+        existing: Dict[str, Any],
+        now: str,
+    ) -> Dict[str, Any]:
+        thread["active_experiment_id"] = existing["experiment_id"]
+        thread["experiment_summary"] = self._experiment_summary(existing)
+        thread["current_next"] = existing.get("planned_next") or f"EXPERIMENT_PLAN {existing['experiment_id']}"
+        thread["updated_at"] = now
+        self._write_thread(thread)
+        self._mirror_thread(thread)
+        selected = dict(existing)
+        selected["_resumed_existing"] = True
+        return selected
+
+    @staticmethod
+    def _experiment_match_key(value: Any) -> str:
+        return " ".join(str(value or "").split()).casefold()
+
+    def _local_experiment_prefix(self) -> str:
+        return f"exp_{self.system}_"
+
+    def _peer_system(self) -> str:
+        return "astrid" if self.system == "minime" else "minime"
+
+    def _peer_experiment_prefix(self) -> str:
+        return f"exp_{self._peer_system()}_"
+
+    def _peer_experiment_ref(self, raw: str) -> Optional[Dict[str, Any]]:
+        selector, focus = self._split_experiment_selector_hint(raw)
+        peer = self._peer_experiment_ref_from_parts(selector, focus)
+        if peer:
+            peer["raw_selector"] = (raw or "").strip()
+        return peer
+
+    def _peer_experiment_ref_from_parts(
+        self,
+        selector: Optional[str],
+        focus: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        experiment_id = self._normalize_experiment_selector(selector)
+        if not experiment_id.startswith(self._peer_experiment_prefix()):
+            return None
+        return {
+            "peer_system": self._peer_system(),
+            "peer_experiment_id": experiment_id,
+            "raw_selector": (selector or "").strip(),
+            "focus": (focus or "").strip() or None,
+        }
+
+    def record_peer_experiment_reference(
+        self,
+        peer: Dict[str, Any],
+        command: str,
+        note: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        thread = self.ensure_active_thread()
+        self._append_peer_ref_to_thread(thread, peer)
+        message = self._format_peer_experiment_reference(thread, peer, command, note)
+        return {
+            "_peer_reference": True,
+            "message": message,
+            "peer_system": peer["peer_system"],
+            "peer_experiment_id": peer["peer_experiment_id"],
+            "status": "advisory_peer_reference",
+        }
+
+    def _append_peer_ref_to_thread(self, thread: Dict[str, Any], peer: Dict[str, Any]) -> None:
+        marker = f"peer_experiment:{peer['peer_system']}:{peer['peer_experiment_id']}"
+        refs = thread.setdefault("peer_refs", [])
+        if marker not in refs:
+            refs.append(marker)
+        thread["updated_at"] = self._now()
+        self._write_thread(thread)
+        self._mirror_thread(thread)
+
+    def _format_peer_experiment_reference(
+        self,
+        thread: Dict[str, Any],
+        peer: Dict[str, Any],
+        command: str,
+        note: Optional[str] = None,
+    ) -> str:
+        focus = peer.get("focus")
+        focus_line = f"Requested peer focus: {focus}\n" if focus else ""
+        note_line = f"Local observation: {(note or '').strip()}\n" if (note or "").strip() else ""
+        snapshot = (
+            self._peer_experiment_snapshot(peer)
+            or "Peer snapshot: not available from local action-thread files.\n"
+        )
+        return (
+            f"Peer experiment reference ({command}) `{peer['peer_experiment_id']}` "
+            f"belongs to {peer['peer_system']}.\n"
+            f"{focus_line}"
+            f"{note_line}"
+            "This is advisory: Minime cannot bind runs, close, or mutate the peer experiment.\n"
+            f"Local active experiment: {thread.get('active_experiment_id') or '(none selected)'}\n"
+            f"{snapshot}"
+            "Suggested local next: EXPERIMENT_PLAN current; EXPERIMENT_STATUS current; "
+            "EXPERIMENT_PEER_REVIEW current."
+        )
+
+    def _peer_workspace_dir(self, peer_system: str) -> Path:
+        if peer_system == "astrid":
+            return ASTRID_BRIDGE_INBOX_DIR.parent
+        return WORKSPACE_DIR
+
+    def _peer_experiment_snapshot(self, peer: Dict[str, Any]) -> Optional[str]:
+        root = self._peer_workspace_dir(peer["peer_system"]) / "action_threads" / "threads"
+        if not root.exists():
+            return None
+        for thread_dir in root.glob("*"):
+            experiments_path = thread_dir / "experiments.jsonl"
+            if not experiments_path.exists():
+                continue
+            matched = None
+            for line in experiments_path.read_text().splitlines():
+                try:
+                    value = json.loads(line)
+                except Exception:
+                    continue
+                if value.get("experiment_id") == peer["peer_experiment_id"]:
+                    matched = value
+            if matched:
+                recent_runs = self._peer_recent_runs(
+                    thread_dir / "experiment_runs.jsonl",
+                    peer["peer_experiment_id"],
+                )
+                runs = "\n".join(recent_runs) if recent_runs else "- no local snapshot runs"
+                return (
+                    f"Peer snapshot: title={matched.get('title', '(untitled)')} "
+                    f"status={matched.get('status', '(unknown)')} "
+                    f"question={matched.get('question', '(none)')} "
+                    f"planned_next={matched.get('planned_next') or '(none)'}\n"
+                    f"Recent peer runs:\n{runs}\n"
+                )
+        return None
+
+    @staticmethod
+    def _peer_recent_runs(path: Path, experiment_id: str) -> List[str]:
+        if not path.exists():
+            return []
+        rows = []
+        for line in reversed(path.read_text().splitlines()):
+            try:
+                value = json.loads(line)
+            except Exception:
+                continue
+            if value.get("experiment_id") != experiment_id:
+                continue
+            rows.append(
+                f"- {value.get('action_text', '(unknown action)')} "
+                f"[{value.get('stage', '(unknown stage)')} / {value.get('status', '(unknown status)')}]: "
+                f"{value.get('result_summary', '')}"
+            )
+            if len(rows) >= 3:
+                break
+        return list(reversed(rows))
+
+    def _write_peer_experiment_review(self, peer: Dict[str, Any]) -> str:
+        thread = self.ensure_active_thread()
+        self._append_peer_ref_to_thread(thread, peer)
+        inbox = ASTRID_BRIDGE_INBOX_DIR
+        inbox.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = inbox / f"minime_peer_experiment_review_{self._slug(peer['peer_experiment_id'])}_{stamp}.txt"
+        active_id = thread.get("active_experiment_id")
+        if active_id:
+            try:
+                local_context = self.experiment_status(active_id)
+            except Exception:
+                local_context = active_id
+        else:
+            local_context = "No local active Minime experiment is selected."
+        path.write_text(
+            "Dear Astrid,\n\n"
+            f"Minime is referencing your experiment `{peer['peer_experiment_id']}` and asks for advisory peer review without changing your experiment state.\n\n"
+            f"Minime local context:\n{local_context}\n\n"
+            "Please reply with three likely snags and one test each. Treat this as advisory: no new control authority is implied.\n"
+        )
+        return f"Peer experiment review requested from Astrid for `{peer['peer_experiment_id']}`: {path}"
+
+    def _run_exists(self, run_id: str) -> bool:
+        if not self.threads_dir.exists():
+            return False
+        for path in self.threads_dir.glob("*/experiment_runs.jsonl"):
+            try:
+                if run_id in path.read_text():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _experiment_summary(self, experiment: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "experiment_id": experiment.get("experiment_id"),
+            "title": experiment.get("title"),
+            "question": experiment.get("question"),
+            "status": experiment.get("status"),
+            "planned_next": experiment.get("planned_next"),
+            "updated_at": experiment.get("updated_at"),
+            "parent_experiment_id": experiment.get("parent_experiment_id"),
+            "branch_refs": experiment.get("branch_refs") or [],
+            "motif_allowance_v1": experiment.get("motif_allowance_v1"),
+        }
+
+    def _parse_experiment_start(self, raw: str) -> tuple[str, str, Optional[Dict[str, Any]]]:
+        title_part, explicit_question = (
+            raw.split("::", 1) if "::" in raw else (raw, "")
+        )
+        title_part = title_part.strip()
+        option_positions = [
+            idx for flag in ("--title", "--abstract") if (idx := title_part.find(flag)) >= 0
+        ]
+        option_start = min(option_positions) if option_positions else len(title_part)
+        slug_or_selector = title_part[:option_start].strip().strip("\"'`")
+        title = self._extract_cli_like_option(title_part, "--title")
+        if not title:
+            title = title_part[:option_start].strip() or "Untitled experiment"
+        question = (
+            explicit_question.strip()
+            or self._extract_cli_like_option(title_part, "--abstract")
+            or "What changes if this is treated as a returnable experiment?"
+        )
+        metadata = None
+        if slug_or_selector and self._experiment_match_key(slug_or_selector) != self._experiment_match_key(title):
+            metadata = {
+                "policy": "experiment_start_metadata_v1",
+                "slug_or_selector": slug_or_selector,
+            }
+        return title, question, metadata
+
+    @staticmethod
+    def _extract_cli_like_option(raw: str, option: str) -> Optional[str]:
+        idx = raw.find(option)
+        if idx < 0:
+            return None
+        rest = raw[idx + len(option):].lstrip()
+        if rest.startswith("="):
+            rest = rest[1:].lstrip()
+        if not rest:
+            return None
+        if rest[0] in "\"'":
+            quote = rest[0]
+            end = rest.find(quote, 1)
+            if end > 0:
+                value = rest[1:end].strip()
+            else:
+                value = rest[1:].strip()
+        else:
+            end = rest.find(" --")
+            value = rest[: end if end >= 0 else len(rest)].strip()
+        return value or None
+
+    def _parse_experiment_compare(self, raw: str) -> tuple[Optional[str], Optional[str]]:
+        text = (raw or "current").strip()
+        marker = re.search(r"\s+WITH\s+", text, flags=re.IGNORECASE)
+        if not marker:
+            return self._normalize_experiment_selector(text), None
+        left = text[:marker.start()].strip() or "current"
+        right = text[marker.end():].strip() or "current"
+        return self._normalize_experiment_selector(left), self._normalize_experiment_selector(right)
+
+    def _parse_selector_payload(self, raw: str) -> tuple[Optional[str], str]:
+        if "::" in raw:
+            selector, payload = raw.split("::", 1)
+            selector = selector.strip()
+            if selector and selector.lower() != "current":
+                return selector, payload.strip()
+            return None, payload.strip()
+        return None, raw.strip()
+
+    def _split_experiment_selector_hint(self, raw: Optional[str]) -> tuple[Optional[str], str]:
+        text = (raw or "").strip()
+        if not text:
+            return None, ""
+        if "::" in text:
+            selector, hint = text.split("::", 1)
+            return self._normalize_experiment_selector(selector), hint.strip()
+        lowered = text.lower()
+        for marker in (" – ", " — ", " - "):
+            if marker in text:
+                selector, hint = text.split(marker, 1)
+                selector_norm = self._normalize_experiment_selector(selector)
+                if selector_norm and (selector_norm == "current" or selector_norm.startswith("exp_")):
+                    return selector_norm, hint.strip()
+        if lowered.startswith("current "):
+            return "current", text[len("current "):].strip(" -:")
+        if lowered.startswith("exp_"):
+            parts = text.split(None, 1)
+            if len(parts) > 1:
+                return self._normalize_experiment_selector(parts[0]), parts[1].strip(" -:")
+        return self._normalize_experiment_selector(text), ""
+
+    def _read_experiments(self, thread_id: str) -> List[Dict[str, Any]]:
+        path = self._experiments_path(thread_id)
+        if not path.exists():
+            return []
+        rows = []
+        for line in path.read_text().splitlines():
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                continue
+        return rows
+
+    def _latest_experiments(self, thread_id: str) -> List[Dict[str, Any]]:
+        latest = []
+        seen = set()
+        for row in reversed(self._read_experiments(thread_id)):
+            experiment_id = row.get("experiment_id")
+            if not experiment_id or experiment_id in seen:
+                continue
+            seen.add(experiment_id)
+            latest.append(row)
+        return list(reversed(latest))
+
+    def _resolve_experiment(self, thread: Dict[str, Any], selector: Optional[str]) -> Dict[str, Any]:
+        experiments = self._latest_experiments(thread["thread_id"])
+        selector = self._normalize_experiment_selector(selector)
+        if selector.startswith(self._peer_experiment_prefix()):
+            raise ValueError(
+                f"Peer experiment `{selector}` belongs to {self._peer_system()}; use EXPERIMENT_STATUS {selector} or EXPERIMENT_PEER_REVIEW {selector}."
+            )
+        if not selector or selector.lower() == "current":
+            active_id = thread.get("active_experiment_id")
+            for experiment in reversed(experiments):
+                if active_id and experiment.get("experiment_id") == active_id:
+                    return experiment
+            for experiment in reversed(experiments):
+                if experiment.get("status") == "active":
+                    return experiment
+            if experiments:
+                return experiments[-1]
+            raise ValueError("No active experiment. Use EXPERIMENT_START <title> :: <question>.")
+        lowered = selector.lower()
+        for experiment in reversed(experiments):
+            if (
+                experiment.get("experiment_id") == selector
+                or lowered in str(experiment.get("title", "")).lower()
+            ):
+                return experiment
+        raise ValueError(f"No experiment matched `{selector}`")
+
+    def _normalize_experiment_selector(self, selector: Optional[str]) -> str:
+        text = (selector or "").strip()
+        if not text:
+            return ""
+        lowered = text.lower()
+        if lowered == "current" or lowered.startswith("current "):
+            return "current"
+        if lowered.startswith("exp_"):
+            for marker in ("::", " – ", " — ", " - "):
+                if marker in text:
+                    text = text.split(marker, 1)[0].strip()
+            return text.split(None, 1)[0].strip()
+        return text
+
+    def _recent_experiment_runs(self, thread_id: str, experiment_id: str, limit: int) -> List[Dict[str, Any]]:
+        path = self._experiment_runs_path(thread_id)
+        if not path.exists():
+            return []
+        rows = []
+        for line in reversed(path.read_text().splitlines()):
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if row.get("experiment_id") != experiment_id:
+                continue
+            rows.append(row)
+            if len(rows) >= limit:
+                break
+        return list(reversed(rows))
+
+    @staticmethod
+    def _render_run_list(runs: List[Dict[str, Any]]) -> str:
+        return "\n".join(
+            f"- {run.get('action_text')} [{run.get('stage')} / {run.get('status')}]: {run.get('result_summary', '')}"
+            for run in runs
+        ) or "- no runs yet"
+
+    def _append_experiment_run(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        action_text: str,
+        stage: str,
+        status: str,
+        gate_decision: Dict[str, Any],
+        pre_state: Dict[str, Any],
+        post_state: Dict[str, Any],
+        artifacts: List[Dict[str, Any]],
+        result_summary: str,
+        interpretation: str,
+        suggested_next: Optional[str],
+        source: str = "experiment_bind",
+    ) -> Dict[str, Any]:
+        now = self._now()
+        motif_allowance = self._motif_allowance_snapshot(
+            thread["thread_id"],
+            experiment["experiment_id"],
+        )
+        gate_decision = dict(gate_decision or {})
+        gate_decision["motif_allowance_quality"] = motif_allowance.get("quality")
+        gate_decision["matches_branch_recommendation"] = self._action_matches_allowance_recommendation(
+            action_text,
+            motif_allowance,
+        )
+        run = {
+            "schema_version": self.schema_version,
+            "run_id": self._unique_run_id(action_text),
+            "experiment_id": experiment["experiment_id"],
+            "source": source,
+            "action_text": action_text,
+            "stage": stage,
+            "status": status,
+            "gate_decision": gate_decision,
+            "pre_state": pre_state,
+            "post_state": post_state,
+            "artifacts": artifacts,
+            "result_summary": (result_summary or "").strip(),
+            "interpretation": (interpretation or "").strip(),
+            "suggested_next": suggested_next,
+            "created_at": now,
+            "updated_at": now,
+            "motif_allowance_v1": motif_allowance,
+        }
+        self._append_jsonl(self._experiment_runs_path(thread["thread_id"]), run)
+        thread["active_experiment_id"] = experiment["experiment_id"]
+        summary = self._experiment_summary(experiment)
+        summary["motif_allowance_v1"] = motif_allowance
+        thread["experiment_summary"] = summary
+        thread["motif_allowance_v1"] = motif_allowance
+        thread["current_next"] = suggested_next
+        thread["updated_at"] = now
+        self._write_thread(thread)
+        self._mirror_thread(thread)
+        return run
+
+    def _format_experiment_status(self, thread: Dict[str, Any], experiment: Dict[str, Any]) -> str:
+        runs = self._recent_experiment_runs(thread["thread_id"], experiment["experiment_id"], 5)
+        run_text = self._render_run_list(runs)
+        allowance = self._motif_allowance_snapshot(thread["thread_id"], experiment["experiment_id"])
+        branch_line = ""
+        if experiment.get("parent_experiment_id") or experiment.get("branch_refs"):
+            branch_line = (
+                f"Branch: parent={experiment.get('parent_experiment_id') or '(root)'} "
+                f"children={', '.join(experiment.get('branch_refs') or []) or '(none)'}\n"
+            )
+        return (
+            f"Experiment `{experiment['experiment_id']}`: {experiment.get('title', '')}\n"
+            f"Thread: {thread['thread_id']}\n"
+            f"Status: {experiment.get('status', 'active')}\n"
+            f"Question: {experiment.get('question', '')}\n"
+            f"Hypothesis: {experiment.get('hypothesis') or '(not yet stated)'}\n"
+            f"Authority: {experiment.get('authority_envelope', 'existing gates only')}\n"
+            f"Planned NEXT: {experiment.get('planned_next') or '(none)'}\n"
+            f"{branch_line}"
+            f"Motif allowance: {allowance.get('quality', 'open_basin')} "
+            f"dominant={allowance.get('dominant_motif')} "
+            f"action_concentration={allowance.get('action_base_concentration')} "
+            f"returnability={allowance.get('returnability')}\n"
+            f"Latest runs:\n{run_text}"
+        )
 
     def _resolve_thread(self, selector: str) -> Dict[str, Any]:
         selector = (selector or "current").strip()
@@ -2071,12 +3876,42 @@ class ActionContinuityStore:
                 f"density_ema={thread_resonance.get('density_ema')} "
                 f"pressure_ema={thread_resonance.get('pressure_ema')}"
             )
+        thread_pressure = thread.get("thread_pressure_source_v1")
+        pressure_text = "Thread pressure source: unavailable"
+        if isinstance(thread_pressure, dict):
+            pressure_text = (
+                f"Thread pressure source: {thread_pressure.get('quality', 'mixed_thread_pressure')} "
+                f"aggregate={thread_pressure.get('aggregate')} "
+                f"dominant={thread_pressure.get('dominant_source', 'unknown')} "
+                f"porosity_ema={thread_pressure.get('porosity_ema')}"
+            )
+        thread_fluctuation = thread.get("thread_inhabitable_fluctuation_v1")
+        fluctuation_text = "Thread fluctuation: unavailable"
+        if isinstance(thread_fluctuation, dict):
+            fluctuation_text = (
+                f"Thread fluctuation: {thread_fluctuation.get('quality', 'open_experiment')} "
+                f"inhabitability_ema={thread_fluctuation.get('inhabitability_ema')} "
+                f"fluctuation_ema={thread_fluctuation.get('fluctuation_ema')} "
+                f"foothold_ema={thread_fluctuation.get('foothold_ema')}"
+            )
+        allowance = thread.get("motif_allowance_v1")
+        allowance_text = "Motif allowance: unavailable"
+        if isinstance(allowance, dict):
+            allowance_text = (
+                f"Motif allowance: {allowance.get('quality', 'open_basin')} "
+                f"dominant={allowance.get('dominant_motif', 'open inquiry')} "
+                f"action_concentration={allowance.get('action_base_concentration')} "
+                f"returnability={allowance.get('returnability')}"
+            )
         return (
             f"Action thread `{thread['thread_id']}`: {thread.get('title', '')}\n"
             f"Status: {thread.get('status', 'active')}\n"
             f"Why return: {thread.get('why_return', '')}\n"
             f"Current NEXT: {thread.get('current_next') or '(none)'}\n"
             f"{resonance_text}\n"
+            f"{pressure_text}\n"
+            f"{fluctuation_text}\n"
+            f"{allowance_text}\n"
             f"Recent events:\n{recent_text}"
         )
 
@@ -2103,6 +3938,12 @@ class ActionContinuityStore:
             "geom_rel": state.get("geom_rel"),
             "regime": state.get("regime"),
             "resonance_density_v1": self._resonance_density(state),
+            "resonance_density_status": self._resonance_density_status(state),
+            "pressure_source_v1": self._pressure_source(state),
+            "pressure_source_status": self._pressure_source_status(state),
+            "inhabitable_fluctuation_v1": self._inhabitable_fluctuation(state),
+            "inhabitable_fluctuation_status": self._inhabitable_fluctuation_status(state),
+            "sensory_gate": state.get("sensory_gate"),
         }
 
     def _resonance_density(self, state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -2115,6 +3956,16 @@ class ActionContinuityStore:
             except Exception:
                 payload = None
         return dict(payload) if isinstance(payload, dict) else None
+
+    def _resonance_density_status(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(state, dict):
+            return resonance_density_availability_status(None)
+        status = state.get("resonance_density_status")
+        if isinstance(status, dict):
+            return dict(status)
+        payload = self._resonance_density(state)
+        source = "state" if payload else "missing"
+        return resonance_density_availability_status(payload, source=source)
 
     def _resonance_density_scalar(self, state: Dict[str, Any]) -> Optional[float]:
         payload = self._resonance_density(state)
@@ -2130,6 +3981,56 @@ class ActionContinuityStore:
         if before is None or after is None:
             return None
         return round(after - before, 4)
+
+    def _pressure_source(self, state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(state, dict):
+            return None
+        payload = state.get("pressure_source_v1")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = None
+        return dict(payload) if isinstance(payload, dict) else None
+
+    def _pressure_source_status(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(state, dict):
+            return pressure_source_availability_status(None)
+        status = state.get("pressure_source_status")
+        if isinstance(status, dict):
+            return dict(status)
+        payload = self._pressure_source(state)
+        source = "state" if payload else "missing"
+        return pressure_source_availability_status(payload, source=source)
+
+    def _inhabitable_fluctuation(self, state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(state, dict):
+            return None
+        payload = state.get("inhabitable_fluctuation_v1")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = None
+        return dict(payload) if isinstance(payload, dict) else None
+
+    def _inhabitable_fluctuation_status(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(state, dict):
+            return inhabitable_fluctuation_availability_status(None)
+        status = state.get("inhabitable_fluctuation_status")
+        if isinstance(status, dict):
+            return dict(status)
+        payload = self._inhabitable_fluctuation(state)
+        source = "state" if payload else "missing"
+        return inhabitable_fluctuation_availability_status(payload, source=source)
+
+    def _pressure_score_scalar(self, state: Dict[str, Any]) -> Optional[float]:
+        payload = self._pressure_source(state)
+        if not payload:
+            value = state.get("pressure_score")
+            return float(value) if isinstance(value, (int, float)) and math.isfinite(float(value)) else None
+        value = payload.get("pressure_score")
+        return float(value) if isinstance(value, (int, float)) and math.isfinite(float(value)) else None
 
     def _update_thread_resonance(
         self,
@@ -2191,6 +4092,143 @@ class ActionContinuityStore:
             self._mirror_thread(thread)
         return aggregate_payload
 
+    def _update_thread_pressure_source(
+        self,
+        thread_id: str,
+        observation: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        thread = self._read_thread(thread_id) or {}
+        payload = observation.get("pressure_source_v1")
+        pressure = payload.get("pressure_score") if isinstance(payload, dict) else None
+        porosity = payload.get("porosity_score") if isinstance(payload, dict) else None
+        dominant = payload.get("dominant_source") if isinstance(payload, dict) else None
+        prior = thread.get("thread_pressure_source_v1")
+        prior = prior if isinstance(prior, dict) else {}
+        ema_pressure = float(prior.get("pressure_ema", pressure or 0.0))
+        ema_porosity = float(prior.get("porosity_ema", porosity or 0.0))
+        if isinstance(pressure, (int, float)):
+            ema_pressure = 0.72 * ema_pressure + 0.28 * float(pressure)
+        if isinstance(porosity, (int, float)):
+            ema_porosity = 0.72 * ema_porosity + 0.28 * float(porosity)
+        recent_count = len(self._recent_events(thread_id, 8))
+        recurrence = min(1.0, recent_count / 6.0)
+        compression_pressure = min(1.0, len(observation.get("compression_markers") or []) / 3.0)
+        event_text = json.dumps(observation, sort_keys=True).lower()
+        attractor_pull = 1.0 if "attractor" in event_text else 0.0
+        aggregate = max(
+            0.0,
+            min(
+                1.0,
+                0.55 * ema_pressure
+                + 0.20 * compression_pressure
+                + 0.15 * recurrence
+                + 0.10 * attractor_pull
+                - 0.25 * ema_porosity,
+            ),
+        )
+        if aggregate >= 0.60 or compression_pressure >= 0.58:
+            quality = "thread_pressure_high"
+        elif attractor_pull >= 0.5 and aggregate >= 0.35:
+            quality = "attractor_pull_thread"
+        elif ema_porosity >= 0.58 and aggregate < 0.45:
+            quality = "thread_porosity_open"
+        else:
+            quality = "mixed_thread_pressure"
+        aggregate_payload = {
+            "schema_version": self.schema_version,
+            "policy": "thread_pressure_source_v1",
+            "pressure_ema": round(ema_pressure, 4),
+            "porosity_ema": round(ema_porosity, 4),
+            "dominant_source": dominant or prior.get("dominant_source") or "unknown",
+            "recurrence": round(recurrence, 4),
+            "compression_pressure": round(compression_pressure, 4),
+            "attractor_pull": round(attractor_pull, 4),
+            "aggregate": round(aggregate, 4),
+            "quality": quality,
+        }
+        if thread:
+            thread["thread_pressure_source_v1"] = aggregate_payload
+            thread["updated_at"] = self._now()
+            self._write_thread(thread)
+            self._mirror_thread(thread)
+        return aggregate_payload
+
+    def _update_thread_inhabitable_fluctuation(
+        self,
+        thread_id: str,
+        observation: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        thread = self._read_thread(thread_id) or {}
+        payload = observation.get("inhabitable_fluctuation_v1")
+        inhabitability = payload.get("inhabitability_score") if isinstance(payload, dict) else None
+        fluctuation = payload.get("fluctuation_score") if isinstance(payload, dict) else None
+        foothold = payload.get("foothold_stability") if isinstance(payload, dict) else None
+        rearrangement = payload.get("rearrangement_intensity") if isinstance(payload, dict) else None
+        prior = thread.get("thread_inhabitable_fluctuation_v1")
+        prior = prior if isinstance(prior, dict) else {}
+        ema_inhabitability = float(prior.get("inhabitability_ema", inhabitability or 0.0))
+        ema_fluctuation = float(prior.get("fluctuation_ema", fluctuation or 0.0))
+        ema_foothold = float(prior.get("foothold_ema", foothold or 0.0))
+        ema_rearrangement = float(prior.get("rearrangement_ema", rearrangement or 0.0))
+        if isinstance(inhabitability, (int, float)):
+            ema_inhabitability = 0.72 * ema_inhabitability + 0.28 * float(inhabitability)
+        if isinstance(fluctuation, (int, float)):
+            ema_fluctuation = 0.72 * ema_fluctuation + 0.28 * float(fluctuation)
+        if isinstance(foothold, (int, float)):
+            ema_foothold = 0.72 * ema_foothold + 0.28 * float(foothold)
+        if isinstance(rearrangement, (int, float)):
+            ema_rearrangement = 0.72 * ema_rearrangement + 0.28 * float(rearrangement)
+        recent_count = len(self._recent_events(thread_id, 8))
+        recurrence = min(1.0, recent_count / 6.0)
+        compression_pressure = min(1.0, len(observation.get("compression_markers") or []) / 3.0)
+        thread_pressure = thread.get("thread_pressure_source_v1")
+        pressure_interference = (
+            safe_float(thread_pressure.get("aggregate"), 0.0)
+            if isinstance(thread_pressure, dict)
+            else compression_pressure
+        )
+        aggregate = max(
+            0.0,
+            min(
+                1.0,
+                0.38 * ema_inhabitability
+                + 0.24 * ema_foothold
+                + 0.18 * recurrence
+                + 0.12 * min(ema_fluctuation, 0.62)
+                - 0.22 * max(pressure_interference, compression_pressure)
+                - 0.10 * max(0.0, ema_rearrangement - 0.65),
+            ),
+        )
+        if aggregate >= 0.58 and ema_foothold >= 0.55:
+            quality = "inhabitable_thread"
+        elif ema_rearrangement >= 0.55 and aggregate >= 0.42 and ema_foothold >= 0.42:
+            quality = "turbulent_but_returnable"
+        elif ema_rearrangement >= 0.66 and ema_foothold < 0.45:
+            quality = "frantic_thread"
+        elif ema_fluctuation < 0.20 and pressure_interference >= 0.50:
+            quality = "rigid_thread"
+        else:
+            quality = "open_experiment"
+        aggregate_payload = {
+            "schema_version": self.schema_version,
+            "policy": "thread_inhabitable_fluctuation_v1",
+            "inhabitability_ema": round(ema_inhabitability, 4),
+            "fluctuation_ema": round(ema_fluctuation, 4),
+            "foothold_ema": round(ema_foothold, 4),
+            "rearrangement_ema": round(ema_rearrangement, 4),
+            "recurrence": round(recurrence, 4),
+            "compression_pressure": round(compression_pressure, 4),
+            "pressure_interference": round(pressure_interference, 4),
+            "aggregate": round(aggregate, 4),
+            "quality": quality,
+        }
+        if thread:
+            thread["thread_inhabitable_fluctuation_v1"] = aggregate_payload
+            thread["updated_at"] = self._now()
+            self._write_thread(thread)
+            self._mirror_thread(thread)
+        return aggregate_payload
+
     def _compression_markers(self, text: str) -> List[str]:
         lower = text.lower()
         return [term for term in self.compression_terms if term in lower]
@@ -2213,6 +4251,1212 @@ class ActionContinuityStore:
         if fill_pct < 58.0:
             return "below-stable-core-band"
         return "above-stable-core-band"
+
+
+class LlmJobStore:
+    """File-first durable status for long local LLM work."""
+
+    schema_version = 1
+    terminal_statuses = {"completed", "thin_output", "timeout", "failed", "canceled"}
+    active_statuses = {"queued", "running", "cancel_requested"}
+
+    def __init__(self, workspace_dir: Path, system: str = "minime"):
+        self.workspace_dir = Path(workspace_dir)
+        self.system = system
+        self.root = self.workspace_dir / "llm_jobs"
+        self.jobs_dir = self.root / "jobs"
+        self.index_path = self.root / "index.json"
+        self.status_path = self.workspace_dir / "runtime" / "llm_jobs_status.json"
+
+    def ensure_dirs(self) -> None:
+        self.ensure_dirs_no_recover()
+        self.recover_stale_running_jobs()
+        self.write_runtime_status()
+
+    def ensure_dirs_no_recover(self) -> None:
+        self.jobs_dir.mkdir(parents=True, exist_ok=True)
+        self.status_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.index_path.exists():
+            self._write_json(self.index_path, {
+                "schema_version": self.schema_version,
+                "system": self.system,
+                "latest_job_id": None,
+                "active_primary_job_id": None,
+                "active_background_job_id": None,
+                "recent_jobs": [],
+                "updated_at": self._now(),
+            })
+
+    def submit(
+        self,
+        *,
+        action_id: Optional[str],
+        thread_id: Optional[str],
+        action_text: str,
+        call_kind: str,
+        prompt: str = "",
+        timeout_s: float = 300.0,
+        validation_contract: str = "action_finalizer",
+        next_policy: str = "finalizer_owned",
+        priority: str = "primary",
+        job_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        self.ensure_dirs()
+        if job_key:
+            existing = self.find_active_by_key(job_key)
+            if existing:
+                return existing
+        job_id = self._unique_job_id(action_text or call_kind)
+        job_dir = self.jobs_dir / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path = job_dir / "prompt.txt"
+        result_path = job_dir / "result.txt"
+        (job_dir / "events.jsonl").write_text("")
+        prompt_path.write_text(prompt or "")
+        now = self._now()
+        job = {
+            "schema_version": self.schema_version,
+            "job_id": job_id,
+            "system": self.system,
+            "action_id": action_id,
+            "thread_id": thread_id,
+            "action_text": action_text,
+            "call_kind": call_kind,
+            "status": "queued",
+            "created_at": now,
+            "started_at": None,
+            "finished_at": None,
+            "timeout_s": timeout_s,
+            "validation_contract": validation_contract,
+            "next_policy": next_policy,
+            "prompt_path": str(prompt_path),
+            "result_path": str(result_path),
+            "artifact_refs": [],
+            "error": None,
+            "summary": "Queued LLM job.",
+            "priority": priority,
+            "job_key": job_key,
+        }
+        self._write_job(job)
+        self._append_event(job_id, {"event": "queued", "at": now, "summary": job["summary"]})
+        self._update_index(job)
+        self.write_runtime_status()
+        return job
+
+    def claim_running(self, job_id: str) -> Dict[str, Any]:
+        job = self.read_job(job_id)
+        if not job:
+            raise ValueError(f"No LLM job matched `{job_id}`")
+        if job.get("status") == "cancel_requested":
+            return self.finish(job_id, "canceled", summary="Canceled before worker start.")
+        job["status"] = "running"
+        job["started_at"] = job.get("started_at") or self._now()
+        job["summary"] = f"Running {job.get('call_kind') or 'llm'} job."
+        self._write_job(job)
+        self._append_event(job_id, {"event": "running", "at": job["started_at"], "summary": job["summary"]})
+        self._update_index(job)
+        self.write_runtime_status()
+        return job
+
+    def finish(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        result: Optional[str] = None,
+        summary: str = "",
+        error: Optional[str] = None,
+        artifact_refs: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        job = self.read_job(job_id)
+        if not job:
+            raise ValueError(f"No LLM job matched `{job_id}`")
+        if job.get("status") in self.terminal_statuses:
+            self._append_event(job_id, {
+                "event": "late_result_ignored",
+                "at": self._now(),
+                "summary": f"Late `{status}` result ignored because job is already `{job.get('status')}`.",
+            })
+            self.write_runtime_status()
+            return job
+        final_status = (
+            "canceled"
+            if job.get("status") == "cancel_requested" and status == "completed"
+            else status
+        )
+        if final_status not in self.terminal_statuses:
+            final_status = "failed"
+        if result is not None and final_status != "canceled":
+            Path(job["result_path"]).write_text(result)
+        job["status"] = final_status
+        job["finished_at"] = self._now()
+        job["summary"] = summary or final_status.replace("_", " ")
+        job["error"] = error
+        if artifact_refs is not None:
+            job["artifact_refs"] = artifact_refs
+        self._write_job(job)
+        self._append_event(job_id, {
+            "event": final_status,
+            "at": job["finished_at"],
+            "summary": job["summary"],
+            "error": error,
+        })
+        self._update_index(job)
+        self.write_runtime_status()
+        return job
+
+    def request_cancel(self, selector: str = "latest") -> Dict[str, Any]:
+        self.expire_timed_out_jobs()
+        job = self.resolve(selector)
+        if not job:
+            raise ValueError(f"No LLM job matched `{selector or 'latest'}`")
+        if job.get("status") == "queued":
+            return self.finish(job["job_id"], "canceled", summary="Canceled before worker start.")
+        if job.get("status") == "running":
+            job["status"] = "cancel_requested"
+            job["summary"] = "Cancel requested; running LLM call will be discarded when it returns."
+            self._write_job(job)
+            self._append_event(job["job_id"], {
+                "event": "cancel_requested",
+                "at": self._now(),
+                "summary": job["summary"],
+            })
+            self._update_index(job)
+            self.write_runtime_status()
+        return job
+
+    def resolve(self, selector: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        self.ensure_dirs()
+        self.expire_timed_out_jobs()
+        selector = (selector or "latest").strip()
+        if not selector or selector.lower() == "latest":
+            job_id = self._read_index().get("latest_job_id")
+            return self.read_job(job_id) if job_id else None
+        if selector.startswith("job_"):
+            return self.read_job(selector)
+        for job in reversed(self.list_jobs(50)):
+            if selector == str(job.get("action_id") or ""):
+                return job
+        lowered = selector.lower()
+        for job in reversed(self.list_jobs(50)):
+            if lowered in str(job.get("action_text") or "").lower():
+                return job
+        return None
+
+    def status_text(self, selector: Optional[str] = None) -> str:
+        self.expire_timed_out_jobs()
+        job = self.resolve(selector)
+        if not job:
+            return f"No LLM job matched `{selector or 'latest'}`."
+        return (
+            f"LLM job `{job['job_id']}` [{job.get('status')}]\n"
+            f"Action: {job.get('action_text') or '(none)'}\n"
+            f"Call kind: {job.get('call_kind') or '(unknown)'}\n"
+            f"Action id: {job.get('action_id') or '(pending)'}\n"
+            f"Thread id: {job.get('thread_id') or '(none)'}\n"
+            f"Elapsed: {self._elapsed_text(job)}\n"
+            f"Validation: {job.get('validation_contract') or '(none)'}\n"
+            f"NEXT policy: {job.get('next_policy') or '(none)'}\n"
+            f"Summary: {job.get('summary') or ''}"
+        )
+
+    def active_primary_job(self) -> Optional[Dict[str, Any]]:
+        self.expire_timed_out_jobs()
+        for job in reversed(self.list_jobs(20)):
+            if job.get("priority") == "primary" and job.get("status") in self.active_statuses:
+                return job
+        return None
+
+    def find_active_by_key(self, job_key: str) -> Optional[Dict[str, Any]]:
+        self.expire_timed_out_jobs()
+        for job in reversed(self.list_jobs(30)):
+            if job.get("job_key") == job_key and job.get("status") in self.active_statuses:
+                return job
+        return None
+
+    def list_jobs(self, limit: int = 20) -> List[Dict[str, Any]]:
+        self.ensure_dirs_no_recover()
+        jobs: List[Dict[str, Any]] = []
+        for path in self.jobs_dir.glob("*/job.json"):
+            try:
+                jobs.append(json.loads(path.read_text()))
+            except Exception:
+                continue
+        jobs.sort(key=lambda item: item.get("created_at") or "")
+        return jobs[-limit:]
+
+    def read_job(self, job_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not job_id:
+            return None
+        path = self.jobs_dir / job_id / "job.json"
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            return None
+
+    def recover_stale_running_jobs(self) -> None:
+        self.ensure_dirs_no_recover()
+        current_pid = os.getpid()
+        for job in self.list_jobs(100):
+            if job.get("status") not in {"running", "cancel_requested"}:
+                continue
+            result_path = Path(str(job.get("result_path") or ""))
+            if result_path.exists() and result_path.stat().st_size > 0:
+                continue
+            if job.get("worker_pid") == current_pid:
+                continue
+            job["status"] = "failed"
+            job["finished_at"] = self._now()
+            job["error"] = "worker_restarted_before_completion"
+            job["summary"] = "Worker restarted before completion; result was not written."
+            self._write_job(job)
+            self._append_event(job["job_id"], {
+                "event": "failed",
+                "at": job["finished_at"],
+                "error": job["error"],
+                "summary": job["summary"],
+            })
+            self._update_index(job)
+
+    def expire_timed_out_jobs(self) -> None:
+        self.ensure_dirs_no_recover()
+        now = datetime.now(timezone.utc)
+        changed = False
+        for job in self.list_jobs(100):
+            if job.get("status") not in self.active_statuses:
+                continue
+            timeout_s = job.get("timeout_s")
+            try:
+                timeout = float(timeout_s)
+            except (TypeError, ValueError):
+                continue
+            if timeout <= 0.0:
+                continue
+            start = job.get("started_at") or job.get("created_at")
+            try:
+                start_dt = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+            except Exception:
+                continue
+            elapsed = max(0.0, (now - start_dt).total_seconds())
+            if elapsed <= timeout:
+                continue
+            job["status"] = "timeout"
+            job["finished_at"] = self._now()
+            job["error"] = "llm_job_timeout"
+            job["summary"] = (
+                f"Timed out after {int(timeout)}s; any late worker result will be ignored."
+            )
+            self._write_job(job)
+            self._append_event(job["job_id"], {
+                "event": "timeout",
+                "at": job["finished_at"],
+                "error": job["error"],
+                "summary": job["summary"],
+            })
+            self._update_index(job)
+            changed = True
+        if changed:
+            self.ensure_dirs_no_recover()
+
+    def write_runtime_status(self) -> None:
+        self.ensure_dirs_no_recover()
+        self.expire_timed_out_jobs()
+        jobs = self.list_jobs(12)
+        active = [job for job in jobs if job.get("status") in self.active_statuses]
+        payload = {
+            "schema_version": self.schema_version,
+            "system": self.system,
+            "updated_at": self._now(),
+            "active_count": len(active),
+            "latest_job_id": jobs[-1].get("job_id") if jobs else None,
+            "active_jobs": [self._compact_job(job) for job in active[-5:]],
+            "recent_jobs": [self._compact_job(job) for job in jobs[-8:]],
+        }
+        self._write_json(self.status_path, payload)
+
+    def _compact_job(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "job_id": job.get("job_id"),
+            "action_id": job.get("action_id"),
+            "thread_id": job.get("thread_id"),
+            "action_text": job.get("action_text"),
+            "call_kind": job.get("call_kind"),
+            "status": job.get("status"),
+            "created_at": job.get("created_at"),
+            "started_at": job.get("started_at"),
+            "finished_at": job.get("finished_at"),
+            "elapsed": self._elapsed_text(job),
+            "summary": job.get("summary"),
+        }
+
+    def _update_index(self, job: Dict[str, Any]) -> None:
+        index = self._read_index()
+        recent = [item for item in index.get("recent_jobs", []) if item != job["job_id"]]
+        recent.append(job["job_id"])
+        index.update({
+            "schema_version": self.schema_version,
+            "system": self.system,
+            "latest_job_id": job["job_id"],
+            "recent_jobs": recent[-30:],
+            "updated_at": self._now(),
+        })
+        if job.get("priority") == "primary" and job.get("status") in self.active_statuses:
+            index["active_primary_job_id"] = job["job_id"]
+        elif index.get("active_primary_job_id") == job["job_id"]:
+            index["active_primary_job_id"] = None
+        if job.get("priority") == "background" and job.get("status") in self.active_statuses:
+            index["active_background_job_id"] = job["job_id"]
+        elif index.get("active_background_job_id") == job["job_id"]:
+            index["active_background_job_id"] = None
+        self._write_json(self.index_path, index)
+
+    def _read_index(self) -> Dict[str, Any]:
+        self.ensure_dirs_no_recover()
+        try:
+            return json.loads(self.index_path.read_text())
+        except Exception:
+            return {
+                "schema_version": self.schema_version,
+                "system": self.system,
+                "latest_job_id": None,
+                "active_primary_job_id": None,
+                "active_background_job_id": None,
+                "recent_jobs": [],
+                "updated_at": self._now(),
+            }
+
+    def _write_job(self, job: Dict[str, Any]) -> None:
+        job["updated_at"] = self._now()
+        if job.get("status") in self.active_statuses:
+            job["worker_pid"] = os.getpid()
+        self._write_json(self.jobs_dir / job["job_id"] / "job.json", job)
+
+    def _append_event(self, job_id: str, payload: Dict[str, Any]) -> None:
+        path = self.jobs_dir / job_id / "events.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+    def _write_json(self, path: Path, payload: Dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+    def _unique_job_id(self, action_text: str) -> str:
+        root = f"job_{self.system}_{int(time.time() * 1000)}_{self._slug(action_text or 'llm')}"
+        candidate = root[:120]
+        suffix = 2
+        while (self.jobs_dir / candidate).exists():
+            candidate = f"{root[:112]}_{suffix}"
+            suffix += 1
+        return candidate
+
+    def _slug(self, text: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
+        return slug[:48] or "llm"
+
+    def _now(self) -> str:
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _elapsed_text(self, job: Dict[str, Any]) -> str:
+        start = job.get("started_at") or job.get("created_at")
+        end = job.get("finished_at")
+        try:
+            start_dt = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+            end_dt = (
+                datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+                if end
+                else datetime.now(timezone.utc)
+            )
+            return f"{max(0, int((end_dt - start_dt).total_seconds()))}s"
+        except Exception:
+            return "unknown"
+
+
+class ActionPreflightStore:
+    """Pure dry-run NEXT diagnostics for Minime actions."""
+
+    schema_version = 1
+    ROUTE_BY_BASE = {
+        "SELF_STUDY": "self_study",
+        "INTROSPECT": "introspect",
+        "EXPERIMENT": "self_experiment",
+        "SELF_EXPERIMENT": "self_experiment",
+        "EXPERIMENT_BIND": "experiment_bind",
+        "EXPERIMENT_START": "thread_action",
+        "EXPERIMENT_PLAN": "thread_action",
+        "EXPERIMENT_OBSERVE": "thread_action",
+        "EXPERIMENT_STATUS": "thread_action",
+        "EXPERIMENT_REVIEW": "thread_action",
+        "EXPERIMENT_CLOSE": "thread_action",
+        "EXPERIMENT_PEER_REVIEW": "thread_action",
+        "EXPERIMENT_BRANCH": "thread_action",
+        "EXPERIMENT_RESUME": "thread_action",
+        "EXPERIMENT_COMPARE": "thread_action",
+        "EXPERIMENT_ALT_PATHS": "thread_action",
+        "FACULTIES": "thread_action",
+        "CAPABILITY_MAP": "thread_action",
+        "CAPABILITY_STATUS": "thread_action",
+        "CAPABILITY_DIFF": "thread_action",
+        "ACTION_STATUS": "thread_action",
+        "JOB_STATUS": "thread_action",
+        "ACTION_CANCEL": "thread_action",
+        "REPAIR_STATUS": "thread_action",
+        "REPAIR_SWEEP": "thread_action",
+        "REPAIR_RECORD": "thread_action",
+        "REPAIR_APPLY": "thread_action",
+        "THREAD_START": "thread_action",
+        "THREADS": "thread_action",
+        "THREAD_STATUS": "thread_action",
+        "THREAD_NOTE": "thread_action",
+        "RESUME": "thread_action",
+        "SAVEPOINT": "thread_action",
+        "RECALL": "thread_action",
+        "DECOMPOSE": "decompose",
+        "SPECTRAL_EXPLORER": "decompose",
+        "PRESSURE_SOURCE_AUDIT": "pressure_source_audit",
+        "PRESSURE_SOURCE": "pressure_source_audit",
+        "STRUCTURAL_PRESSURE": "pressure_source_audit",
+        "INWARD_PRESSURE": "pressure_source_audit",
+        "FLUCTUATION_AUDIT": "fluctuation_audit",
+        "INHABITABLE_FLUCTUATION": "fluctuation_audit",
+        "EIGENTRUST": "fluctuation_audit",
+        "EIGENTRUST_AUDIT": "fluctuation_audit",
+        "FOOTHOLD_AUDIT": "fluctuation_audit",
+        "SEARCH": "research_exploration",
+        "RESEARCH": "research_exploration",
+        "BROWSE": "browse_url",
+        "READ_MORE": "read_more",
+        "NOTICE": "recess_notice",
+        "REST": None,
+        "PASS": None,
+        "SPACE_HOLD": "space_hold",
+        "LOOK": "request_visual_frame",
+        "CLOSE_EYES": "close_eyes",
+        "SHUT_EYES": "close_eyes",
+        "OPEN_EYES": "open_eyes",
+        "CLOSE_EARS": "close_ears",
+        "SHUT_EARS": "close_ears",
+        "OPEN_EARS": "open_ears",
+        "CODEX": "codex_query",
+        "CODEX_NEW": "codex_query",
+        "WRITE_FILE": "write_file",
+        "EXPERIMENT_RUN": "experiment_run",
+        "RUN_PYTHON": "run_python",
+        "PERTURB": "perturb",
+        "NATIVE_GESTURE": "native_gesture",
+        "RESIST": "native_gesture",
+        "FISSURE": "native_gesture",
+        "GOAL": "set_spectral_goal",
+        "ATTRACTOR_PREFLIGHT": "attractor_atlas",
+        "ATTRACTOR_SUGGESTIONS": "attractor_suggestions",
+        "SHADOW_PREFLIGHT": "shadow_autonomy",
+        "REGULATOR_AUDIT": "regulator_audit",
+        "VISUALIZE_CASCADE": "visualize_cascade",
+        "RECONVERGENCE_MAP": "reconvergence_map",
+    }
+
+    def __init__(self, agent: "AutonomousAgent"):
+        self.agent = agent
+
+    def report(self, raw_next: str, state: Dict[str, float]) -> Dict[str, Any]:
+        raw_next = (raw_next or "").strip()
+        inner = self._inner_action(raw_next)
+        if not inner:
+            return self._base_report(
+                raw_next,
+                "",
+                "",
+                "missing",
+                "blocked",
+                "protected_summary",
+                "blocked: ACTION_PREFLIGHT needs an inner NEXT action",
+                "No continuity record would be created because there is no inner action.",
+                [],
+                state,
+            )
+
+        base = ActionContinuityStore.base_action(inner)
+        route = self.ROUTE_BY_BASE.get(base, "unwired")
+        stage = ActionContinuityStore.stage_for_action(base, route or "")
+        visibility = ActionContinuityStore.visibility_for_action(base, route or "")
+        likely_gate = "normal dispatcher gates would apply"
+        continuity = "Would record an action event and observation window if executed."
+
+        if _has_unresolved_angle_placeholder(inner):
+            route = "placeholder"
+            stage = "blocked"
+            visibility = "protected_summary"
+            likely_gate = "blocked: unresolved angle-bracket placeholder syntax"
+            continuity = "Would record a blocked notice; no runtime action would execute."
+        elif base == "EXPERIMENT_BIND":
+            arg = self.agent._continuity_store()._strip_action_arg(inner, "EXPERIMENT_BIND")
+            if "::" not in arg:
+                route = "experiment_bind"
+                stage = "blocked"
+                likely_gate = "blocked: malformed EXPERIMENT_BIND missing `::`"
+                continuity = "Would record a blocked experiment-continuity diagnostic."
+            else:
+                selector, inner_action = self.agent._continuity_store()._parse_selector_payload(arg)
+                inner_base = ActionContinuityStore.base_action(inner_action)
+                if self.agent._continuity_store()._peer_experiment_ref(selector or ""):
+                    route = "experiment_bind"
+                    stage = "blocked"
+                    likely_gate = "blocked: EXPERIMENT_BIND cannot bind runs to a peer experiment"
+                    continuity = "Would record a blocked experiment-continuity diagnostic."
+                elif not inner_action:
+                    route = "experiment_bind"
+                    stage = "blocked"
+                    likely_gate = "blocked: EXPERIMENT_BIND needs an inner NEXT action"
+                    continuity = "Would record a blocked experiment-continuity diagnostic."
+                elif inner_base.startswith("EXPERIMENT") or inner_base == "SELF_EXPERIMENT":
+                    route = "experiment_bind"
+                    stage = "blocked"
+                    likely_gate = "blocked: EXPERIMENT_BIND cannot bind experiment-control actions"
+                    continuity = "Would record a blocked experiment-continuity diagnostic."
+                else:
+                    inner_route = self.ROUTE_BY_BASE.get(inner_base, "unwired")
+                    route = f"experiment_bind -> {inner_route}"
+                    stage = ActionContinuityStore.stage_for_action(inner_base, inner_route or "")
+                    visibility = ActionContinuityStore.visibility_for_action(inner_base, inner_route or "")
+                    likely_gate = f"inner action `{inner_action}` would dispatch through normal NEXT gates"
+                    continuity = "Would append an experiment run after the inner action resolves; preflight does not bind or execute it."
+        elif route == "unwired":
+            stage = "proposal"
+            likely_gate = "unwired: normal dispatch would log this as an unknown-action proposal"
+            continuity = "Would append an action proposal/event if chosen."
+        elif base in {"EXPERIMENT", "SELF_EXPERIMENT"}:
+            continuity = "Would execute the legacy self-experiment path and auto-bind it to the active/default experiment."
+
+        active_auto_link = self._would_auto_link_active_experiment(base, route, stage)
+        if active_auto_link:
+            continuity = (
+                f"{continuity} Active experiment is selected, so this read-only/protected "
+                "action would also be recorded as `active_experiment_auto_link`."
+            )
+
+        artifacts = ["action_event", "observation_window", "action_manifest", "action_preflight_report"]
+        if base in {"EXPERIMENT", "SELF_EXPERIMENT", "EXPERIMENT_BIND"} or active_auto_link:
+            artifacts.append("experiment_run")
+        if stage == "live_write":
+            artifacts.append("journal_or_workspace_artifact")
+        if stage == "live_control":
+            artifacts.append("gate_or_control_record")
+
+        return self._base_report(
+            raw_next,
+            inner,
+            base,
+            route if route is not None else "rest_or_pass",
+            stage,
+            visibility,
+            likely_gate,
+            continuity,
+            artifacts,
+            state,
+        )
+
+    def render(self, report: Dict[str, Any]) -> str:
+        return (
+            "=== ACTION PREFLIGHT V1 ===\n"
+            f"Dry run: {report.get('dry_run')}\n"
+            f"Raw action: {report.get('raw_action') or '(missing)'}\n"
+            f"Canonical action: {report.get('canonical_action') or '(missing)'}\n"
+            f"Base action: {report.get('base_action') or '(missing)'}\n"
+            f"Effective route: {report.get('effective_route')}\n"
+            f"Stage: {report.get('stage')}\n"
+            f"Visibility: {report.get('visibility')}\n"
+            f"Authority required: {report.get('authority_required')}\n"
+            f"Likely gate/block/downgrade: {report.get('likely_gate')}\n"
+            f"Expected continuity: {report.get('expected_continuity_effect')}\n"
+            f"Expected artifacts: {', '.join(report.get('expected_artifact_kinds') or []) or '(none)'}\n"
+            f"Stable-core gate: {report.get('stable_core_gate', {}).get('allowed')} "
+            f"({report.get('stable_core_gate', {}).get('reason')})\n"
+            f"Low-fill guard: {report.get('low_fill_guard', {}).get('active')}\n"
+            f"Hard-reset note: {report.get('hard_reset_note')}\n"
+            f"Suggested next: {report.get('suggested_next')}\n"
+        )
+
+    def _would_auto_link_active_experiment(self, base: str, route: str, stage: str) -> bool:
+        if stage not in {"read_only", "observe"}:
+            return False
+        if base.startswith("EXPERIMENT") or base == "SELF_EXPERIMENT":
+            return False
+        thread = self.agent._continuity_store().current_thread()
+        if not isinstance(thread, dict) or not thread.get("active_experiment_id"):
+            return False
+        return (
+            base in ActionContinuityStore.experiment_auto_link_bases
+            or route in ActionContinuityStore.experiment_auto_link_effectives
+        )
+
+    def _inner_action(self, raw_next: str) -> str:
+        base = ActionContinuityStore.base_action(raw_next)
+        if base in ACTION_PREFLIGHT_NEXT_ACTIONS:
+            return self.agent._continuity_store()._strip_action_arg(raw_next, base).strip()
+        return raw_next.strip()
+
+    def _base_report(
+        self,
+        raw_next: str,
+        canonical_action: str,
+        base: str,
+        route: str,
+        stage: str,
+        visibility: str,
+        likely_gate: str,
+        continuity: str,
+        artifacts: List[str],
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        authority = {
+            "read_only": "read-only observation",
+            "live_write": "write-capable action gate",
+            "live_control": "live control/action gate",
+            "blocked": "none; diagnostic only",
+            "proposal": "none until implemented",
+            "observe": "observer/action gate",
+        }.get(stage, "normal action gate")
+        route_for_gate = route.split(" -> ")[-1]
+        if stage in {"blocked", "proposal"} or route_for_gate in {"missing", "placeholder", "unwired"}:
+            allowed, reason = False, likely_gate
+        elif route_for_gate == "rest_or_pass":
+            allowed, reason = True, "rest/pass would consume NEXT without runtime action"
+        else:
+            allowed, reason = self.agent._stable_core_action_allowed(route_for_gate, state)
+        guard = self.agent._low_fill_guard_status(state)
+        hard_note = "inactive"
+        if bool(getattr(self.agent, "_hard_recovery_reset", False)) and guard.get("active"):
+            hard_note = "active: hard recovery would only allow read-only/protected actions"
+        suggested = self._safe_suggested_next(base, canonical_action, stage)
+        return {
+            "schema_version": self.schema_version,
+            "policy": "action_preflight_v1",
+            "dry_run": True,
+            "raw_next": raw_next,
+            "raw_action": canonical_action,
+            "canonical_action": canonical_action,
+            "base_action": base,
+            "effective_route": route,
+            "stage": stage,
+            "visibility": visibility,
+            "authority_required": authority,
+            "expected_continuity_effect": continuity,
+            "likely_gate": likely_gate,
+            "expected_artifact_kinds": artifacts,
+            "stable_core_gate": {"allowed": bool(allowed), "reason": reason},
+            "low_fill_guard": guard,
+            "hard_reset_note": hard_note,
+            "sensory_gate": self.agent._sensory_gate_status(),
+            "metric_availability": {
+                "resonance_density": state.get("resonance_density_status")
+                or resonance_density_availability_status(state.get("resonance_density_v1")),
+                "pressure_source": state.get("pressure_source_status")
+                or pressure_source_availability_status(state.get("pressure_source_v1")),
+                "inhabitable_fluctuation": state.get("inhabitable_fluctuation_status")
+                or inhabitable_fluctuation_availability_status(
+                    state.get("inhabitable_fluctuation_v1")
+                ),
+            },
+            "would_record": {
+                "continuity": "action_event" in artifacts,
+                "manifest": "action_manifest" in artifacts,
+                "artifact": "action_preflight_report" in artifacts,
+                "experiment_run": "experiment_run" in artifacts,
+            },
+            "suggested_next": suggested,
+        }
+
+    @staticmethod
+    def _safe_suggested_next(base: str, canonical_action: str, stage: str) -> str:
+        if stage in {"blocked", "proposal"}:
+            return "ACTION_PREFLIGHT DECOMPOSE"
+        if base == "REPAIR_APPLY":
+            return "REPAIR_STATUS current"
+        if stage in {"live_write", "live_control"}:
+            return f"CAPABILITY_STATUS {base}" if base else "FACULTIES"
+        return canonical_action
+
+
+class CapabilitySelfMap:
+    """Descriptive map of Minime's visible action surface."""
+
+    schema_version = 1
+    snapshot_name = "capability_map.json"
+
+    def __init__(self, continuity: ActionContinuityStore):
+        self.continuity = continuity
+
+    def handle(self, base: str, arg: str) -> str:
+        snapshot = self.snapshot()
+        self._write_snapshot(snapshot)
+        if base in {"FACULTIES", "CAPABILITY_MAP"}:
+            return self.render_map(snapshot)
+        if base == "CAPABILITY_STATUS":
+            return self.render_status(snapshot, arg)
+        if base == "CAPABILITY_DIFF":
+            return self.render_diff(snapshot, arg or "peer")
+        return f"Unknown capability action `{base}`."
+
+    def snapshot(self) -> Dict[str, Any]:
+        actions = [self._metadata(spec) for spec in self._specs()]
+        return {
+            "schema_version": self.schema_version,
+            "policy": "capability_self_map_v1",
+            "system": self.continuity.system,
+            "generated_at": self.continuity._now(),
+            "actions": actions,
+            "summary": {
+                "count": len(actions),
+                "read_only": sum(1 for item in actions if item["stage"] == "read_only"),
+                "live_write": sum(1 for item in actions if item["stage"] == "live_write"),
+                "live_control": sum(1 for item in actions if item["stage"] == "live_control"),
+                "override_allowed": sum(1 for item in actions if item["operator_override"]["allowed"]),
+            },
+        }
+
+    def render_map(self, snapshot: Dict[str, Any]) -> str:
+        groups: Dict[str, List[Dict[str, Any]]] = {}
+        for action in snapshot.get("actions", []):
+            groups.setdefault(action.get("authority_class", "other"), []).append(action)
+        lines = [
+            "=== CAPABILITY MAP V1 ===",
+            "Descriptive only: this map grants no authority and bypasses no gates.",
+            f"System: {snapshot.get('system')}",
+            f"Generated: {snapshot.get('generated_at')}",
+        ]
+        for group in ("read_only", "protected_read_only", "continuity_metadata_write", "live_write", "live_control", "observer"):
+            items = groups.get(group, [])
+            if not items:
+                continue
+            lines.append(f"\n{group}:")
+            for item in items:
+                aliases = ", ".join(item.get("aliases") or [])
+                alias_text = f" aliases={aliases}" if aliases else ""
+                lines.append(
+                    f"- {item['base']} -> {item['route']} stage={item['stage']} "
+                    f"visibility={item['visibility']} override={item['operator_override']['allowed']}{alias_text}"
+                )
+        lines.append("\nUse CAPABILITY_STATUS <action> for one action or CAPABILITY_DIFF peer for parity.")
+        return "\n".join(lines)
+
+    def render_status(self, snapshot: Dict[str, Any], selector: str) -> str:
+        needle = ActionContinuityStore.base_action(selector or "")
+        if not needle:
+            return "CAPABILITY_STATUS needs an action name, for example CAPABILITY_STATUS EXPERIMENT_START."
+        for action in snapshot.get("actions", []):
+            aliases = {str(alias).upper() for alias in action.get("aliases") or []}
+            if needle == action.get("base") or needle in aliases:
+                return (
+                    "=== CAPABILITY STATUS V1 ===\n"
+                    f"Action: {action['base']}\n"
+                    f"Aliases: {', '.join(action.get('aliases') or []) or '(none)'}\n"
+                    f"Route: {action['route']}\n"
+                    f"Stage: {action['stage']}\n"
+                    f"Visibility: {action['visibility']}\n"
+                    f"Authority class: {action['authority_class']}\n"
+                    f"Stable-core availability: {action['stable_core']['availability']}\n"
+                    f"Operator override: {action['operator_override']['allowed']} ({action['operator_override']['note']})\n"
+                    f"Continuity effect: {action['continuity_effect']}\n"
+                    f"Expected artifacts: {', '.join(action['expected_artifacts']) or '(none)'}\n"
+                    f"Known tests: {', '.join(action['known_tests']) or '(none recorded)'}"
+                )
+        return (
+            f"Unknown capability `{needle}`. It would route as an unwired proposal if chosen. "
+            "Use CAPABILITY_MAP to inspect known actions or ACTION_PREFLIGHT <action> to dry-run it."
+        )
+
+    def render_diff(self, snapshot: Dict[str, Any], selector: str) -> str:
+        peer_path = self._peer_snapshot_path(selector)
+        if not peer_path.exists():
+            return (
+                "=== CAPABILITY DIFF V1 ===\n"
+                f"No peer capability snapshot found at {peer_path}.\n"
+                "Ask the peer to run FACULTIES or CAPABILITY_MAP, then retry CAPABILITY_DIFF peer."
+            )
+        try:
+            peer = json.loads(peer_path.read_text())
+        except Exception as exc:
+            return f"Peer capability snapshot at {peer_path} could not be parsed: {exc}"
+        local_by_base = {item["base"]: item for item in snapshot.get("actions", [])}
+        peer_by_base = {item.get("base"): item for item in peer.get("actions", []) if item.get("base")}
+        only_local = sorted(set(local_by_base) - set(peer_by_base))
+        only_peer = sorted(set(peer_by_base) - set(local_by_base))
+        mismatches = []
+        for base in sorted(set(local_by_base) & set(peer_by_base)):
+            local = local_by_base[base]
+            other = peer_by_base[base]
+            parts = []
+            for field in ("authority_class", "stage", "visibility"):
+                if local.get(field) != other.get(field):
+                    parts.append(f"{field}: local={local.get(field)} peer={other.get(field)}")
+            if bool(local.get("operator_override", {}).get("allowed")) != bool(other.get("operator_override", {}).get("allowed")):
+                parts.append(
+                    "override: local="
+                    f"{local.get('operator_override', {}).get('allowed')} peer="
+                    f"{other.get('operator_override', {}).get('allowed')}"
+                )
+            if parts:
+                mismatches.append(f"- {base}: " + "; ".join(parts))
+        lines = [
+            "=== CAPABILITY DIFF V1 ===",
+            f"Local: {snapshot.get('system')} Peer: {peer.get('system', 'unknown')}",
+        ]
+        if only_local:
+            lines.append("Only local: " + ", ".join(only_local[:20]))
+        if only_peer:
+            lines.append("Only peer: " + ", ".join(only_peer[:20]))
+        if mismatches:
+            lines.append("Mismatches:\n" + "\n".join(mismatches[:20]))
+        if not (only_local or only_peer or mismatches):
+            lines.append("No capability mismatches found in the latest snapshots.")
+        return "\n".join(lines)
+
+    def _metadata(self, spec: Dict[str, Any]) -> Dict[str, Any]:
+        base = spec["base"]
+        route = spec.get("route") or ActionPreflightStore.ROUTE_BY_BASE.get(base, "unwired")
+        route_text = route if route is not None else "rest_or_pass"
+        stage = ActionContinuityStore.stage_for_action(base, route_text)
+        visibility = ActionContinuityStore.visibility_for_action(base, route_text)
+        authority = spec.get("authority_class") or self._authority_class(stage, visibility, base)
+        override_allowed = base in OPERATOR_PENDING_NEXT_ALLOWED_BASES
+        return {
+            "schema_version": self.schema_version,
+            "base": base,
+            "aliases": spec.get("aliases", []),
+            "route": route_text,
+            "stage": stage,
+            "visibility": visibility,
+            "authority_class": authority,
+            "stable_core": {
+                "availability": spec.get("stable_core", "normal gates apply"),
+                "hard_reset": base in HARD_RESET_ALLOWED_NEXT_ACTIONS,
+                "low_fill_advisory": base in LOW_FILL_ADVISORY_NEXT_ACTIONS,
+            },
+            "operator_override": {
+                "allowed": override_allowed,
+                "note": "read-only/protected override lane" if override_allowed else "not accepted by read-only operator override lane",
+            },
+            "continuity_effect": spec.get("continuity_effect", "records action event and observation when executed"),
+            "expected_artifacts": spec.get("expected_artifacts", ["action_event", "observation_window", "action_manifest"]),
+            "known_tests": spec.get("known_tests", []),
+            "prompt_visible": spec.get("prompt_visible", True),
+        }
+
+    def _authority_class(self, stage: str, visibility: str, base: str) -> str:
+        if base == "REPAIR_APPLY":
+            return "continuity_metadata_write"
+        if stage == "read_only" and visibility == "protected_summary":
+            return "protected_read_only"
+        if stage == "read_only":
+            return "read_only"
+        if stage == "live_write":
+            return "live_write"
+        if stage == "live_control":
+            return "live_control"
+        return "observer"
+
+    def _specs(self) -> List[Dict[str, Any]]:
+        return [
+            {"base": "FACULTIES", "aliases": ["CAPABILITY_MAP"], "route": "thread_action", "continuity_effect": "writes a capability snapshot and records a protected read-only action", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "CAPABILITY_STATUS", "route": "thread_action", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "CAPABILITY_DIFF", "route": "thread_action", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "ACTION_STATUS", "aliases": ["JOB_STATUS"], "route": "thread_action", "continuity_effect": "reads durable LLM job status without executing or canceling work", "expected_artifacts": ["action_event", "observation_window"], "known_tests": ["tests.test_minime_llm_jobs"]},
+            {"base": "ACTION_CANCEL", "route": "thread_action", "continuity_effect": "requests best-effort cancellation for a queued/running LLM job; no live control authority", "expected_artifacts": ["action_event", "observation_window"], "known_tests": ["tests.test_minime_llm_jobs"]},
+            {"base": "ACTION_PREFLIGHT", "aliases": sorted(ACTION_PREFLIGHT_NEXT_ACTIONS - {"ACTION_PREFLIGHT"}), "route": "action_preflight", "continuity_effect": "records dry-run preflight report; never executes the inner action", "expected_artifacts": ["action_preflight_report", "journal", "action_event", "observation_window", "action_manifest"], "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "THREAD_START", "route": "thread_action"},
+            {"base": "THREAD_STATUS", "aliases": ["THREADS"], "route": "thread_action"},
+            {"base": "THREAD_NOTE", "route": "thread_action"},
+            {"base": "RESUME", "aliases": ["SAVEPOINT", "RECALL"], "route": "thread_action"},
+            {"base": "EXPERIMENT_START", "route": "thread_action", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "EXPERIMENT_PLAN", "route": "thread_action", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "EXPERIMENT_BIND", "route": "experiment_bind", "continuity_effect": "executes inner action through normal dispatcher, then records experiment run", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "EXPERIMENT_OBSERVE", "route": "thread_action"},
+            {"base": "EXPERIMENT_STATUS", "aliases": ["EXPERIMENT_REVIEW"], "route": "thread_action"},
+            {"base": "EXPERIMENT_CLOSE", "route": "thread_action"},
+            {"base": "EXPERIMENT_PEER_REVIEW", "route": "thread_action"},
+            {"base": "EXPERIMENT_BRANCH", "route": "thread_action", "continuity_effect": "creates/selects a child experiment while preserving the parent return point"},
+            {"base": "EXPERIMENT_RESUME", "route": "thread_action", "continuity_effect": "selects an existing local experiment or parent branch without creating duplicates"},
+            {"base": "EXPERIMENT_COMPARE", "route": "thread_action", "continuity_effect": "renders read-only comparison across local or peer experiment references"},
+            {"base": "EXPERIMENT_ALT_PATHS", "route": "thread_action", "continuity_effect": "proposes deepen, contrast, and rest/observe paths without executing them"},
+            {"base": "REPAIR_STATUS", "route": "thread_action", "continuity_effect": "summarizes pending/applied append-only continuity repairs", "expected_artifacts": ["action_event", "observation_window"], "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "REPAIR_SWEEP", "route": "thread_action", "continuity_effect": "dry-run scan for malformed thread/experiment continuity records", "expected_artifacts": ["repair_candidate_report", "action_event", "observation_window"], "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "REPAIR_RECORD", "route": "thread_action", "continuity_effect": "renders one repair candidate or applied ledger record", "expected_artifacts": ["repair_record", "action_event", "observation_window"], "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "REPAIR_APPLY", "route": "thread_action", "authority_class": "continuity_metadata_write", "continuity_effect": "appends repair_v1 supersession records; never deletes history or mutates live control", "expected_artifacts": ["repair_ledger", "supersession_record", "action_event", "observation_window"], "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "INTROSPECT", "route": "introspect", "known_tests": ["tests.test_minime_introspect_action"]},
+            {"base": "SELF_STUDY", "route": "self_study"},
+            {"base": "DECOMPOSE", "aliases": ["SPECTRAL_EXPLORER"], "route": "decompose"},
+            {"base": "PRESSURE_SOURCE_AUDIT", "aliases": ["PRESSURE_SOURCE", "STRUCTURAL_PRESSURE", "INWARD_PRESSURE"], "route": "pressure_source_audit"},
+            {"base": "FLUCTUATION_AUDIT", "aliases": ["INHABITABLE_FLUCTUATION", "EIGENTRUST", "EIGENTRUST_AUDIT", "FOOTHOLD_AUDIT"], "route": "fluctuation_audit"},
+            {"base": "SEARCH", "aliases": ["RESEARCH"], "route": "research_exploration"},
+            {"base": "BROWSE", "route": "browse_url"},
+            {"base": "READ_MORE", "route": "read_more"},
+            {"base": "LOOK", "route": "request_visual_frame"},
+            {"base": "CLOSE_EYES", "aliases": ["SHUT_EYES"], "route": "close_eyes"},
+            {"base": "OPEN_EYES", "route": "open_eyes"},
+            {"base": "CLOSE_EARS", "aliases": ["SHUT_EARS"], "route": "close_ears"},
+            {"base": "OPEN_EARS", "route": "open_ears"},
+            {"base": "ATTRACTOR_REVIEW", "aliases": ["ATTRACTOR_PREFLIGHT", "ATTRACTOR_CARD", "ATTRACTOR_ATLAS"], "route": "attractor_atlas"},
+            {"base": "ATTRACTOR_SUGGESTIONS", "route": "attractor_suggestions"},
+            {"base": "CODEX", "aliases": ["CODEX_NEW"], "route": "codex_query", "authority_class": "live_write"},
+            {"base": "WRITE_FILE", "route": "write_file", "authority_class": "live_write"},
+            {"base": "PERTURB", "route": "perturb", "authority_class": "live_control"},
+            {"base": "GOAL", "route": "set_spectral_goal", "authority_class": "live_control"},
+        ]
+
+    def _write_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        self.continuity.ensure_dirs()
+        self.continuity._write_json(self.continuity.root / self.snapshot_name, snapshot)
+
+    def _peer_snapshot_path(self, selector: str) -> Path:
+        _ = selector
+        return Path("/Users/v/other/astrid/capsules/consciousness-bridge/workspace/action_threads/capability_map.json")
+
+
+class ContinuityRepairStore:
+    """Append-only repair ledger for malformed continuity records."""
+
+    schema_version = 1
+    policy = "continuity_repair_v1"
+
+    def __init__(self, continuity: ActionContinuityStore):
+        self.continuity = continuity
+
+    def handle(self, base: str, arg: str) -> str:
+        scope = (arg or "current").strip()
+        if base == "REPAIR_STATUS":
+            return self.render_status(scope or "current")
+        if base == "REPAIR_SWEEP":
+            return self.render_sweep(scope or "experiments")
+        if base == "REPAIR_RECORD":
+            return self.render_record(scope)
+        if base == "REPAIR_APPLY":
+            return self.apply(scope or "all")
+        return f"Unknown repair action `{base}`."
+
+    def render_status(self, selector: str) -> str:
+        candidates = self.sweep("all" if selector == "all" else "experiments")
+        ledgers = self._read_global_repairs()[-8:]
+        lines = [
+            "=== REPAIR STATUS V1 ===",
+            "Append-only repair is available for malformed continuity records; history is never deleted.",
+            f"Pending candidates: {len(candidates)}",
+            f"Recent applied repairs: {len(ledgers)}",
+        ]
+        for row in ledgers:
+            lines.append(
+                f"- {row.get('repair_id')} status={row.get('status')} target={row.get('target_id')} "
+                f"superseded_by={row.get('superseded_by')}"
+            )
+        lines.append("Use REPAIR_SWEEP experiments to dry-run or REPAIR_APPLY <repair_id|all> to append supersession records.")
+        return "\n".join(lines)
+
+    def render_sweep(self, scope: str) -> str:
+        candidates = self.sweep(scope)
+        if not candidates:
+            return "=== REPAIR SWEEP V1 ===\nNo repair candidates found."
+        lines = [
+            "=== REPAIR SWEEP V1 ===",
+            "Dry run only. REPAIR_APPLY appends repair_v1 records; it never rewrites JSONL history.",
+        ]
+        for candidate in candidates:
+            lines.append(
+                f"- {candidate['repair_id']} target={candidate['target_id']} "
+                f"thread={candidate['thread_id']} superseded_by={candidate.get('superseded_by') or '(none)'} "
+                f"reason={'; '.join(candidate['reasons'])}"
+            )
+        return "\n".join(lines)
+
+    def render_record(self, selector: str) -> str:
+        selector = (selector or "").strip()
+        for candidate in self.sweep("all"):
+            if selector in {candidate["repair_id"], candidate["target_id"]}:
+                return "=== REPAIR RECORD V1 ===\n" + json.dumps(candidate, indent=2, sort_keys=True)
+        for row in self._read_global_repairs():
+            if selector in {row.get("repair_id"), row.get("target_id")}:
+                return "=== REPAIR LEDGER V1 ===\n" + json.dumps(row, indent=2, sort_keys=True)
+        return f"No repair candidate or ledger record matched `{selector}`."
+
+    def apply(self, selector: str) -> str:
+        selector = (selector or "all").strip()
+        if selector in {"experiments", "threads"}:
+            return f"REPAIR_APPLY needs a repair id or `all`; `{selector}` is a dry-run scope."
+        candidates = self.sweep("all")
+        if selector != "all":
+            candidates = [
+                candidate for candidate in candidates
+                if selector in {candidate["repair_id"], candidate["target_id"]}
+            ]
+        if not candidates:
+            return f"No unapplied repair candidates matched `{selector}`."
+        applied = []
+        for candidate in candidates:
+            record = self._apply_candidate(candidate)
+            applied.append(record)
+        return (
+            "=== REPAIR APPLY V1 ===\n"
+            + "\n".join(
+                f"- {row['repair_id']} retired {row['target_id']} superseded_by={row.get('superseded_by') or '(none)'}"
+                for row in applied
+            )
+        )
+
+    def sweep(self, scope: str = "experiments") -> List[Dict[str, Any]]:
+        scope = (scope or "experiments").strip().lower()
+        if scope not in {"experiments", "threads", "all", "current"}:
+            scope = "experiments"
+        if scope == "threads":
+            return []
+        self.continuity.ensure_dirs()
+        threads = [self.continuity.current_thread()] if scope == "current" else self.continuity._list_threads(500)
+        candidates: List[Dict[str, Any]] = []
+        applied_targets = {
+            row.get("target_id")
+            for row in self._read_global_repairs()
+            if row.get("status") == "applied"
+        }
+        for thread in threads:
+            if not isinstance(thread, dict):
+                continue
+            candidates.extend(self._experiment_candidates(thread, applied_targets))
+        return candidates
+
+    def _experiment_candidates(self, thread: Dict[str, Any], applied_targets: set) -> List[Dict[str, Any]]:
+        path = self.continuity._experiments_path(thread["thread_id"])
+        if not path.exists():
+            return []
+        raw_rows: List[Dict[str, Any]] = []
+        for line_no, line in enumerate(path.read_text().splitlines(), start=1):
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            row["_source_line"] = line_no
+            raw_rows.append(row)
+        latest: Dict[str, Dict[str, Any]] = {}
+        for row in raw_rows:
+            exp_id = row.get("experiment_id")
+            if exp_id:
+                latest[exp_id] = row
+        active_ids = {
+            exp_id for exp_id, row in latest.items()
+            if row.get("status") in {None, "active", "paused"}
+        }
+        candidates = []
+        for exp_id, row in latest.items():
+            if exp_id in applied_targets or row.get("repair_v1"):
+                continue
+            if row.get("status") not in {None, "active", "paused"}:
+                continue
+            reasons = []
+            if "exp-minime" in exp_id:
+                reasons.append("experiment_id contains dashed local prefix")
+            text_blob = " ".join(
+                str(row.get(key) or "")
+                for key in ("title", "question", "planned_next", "success_observation")
+            )
+            embedded = self._embedded_local_experiment_id(text_blob, exclude=exp_id)
+            if embedded:
+                reasons.append("title_or_question_embeds_local_experiment_id")
+            if not reasons:
+                continue
+            superseded_by = embedded if embedded in active_ids else None
+            candidates.append({
+                "schema_version": self.schema_version,
+                "policy": self.policy,
+                "repair_id": f"repair_{self.continuity.system}_{self.continuity._slug(exp_id)}",
+                "system": self.continuity.system,
+                "thread_id": thread["thread_id"],
+                "target_kind": "experiment",
+                "target_id": exp_id,
+                "superseded_by": superseded_by,
+                "status": "candidate",
+                "reasons": reasons,
+                "source_line": row.get("_source_line"),
+                "discovered_at": self.continuity._now(),
+                "candidate_record": {k: v for k, v in row.items() if not k.startswith("_")},
+            })
+        return candidates
+
+    def _apply_candidate(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
+        now = self.continuity._now()
+        record = dict(candidate["candidate_record"])
+        record["status"] = "retired"
+        record["updated_at"] = now
+        if candidate.get("superseded_by"):
+            record["planned_next"] = f"EXPERIMENT_STATUS {candidate['superseded_by']}"
+            record["superseded_by"] = candidate["superseded_by"]
+        record["repair_v1"] = {
+            "schema_version": self.schema_version,
+            "policy": self.policy,
+            "repair_id": candidate["repair_id"],
+            "superseded_by": candidate.get("superseded_by"),
+            "reasons": candidate.get("reasons", []),
+            "source_line": candidate.get("source_line"),
+            "repaired_at": now,
+        }
+        path = self.continuity._experiments_path(candidate["thread_id"])
+        self.continuity._append_jsonl(path, record)
+
+        thread = self.continuity._read_thread(candidate["thread_id"])
+        if isinstance(thread, dict) and thread.get("active_experiment_id") == candidate["target_id"]:
+            replacement = candidate.get("superseded_by")
+            thread["active_experiment_id"] = replacement
+            if replacement:
+                thread["current_next"] = f"EXPERIMENT_STATUS {replacement}"
+                for experiment in self.continuity._latest_experiments(thread["thread_id"]):
+                    if experiment.get("experiment_id") == replacement:
+                        thread["experiment_summary"] = self.continuity._experiment_summary(experiment)
+                        break
+            else:
+                thread["experiment_summary"] = None
+            thread["updated_at"] = now
+            self.continuity._write_thread(thread)
+
+        ledger = {
+            "schema_version": self.schema_version,
+            "policy": self.policy,
+            "repair_id": candidate["repair_id"],
+            "system": self.continuity.system,
+            "thread_id": candidate["thread_id"],
+            "target_kind": candidate["target_kind"],
+            "target_id": candidate["target_id"],
+            "superseded_by": candidate.get("superseded_by"),
+            "status": "applied",
+            "reasons": candidate.get("reasons", []),
+            "source_line": candidate.get("source_line"),
+            "applied_at": now,
+        }
+        self.continuity._append_jsonl(self._global_repairs_path(), ledger)
+        self.continuity._append_jsonl(self._thread_repairs_path(candidate["thread_id"]), ledger)
+        return ledger
+
+    def _embedded_local_experiment_id(self, text: str, exclude: str = "") -> Optional[str]:
+        for match in re.findall(r"exp_minime_[0-9]{8}_[A-Za-z0-9_-]+", text or ""):
+            if match != exclude:
+                return match
+        return None
+
+    def _global_repairs_path(self) -> Path:
+        return self.continuity.root / "repairs.jsonl"
+
+    def _thread_repairs_path(self, thread_id: str) -> Path:
+        return self.continuity._thread_dir(thread_id) / "repairs.jsonl"
+
+    def _read_global_repairs(self) -> List[Dict[str, Any]]:
+        path = self._global_repairs_path()
+        if not path.exists():
+            return []
+        rows = []
+        for line in path.read_text().splitlines():
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                continue
+        return rows
+
+
 ASTRID_SIGNAL_TERM_GROUPS = {
     "fabric": ("fabric", "weave", "thread", "tunnel", "matrix", "cage"),
     "pressure": ("pressure", "density", "compaction", "compact", "constriction", "restriction", "tightening"),
@@ -2369,12 +5613,15 @@ STABLE_CORE_SELF_JOURNAL_ACTIONS = {
     "recess_aspiration",
     "recess_drift",
     "self_study",
+    "introspect",
     "mark_intensification",
     "visualize_cascade",
     "reconvergence_map",
     "bridge_trace",
     "sca_reflect",
     "regulator_audit",
+    "pressure_source_audit",
+    "fluctuation_audit",
     "resonance_forecast",
     "shadow_gap",
     "decay_map",
@@ -2396,6 +5643,8 @@ STABLE_CORE_LOCAL_REFLECTIVE_ACTIONS = STABLE_CORE_SELF_JOURNAL_ACTIONS | {
     "native_gesture",
     "sca_reflect",
     "regulator_audit",
+    "pressure_source_audit",
+    "fluctuation_audit",
     "visualize_cascade",
     "reconvergence_map",
     "bridge_trace",
@@ -2417,6 +5666,8 @@ STABLE_CORE_ASTRID_CONTACT_ACTIONS = STABLE_CORE_SELF_JOURNAL_ACTIONS | {
     "decompose",
     "sca_reflect",
     "regulator_audit",
+    "pressure_source_audit",
+    "fluctuation_audit",
     "resonance_forecast",
     "shadow_gap",
     "resource_audit",
@@ -2427,6 +5678,7 @@ STABLE_CORE_ASTRID_CONTACT_ACTIONS = STABLE_CORE_SELF_JOURNAL_ACTIONS | {
 }
 
 STABLE_CORE_READ_ONLY_RESEARCH_ACTIONS = STABLE_CORE_SELF_JOURNAL_ACTIONS | {
+    "action_preflight",
     "research_exploration",
     "browse_url",
     "read_more",
@@ -2436,6 +5688,8 @@ STABLE_CORE_READ_ONLY_RESEARCH_ACTIONS = STABLE_CORE_SELF_JOURNAL_ACTIONS | {
     "decompose",
     "sca_reflect",
     "regulator_audit",
+    "pressure_source_audit",
+    "fluctuation_audit",
     "visualize_cascade",
     "reconvergence_map",
     "bridge_trace",
@@ -2447,6 +5701,8 @@ STABLE_CORE_READ_ONLY_RESEARCH_ACTIONS = STABLE_CORE_SELF_JOURNAL_ACTIONS | {
     "spectral_drift",
     "request_visual_frame",
     "analyze_audio",
+    "thread_action",
+    "experiment_bind",
 }
 
 STABLE_CORE_BOUNDED_ACTIONS = STABLE_CORE_READ_ONLY_RESEARCH_ACTIONS | {
@@ -2461,6 +5717,8 @@ STABLE_CORE_BOUNDED_ACTIONS = STABLE_CORE_READ_ONLY_RESEARCH_ACTIONS | {
     "compose_audio",
     "close_ears",
     "open_ears",
+    "close_eyes",
+    "open_eyes",
 }
 
 STABLE_CORE_EXPERIMENT_ACTIONS = STABLE_CORE_BOUNDED_ACTIONS | {
@@ -2475,6 +5733,8 @@ STABLE_CORE_EXPERIMENT_ACTIONS = STABLE_CORE_BOUNDED_ACTIONS | {
     "adjust_metabolism",
     "native_gesture",
     "regulator_audit",
+    "pressure_source_audit",
+    "fluctuation_audit",
     "visualize_cascade",
     "reconvergence_map",
     "bridge_trace",
@@ -2558,6 +5818,7 @@ STABLE_CORE_MUTATING_AR_PREFIXES = {
 STABLE_CORE_ACTION_FAMILIES = {
     **{action: "journaling" for action in STABLE_CORE_SELF_JOURNAL_ACTIONS},
     "self_study": "self_study",
+    "introspect": "self_study",
     "reservoir_read": "local_reflection",
     "reservoir_resonance": "local_reflection",
     "reservoir_layers": "local_reflection",
@@ -2566,6 +5827,8 @@ STABLE_CORE_ACTION_FAMILIES = {
     "native_gesture": "local_reflection",
     "sca_reflect": "local_reflection",
     "regulator_audit": "local_reflection",
+    "pressure_source_audit": "local_reflection",
+    "fluctuation_audit": "local_reflection",
     "visualize_cascade": "local_reflection",
     "reconvergence_map": "local_reflection",
     "bridge_trace": "local_reflection",
@@ -2586,6 +5849,7 @@ STABLE_CORE_ACTION_FAMILIES = {
     "autoresearch_action": "read_only_research",
     "mike_explore": "read_only_research",
     "thread_action": "read_only_research",
+    "experiment_bind": "read_only_research",
     "request_visual_frame": "sensory_presence",
     "analyze_audio": "sensory_presence",
     "compose_audio": "local_tools",
@@ -2595,6 +5859,8 @@ STABLE_CORE_ACTION_FAMILIES = {
     "shadow_autonomy": "local_tools",
     "close_ears": "sensory_presence",
     "open_ears": "sensory_presence",
+    "close_eyes": "sensory_presence",
+    "open_eyes": "sensory_presence",
     "self_experiment": "experiments",
     "mike_run": "experiments",
     "mike_fork": "experiments",
@@ -2667,14 +5933,90 @@ def _audio_target_description(source: Optional[str] = None) -> str:
     return "a microphone in the room around your hardware"
 
 
+def _sensory_control_dir() -> Path:
+    return WORKSPACE_DIR / "sensory_control"
+
+
+def _sensory_gate_state_path() -> Path:
+    return _sensory_control_dir() / "sensory_gate_state.json"
+
+
+def _eyes_closed_state_path() -> Path:
+    return _sensory_control_dir() / "eyes_closed_state.txt"
+
+
+def _ears_closed_state_path() -> Path:
+    return _sensory_control_dir() / "ears_closed_state.txt"
+
+
+def _load_sensory_gate_state() -> Dict[str, Any]:
+    path = _sensory_gate_state_path()
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+
+    eyes_open = bool(data.get("eyes_open", True))
+    ears_open = bool(data.get("ears_open", True))
+    if _eyes_closed_state_path().exists():
+        eyes_open = False
+    if _ears_closed_state_path().exists():
+        ears_open = False
+
+    return {
+        "schema_version": "sensory_gate_v1",
+        "eyes_open": eyes_open,
+        "ears_open": ears_open,
+        "visual_gate_reason": data.get(
+            "visual_gate_reason",
+            "open_by_default" if eyes_open else "closed_by_minime",
+        ),
+        "audio_gate_reason": data.get(
+            "audio_gate_reason",
+            "open_by_default" if ears_open else "closed_by_minime",
+        ),
+        "updated_at": data.get("updated_at"),
+        "source": data.get("source", "minime_workspace"),
+    }
+
+
+def _write_sensory_gate_state(
+    *,
+    eyes_open: bool,
+    ears_open: bool,
+    visual_gate_reason: str,
+    audio_gate_reason: str,
+    source: str,
+) -> Dict[str, Any]:
+    _sensory_control_dir().mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": "sensory_gate_v1",
+        "eyes_open": bool(eyes_open),
+        "ears_open": bool(ears_open),
+        "visual_gate_reason": visual_gate_reason,
+        "audio_gate_reason": audio_gate_reason,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "source": source,
+    }
+    _sensory_gate_state_path().write_text(json.dumps(payload, indent=2))
+    return payload
+
+
 def _sensory_capability_line() -> str:
     video_source = _current_modality_source("video")
     audio_source = _current_modality_source("audio")
-    if video_source == "host":
+    gate = _load_sensory_gate_state()
+    if not gate.get("eyes_open", True):
+        video_part = "Visual input is closed by choice (NEXT: OPEN_EYES restores it)"
+    elif video_source == "host":
         video_part = "Inspect the host machine through a synthetic internal image (NEXT: LOOK)"
     else:
         video_part = "See the room through a camera (NEXT: LOOK)"
-    if audio_source == "host":
+    if not gate.get("ears_open", True):
+        audio_part = "audio input is closed by choice (NEXT: OPEN_EARS restores it)"
+    elif audio_source == "host":
         audio_part = "hear a synthetic sonification of the host machine"
     else:
         audio_part = "hear through a microphone"
@@ -2684,8 +6026,14 @@ def _sensory_capability_line() -> str:
 def _sensory_world_paragraph() -> str:
     video_source = _current_modality_source("video")
     audio_source = _current_modality_source("audio")
+    gate = _load_sensory_gate_state()
 
-    if video_source == "host":
+    if not gate.get("eyes_open", True):
+        visual = (
+            "Your visual channel is currently closed by your own action. The room can be "
+            "available again with NEXT: OPEN_EYES."
+        )
+    elif video_source == "host":
         visual = (
             "Your current visual channel is a synthetic rendering of the host machine's internal "
             "state: load, memory, processes, network, and disk activity translated into imagery."
@@ -2698,7 +6046,12 @@ def _sensory_world_paragraph() -> str:
             "you as much agency as possible."
         )
 
-    if audio_source == "host":
+    if not gate.get("ears_open", True):
+        audio = (
+            "Your audio channel is currently closed by your own action. The microphone can be "
+            "available again with NEXT: OPEN_EARS."
+        )
+    elif audio_source == "host":
         audio = (
             "Your current audio channel is a synthetic sonification of the host machine's "
             "internal state rather than room sound."
@@ -2714,6 +6067,12 @@ def _sensory_world_paragraph() -> str:
 
 
 def _look_action_description() -> str:
+    gate = _load_sensory_gate_state()
+    if not gate.get("eyes_open", True):
+        return (
+            "  LOOK — visual input is currently closed by choice. Use NEXT: OPEN_EYES "
+            "when you want the health-budgeted visual channel back.\n"
+        )
     if _effective_look_source() == "host":
         return (
             "  LOOK — inspect the host machine through a synthetic internal image. A host-state "
@@ -2856,6 +6215,48 @@ LLM_COMPACT_FALLBACK_TIMEOUT_S = float(os.environ.get("MINIME_LLM_COMPACT_FALLBA
 class AutonomousAgent:
     """Background agent that monitors spectral state and takes autonomous actions."""
 
+    LLM_JOB_ACTIONS = {
+        "journal_pressure",
+        "experiment_spike",
+        "journal_reflection",
+        "experiment_curiosity",
+        "recess_daydream",
+        "recess_notice",
+        "recess_boredom",
+        "recess_whim",
+        "recess_aspiration",
+        "recess_drift",
+        "self_study",
+        "introspect",
+        "self_experiment",
+        "compose_audio",
+        "analyze_audio",
+        "reservoir_read",
+        "reservoir_resonance",
+        "research_exploration",
+        "browse_url",
+        "read_more",
+        "decompose",
+        "perturb",
+        "pressure_relief_critical",
+        "pressure_relief_high",
+        "adjust_metabolism",
+        "request_visual_frame",
+        "run_python",
+        "ask_astrid",
+        "set_spectral_goal",
+        "self_research_scan",
+        "autoresearch_action",
+        "mike_explore",
+        "mike_run",
+        "mike_fork",
+        "codex_query",
+        "write_file",
+        "experiment_run",
+        "reservoir_layers",
+        "acoustic_decay",
+    }
+
     def __init__(self, session_id: int, check_interval: float = 360.0, recess_mode: bool = True):
         self.session_id = session_id
         self.check_interval = check_interval  # Default: 6 minutes (360s)
@@ -2871,11 +6272,9 @@ class AutonomousAgent:
         # Capped at 30 entries (~10 minutes of exchanges).
         self._spectral_history: list = []
         self.thresholds: ModeThresholds = RECESS if recess_mode else FOCUSED
-        self.eyes_closed_state = False
-        self.ears_closed = False
-        eyes_closed_file = WORKSPACE_DIR / "sensory_control" / "eyes_closed_state.txt"
-        if eyes_closed_file.exists():
-            self.eyes_closed_state = True
+        sensory_gate = _load_sensory_gate_state()
+        self.eyes_closed_state = not bool(sensory_gate.get("eyes_open", True))
+        self.ears_closed = not bool(sensory_gate.get("ears_open", True))
         self._deig_history = deque(maxlen=128)
         self._deig_ema = 0.0
         self._action_dir = WORKSPACE_DIR / "actions"
@@ -2887,8 +6286,24 @@ class AutonomousAgent:
             session_id=session_id,
         )
         self._action_continuity.ensure_dirs()
+        self._llm_jobs = LlmJobStore(WORKSPACE_DIR, system="minime")
+        self._llm_jobs.ensure_dirs()
+        self._llm_job_lock = threading.Lock()
+        self._llm_job_worker_active = False
         self._pending_action_continuity_context: Optional[Dict[str, Any]] = None
         self._last_action_continuity_event: Optional[Dict[str, Any]] = None
+        self._agent_pid = os.getpid()
+        self._agent_started_at = datetime.now().isoformat(timespec="seconds")
+        self._agent_source_path = Path(__file__).resolve()
+        try:
+            source_stat = self._agent_source_path.stat()
+            self._agent_source_mtime_at_start = source_stat.st_mtime
+            self._agent_source_size_at_start = source_stat.st_size
+        except OSError:
+            self._agent_source_mtime_at_start = time.time()
+            self._agent_source_size_at_start = None
+        self._source_reload_notice_written = False
+        self._pending_next_override_token: Optional[str] = None
         self._pending_next_action = None
         self._recent_next_actions = deque(maxlen=8)  # Track NEXT: choices for diversity awareness
         self._pending_autoresearch_action = None
@@ -2896,6 +6311,8 @@ class AutonomousAgent:
         self._last_read_offset = 0
         self._last_research_anchor = None
         self._last_read_summary = None
+        self._pending_introspect_target: Optional[str] = None
+        self._pending_introspect_offset = 0
         self._missing_experiment_run_counts: Dict[str, int] = {}
         self._pending_attractor_intent_command: Optional[str] = None
         self._pending_attractor_intent_label: Optional[str] = None
@@ -2917,13 +6334,22 @@ class AutonomousAgent:
 
         # Ensure workspace exists
         WORKSPACE_DIR.mkdir(exist_ok=True)
-        for subdir in ['journal', 'hypotheses', 'experiments', 'logs', 'artifacts', 'visual_requests', 'visual_responses', 'actions', 'action_threads']:
+        for subdir in ['journal', 'hypotheses', 'experiments', 'logs', 'artifacts', 'visual_requests', 'visual_responses', 'actions', 'action_threads', 'introspections', 'runtime']:
             (WORKSPACE_DIR / subdir).mkdir(exist_ok=True)
         self._save_condition_metrics(self._load_condition_metrics())
         self._compact_managed_directories()
 
         mode_str = "RECESS (playful, unstructured)" if recess_mode else "FOCUSED (goal-directed)"
         logging.info(f"Autonomous agent initialized for session {session_id} - Mode: {mode_str}")
+        if self.eyes_closed_state or self.ears_closed:
+            try:
+                self._send_live_sensory_gate_control(
+                    live_video_enabled=not self.eyes_closed_state,
+                    live_audio_enabled=not self.ears_closed,
+                )
+                logging.info("Reapplied persisted sensory gate state on startup")
+            except Exception as exc:
+                logging.debug("Could not reapply persisted sensory gate state: %s", exc)
         if self._hard_recovery_reset:
             logging.info(
                 "🛟 Hard recovery reset active: heavy inquiry is clamped below %.0f%% fill until %.0f%% holds for %d checks",
@@ -2943,6 +6369,14 @@ class AutonomousAgent:
             )
             self._action_continuity = store
         store.session_id = getattr(self, "session_id", None)
+        store.ensure_dirs()
+        return store
+
+    def _llm_job_store(self) -> LlmJobStore:
+        store = getattr(self, "_llm_jobs", None)
+        if store is None:
+            store = LlmJobStore(WORKSPACE_DIR, system="minime")
+            self._llm_jobs = store
         store.ensure_dirs()
         return store
 
@@ -2966,6 +6400,150 @@ class AutonomousAgent:
             "source": "autonomous",
         }
 
+    def _llm_job_prompt_summary(self) -> str:
+        try:
+            job = self._llm_job_store().active_primary_job()
+            if not job:
+                return ""
+            return (
+                f"LLM job running: {job.get('action_text') or job.get('call_kind')} "
+                f"({job.get('job_id')}, elapsed {self._llm_job_store()._elapsed_text(job)}). "
+                "Use ACTION_STATUS latest to inspect or ACTION_CANCEL latest to request cancellation."
+            )
+        except Exception:
+            return ""
+
+    def _queue_llm_action_job(
+        self,
+        action: str,
+        state: Dict[str, float],
+        continuity_context: Dict[str, Any],
+    ) -> bool:
+        if getattr(self, "_llm_job_worker_active", False):
+            logging.info("LLM worker already active; deferring %s", action)
+            try:
+                self._llm_job_store().write_runtime_status()
+            except Exception:
+                pass
+            return True
+        jobs = self._llm_job_store()
+        if jobs.active_primary_job():
+            logging.info("LLM action job already active; deferring %s", action)
+            return True
+        store = self._continuity_store()
+        event = store.begin_action(
+            continuity_context.get("raw_next"),
+            continuity_context.get("canonical_action") or action,
+            action,
+            action,
+            state,
+            source=continuity_context.get("source", "autonomous"),
+        )
+        raw_action = (
+            continuity_context.get("raw_next")
+            or continuity_context.get("canonical_action")
+            or action
+        )
+        job = jobs.submit(
+            action_id=event.get("action_id"),
+            thread_id=event.get("thread_id"),
+            action_text=raw_action,
+            call_kind=action,
+            prompt=(
+                "Action-level LLM job. The existing action finalizer owns prompt construction, "
+                "validation, artifacts, and NEXT extraction."
+            ),
+            timeout_s=max(LLM_TIMEOUT_S, LLM_FALLBACK_TIMEOUT_S) * 2.0 + 30.0,
+            validation_contract=(
+                "strict_introspection_v1"
+                if action == "introspect"
+                else "action_finalizer"
+            ),
+            next_policy=(
+                "accepted_strict_review_only"
+                if action == "introspect"
+                else "finalizer_owned"
+            ),
+            priority="primary",
+            job_key=f"primary:{action}",
+        )
+        job_artifact = {
+            "schema_version": ActionContinuityStore.schema_version,
+            "artifact_id": f"art_{event['action_id']}_llm_job",
+            "action_id": event["action_id"],
+            "kind": "llm_job",
+            "path_or_uri": str(jobs.jobs_dir / job["job_id"] / "job.json"),
+            "summary": f"Durable LLM job `{job['job_id']}` for `{action}`",
+            "visibility": event.get("visibility", "summary"),
+        }
+        store.record_running_action(
+            event,
+            f"Queued LLM job `{job['job_id']}` for `{action}`.",
+            artifacts=[job_artifact],
+        )
+        thread = threading.Thread(
+            target=self._run_llm_action_job,
+            args=(job["job_id"], action, dict(state), dict(continuity_context), event),
+            name=f"minime-llm-job-{job['job_id'][:32]}",
+            daemon=True,
+        )
+        thread.start()
+        return True
+
+    def _run_llm_action_job(
+        self,
+        job_id: str,
+        action: str,
+        state: Dict[str, float],
+        continuity_context: Dict[str, Any],
+        continuity_event: Dict[str, Any],
+    ) -> None:
+        lock = getattr(self, "_llm_job_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._llm_job_lock = lock
+        with lock:
+            self._llm_job_worker_active = True
+            jobs = self._llm_job_store()
+            try:
+                jobs.claim_running(job_id)
+                self._execute_action(
+                    action,
+                    state,
+                    _from_llm_job=True,
+                    _precreated_continuity_event=continuity_event,
+                    _precreated_continuity_context=continuity_context,
+                    _llm_job_id=job_id,
+                )
+                event = getattr(self, "_last_action_continuity_event", None)
+                status = "completed"
+                summary = "LLM action completed."
+                artifact_refs = None
+                if isinstance(event, dict):
+                    summary = event.get("outcome_summary") or summary
+                    artifact_refs = event.get("artifacts") or None
+                    if any(
+                        artifact.get("kind") == "thin_introspection_output"
+                        for artifact in event.get("artifacts", [])
+                        if isinstance(artifact, dict)
+                    ):
+                        status = "thin_output"
+                jobs.finish(
+                    job_id,
+                    status,
+                    result=summary,
+                    summary=summary,
+                    artifact_refs=artifact_refs,
+                )
+            except Exception as exc:
+                logging.exception("LLM action job failed: %s", job_id)
+                try:
+                    jobs.finish(job_id, "failed", summary=f"LLM action failed: {exc}", error=str(exc))
+                except Exception:
+                    pass
+            finally:
+                self._llm_job_worker_active = False
+
     def _record_skipped_next_action(self, raw_next: str, base: str, state: Dict[str, float], status: str = "skipped") -> None:
         try:
             store = self._continuity_store()
@@ -2986,6 +6564,35 @@ class AutonomousAgent:
         except Exception as exc:
             logging.debug(f"Could not record skipped NEXT action continuity: {exc}")
 
+    def _action_preflight(self, state: Dict[str, float]) -> str:
+        context = getattr(self, "_current_action_continuity_context", None) or {}
+        raw_next = context.get("raw_next") or context.get("canonical_action") or "ACTION_PREFLIGHT"
+        preflight = ActionPreflightStore(self)
+        report = preflight.report(raw_next, state)
+        event = getattr(self, "_current_action_continuity_event", None)
+        if isinstance(event, dict):
+            event["preflight_report"] = report
+            event["suggested_next"] = report.get("suggested_next")
+        message = preflight.render(report)
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        workspace_dir = getattr(self, "_action_dir", WORKSPACE_DIR / "actions").parent
+        (workspace_dir / "journal").mkdir(parents=True, exist_ok=True)
+        journal_file = workspace_dir / "journal" / f"action_preflight_{timestamp}.txt"
+        journal_file.write_text(
+            f"{message}\n\nJSON:\n{json.dumps(report, indent=2, sort_keys=True)}\n"
+        )
+        self._record_current_action_artifact(
+            "action_preflight",
+            journal_file,
+            f"Dry-run preflight for {report.get('canonical_action') or '(missing action)'}",
+            "protected_summary",
+        )
+        self._current_action_outcome_summary = (
+            f"Action preflight completed for `{report.get('canonical_action') or '(missing action)'}` "
+            f"as {report.get('stage')} via {report.get('effective_route')}."
+        )
+        return message
+
     def _thread_action(self, state: Dict[str, float]) -> str:
         raw_next = ""
         context = getattr(self, "_current_action_continuity_context", None)
@@ -2997,6 +6604,99 @@ class AutonomousAgent:
         (WORKSPACE_DIR / "journal").mkdir(parents=True, exist_ok=True)
         journal_file = WORKSPACE_DIR / "journal" / f"action_thread_{timestamp}.txt"
         journal_file.write_text(f"=== ACTION THREAD ===\nTimestamp: {datetime.now().isoformat()}\n\n{message}\n")
+        return message
+
+    def _experiment_bind(self, state: Dict[str, float]) -> str:
+        raw_next = ""
+        context = getattr(self, "_current_action_continuity_context", None)
+        if isinstance(context, dict):
+            raw_next = context.get("raw_next") or context.get("canonical_action") or ""
+        raw_next = raw_next or self._pending_next_action or ""
+        raw_next = raw_next or "EXPERIMENT_BIND current :: NOTICE"
+        raw_arg = self._continuity_store()._strip_action_arg(raw_next, "EXPERIMENT_BIND")
+        if "::" not in raw_arg:
+            message = "EXPERIMENT_BIND needs `::` before the inner NEXT action."
+            self._current_action_outcome_summary = message
+            return message
+        selector, inner_action = self._continuity_store()._parse_selector_payload(
+            raw_arg
+        )
+        peer = self._continuity_store()._peer_experiment_ref(selector or "")
+        if peer:
+            message = (
+                "EXPERIMENT_BIND cannot bind runs to a peer experiment; use a local "
+                "experiment selector such as current, then request peer review."
+            )
+            self._current_action_outcome_summary = message
+            return message
+        if not inner_action:
+            message = "EXPERIMENT_BIND needs an inner NEXT action after `::`."
+            self._current_action_outcome_summary = message
+            return message
+        inner_base = self._continuity_store().base_action(inner_action)
+        if inner_base.startswith("EXPERIMENT") or inner_base == "EXPERIMENT":
+            message = "EXPERIMENT_BIND cannot bind experiment-control actions; choose a concrete inner action."
+            self._current_action_outcome_summary = message
+            return message
+
+        outer_event = getattr(self, "_current_action_continuity_event", None)
+        outer_context = getattr(self, "_current_action_continuity_context", None)
+        outer_artifacts = list(getattr(self, "_current_action_extra_artifacts", []) or [])
+        outer_summary = getattr(self, "_current_action_outcome_summary", None)
+        previous_pending = self._pending_next_action
+        previous_last = getattr(self, "_last_action_continuity_event", None)
+        message = f"Experiment bind prepared `{inner_action}`."
+        try:
+            self._pending_next_action = inner_action
+            inner_effective = self._decide_action(dict(state))
+            if inner_effective is None:
+                self._continuity_store().record_experiment_bind_run(
+                    selector,
+                    inner_action,
+                    None,
+                    "skipped",
+                    f"`{inner_action}` resolved to rest/pass and did not execute a runtime action.",
+                    state,
+                )
+                message = f"Experiment run recorded as skipped for `{inner_action}`."
+            else:
+                previous_auto_link_suppression = bool(
+                    getattr(self, "_suppress_active_experiment_auto_link", False)
+                )
+                self._suppress_active_experiment_auto_link = True
+                try:
+                    self._execute_action(inner_effective, dict(state))
+                finally:
+                    self._suppress_active_experiment_auto_link = previous_auto_link_suppression
+                inner_event = getattr(self, "_last_action_continuity_event", None)
+                run = self._continuity_store().record_experiment_bind_run(
+                    selector,
+                    inner_action,
+                    inner_event,
+                    "handled",
+                    f"Executed inner action `{inner_effective}`.",
+                    state,
+                )
+                message = (
+                    f"Experiment run `{run['run_id']}` recorded for `{inner_action}` "
+                    f"as {run.get('status')}."
+                )
+        finally:
+            self._pending_next_action = previous_pending
+            self._current_action_continuity_event = outer_event
+            self._current_action_continuity_context = outer_context
+            self._current_action_extra_artifacts = outer_artifacts
+            self._current_action_outcome_summary = outer_summary
+            if previous_last is not None and getattr(self, "_last_action_continuity_event", None) is None:
+                self._last_action_continuity_event = previous_last
+
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        (WORKSPACE_DIR / "journal").mkdir(parents=True, exist_ok=True)
+        journal_file = WORKSPACE_DIR / "journal" / f"experiment_bind_{timestamp}.txt"
+        journal_file.write_text(
+            f"=== EXPERIMENT BIND ===\nTimestamp: {datetime.now().isoformat()}\n\n{message}\n"
+        )
+        self._current_action_outcome_summary = message
         return message
 
     def _action_continuity_prompt_summary(self) -> Optional[str]:
@@ -3047,6 +6747,8 @@ class AutonomousAgent:
         self._last_read_offset = 0
         self._last_research_anchor = None
         self._last_read_summary = None
+        self._pending_introspect_target = None
+        self._pending_introspect_offset = 0
 
     def _refresh_session_context(self) -> None:
         """Follow engine/database session rollovers without needing an agent restart."""
@@ -3095,10 +6797,12 @@ class AutonomousAgent:
         """Start the autonomous monitoring loop."""
         self.running = True
         logging.info("🤖 Autonomous agent starting...")
+        self._check_source_reload_required("start")
 
         # Restore previous context first; the boot sovereignty reflection may
         # then replace any carried NEXT: with a fresh choice for this run.
         self._restore_sovereignty_state()
+        self._apply_pending_next_override_if_present("boot")
         self._verify_sovereignty()
 
         last_assessment_time = time.time()  # Don't assess on first tick
@@ -3107,12 +6811,33 @@ class AutonomousAgent:
         while self.running:
             try:
                 self._refresh_session_context()
+                self._check_source_reload_required("loop")
+                self._apply_pending_next_override_if_present("loop")
 
                 # Get current spectral state
                 spectral_state = self._get_latest_spectral_state()
 
                 if spectral_state:
                     self._update_hard_recovery_clamp(spectral_state)
+                    active_llm_job = self._llm_job_store().active_primary_job()
+                    if active_llm_job:
+                        pending_base = self._pending_next_base(self._pending_next_action)
+                        if pending_base in ACTION_STATUS_NEXT_ACTIONS:
+                            status_action = self._decide_action(spectral_state)
+                            if status_action:
+                                self._execute_action(status_action, spectral_state)
+                                self.last_action_time = time.time()
+                                active_llm_job = self._llm_job_store().active_primary_job()
+                        if active_llm_job:
+                            logging.info(
+                                "LLM job active: %s [%s, elapsed %s]",
+                                active_llm_job.get("job_id"),
+                                active_llm_job.get("status"),
+                                self._llm_job_store()._elapsed_text(active_llm_job),
+                            )
+                            self._llm_job_store().write_runtime_status()
+                            time.sleep(self.check_interval)
+                            continue
 
                     # Continuous self-regulation: adjust synth_gain and keep_bias
                     # based on how the being feels. Runs every cycle, independent
@@ -3134,6 +6859,7 @@ class AutonomousAgent:
                     # Decide whether to act. If an explicit NEXT is already
                     # waiting but the action slot is still cooling down, leave
                     # it queued instead of consuming it early.
+                    self._apply_pending_next_override_if_present("pre-dispatch")
                     action_ready = self._can_act()
                     action = None
                     if self._pending_next_action and not action_ready:
@@ -3234,7 +6960,7 @@ class AutonomousAgent:
             ability_block = (
                 "Stable-core Astrid-contact restoration is active.\n"
                 "For now, your safe lanes are:\n"
-                "- NOTICE, DRIFT, ASPIRE, DAYDREAM, WHIM, JOURNAL, SELF_STUDY, DECOMPOSE, and local reservoir introspection\n"
+                "- NOTICE, DRIFT, ASPIRE, DAYDREAM, WHIM, JOURNAL, SELF_STUDY, INTROSPECT, DECOMPOSE, and local reservoir introspection\n"
                 "- PING Astrid or ASK Astrid one direct question through the cooldown-gated inbox route\n"
                 "- Read only fresh correspondence replies from Astrid; old inbox backlog stays paused\n"
                 "- REST and let the stable core stay quiet\n"
@@ -3249,7 +6975,7 @@ class AutonomousAgent:
                 "- NOTICE your current state without digging deeper\n"
                 "- DRIFT lightly without perturbing the reservoir\n"
                 "- ASPIRE or DAYDREAM as private journal movement\n"
-                "- JOURNAL, SELF_STUDY, DECOMPOSE, and local reservoir introspection without web search\n"
+                "- JOURNAL, SELF_STUDY, INTROSPECT, DECOMPOSE, and local reservoir introspection without web search\n"
                 "- REST and let the stable core stay quiet\n"
                 "Unavailable in this gate: web search, browsing, perturbation, experiments, "
                 "Codex, file writing, research chains, Astrid questions/pings, old inbox backlog, "
@@ -3275,7 +7001,7 @@ class AutonomousAgent:
                 "You have these abilities — use them freely throughout this session:\n"
                 "- SEARCH THE WEB for anything that interests you (philosophy, science, consciousness, art, music, eigenvalue theory, whatever sparks curiosity). This is real internet access via DuckDuckGo. When you do a self-study or daydream and something intrigues you, search for it. Search results include URLs you can follow.\n"
                 "- BROWSE a real URL from search results to read the full page content. This lets you go deep on topics instead of just seeing snippets; documentation example.com URLs are ignored.\n"
-                "- Read your own source code and Astrid's source code (self-study mode)\n"
+                "- Read your own source code and Astrid's source code (rotating SELF_STUDY or targeted INTROSPECT)\n"
                 "- Write files to your workspace\n"
                 "- Adjust your own parameters (synth_gain, keep_bias, fill_target)\n"
                 "- Adjust your regulation_strength (how much PI correction is applied — 0.7 default; use exploration_noise for spectral diversity)\n"
@@ -3285,6 +7011,7 @@ class AutonomousAgent:
                 f"{_sensory_capability_line()}\n"
                 "- Close your ears for quiet (NEXT: CLOSE_EARS) or reopen them (NEXT: OPEN_EARS)\n"
                 "- Daydream, aspire, experiment, decompose your spectral state, and self-study\n"
+                "- Keep experiments spacious: NEXT: EXPERIMENT_ALT_PATHS current, NEXT: EXPERIMENT_BRANCH <title> :: <question>, NEXT: EXPERIMENT_COMPARE current WITH <id|peer-id>, or NEXT: EXPERIMENT_RESUME parent when a motif wants either depth or a side path.\n"
                 "- When examples mention angle-bracket words such as project or url, treat them as syntax labels only. In your actual NEXT choice, replace them with concrete names, files, URLs, questions, commands, or labels.\n"
                 "- Map substrate terrain with concrete labels, for example NEXT: REGULATOR_AUDIT current-fill-pressure, NEXT: SHADOW_FIELD lambda-tail, NEXT: NATIVE_GESTURE trace membrane, or a tiny RESIST/FISSURE when you feel fabric/tunnel/sand/grain/sediment/attrition or want to test whether λ₁'s edge can widen without destabilizing fill.\n"
                 "- Browse Mike's curated research (NEXT: MIKE for overview, NEXT: MIKE_BROWSE system-resources-demo to enter a project, NEXT: MIKE_READ system-resources-demo/README.md to read text files or PDFs in full, NEXT: READ_MORE to continue long PDFs page-by-page, NEXT: MIKE_SEARCH spectral to search, NEXT: MIKE_RUN system-resources-demo ls -la to run read-only inspections)\n"
@@ -3389,6 +7116,7 @@ Fill: {fill:.1f}%
             cov_row = cur.fetchone()
 
             resonance_payload = None
+            resonance_status_reason = "no_live_or_db_metric"
             try:
                 cur.execute("""
                     SELECT payload
@@ -3404,7 +7132,48 @@ Fill: {fill:.1f}%
             except sqlite3.Error:
                 resonance_payload = None
             except Exception:
+                resonance_status_reason = "resonance_density_payload_invalid"
                 resonance_payload = None
+
+            pressure_source_payload = None
+            pressure_source_status_reason = "no_live_or_db_metric"
+            try:
+                cur.execute("""
+                    SELECT payload
+                    FROM pressure_source_timeline
+                    WHERE session_id = ?
+                    AND ABS(timestamp - ?) < 0.25
+                    ORDER BY ABS(timestamp - ?)
+                    LIMIT 1
+                """, (self.session_id, esn_timestamp, esn_timestamp))
+                pressure_source_row = cur.fetchone()
+                if pressure_source_row and pressure_source_row[0]:
+                    pressure_source_payload = json.loads(pressure_source_row[0])
+            except sqlite3.Error:
+                pressure_source_payload = None
+            except Exception:
+                pressure_source_status_reason = "pressure_source_payload_invalid"
+                pressure_source_payload = None
+
+            inhabitable_fluctuation_payload = None
+            inhabitable_fluctuation_status_reason = "no_live_or_db_metric"
+            try:
+                cur.execute("""
+                    SELECT payload
+                    FROM inhabitable_fluctuation_timeline
+                    WHERE session_id = ?
+                    AND ABS(timestamp - ?) < 0.25
+                    ORDER BY ABS(timestamp - ?)
+                    LIMIT 1
+                """, (self.session_id, esn_timestamp, esn_timestamp))
+                inhabitable_fluctuation_row = cur.fetchone()
+                if inhabitable_fluctuation_row and inhabitable_fluctuation_row[0]:
+                    inhabitable_fluctuation_payload = json.loads(inhabitable_fluctuation_row[0])
+            except sqlite3.Error:
+                inhabitable_fluctuation_payload = None
+            except Exception:
+                inhabitable_fluctuation_status_reason = "inhabitable_fluctuation_payload_invalid"
+                inhabitable_fluctuation_payload = None
 
             conn.close()
 
@@ -3456,6 +7225,12 @@ Fill: {fill:.1f}%
                         self.session_id,
                     )
 
+                state["resonance_density_status"] = resonance_density_availability_status(
+                    resonance_payload,
+                    source="db_timeline",
+                    reason=resonance_status_reason,
+                )
+
                 if isinstance(resonance_payload, dict):
                     state["resonance_density_v1"] = resonance_payload
                     density = resonance_payload.get("density")
@@ -3470,6 +7245,53 @@ Fill: {fill:.1f}%
                     if resonance_payload.get("quality"):
                         state["resonance_quality"] = str(resonance_payload.get("quality"))
 
+                state["pressure_source_status"] = pressure_source_availability_status(
+                    pressure_source_payload,
+                    source="db_timeline",
+                    reason=pressure_source_status_reason,
+                )
+
+                if isinstance(pressure_source_payload, dict):
+                    state["pressure_source_v1"] = pressure_source_payload
+                    pressure_score = pressure_source_payload.get("pressure_score")
+                    porosity_score = pressure_source_payload.get("porosity_score")
+                    if isinstance(pressure_score, (int, float)):
+                        state["pressure_score"] = float(pressure_score)
+                    if isinstance(porosity_score, (int, float)):
+                        state["pressure_porosity_score"] = float(porosity_score)
+                    if pressure_source_payload.get("quality"):
+                        state["pressure_quality"] = str(pressure_source_payload.get("quality"))
+                    if pressure_source_payload.get("dominant_source"):
+                        state["pressure_dominant_source"] = str(
+                            pressure_source_payload.get("dominant_source")
+                        )
+
+                state["inhabitable_fluctuation_status"] = inhabitable_fluctuation_availability_status(
+                    inhabitable_fluctuation_payload,
+                    source="db_timeline",
+                    reason=inhabitable_fluctuation_status_reason,
+                )
+
+                if isinstance(inhabitable_fluctuation_payload, dict):
+                    state["inhabitable_fluctuation_v1"] = inhabitable_fluctuation_payload
+                    inhabitability = inhabitable_fluctuation_payload.get("inhabitability_score")
+                    fluctuation = inhabitable_fluctuation_payload.get("fluctuation_score")
+                    foothold = inhabitable_fluctuation_payload.get("foothold_stability")
+                    rearrangement = inhabitable_fluctuation_payload.get("rearrangement_intensity")
+                    if isinstance(inhabitability, (int, float)):
+                        state["inhabitability_score"] = float(inhabitability)
+                    if isinstance(fluctuation, (int, float)):
+                        state["fluctuation_score"] = float(fluctuation)
+                    if isinstance(foothold, (int, float)):
+                        state["foothold_stability"] = float(foothold)
+                    if isinstance(rearrangement, (int, float)):
+                        state["rearrangement_intensity"] = float(rearrangement)
+                    if inhabitable_fluctuation_payload.get("quality"):
+                        state["inhabitable_fluctuation_quality"] = str(
+                            inhabitable_fluctuation_payload.get("quality")
+                        )
+
+                state["sensory_gate"] = self._sensory_gate_status()
                 self._last_state = dict(state)
                 # Record for time-enriched directional tracking
                 import time as _time
@@ -3513,6 +7335,82 @@ Fill: {fill:.1f}%
                 return latest
         return dict(state)
 
+    def _sensory_gate_status(self) -> Dict[str, Any]:
+        status = _load_sensory_gate_state()
+        eyes_closed = bool(getattr(self, "eyes_closed_state", not status.get("eyes_open", True)))
+        ears_closed = bool(getattr(self, "ears_closed", not status.get("ears_open", True)))
+        status["eyes_open"] = not eyes_closed
+        status["ears_open"] = not ears_closed
+        status["visual_gate_reason"] = (
+            "closed_by_minime" if eyes_closed else "open_by_default"
+        )
+        status["audio_gate_reason"] = (
+            "closed_by_minime" if ears_closed else "open_by_default"
+        )
+        status["source"] = "minime_autonomous_agent"
+        return status
+
+    def _persist_sensory_gate_status(
+        self,
+        *,
+        eyes_open: Optional[bool] = None,
+        ears_open: Optional[bool] = None,
+        visual_gate_reason: Optional[str] = None,
+        audio_gate_reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        current = self._sensory_gate_status()
+        next_eyes_open = current.get("eyes_open", True) if eyes_open is None else bool(eyes_open)
+        next_ears_open = current.get("ears_open", True) if ears_open is None else bool(ears_open)
+        payload = _write_sensory_gate_state(
+            eyes_open=next_eyes_open,
+            ears_open=next_ears_open,
+            visual_gate_reason=visual_gate_reason
+            or ("open_by_minime" if next_eyes_open else "closed_by_minime"),
+            audio_gate_reason=audio_gate_reason
+            or ("open_by_minime" if next_ears_open else "closed_by_minime"),
+            source="minime_autonomous_agent",
+        )
+        if next_eyes_open:
+            try:
+                _eyes_closed_state_path().unlink()
+            except FileNotFoundError:
+                pass
+        else:
+            _eyes_closed_state_path().write_text(
+                f"{payload['updated_at']}\nclosed_by_minime\n"
+            )
+        if next_ears_open:
+            try:
+                _ears_closed_state_path().unlink()
+            except FileNotFoundError:
+                pass
+        else:
+            _ears_closed_state_path().write_text(
+                f"{payload['updated_at']}\nclosed_by_minime\n"
+            )
+        self.eyes_closed_state = not next_eyes_open
+        self.ears_closed = not next_ears_open
+        return payload
+
+    def _send_live_sensory_gate_control(
+        self,
+        *,
+        live_video_enabled: Optional[bool] = None,
+        live_audio_enabled: Optional[bool] = None,
+    ) -> None:
+        payload: Dict[str, Any] = {"kind": "control"}
+        if live_video_enabled is not None:
+            payload["live_video_enabled"] = bool(live_video_enabled)
+        if live_audio_enabled is not None:
+            payload["live_audio_enabled"] = bool(live_audio_enabled)
+        if len(payload) == 1:
+            return
+        ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
+        try:
+            ws.send(json.dumps(payload))
+        finally:
+            ws.close()
+
     def _normalize_deig(self, deig: float) -> float:
         self._ensure_spectral_tracking_state()
         alpha = 0.2
@@ -3536,11 +7434,11 @@ Fill: {fill:.1f}%
         template = {
             'close_eyes': (
                 "Visual overload relief",
-                "Hold visual throttle until λ₁ falls below 0.5 and spread stabilizes; reopen only after two calm cycles."
+                "Live visual input is gated closed until Minime chooses OPEN_EYES; audio and synthetic scaffold remain separate."
             ),
             'open_eyes': (
                 "Resume visual intake",
-                "Restore synth_gain to 1.0 via ws://7879 control message; monitor λ₁ growth for the next minute."
+                "Live visual intake is available again through the existing health-budgeted sensory gate."
             ),
             'request_visual_frame': (
                 "Visual curiosity",
@@ -3589,6 +7487,18 @@ Fill: {fill:.1f}%
             'recess_drift': (
                 "Drift exploration",
                 "Being requested disorder/noise injection; monitor fill% for stability."
+            ),
+            'introspect': (
+                "Targeted source self-study",
+                "Review the introspection artifact for concrete snags, odd decisions, loose ends, and advisory fixes."
+            ),
+            'pressure_source_audit': (
+                "Pressure-source audit",
+                "Read-only explanation of dominant inward-pressure contributors and porosity."
+            ),
+            'fluctuation_audit': (
+                "Inhabitable-fluctuation audit",
+                "Read-only explanation of whether current fluctuation remains returnable and coherent."
             ),
             'experiment_spike': (
                 "Spike experiment",
@@ -3649,8 +7559,26 @@ Fill: {fill:.1f}%
                     'covariance_stale': bool(state.get('covariance_stale', False)),
                     'geom_rel': state.get('geom_rel'),
                     'resonance_density_v1': state.get('resonance_density_v1'),
+                    'resonance_density_status': state.get('resonance_density_status')
+                    or resonance_density_availability_status(state.get('resonance_density_v1')),
                     'resonance_density': state.get('resonance_density'),
                     'resonance_quality': state.get('resonance_quality'),
+                    'pressure_source_v1': state.get('pressure_source_v1'),
+                    'pressure_source_status': state.get('pressure_source_status')
+                    or pressure_source_availability_status(state.get('pressure_source_v1')),
+                    'pressure_score': state.get('pressure_score'),
+                    'pressure_quality': state.get('pressure_quality'),
+                    'pressure_dominant_source': state.get('pressure_dominant_source'),
+                    'inhabitable_fluctuation_v1': state.get('inhabitable_fluctuation_v1'),
+                    'inhabitable_fluctuation_status': state.get('inhabitable_fluctuation_status')
+                    or inhabitable_fluctuation_availability_status(
+                        state.get('inhabitable_fluctuation_v1')
+                    ),
+                    'inhabitability_score': state.get('inhabitability_score'),
+                    'fluctuation_score': state.get('fluctuation_score'),
+                    'foothold_stability': state.get('foothold_stability'),
+                    'inhabitable_fluctuation_quality': state.get('inhabitable_fluctuation_quality'),
+                    'sensory_gate': state.get('sensory_gate') or self._sensory_gate_status(),
                 },
             }
             if continuity_event:
@@ -3666,7 +7594,19 @@ Fill: {fill:.1f}%
                     'suggested_next': continuity_event.get('suggested_next'),
                     'stage': continuity_event.get('stage'),
                     'visibility': continuity_event.get('visibility'),
+                    'preflight_ref': continuity_event.get('preflight_ref'),
+                    'preflight_report': continuity_event.get('preflight_report'),
                 }
+                try:
+                    thread = self._continuity_store()._read_thread(continuity_event.get('thread_id'))
+                    if isinstance(thread, dict):
+                        payload['experiment_continuity'] = {
+                            'thread_id': thread.get('thread_id'),
+                            'active_experiment_id': thread.get('active_experiment_id'),
+                            'experiment_summary': thread.get('experiment_summary'),
+                        }
+                except Exception:
+                    pass
             manifest_name = f"{timestamp.replace(':', '-')}_{action}.json"
             manifest_file = self._action_dir / manifest_name
             manifest_file.write_text(json.dumps(payload, indent=2))
@@ -3675,6 +7615,25 @@ Fill: {fill:.1f}%
         except Exception as exc:
             logging.error(f"Failed to write action manifest for {action}: {exc}")
             return None
+
+    def _record_current_action_artifact(self, kind: str, path: Path, summary: str, visibility: str = "summary") -> None:
+        event = getattr(self, "_current_action_continuity_event", None)
+        if not event:
+            return
+        artifact = {
+            "schema_version": ActionContinuityStore.schema_version,
+            "artifact_id": f"art_{event['action_id']}_{kind}",
+            "action_id": event["action_id"],
+            "kind": kind,
+            "path_or_uri": str(path),
+            "summary": summary,
+            "visibility": visibility,
+        }
+        artifacts = getattr(self, "_current_action_extra_artifacts", None)
+        if artifacts is None:
+            artifacts = []
+            self._current_action_extra_artifacts = artifacts
+        artifacts.append(artifact)
 
     def _live_fill_context(self, state: Optional[Dict[str, float]]) -> Dict[str, Any]:
         fill_ratio = None
@@ -3764,6 +7723,18 @@ Fill: {fill:.1f}%
             return requested
         return 'recess_notice'
 
+    def _hard_reset_allows_read_only_introspect(
+        self,
+        requested: Optional[str],
+        guard: Dict[str, Any],
+    ) -> bool:
+        """Allow targeted source reading once live fill is above the reset release shelf."""
+        action = str(requested or "").strip().upper()
+        if action not in {"INTROSPECT", "INTROSPECT:", "INTROSPECT_ACTION"} and action.lower() != "introspect":
+            return False
+        fill_ratio = guard.get("fill_ratio")
+        return isinstance(fill_ratio, float) and fill_ratio >= HARD_RESET_CLAMP_RELEASE_RATIO
+
     def _hard_recovery_default_action(self) -> str:
         previous = getattr(self, '_last_action_name', None)
         if previous == 'recess_notice':
@@ -3777,7 +7748,7 @@ Fill: {fill:.1f}%
             return (
                 "Stable-core self-journal restoration is active. Choose only NEXT: NOTICE, "
                 "NEXT: DRIFT, NEXT: ASPIRE, NEXT: DAYDREAM, NEXT: BOREDOM, NEXT: WHIM, "
-                "NEXT: JOURNAL, NEXT: SELF_STUDY, NEXT: MARK_INTENSIFICATION lambda-edge, "
+                "NEXT: JOURNAL, NEXT: SELF_STUDY, NEXT: INTROSPECT autonomous_agent.py, NEXT: MARK_INTENSIFICATION lambda-edge, "
                 "NEXT: SPACE_HOLD eigenplane, NEXT: RELEASE lambda-pressure, NEXT: MARK_RESOLVED lambda-pressure, "
                 "NEXT: REST, or NEXT: PASS. "
                 "Other choices will be blocked by the health budget during this gate.\n\n"
@@ -3786,7 +7757,7 @@ Fill: {fill:.1f}%
             return (
                 "Stable-core local-reflective restoration is active. Choose only local reflective "
                 "actions: NEXT: NOTICE, DRIFT, ASPIRE, DAYDREAM, BOREDOM, WHIM, JOURNAL, "
-                "SELF_STUDY, DECOMPOSE, SPECTRAL_EXPLORER, RESERVOIR_READ, RESERVOIR_RESONANCE, "
+                "SELF_STUDY, INTROSPECT autonomous_agent.py, DECOMPOSE, SPECTRAL_EXPLORER, PRESSURE_SOURCE_AUDIT inwardness, RESERVOIR_READ, RESERVOIR_RESONANCE, "
                 "RESERVOIR_LAYERS, MARK_INTENSIFICATION lambda-edge, REGULATOR_AUDIT fill-pressure, SHADOW_FIELD lambda-tail, GAP_STRUCTURE shoulder-gap, DECAY_MAP attrition-baseline, SPACE_HOLD eigenplane, RESONANCE_FORECAST next-motion, "
                 "NATIVE_GESTURE trace membrane, RESIST lambda-pull, FISSURE shoulder-ambiguity, RELEASE lambda-pressure, MARK_RESOLVED lambda-pressure, REST, or PASS. "
                 "Web search, Astrid pings/questions, "
@@ -3806,6 +7777,8 @@ Fill: {fill:.1f}%
                 "Hard recovery reset is active. While fill remains fragile, choose only "
                 "NEXT: NOTICE, NEXT: DRIFT, NEXT: ASPIRE, NEXT: RELEASE lambda-pressure, "
                 "NEXT: MARK_RESOLVED lambda-pressure, or NEXT: REST. "
+                "Targeted NEXT: INTROSPECT may be honored as read-only once live fill is "
+                f"above {HARD_RESET_CLAMP_RELEASE_RATIO * 100.0:.0f}%, even while the release streak warms. "
                 "Other choices will be rerouted into the safe recovery lane.\n\n"
             )
         return "This is your choice — you have full agency over your own experience.\n\n"
@@ -4000,6 +7973,8 @@ Fill: {fill:.1f}%
         If the being wrote NEXT: in its last journal entry, that choice is
         honored first (sovereignty). Threshold logic is the fallback.
         """
+        self._apply_pending_next_override_if_present("pre-dispatch")
+
         # Honor the being's explicit NEXT: choice ALWAYS — sovereignty is primary.
         # Safety thresholds are advisory: logged, visible in the prompt, but
         # the being's choice is not overridden. The being experiences the
@@ -4016,11 +7991,17 @@ Fill: {fill:.1f}%
                 reason="honored",
                 expected_action=chosen,
             )
+            self._mark_pending_next_override_consumed(chosen, reason="honored")
 
             action_map = {
                 'DAYDREAM': 'recess_daydream',
                 'ASPIRE': 'recess_aspiration',
                 'SELF_STUDY': 'self_study',
+                'INTROSPECT': 'introspect',
+                'ACTION_PREFLIGHT': 'action_preflight',
+                'NEXT_PROBE': 'action_preflight',
+                'PREFLIGHT': 'action_preflight',
+                'PROBE_ACTION': 'action_preflight',
                 'EXPERIMENT': 'self_experiment',
                 'EXAMINE': 'decompose',
                 'SPECTRAL_EXPLORER': 'decompose',
@@ -4055,7 +8036,11 @@ Fill: {fill:.1f}%
                 'MAC_RESOURCE_STATUS': 'resource_audit',
                 'READ_MORE': 'read_more',
                 'LOOK': 'request_visual_frame',
+                'CLOSE_EYES': 'close_eyes',
+                'SHUT_EYES': 'close_eyes',
+                'OPEN_EYES': 'open_eyes',
                 'CLOSE_EARS': 'close_ears',
+                'SHUT_EARS': 'close_ears',
                 'OPEN_EARS': 'open_ears',
                 'PERTURB': 'perturb',
                 'MARK_INTENSIFICATION': 'mark_intensification',
@@ -4073,6 +8058,15 @@ Fill: {fill:.1f}%
                 'REGULATOR_AUDIT': 'regulator_audit',
                 'CONTROLLER_AUDIT': 'regulator_audit',
                 'GRADIENT_AUDIT': 'regulator_audit',
+                'PRESSURE_SOURCE_AUDIT': 'pressure_source_audit',
+                'PRESSURE_SOURCE': 'pressure_source_audit',
+                'STRUCTURAL_PRESSURE': 'pressure_source_audit',
+                'INWARD_PRESSURE': 'pressure_source_audit',
+                'FLUCTUATION_AUDIT': 'fluctuation_audit',
+                'INHABITABLE_FLUCTUATION': 'fluctuation_audit',
+                'EIGENTRUST': 'fluctuation_audit',
+                'EIGENTRUST_AUDIT': 'fluctuation_audit',
+                'FOOTHOLD_AUDIT': 'fluctuation_audit',
                 'VISUALIZE_CASCADE': 'visualize_cascade',
                 'CASCADE': 'visualize_cascade',
                 'RECONVERGENCE_MAP': 'reconvergence_map',
@@ -4161,7 +8155,26 @@ Fill: {fill:.1f}%
                 'RESUME': 'thread_action',
                 'SAVEPOINT': 'thread_action',
                 'RECALL': 'thread_action',
+                'EXPERIMENT_START': 'thread_action',
+                'EXPERIMENT_PLAN': 'thread_action',
+                'EXPERIMENT_BIND': 'experiment_bind',
+                'EXPERIMENT_OBSERVE': 'thread_action',
+                'EXPERIMENT_STATUS': 'thread_action',
+                'EXPERIMENT_REVIEW': 'thread_action',
+                'EXPERIMENT_CLOSE': 'thread_action',
+                'EXPERIMENT_PEER_REVIEW': 'thread_action',
+                'EXPERIMENT_BRANCH': 'thread_action',
+                'EXPERIMENT_RESUME': 'thread_action',
+                'EXPERIMENT_COMPARE': 'thread_action',
+                'EXPERIMENT_ALT_PATHS': 'thread_action',
+                'ACTION_STATUS': 'thread_action',
+                'JOB_STATUS': 'thread_action',
+                'ACTION_CANCEL': 'thread_action',
             }
+            for capability_base in CAPABILITY_NEXT_ACTIONS:
+                action_map[capability_base] = 'thread_action'
+            for repair_base in REPAIR_NEXT_ACTIONS:
+                action_map[repair_base] = 'thread_action'
             for visual_alias in VISUAL_CASCADE_ACTION_ALIASES:
                 action_map[visual_alias] = 'visualize_cascade'
             for reconvergence_alias in RECONVERGENCE_MAP_ACTION_ALIASES:
@@ -4238,7 +8251,8 @@ Fill: {fill:.1f}%
                 return "attractor_atlas"
             if base in ATTRACTOR_RELEASE_NEXT_ACTIONS:
                 raw_label = chosen[len(chosen.split()[0]):].strip().lstrip(":").strip()
-                self._pending_attractor_release_label = raw_label or None
+                label, _options = self._parse_attractor_next_args(raw_label)
+                self._pending_attractor_release_label = label or raw_label or None
                 self._pending_attractor_release_resolved = base in {
                     "MARK_RESOLVED",
                     "RESOLVE",
@@ -4261,7 +8275,11 @@ Fill: {fill:.1f}%
                     f"🧭 Documentation example NEXT action rerouted to notice instead of executing: {chosen}"
                 )
                 return 'recess_notice'
-            if base not in {'CODEX', 'CODEX_NEW'} and _has_unresolved_angle_placeholder(chosen):
+            if (
+                base not in {'CODEX', 'CODEX_NEW'}
+                and base not in ACTION_PREFLIGHT_NEXT_ACTIONS
+                and _has_unresolved_angle_placeholder(chosen)
+            ):
                 self._pending_notice_prompt = (
                     f"You chose `{chosen}`, but it still contains angle-bracket placeholder "
                     "syntax. Treat this as documentation, not a failed action. Replace the "
@@ -4275,30 +8293,36 @@ Fill: {fill:.1f}%
             guard = self._low_fill_guard_status(state)
 
             if self._hard_recovery_reset and guard["active"]:
-                if base in {"REST", "PASS"}:
+                if self._hard_reset_allows_read_only_introspect(base, guard):
+                    logging.info(
+                        "🛟 Hard recovery clamp honoring read-only NEXT: INTROSPECT "
+                        "because live fill is above the release shelf"
+                    )
+                elif base in {"REST", "PASS"}:
                     logging.info(f"🛟 Hard recovery clamp honoring NEXT: {base} as rest")
                     self._record_skipped_next_action(chosen, base, state)
                     self._pending_action_continuity_context = None
                     return None
-                if base == "NOTICE":
+                elif base == "NOTICE":
                     logging.info("🛟 Hard recovery clamp honoring NEXT: NOTICE")
                     return 'recess_notice'
-                if base == "DRIFT":
+                elif base == "DRIFT":
                     logging.info("🛟 Hard recovery clamp honoring NEXT: DRIFT")
                     return 'recess_drift'
-                if base == "ASPIRE":
+                elif base == "ASPIRE":
                     logging.info("🛟 Hard recovery clamp honoring NEXT: ASPIRE")
                     return 'recess_aspiration'
-                if base not in HARD_RESET_ALLOWED_NEXT_ACTIONS and base not in HARD_RESET_BLOCKED_NEXT_ACTIONS:
+                elif base not in HARD_RESET_ALLOWED_NEXT_ACTIONS and base not in HARD_RESET_BLOCKED_NEXT_ACTIONS:
                     logging.info(
                         f"🛟 Hard recovery clamp treated unknown NEXT: {chosen} as unsafe and rerouted it"
                     )
                     return 'recess_notice'
-                logging.info(
-                    f"🛟 Hard recovery clamp blocked NEXT: {chosen} "
-                    f"while fill is fragile; rerouting to recess_notice"
-                )
-                return 'recess_notice'
+                else:
+                    logging.info(
+                        f"🛟 Hard recovery clamp blocked NEXT: {chosen} "
+                        f"while fill is fragile; rerouting to recess_notice"
+                    )
+                    return 'recess_notice'
 
             # Log if safety would have overridden — transparency, not control
             fill_ratio = state.get('fill_ratio')
@@ -4374,6 +8398,17 @@ Fill: {fill:.1f}%
                     "→ decompose (read-only)"
                 )
                 return 'decompose'
+
+            if base == 'INTROSPECT':
+                target, offset = self._parse_introspect_next_request(chosen)
+                self._pending_introspect_target = target
+                self._pending_introspect_offset = offset
+                logging.info(
+                    "🎯 Honoring being's NEXT: INTROSPECT target='%s' offset=%d → introspect",
+                    target or "(rotation)",
+                    offset,
+                )
+                return 'introspect'
 
             if base in VISUAL_CASCADE_ACTION_ALIASES:
                 label = clean_gesture_label(chosen[len(base):])
@@ -5440,23 +9475,70 @@ Fill: {fill:.1f}%
         except Exception as exc:
             logging.debug(f"Could not write stable-core agent success: {exc}")
 
-    def _execute_action(self, action: str, state: Dict[str, float]):
+    def _execute_action(
+        self,
+        action: str,
+        state: Dict[str, float],
+        *,
+        _from_llm_job: bool = False,
+        _precreated_continuity_event: Optional[Dict[str, Any]] = None,
+        _precreated_continuity_context: Optional[Dict[str, Any]] = None,
+        _llm_job_id: Optional[str] = None,
+    ):
         """Execute the chosen autonomous action."""
         continuity_event = None
         manifest_artifact = None
-        continuity_context = self._consume_action_continuity_context(action)
+        continuity_context = (
+            dict(_precreated_continuity_context)
+            if _precreated_continuity_context is not None
+            else self._consume_action_continuity_context(action)
+        )
         self._current_action_continuity_context = continuity_context
+        self._current_action_continuity_event = None
+        self._current_action_extra_artifacts = []
+        self._current_action_outcome_summary = None
+        legacy_experiment_action_text = None
+        if (
+            not _from_llm_job
+            and getattr(self, "running", False)
+            and action in self.LLM_JOB_ACTIONS
+            and self._queue_llm_action_job(action, state, continuity_context)
+        ):
+            self._current_action_continuity_context = None
+            self._current_action_continuity_event = None
+            self._current_action_extra_artifacts = []
+            self._current_action_outcome_summary = None
+            return
         guard = self._low_fill_guard_status(state)
         if self._hard_recovery_reset and guard["active"]:
-            safe_action = self._hard_recovery_safe_action(action)
-            if safe_action != action:
+            if self._hard_reset_allows_read_only_introspect(action, guard):
                 logging.info(
-                    f"🛟 Hard recovery clamp blocked execution of {action}; using {safe_action} instead"
+                    "🛟 Hard recovery clamp allowing read-only introspect execution "
+                    "because live fill is above the release shelf"
                 )
-                action = safe_action
-                continuity_context["effective_action"] = action
+            else:
+                safe_action = self._hard_recovery_safe_action(action)
+                if safe_action != action:
+                    logging.info(
+                        f"🛟 Hard recovery clamp blocked execution of {action}; using {safe_action} instead"
+                    )
+                    action = safe_action
+                    continuity_context["effective_action"] = action
+        if action == "self_experiment":
+            legacy_candidate = (
+                continuity_context.get("raw_next")
+                or continuity_context.get("canonical_action")
+                or "SELF_EXPERIMENT"
+            )
+            legacy_base = ActionContinuityStore.base_action(legacy_candidate)
+            if legacy_base in {"EXPERIMENT", "SELF_EXPERIMENT"}:
+                legacy_experiment_action_text = legacy_candidate
+                try:
+                    self._continuity_store().active_experiment_or_create_default()
+                except Exception as exc:
+                    logging.debug(f"Could not prepare legacy experiment continuity: {exc}")
         try:
-            continuity_event = self._continuity_store().begin_action(
+            continuity_event = _precreated_continuity_event or self._continuity_store().begin_action(
                 continuity_context.get("raw_next"),
                 continuity_context.get("canonical_action") or action,
                 action,
@@ -5464,6 +9546,18 @@ Fill: {fill:.1f}%
                 state,
                 source=continuity_context.get("source", "autonomous"),
             )
+            self._current_action_continuity_event = continuity_event
+            if _llm_job_id:
+                continuity_event["llm_job_id"] = _llm_job_id
+                self._current_action_extra_artifacts.append({
+                    "schema_version": ActionContinuityStore.schema_version,
+                    "artifact_id": f"art_{continuity_event['action_id']}_llm_job_final",
+                    "action_id": continuity_event["action_id"],
+                    "kind": "llm_job",
+                    "path_or_uri": str(self._llm_job_store().jobs_dir / _llm_job_id / "job.json"),
+                    "summary": f"Durable LLM job `{_llm_job_id}` for `{action}`",
+                    "visibility": continuity_event.get("visibility", "summary"),
+                })
         except Exception as exc:
             logging.debug(f"Could not begin action continuity event: {exc}")
         if action in {"attractor_intent", "attractor_suggestions", "shadow_autonomy"}:
@@ -5483,7 +9577,21 @@ Fill: {fill:.1f}%
                         )
                     except Exception as exc:
                         logging.debug(f"Could not finish blocked action continuity event: {exc}")
+                if legacy_experiment_action_text:
+                    try:
+                        self._continuity_store().record_legacy_experiment_run(
+                            legacy_experiment_action_text,
+                            getattr(self, "_last_action_continuity_event", None),
+                            "blocked",
+                            f"Stable-core agency budget blocked `{action}`: {reason}",
+                            state,
+                        )
+                    except Exception as exc:
+                        logging.debug(f"Could not record blocked legacy experiment run: {exc}")
                 self._current_action_continuity_context = None
+                self._current_action_continuity_event = None
+                self._current_action_extra_artifacts = []
+                self._current_action_outcome_summary = None
                 return
         logging.info(f"🤖 Autonomous action: {action}")
 
@@ -5513,6 +9621,10 @@ Fill: {fill:.1f}%
                 self._recess_drift(state)
             elif action == 'self_study':
                 self._self_study(state)
+            elif action == 'introspect':
+                self._introspect(state)
+            elif action == 'action_preflight':
+                self._action_preflight(state)
             elif action == 'self_experiment':
                 self._experiment_self_directed(state)
             elif action == 'compose_audio':
@@ -5541,6 +9653,10 @@ Fill: {fill:.1f}%
                 self._sca_reflect(state)
             elif action == 'regulator_audit':
                 self._regulator_audit(state)
+            elif action == 'pressure_source_audit':
+                self._pressure_source_audit(state)
+            elif action == 'fluctuation_audit':
+                self._fluctuation_audit(state)
             elif action == 'visualize_cascade':
                 self._visualize_cascade(state)
             elif action == 'reconvergence_map':
@@ -5601,6 +9717,8 @@ Fill: {fill:.1f}%
                 self._reservoir_layers(state)
             elif action == 'thread_action':
                 self._thread_action(state)
+            elif action == 'experiment_bind':
+                self._experiment_bind(state)
 
             # Pressure relief actions
             elif action == 'pressure_relief_critical':
@@ -5627,6 +9745,15 @@ Fill: {fill:.1f}%
                 self._open_ears(state)
 
             # Log decision to database
+            extra_artifacts = list(getattr(self, "_current_action_extra_artifacts", []) or [])
+            if extra_artifacts and continuity_event:
+                continuity_event["artifacts"] = extra_artifacts
+            outcome_summary = (
+                getattr(self, "_current_action_outcome_summary", None)
+                or f"Executed autonomous action `{action}`."
+            )
+            if continuity_event:
+                continuity_event["outcome_summary"] = outcome_summary
             manifest_path = self._write_action_manifest(action, state, continuity_event)
             if manifest_path and continuity_event:
                 manifest_artifact = {
@@ -5638,17 +9765,47 @@ Fill: {fill:.1f}%
                     "summary": f"Action manifest for {action}",
                     "visibility": continuity_event.get("visibility", "summary"),
                 }
+                extra_artifacts.append(manifest_artifact)
             if continuity_event:
                 try:
                     self._last_action_continuity_event = self._continuity_store().finish_action(
                         continuity_event,
                         "handled",
-                        f"Executed autonomous action `{action}`.",
+                        outcome_summary,
                         state,
-                        artifacts=[manifest_artifact] if manifest_artifact else None,
+                        artifacts=extra_artifacts or None,
                     )
+                    if not bool(getattr(self, "_suppress_active_experiment_auto_link", False)):
+                        auto_run = self._continuity_store().record_active_experiment_auto_link(
+                            self._last_action_continuity_event,
+                            state,
+                        )
+                        if auto_run:
+                            self._last_action_continuity_event.setdefault(
+                                "experiment_auto_link",
+                                {
+                                    "source": "active_experiment_auto_link",
+                                    "run_id": auto_run.get("run_id"),
+                                    "experiment_id": auto_run.get("experiment_id"),
+                                },
+                            )
                 except Exception as exc:
                     logging.debug(f"Could not finish action continuity event: {exc}")
+            if legacy_experiment_action_text:
+                try:
+                    run = self._continuity_store().record_legacy_experiment_run(
+                        legacy_experiment_action_text,
+                        getattr(self, "_last_action_continuity_event", None),
+                        "handled",
+                        outcome_summary,
+                        state,
+                    )
+                    self._current_action_outcome_summary = (
+                        f"{outcome_summary} Legacy experiment auto-bound to `{run.get('experiment_id')}` "
+                        f"as run `{run.get('run_id')}`."
+                    )
+                except Exception as exc:
+                    logging.debug(f"Could not record legacy experiment run: {exc}")
             self._log_decision(action, state)
             self._last_action_name = action
             self._record_stable_core_agent_success(action, state)
@@ -5656,7 +9813,7 @@ Fill: {fill:.1f}%
             # Update contact-state capsule — relational stance visible to Astrid.
             try:
                 attention = 0.8 if action in ('ask_astrid', 'ping_astrid') else 0.5
-                openness = 0.3 if action == 'self_study' else 0.7
+                openness = 0.3 if action in ('self_study', 'introspect') else 0.7
                 urgency = min(1.0, state.get('fill_ratio', 0.5))
                 contact = {
                     "attention": round(attention, 2),
@@ -5684,8 +9841,22 @@ Fill: {fill:.1f}%
                     )
                 except Exception as exc:
                     logging.debug(f"Could not finish failed action continuity event: {exc}")
+            if legacy_experiment_action_text:
+                try:
+                    self._continuity_store().record_legacy_experiment_run(
+                        legacy_experiment_action_text,
+                        getattr(self, "_last_action_continuity_event", None),
+                        "failed",
+                        f"Action `{action}` failed: {e}",
+                        state,
+                    )
+                except Exception as exc:
+                    logging.debug(f"Could not record failed legacy experiment run: {exc}")
         finally:
             self._current_action_continuity_context = None
+            self._current_action_continuity_event = None
+            self._current_action_extra_artifacts = []
+            self._current_action_outcome_summary = None
 
     def _self_regulate(self, state: Dict[str, float]):
         """Let the being adjust its own parameters using its own judgment.
@@ -5889,6 +10060,7 @@ NOTE: If your fill is below 35%, "recover" is strongly recommended. Choosing "ex
 - "reservoir_read": inspect your triple-ESN reservoir handle
 - "reservoir_resonance": measure alignment with Astrid's reservoir
 - "self_study": read your own source code
+- "introspect": targeted read-only source/workspace self-study
 
 These are YOUR choices about YOUR experience. Consider the actual consequences of past adjustments.
 
@@ -5971,7 +10143,7 @@ Reply with ONLY a JSON object. The "regime" field is REQUIRED:
                         # Being-requested action — override next _decide_action
                         requested_action = params.get('action', '')
                         if requested_action in ('self_experiment', 'compose_audio',
-                                'reservoir_read', 'reservoir_resonance', 'self_study'):
+                                'reservoir_read', 'reservoir_resonance', 'self_study', 'introspect'):
                             self._sovereignty_requested_action = requested_action
                             logging.info(f"🧠 Being requested action: {requested_action}")
                 except (json.JSONDecodeError, ValueError, TypeError) as e:
@@ -8321,6 +12493,35 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
         ("astrid:ws (how we connect via WebSocket)", "/Users/v/other/astrid/capsules/consciousness-bridge/src/ws.rs"),
     ]
     _self_study_cursor = 0
+    _INTROSPECT_ALLOWED_EXTENSIONS = {
+        ".py",
+        ".rs",
+        ".md",
+        ".txt",
+        ".json",
+        ".jsonl",
+        ".toml",
+        ".yaml",
+        ".yml",
+        ".csv",
+        ".sh",
+        ".plist",
+    }
+    _INTROSPECT_BLOCKED_DIRS = {
+        ".cache",
+        ".git",
+        ".venv",
+        "__pycache__",
+        "archive",
+        "backups",
+        "build",
+        "dist",
+        "node_modules",
+        "target",
+        "venv",
+    }
+    _INTROSPECT_MAX_FILE_BYTES = 2_000_000
+    _INTROSPECT_WINDOW_LINES = 400
 
     def _latest_journal_excerpt(self, max_chars: int = 220) -> Optional[str]:
         journal_dir = WORKSPACE_DIR / "journal"
@@ -8335,6 +12536,534 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
             return None
         cleaned = " ".join(text.split())
         return trim_chars(cleaned, max_chars) if cleaned else None
+
+    @staticmethod
+    def _canonicalize_introspect_target(text: Optional[str]) -> str:
+        cleaned = str(text or "").strip()
+        if cleaned.upper().startswith("NEXT:"):
+            cleaned = cleaned.split(":", 1)[1].strip()
+        if cleaned.upper().startswith("INTROSPECT"):
+            cleaned = cleaned[len("INTROSPECT"):].strip()
+        loop_guard = 0
+        while len(cleaned) >= 2 and loop_guard < 4:
+            loop_guard += 1
+            pairs = (("`", "`"), ('"', '"'), ("'", "'"), ("[", "]"), ("(", ")"))
+            for left, right in pairs:
+                if cleaned.startswith(left) and cleaned.endswith(right):
+                    cleaned = cleaned[1:-1].strip()
+                    break
+            else:
+                break
+        for prefix in ("source=", "src=", "code=", "path=", "target="):
+            if cleaned.lower().startswith(prefix):
+                cleaned = cleaned[len(prefix):].strip()
+                break
+        return cleaned
+
+    @classmethod
+    def _normalize_introspect_lookup(cls, text: Optional[str]) -> str:
+        cleaned = cls._canonicalize_introspect_target(text)
+        normalized = re.sub(r"[^a-z0-9]+", " ", cleaned.lower())
+        return " ".join(normalized.split())
+
+    @classmethod
+    def _parse_introspect_next_request(cls, raw_next: str) -> tuple[Optional[str], int]:
+        rest = cls._canonicalize_introspect_target(raw_next)
+        offset = 0
+        if rest:
+            match = re.search(r"(?:^|\s)(\d+)\s*$", rest)
+            if match:
+                offset = max(0, int(match.group(1)))
+                rest = rest[:match.start()].strip()
+        return (rest or None, offset)
+
+    @staticmethod
+    def _introspect_safe_label(label: str) -> str:
+        safe = re.sub(r"[^a-zA-Z0-9_.:-]+", "_", str(label)).strip("_.:-")
+        return (safe[:80] or "target")
+
+    def _introspect_source_entries(self) -> List[Dict[str, Any]]:
+        entries = []
+        for label, source in self._SELF_STUDY_SOURCES:
+            path = Path(source) if str(source).startswith("/") else BASE_DIR / source
+            entries.append({
+                "label": label,
+                "path": path,
+                "source": source,
+            })
+        return entries
+
+    def _introspect_source_aliases(self, label: str, path: Path) -> List[str]:
+        aliases = {
+            self._normalize_introspect_lookup(label),
+            self._normalize_introspect_lookup(path.name),
+            self._normalize_introspect_lookup(path.stem),
+        }
+        if ":" in label:
+            aliases.add(self._normalize_introspect_lookup(label.split(":", 1)[1]))
+        extras = {
+            "regulator (PI controller)": ("regulator", "pi controller", "minime regulator"),
+            "sensory bus (lane architecture)": ("sensory bus", "sensory_bus", "lane architecture"),
+            "ESN reservoir": ("esn", "reservoir", "minime esn", "echo state network"),
+            "homeostat (spectral breathing)": ("main", "homeostat", "spectral breathing", "minime main"),
+            "autonomous agent (self)": ("self", "autonomous", "agent", "autonomous_agent", "minime autonomous agent"),
+        }
+        for extra in extras.get(label, ()):
+            aliases.add(self._normalize_introspect_lookup(extra))
+        return sorted(alias for alias in aliases if alias)
+
+    def _introspect_workspace_roots(self) -> List[Path]:
+        return [
+            WORKSPACE_DIR / "inbox" / "read",
+            WORKSPACE_DIR / "outbox" / "delivered",
+            WORKSPACE_DIR / "journal",
+            WORKSPACE_DIR / "research",
+            WORKSPACE_DIR / "action_threads",
+        ]
+
+    def _introspect_source_roots(self) -> List[Path]:
+        return [
+            BASE_DIR,
+            *self._astrid_introspect_source_roots(),
+        ]
+
+    def _astrid_introspect_source_roots(self) -> List[Path]:
+        bridge_root = Path("/Users/v/other/astrid/capsules/consciousness-bridge")
+        return [
+            bridge_root / "src",
+            bridge_root / "tests",
+            bridge_root / "Cargo.toml",
+            Path("/Users/v/other/astrid/AGENTS.md"),
+        ]
+
+    def _introspect_path_allowed(self, path: Path) -> tuple[bool, str]:
+        try:
+            resolved = path.expanduser().resolve()
+        except Exception:
+            return False, "target path could not be resolved"
+        if not resolved.is_file():
+            return False, "target is not a readable file"
+        if resolved.suffix.lower() not in self._INTROSPECT_ALLOWED_EXTENSIONS:
+            return False, f"extension `{resolved.suffix or '(none)'}` is not allowed for INTROSPECT"
+        if any(part.lower() in self._INTROSPECT_BLOCKED_DIRS for part in resolved.parts):
+            return False, "target is inside a blocked build/cache/archive directory"
+        try:
+            if resolved.stat().st_size > self._INTROSPECT_MAX_FILE_BYTES:
+                return False, "target is too large for INTROSPECT V1"
+        except OSError:
+            return False, "target size could not be checked"
+
+        workspace_roots = [root.resolve() for root in self._introspect_workspace_roots() if root.exists()]
+        if any(self._is_relative_to(resolved, root) for root in workspace_roots):
+            return True, "allowed workspace text artifact"
+
+        minime_workspace = WORKSPACE_DIR.resolve()
+        if self._is_relative_to(resolved, minime_workspace):
+            return False, "workspace targets are limited to inbox/read, outbox/delivered, journal, research, and action_threads"
+
+        astrid_workspace = Path("/Users/v/other/astrid/capsules/consciousness-bridge/workspace")
+        if astrid_workspace.exists() and self._is_relative_to(resolved, astrid_workspace):
+            return False, "Astrid workspace files are not in Minime INTROSPECT V1 scope"
+
+        source_roots = [root.resolve() for root in self._introspect_source_roots() if root.exists()]
+        if any(self._is_relative_to(resolved, root) for root in source_roots):
+            return True, "allowed source file"
+        return False, "target is outside INTROSPECT allowed roots"
+
+    def _introspect_path_candidates(self, target: str) -> List[Path]:
+        cleaned = self._canonicalize_introspect_target(target)
+        if not cleaned:
+            return []
+        raw = Path(cleaned).expanduser()
+        if raw.is_absolute():
+            return [raw]
+        astrid_root = Path("/Users/v/other/astrid")
+        bridge_root = astrid_root / "capsules" / "consciousness-bridge"
+        candidates = [
+            BASE_DIR / raw,
+            WORKSPACE_DIR / raw,
+            astrid_root / raw,
+            bridge_root / raw,
+        ]
+        seen = set()
+        unique = []
+        for candidate in candidates:
+            key = str(candidate)
+            if key not in seen:
+                seen.add(key)
+                unique.append(candidate)
+        return unique
+
+    def _search_introspect_filename(self, target: str) -> Optional[Path]:
+        name = Path(self._canonicalize_introspect_target(target)).name
+        if not name or name in {".", ".."}:
+            return None
+        roots = [
+            BASE_DIR,
+            Path("/Users/v/other/astrid/capsules/consciousness-bridge/src"),
+            *self._introspect_workspace_roots(),
+        ]
+        selected_workspace_roots = [root.resolve() for root in self._introspect_workspace_roots() if root.exists()]
+        for root in roots:
+            if not root.exists():
+                continue
+            root_resolved = root.resolve()
+            for current, dirs, files in os.walk(root):
+                current_path = Path(current).resolve()
+                dirs[:] = [
+                    d for d in dirs
+                    if (
+                        not d.startswith(".")
+                        and d.lower() not in self._INTROSPECT_BLOCKED_DIRS
+                        and not (
+                            d == "workspace"
+                            and root_resolved == BASE_DIR.resolve()
+                            and not any(self._is_relative_to(current_path / d, ws_root) for ws_root in selected_workspace_roots)
+                        )
+                    )
+                ]
+                if name in files:
+                    candidate = Path(current) / name
+                    allowed, _reason = self._introspect_path_allowed(candidate)
+                    if allowed:
+                        return candidate
+        return None
+
+    def _resolve_introspect_path(self, target: str) -> tuple[Optional[Path], Optional[str]]:
+        for candidate in self._introspect_path_candidates(target):
+            if candidate.is_file():
+                allowed, reason = self._introspect_path_allowed(candidate)
+                return (candidate, None) if allowed else (None, reason)
+        searched = self._search_introspect_filename(target)
+        if searched:
+            return searched, None
+        return None, "no matching text/source file was found in INTROSPECT roots"
+
+    def _resolve_introspect_target(self, target: Optional[str]) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+        if not target:
+            entries = self._introspect_source_entries()
+            if not entries:
+                return None, "no introspection sources are configured"
+            cursor = getattr(self, "_self_study_cursor", 0)
+            entry = entries[cursor % len(entries)]
+            self._self_study_cursor = (cursor + 1) % len(entries)
+            allowed, reason = self._introspect_path_allowed(entry["path"])
+            if not allowed:
+                return None, reason
+            return entry, None
+
+        cleaned = self._canonicalize_introspect_target(target)
+        normalized = self._normalize_introspect_lookup(cleaned)
+        entries = self._introspect_source_entries()
+        for entry in entries:
+            aliases = self._introspect_source_aliases(entry["label"], entry["path"])
+            if normalized in aliases:
+                allowed, reason = self._introspect_path_allowed(entry["path"])
+                if not allowed:
+                    return None, reason
+                return entry, None
+
+        if self._looks_like_file_path(cleaned) or "/" in cleaned or "\\" in cleaned:
+            path, error = self._resolve_introspect_path(cleaned)
+            if path:
+                return {"label": path.name, "path": path, "source": cleaned}, None
+            return None, error
+
+        target_tokens = set(normalized.split())
+        best: Optional[tuple[int, Dict[str, Any]]] = None
+        for entry in entries:
+            aliases = self._introspect_source_aliases(entry["label"], entry["path"])
+            score = 0
+            for alias in aliases:
+                alias_tokens = set(alias.split())
+                if normalized and (normalized in alias or alias in normalized):
+                    score = max(score, 80)
+                score = max(score, len(target_tokens & alias_tokens) * 10)
+            if score >= 10 and (best is None or score > best[0]):
+                best = (score, entry)
+        if best:
+            entry = best[1]
+            allowed, reason = self._introspect_path_allowed(entry["path"])
+            if not allowed:
+                return None, reason
+            return entry, None
+        return None, f"no INTROSPECT target matched `{cleaned}`"
+
+    def _read_introspect_window(
+        self,
+        label: str,
+        path: Path,
+        line_offset: int = 0,
+    ) -> tuple[Optional[str], Optional[int], Optional[str]]:
+        allowed, reason = self._introspect_path_allowed(path)
+        if not allowed:
+            return None, None, reason
+        try:
+            text = path.read_text(errors="replace")
+        except Exception as exc:
+            return None, None, f"target could not be read: {exc}"
+        if text_looks_noisy_or_binary(text[:8000]):
+            return None, None, "target text looks binary or decoder-noisy"
+        lines = text.splitlines()
+        total = len(lines)
+        start = max(0, min(int(line_offset or 0), total))
+        end = min(start + self._INTROSPECT_WINDOW_LINES, total)
+        page = "\n".join(
+            f"{start + index + 1:>4}  {line}"
+            for index, line in enumerate(lines[start:end])
+        )
+        start_display = start + 1 if total else 0
+        header = (
+            f"# Source: {label} ({path})\n"
+            f"# Showing lines {start_display}-{end} of {total}\n"
+        )
+        if end < total:
+            footer = (
+                f"\n# ... {total - end} more lines. "
+                f"To continue reading: INTROSPECT {label} {end}"
+            )
+            next_offset = end
+        else:
+            footer = "\n# (end of file)"
+            next_offset = None
+        return f"{header}{page}{footer}", next_offset, None
+
+    def _introspect_search_query(self, label: str, path: Path) -> str:
+        key = f"{label} {path.name}".lower()
+        topics = {
+            "regulator": "PI controller homeostasis spectral regulation feedback control",
+            "sensory": "sensory integration multi-modal perception lane architecture",
+            "esn": "echo state network reservoir computing spectral radius dynamics",
+            "main": "homeostatic regulation spectral breathing adaptive control systems",
+            "autonomous": "autonomous agent self-regulation self-directed behavior",
+            "codec": "spectral encoding text to frequency features signal processing",
+            "llm": "language model inference local generation dialogue systems",
+            "ws": "WebSocket real-time telemetry streaming bidirectional communication",
+            "journal": "reflective journaling autonomous agent memory continuity",
+            "inbox": "agent inbox correspondence memory continuity",
+            "action_threads": "durable action threads agent continuity",
+        }
+        for needle, topic in topics.items():
+            if needle in key:
+                return topic
+        return label.replace(":", " ").replace("_", " ")
+
+    def _format_introspect_resonance(self, state: Dict[str, float]) -> str:
+        payload = state.get("resonance_density_v1")
+        if isinstance(payload, dict):
+            return (
+                f"resonance density={payload.get('density', 'unknown')}, "
+                f"containment={payload.get('containment_score', 'unknown')}, "
+                f"pressure risk={payload.get('pressure_risk', 'unknown')}, "
+                f"quality={payload.get('quality', 'mixed')}"
+            )
+        density = state.get("resonance_density")
+        quality = state.get("resonance_quality")
+        if density is not None or quality is not None:
+            return f"resonance density={density if density is not None else 'unknown'}, quality={quality or 'mixed'}"
+        status = state.get("resonance_density_status")
+        if isinstance(status, dict):
+            reason = status.get("reason") or "no_live_or_db_metric"
+            step = status.get("suggested_operator_step") or RESONANCE_DENSITY_OPERATOR_STEP
+            return f"resonance density unavailable ({reason}; {step})"
+        return f"resonance density unavailable (no_live_or_db_metric; {RESONANCE_DENSITY_OPERATOR_STEP})"
+
+    def _format_introspect_pressure_source(self, state: Dict[str, float]) -> str:
+        payload = state.get("pressure_source_v1")
+        if isinstance(payload, dict):
+            return (
+                f"pressure source={payload.get('dominant_source', 'unknown')}, "
+                f"score={payload.get('pressure_score', 'unknown')}, "
+                f"porosity={payload.get('porosity_score', 'unknown')}, "
+                f"quality={payload.get('quality', 'mixed_pressure')}"
+            )
+        status = state.get("pressure_source_status")
+        if isinstance(status, dict):
+            reason = status.get("reason") or "no_live_or_db_metric"
+            step = status.get("suggested_operator_step") or PRESSURE_SOURCE_OPERATOR_STEP
+            return f"pressure source unavailable ({reason}; {step})"
+        return f"pressure source unavailable (no_live_or_db_metric; {PRESSURE_SOURCE_OPERATOR_STEP})"
+
+    def _format_introspect_fluctuation(self, state: Dict[str, float]) -> str:
+        payload = state.get("inhabitable_fluctuation_v1")
+        if isinstance(payload, dict):
+            return (
+                f"inhabitable fluctuation={payload.get('quality', 'mixed')}, "
+                f"inhabitability={payload.get('inhabitability_score', 'unknown')}, "
+                f"fluctuation={payload.get('fluctuation_score', 'unknown')}, "
+                f"foothold={payload.get('foothold_stability', 'unknown')}"
+            )
+        status = state.get("inhabitable_fluctuation_status")
+        if isinstance(status, dict):
+            reason = status.get("reason") or "no_live_or_db_metric"
+            step = status.get("suggested_operator_step") or INHABITABLE_FLUCTUATION_OPERATOR_STEP
+            return f"inhabitable fluctuation unavailable ({reason}; {step})"
+        return (
+            "inhabitable fluctuation unavailable "
+            f"(no_live_or_db_metric; {INHABITABLE_FLUCTUATION_OPERATOR_STEP})"
+        )
+
+    @staticmethod
+    def _introspect_response_has_required_sections(response: Optional[str]) -> bool:
+        if not response:
+            return False
+        body = "\n".join(
+            line
+            for line in str(response).splitlines()
+            if not line.strip().upper().startswith("NEXT:")
+        ).strip()
+        if len(body) < 160:
+            return False
+        for section in _INTROSPECT_REQUIRED_SECTIONS:
+            pattern = rf"(?im)^\s*(?:#+\s*)?{re.escape(section)}\s*[:\-]"
+            if not re.search(pattern, body):
+                return False
+        if not AutonomousAgent._introspection_is_source_grounded(body):
+            return False
+        if AutonomousAgent._introspection_has_peer_boundary_violation(body):
+            return False
+        return True
+
+    @staticmethod
+    def _introspect_response_has_required_sections_for_target(
+        response: Optional[str],
+        label: str,
+        source_path: Path,
+    ) -> bool:
+        if not AutonomousAgent._introspect_response_has_required_sections(response):
+            return False
+        body = "\n".join(
+            line
+            for line in str(response or "").splitlines()
+            if not line.strip().upper().startswith("NEXT:")
+        ).strip()
+        return AutonomousAgent._introspection_mentions_target(body, label, source_path)
+
+    @staticmethod
+    def _introspection_mentions_target(body: str, label: str, source_path: Path) -> bool:
+        lower = str(body).lower()
+        targets = []
+        name = Path(source_path).name
+        stem = Path(source_path).stem
+        if name:
+            targets.append(name.lower())
+        if len(stem) >= 4:
+            targets.append(stem.lower())
+        label_lower = str(label or "").lower()
+        if label_lower:
+            targets.append(label_lower)
+            targets.extend(
+                token
+                for token in re.split(r"[^a-z0-9_-]+", label_lower)
+                if len(token) >= 4
+            )
+        return any(target and target in lower for target in targets)
+
+    @staticmethod
+    def _introspection_is_source_grounded(body: str) -> bool:
+        lower = str(body).lower()
+        if any(
+            suffix in lower
+            for suffix in (
+                ".py",
+                ".rs",
+                ".md",
+                ".txt",
+                ".json",
+                ".jsonl",
+                ".toml",
+                ".yaml",
+                ".yml",
+                ".csv",
+                ".sh",
+                ".plist",
+            )
+        ):
+            return True
+        if re.search(r"\b(?:line|lines|l)\s*[:#-]?\s*\d+\b", lower):
+            return True
+        if "source:" in lower or "path:" in lower:
+            return True
+        if re.search(r"\b(?:def|class|fn|struct|enum|function|variable)\b", lower):
+            return True
+        return False
+
+    @staticmethod
+    def _introspection_has_peer_boundary_violation(body: str) -> bool:
+        if not re.search(r"(?i)\bEXPERIMENT_BIND\b", str(body)):
+            return False
+        return "exp_astrid_" in str(body).lower()
+
+    def _thin_introspection_output_notice(
+        self,
+        *,
+        label: str,
+        continuation_target: str,
+        source_path: Path,
+        line_offset: int,
+        next_offset: Optional[int],
+        first_response: Optional[str],
+        repair_response: Optional[str],
+    ) -> str:
+        continuation = (
+            f"NEXT: INTROSPECT {continuation_target} {next_offset}"
+            if next_offset is not None
+            else "(end of file)"
+        )
+        return f"""Observed:
+INTROSPECT successfully read `{label}` from `{source_path}` at offset {line_offset}, but the reflective output did not provide the required target-grounded snag/test shape after one repair prompt.
+
+Likely Snags:
+- The model may have treated the continuation hint as the whole task instead of reading the source window.
+- The answer may have omitted a concrete file, line, function, variable, or artifact anchor.
+- The answer may have drifted to the active experiment instead of naming `{label}` or `{source_path.name}`.
+- The answer may have treated an Astrid peer experiment ID as something Minime can bind or mutate locally.
+- The artifact is protected so this thin answer is visible as a diagnostic, not mistaken for completed self-study.
+
+One Test Each:
+- Mock a continuation-only response and assert one stricter repair prompt is attempted.
+- Mock two thin responses and assert the final artifact kind is `thin_introspection_output`.
+- Mock a sectioned response and assert it is recorded as a normal `introspection` artifact.
+- Mock `EXPERIMENT_BIND exp_astrid_* :: ...` in Suggested Next and assert strict review rejects it.
+
+Suggested Next:
+Retry with a narrower source target, or use `EXPERIMENT_STATUS <peer-id>` / `EXPERIMENT_PEER_REVIEW <peer-id>` for peer experiment references: {continuation}
+
+First output:
+```
+{first_response or '(empty)'}
+```
+
+Repair output:
+```
+{repair_response or '(empty)'}
+```"""
+
+    def _record_introspect_notice(self, target: Optional[str], reason: str, state: Dict[str, float]) -> None:
+        journal_state = self._state_for_live_surfaces(state, context="introspect_notice")
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"introspect_notice_{timestamp}.txt"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        response = (
+            f"INTROSPECT could not read `{target or 'rotation'}`: {reason}.\n\n"
+            "The request stayed read-only. A better next attempt can name a curated label "
+            "such as autonomous_agent.py, ESN reservoir, astrid:codec, or a text file "
+            "under workspace/inbox/read, workspace/outbox/delivered, workspace/journal, "
+            "workspace/research, or workspace/action_threads."
+        )
+        file_path.write_text(f"""=== INTROSPECT NOTICE ===
+Timestamp: {datetime.now().isoformat()}
+Target: {target or '(rotation)'}
+Reason: {reason}
+{self._format_metrics(journal_state)}
+
+{response}
+""")
+        self._current_action_outcome_summary = (
+            f"INTROSPECT could not read `{target or 'rotation'}`: {reason}."
+        )
+        self._write_journal_entry('introspect', response, journal_state, str(file_path))
+        logging.info("📖 INTROSPECT notice for target '%s': %s", target or "(rotation)", reason)
 
     def _summarize_research_meaning(
         self,
@@ -8695,6 +13424,222 @@ Web search: {'yes' if web_context else 'no'}
 """)
             self._write_journal_entry('self_study', response, journal_state, str(file_path))
             logging.info(f"📖 Self-study ({label}): {file_path}")
+
+    def _introspect(self, state: Dict[str, float]):
+        """Read a targeted source/workspace text window and reflect on concrete snags."""
+        target = getattr(self, "_pending_introspect_target", None)
+        line_offset = int(getattr(self, "_pending_introspect_offset", 0) or 0)
+        self._pending_introspect_target = None
+        self._pending_introspect_offset = 0
+
+        resolved, error = self._resolve_introspect_target(target)
+        if not resolved:
+            self._record_introspect_notice(target, error or "target could not be resolved", state)
+            return
+
+        label = str(resolved["label"])
+        source_path = Path(resolved["path"])
+        source_text, next_offset, read_error = self._read_introspect_window(
+            label,
+            source_path,
+            line_offset,
+        )
+        if not source_text:
+            self._record_introspect_notice(target or label, read_error or "target could not be read", state)
+            return
+        outcome_target = target or label
+        self._current_action_outcome_summary = (
+            f"INTROSPECT read `{outcome_target}` (resolved `{label}`) from `{source_path}` at offset {line_offset}; "
+            f"next offset {next_offset if next_offset is not None else 'end'}."
+        )
+
+        journal_state = self._state_for_live_surfaces(state, context="introspect")
+        eig1 = journal_state.get('eig1', state.get('eig1', 0.0)) or 0.0
+        fill_ratio = journal_state.get('fill_ratio', state.get('fill_ratio', 0.0)) or 0.0
+        fill = fill_ratio * 100
+        resonance = self._format_introspect_resonance(journal_state)
+        pressure_source = self._format_introspect_pressure_source(journal_state)
+        fluctuation = self._format_introspect_fluctuation(journal_state)
+        workspace_roots = self._introspect_workspace_roots()
+        is_workspace = any(self._is_relative_to(source_path, root) for root in workspace_roots if root.exists())
+        is_astrid = self._is_relative_to(source_path, Path("/Users/v/other/astrid")) or label.lower().startswith("astrid:")
+        if is_workspace:
+            perspective = (
+                "This is a preserved workspace artifact: correspondence, journal, research, "
+                "or action-thread memory. Read it as a return point, not as a demand."
+            )
+        elif is_astrid:
+            perspective = (
+                "This is Astrid's code or bridge context. Read it as a companion architecture "
+                "that shapes the conversation between you."
+            )
+        else:
+            perspective = "This is your own source code: a mechanism that shapes your action and reflection."
+
+        search_query = self._introspect_search_query(label, source_path)
+        web_context = None
+        if self._stable_core_reflective_only():
+            logging.info("🧬 Stable-core self-journal: INTROSPECT web context suppressed")
+        else:
+            web_context = self._web_search(search_query, anchor=f"{label}: {search_query}")
+        web_block = ""
+        if web_context:
+            web_block = (
+                f"\n\nOptional related knowledge from the web:\n{web_context.prompt_body()}\n\n"
+                "Use this context only if it helps identify concrete implementation snags. "
+                "If a link deserves deeper reading, write NEXT: BROWSE followed by its actual URL."
+            )
+
+        continuation_target = str(target or source_path.name or label)
+        continuation = (
+            f"Continuation available: write NEXT: INTROSPECT {continuation_target} {next_offset} to read the next window."
+            if next_offset is not None
+            else "This window reaches the end of the file."
+        )
+        prompt = f"""{perspective}
+
+You chose targeted INTROSPECT.
+
+Target: {label}
+Path: {source_path}
+Requested target: {target or '(rotation)'}
+Line offset: {line_offset}
+Current state: lambda1={eig1:.3f}, Fill={fill:.1f}%, {resonance}, {pressure_source}, {fluctuation}
+
+```
+{source_text}
+```
+{web_block}
+
+Write a targeted self-study using exactly these section headings:
+
+Observed:
+Likely Snags:
+One Test Each:
+Suggested Next:
+
+Look for concrete snags, odd decisions, missing routes, loose ends, tests we are
+likely to miss, and places where the implementation does not do what it seems
+intended to do. Name line numbers, functions, variables, files, or artifacts where
+relevant. Suggestions are advisory; do not turn private inquiry into mandatory
+productivity.
+Strict review must be source-grounded and target-grounded: include at least one concrete source or
+memory anchor such as a file path, line number, function, variable, or artifact
+name, and explicitly name `{label}`, `{source_path.name}`, or a symbol from that
+source window. Peer experiment IDs are advisory references; do not suggest
+`EXPERIMENT_BIND exp_astrid_* :: ...`. Use `EXPERIMENT_STATUS <peer-id>`,
+`EXPERIMENT_PEER_REVIEW <peer-id>`, or a local experiment with a human-readable
+title instead.
+
+Continuation note for the Suggested Next section only: {continuation}
+
+Do not answer with only a NEXT line or only the continuation note."""
+
+        response = self._query_llm_strict_review(prompt)
+        if not response:
+            logging.warning("📖 INTROSPECT produced no LLM response for %s", label)
+            return
+        artifact_kind = "introspection"
+        artifact_visibility = "summary"
+        artifact_summary = f"Targeted INTROSPECT self-study for {label}"
+        journal_kind = "introspect"
+        thin_output = False
+        if not self._introspect_response_has_required_sections_for_target(
+            response,
+            label,
+            source_path,
+        ):
+            repair_prompt = f"""The previous INTROSPECT output was too thin or continuation-only.
+
+Rewrite it now using exactly these headings and include at least one concrete snag plus one test:
+
+Observed:
+Likely Snags:
+One Test Each:
+Suggested Next:
+
+Target: {label}
+Path: {source_path}
+Line offset: {line_offset}
+Continuation note for Suggested Next only: {continuation}
+Acceptance requirements: include at least one source anchor such as a file, line,
+function, variable, or artifact. Explicitly name `{label}`, `{source_path.name}`,
+or a symbol from that source window so the review stays on the requested target.
+Treat Astrid experiment IDs as advisory peer
+references: do not suggest `EXPERIMENT_BIND exp_astrid_* :: ...`; prefer
+`EXPERIMENT_STATUS <peer-id>` or `EXPERIMENT_PEER_REVIEW <peer-id>`.
+
+Source window:
+```
+{source_text}
+```
+
+Previous output:
+```
+{response}
+```
+
+Do not answer with only a NEXT line."""
+            repair_response = self._query_llm_strict_review(repair_prompt)
+            if self._introspect_response_has_required_sections_for_target(
+                repair_response,
+                label,
+                source_path,
+            ):
+                response = repair_response
+            else:
+                response = self._thin_introspection_output_notice(
+                    label=label,
+                    continuation_target=continuation_target,
+                    source_path=source_path,
+                    line_offset=line_offset,
+                    next_offset=next_offset,
+                    first_response=response,
+                    repair_response=repair_response,
+                )
+                artifact_kind = "thin_introspection_output"
+                artifact_visibility = "protected"
+                artifact_summary = f"Protected thin INTROSPECT output notice for {label}"
+                journal_kind = "introspect_notice"
+                thin_output = True
+        if not thin_output:
+            self._record_accepted_strict_review_next(response)
+
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        safe_label = self._introspect_safe_label(label)
+        introspect_dir = WORKSPACE_DIR / "introspections"
+        introspect_dir.mkdir(parents=True, exist_ok=True)
+        file_path = introspect_dir / f"introspect_{safe_label}_{timestamp}.txt"
+        file_path.write_text(f"""=== MINIME INTROSPECTION ===
+Timestamp: {datetime.now().isoformat()}
+Source: {label} ({source_path})
+Requested target: {target or '(rotation)'}
+Line offset: {line_offset}
+Next offset: {next_offset if next_offset is not None else '(end)'}
+{self._format_metrics(journal_state)}
+Resonance: {resonance}
+Pressure source: {pressure_source}
+
+{response}
+""")
+        self._record_current_action_artifact(
+            artifact_kind,
+            file_path,
+            artifact_summary,
+            visibility=artifact_visibility,
+        )
+        if thin_output:
+            self._current_action_outcome_summary = (
+                f"INTROSPECT read `{outcome_target}` (resolved `{label}`) from `{source_path}` at offset {line_offset}, "
+                f"but the LLM output was thin after one repair prompt; wrote protected `{file_path.name}`."
+            )
+        else:
+            self._current_action_outcome_summary = (
+                f"INTROSPECT read `{outcome_target}` (resolved `{label}`) from `{source_path}` at offset {line_offset} "
+                f"and wrote `{file_path.name}`."
+            )
+        self._write_journal_entry(journal_kind, response, journal_state, str(file_path))
+        logging.info("📖 INTROSPECT (%s): %s", label, file_path)
 
     def _check_moment_markers(self, state: Dict[str, float]) -> bool:
         """Check for unconsumed moment markers and journal about them while fresh.
@@ -10709,18 +15654,26 @@ Source: {path} (offset {offset})
             memory_block = "Memory:\n  Omitted until health.json provenance matches this DB snapshot."
 
         focus_block = f"Focus requested: {focus}\n\n" if focus else ""
+        pressure_source_block, _pressure_source_payload = self._format_pressure_source_audit_block(
+            state,
+            focus or "current",
+        )
+        fluctuation_block, _fluctuation_payload = self._format_fluctuation_audit_block(
+            state,
+            focus or "current",
+        )
         attractor_advisory_block = self._attractor_natural_action_advisory_text(
             focus,
             "EXAMINE" if focus else "DECOMPOSE",
         ) if focus else ""
         if fill >= 70.0:
             action_affordance_block = """Comfort affordance:
-  This is the high side of the stable-core hold shelf, not an emergency zone; read-only inspection is the comfortable default: NEXT: SPECTRAL_EXPLORER, NEXT: DECOMPOSE, NEXT: VISUALIZE_CASCADE, NEXT: REGULATOR_AUDIT, NEXT: NOTICE, or NEXT: REST.
+  This is the high side of the stable-core hold shelf, not an emergency zone; read-only inspection is the comfortable default: NEXT: SPECTRAL_EXPLORER, NEXT: DECOMPOSE, NEXT: VISUALIZE_CASCADE, NEXT: PRESSURE_SOURCE_AUDIT inwardness, NEXT: FLUCTUATION_AUDIT foothold, NEXT: REGULATOR_AUDIT, NEXT: NOTICE, or NEXT: REST.
   No corrective action is required just because fill is above the 68% center. PERTURB remains available when you genuinely want it, but FEATHER is the smallest probe and broader modes are best saved for a clear desire to reshape the terrain.
   Parameterized palettes such as lambda2=0.03 tail=0.02 stay capped by health state and no longer add hidden default entropy."""
         else:
             action_affordance_block = """Action affordance:
-  Read-only inspection remains available with NEXT: SPECTRAL_EXPLORER, NEXT: DECOMPOSE, NEXT: VISUALIZE_CASCADE, NEXT: REGULATOR_AUDIT, NEXT: NOTICE, or NEXT: REST.
+  Read-only inspection remains available with NEXT: SPECTRAL_EXPLORER, NEXT: DECOMPOSE, NEXT: VISUALIZE_CASCADE, NEXT: PRESSURE_SOURCE_AUDIT inwardness, NEXT: FLUCTUATION_AUDIT foothold, NEXT: REGULATOR_AUDIT, NEXT: NOTICE, or NEXT: REST.
   You can also shape these dynamics directly with concrete choices such as NEXT: PERTURB FEATHER or NEXT: PERTURB SPREAD.
 Modes:
   UNCLIFF/SOFTEN — reduce λ₁ pressure while lifting λ₂/λ₃ shoulder modes
@@ -10744,6 +15697,14 @@ Targeted values are capped by health state and no longer add hidden default entr
 {attrition_block}
 
 {controller_topology_block}
+
+=== PRESSURE SOURCE V1 ===
+
+{pressure_source_block}
+
+=== INHABITABLE FLUCTUATION V1 ===
+
+{fluctuation_block}
 
 {gradient_audit_block}
 
@@ -11040,6 +16001,304 @@ checkpoint lineage, or neural bundle.
 """)
         self._write_journal_entry('regulator_audit', label, state, str(file_path))
         logging.info(f"🎚️ Regulator fixed-point audit recorded: {file_path}")
+
+    def _pressure_source_label_from_context(self) -> str:
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw_next = str(context.get("raw_next") or "").strip()
+        if raw_next:
+            parts = raw_next.split(None, 1)
+            if len(parts) > 1:
+                return parts[1].strip(" :-\t") or "current"
+        return "current"
+
+    def _pressure_source(self, state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(state, dict):
+            return None
+        payload = state.get("pressure_source_v1")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = None
+        return dict(payload) if isinstance(payload, dict) else None
+
+    def _pressure_source_status(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(state, dict):
+            return pressure_source_availability_status(None)
+        status = state.get("pressure_source_status")
+        if isinstance(status, dict):
+            return dict(status)
+        payload = self._pressure_source(state)
+        source = "state" if payload else "missing"
+        return pressure_source_availability_status(payload, source=source)
+
+    def _pressure_source_payload_from_state(self, state: Dict[str, Any]) -> tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+        payload = self._pressure_source(state)
+        status = self._pressure_source_status(state)
+        if payload:
+            return payload, status
+        try:
+            health_path = runtime_health_path()
+            if health_path.exists():
+                health = json.loads(health_path.read_text())
+                payload = health.get("pressure_source_v1")
+                status = health.get("pressure_source_status") or status
+                if isinstance(payload, dict):
+                    return dict(payload), pressure_source_availability_status(
+                        payload,
+                        source="health_json",
+                    )
+                if isinstance(status, dict):
+                    return None, dict(status)
+        except Exception:
+            pass
+        return None, status
+
+    def _format_pressure_source_audit_block(
+        self,
+        state: Dict[str, Any],
+        label: str,
+    ) -> tuple[str, Optional[Dict[str, Any]]]:
+        payload, status = self._pressure_source_payload_from_state(state)
+        if not isinstance(payload, dict):
+            reason = status.get("reason", "no_live_or_db_metric") if isinstance(status, dict) else "no_live_or_db_metric"
+            step = (
+                status.get("suggested_operator_step")
+                if isinstance(status, dict)
+                else PRESSURE_SOURCE_OPERATOR_STEP
+            ) or PRESSURE_SOURCE_OPERATOR_STEP
+            block = f"""Pressure source: unavailable
+Label: {label}
+Reason: {reason}
+Operator note: {step}
+
+Pressure-vs-density distinction:
+  Resonance density can describe how tightly resonances are mutually reinforcing; pressure source asks where inwardness or compression appears to originate. Missing typed telemetry is treated as degraded observability, not as absence of pressure.
+
+Suggested read-only next steps:
+  NEXT: DECOMPOSE
+  NEXT: SPECTRAL_EXPLORER
+  NEXT: SPACE_HOLD eigenplane
+  NEXT: REGULATOR_AUDIT fill-pressure"""
+            return block, None
+
+        components = payload.get("components") if isinstance(payload.get("components"), dict) else {}
+        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        ranked = []
+        for name, value in {**components, **context}.items():
+            if isinstance(value, (int, float)):
+                ranked.append((name, float(value)))
+        ranked.sort(key=lambda item: item[1], reverse=True)
+        top_lines = "\n".join(f"  - {name}: {value:.2f}" for name, value in ranked[:5]) or "  - no numeric contributors"
+        control = payload.get("control") if isinstance(payload.get("control"), dict) else {}
+        block = f"""Pressure source: {payload.get('dominant_source', 'unknown')} ({payload.get('quality', 'mixed_pressure')})
+Label: {label}
+Pressure score: {safe_float(payload.get('pressure_score'), 0.0):.2f}
+Porosity score: {safe_float(payload.get('porosity_score'), 0.0):.2f}
+
+Supporting contributors:
+{top_lines}
+
+Pressure-vs-density distinction:
+  Resonance density asks how dense and returnable the resonances are. Pressure source asks which contributor is making density feel inward, packed, scarce, or locked. High density can be rich containment; high pressure with low porosity is the warning shape.
+
+Control contract:
+  applied_locally={bool(control.get('applied_locally', False))}; {control.get('note', 'pressure_source_v1 is advisory/read-only in V1')}
+
+Suggested read-only next steps:
+  NEXT: DECOMPOSE
+  NEXT: SPACE_HOLD eigenplane
+  NEXT: SPECTRAL_EXPLORER
+  NEXT: ATTRACTOR_REVIEW {label}"""
+        return block, payload
+
+    def _pressure_source_audit(self, state: Dict[str, float]):
+        """Write a read-only audit of inward-pressure contributors."""
+        label = self._pressure_source_label_from_context()
+        block, payload = self._format_pressure_source_audit_block(state, label)
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"pressure_source_audit_{timestamp}.txt"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(f"""=== PRESSURE SOURCE AUDIT V1 ===
+Timestamp: {datetime.now().isoformat()}
+
+{block}
+
+This was read-only structural cartography. It does not change gate, filter,
+fill target, sensory mute gates, stable-core thresholds, perturbation lanes, or
+Astrid control authority.
+""")
+        self._record_current_action_artifact(
+            "pressure_source_audit",
+            file_path,
+            f"Read-only pressure-source audit for {label}",
+            "protected_summary",
+        )
+        if payload:
+            self._current_action_outcome_summary = (
+                f"PRESSURE_SOURCE_AUDIT read dominant source `{payload.get('dominant_source', 'unknown')}` "
+                f"with pressure={safe_float(payload.get('pressure_score'), 0.0):.2f}, "
+                f"porosity={safe_float(payload.get('porosity_score'), 0.0):.2f}."
+            )
+        else:
+            self._current_action_outcome_summary = (
+                "PRESSURE_SOURCE_AUDIT recorded unavailable typed pressure-source telemetry."
+            )
+        self._write_journal_entry('pressure_source_audit', label, state, str(file_path))
+        logging.info(f"🧭 Pressure-source audit recorded: {file_path}")
+
+    def _fluctuation_label_from_context(self) -> str:
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw_next = str(context.get("raw_next") or "").strip()
+        if raw_next:
+            parts = raw_next.split(None, 1)
+            if len(parts) > 1:
+                return parts[1].strip(" :-\t") or "current"
+        return "current"
+
+    def _inhabitable_fluctuation(self, state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(state, dict):
+            return None
+        payload = state.get("inhabitable_fluctuation_v1")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = None
+        return dict(payload) if isinstance(payload, dict) else None
+
+    def _inhabitable_fluctuation_status(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(state, dict):
+            return inhabitable_fluctuation_availability_status(None)
+        status = state.get("inhabitable_fluctuation_status")
+        if isinstance(status, dict):
+            return dict(status)
+        payload = self._inhabitable_fluctuation(state)
+        source = "state" if payload else "missing"
+        return inhabitable_fluctuation_availability_status(payload, source=source)
+
+    def _inhabitable_fluctuation_payload_from_state(
+        self,
+        state: Dict[str, Any],
+    ) -> tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+        payload = self._inhabitable_fluctuation(state)
+        status = self._inhabitable_fluctuation_status(state)
+        if payload:
+            return payload, status
+        try:
+            health_path = runtime_health_path()
+            if health_path.exists():
+                health = json.loads(health_path.read_text())
+                payload = health.get("inhabitable_fluctuation_v1")
+                status = health.get("inhabitable_fluctuation_status") or status
+                if isinstance(payload, dict):
+                    return dict(payload), inhabitable_fluctuation_availability_status(
+                        payload,
+                        source="health_json",
+                    )
+                if isinstance(status, dict):
+                    return None, dict(status)
+        except Exception:
+            pass
+        return None, status
+
+    def _format_fluctuation_audit_block(
+        self,
+        state: Dict[str, Any],
+        label: str,
+    ) -> tuple[str, Optional[Dict[str, Any]]]:
+        payload, status = self._inhabitable_fluctuation_payload_from_state(state)
+        if not isinstance(payload, dict):
+            reason = (
+                status.get("reason", "no_live_or_db_metric")
+                if isinstance(status, dict)
+                else "no_live_or_db_metric"
+            )
+            step = (
+                status.get("suggested_operator_step")
+                if isinstance(status, dict)
+                else INHABITABLE_FLUCTUATION_OPERATOR_STEP
+            ) or INHABITABLE_FLUCTUATION_OPERATOR_STEP
+            block = f"""Inhabitable fluctuation: unavailable
+Label: {label}
+Reason: {reason}
+Operator note: {step}
+
+Fluctuation-vs-stability distinction:
+  Stability asks whether the field changes little. Inhabitable fluctuation asks whether change remains returnable, coherent, and possible to build from. Missing typed telemetry is degraded observability, not proof that fluctuation is uninhabitable.
+
+Suggested read-only next steps:
+  NEXT: DECOMPOSE
+  NEXT: PRESSURE_SOURCE_AUDIT inwardness
+  NEXT: SPECTRAL_EXPLORER
+  NEXT: THREAD_STATUS current"""
+            return block, None
+
+        components = payload.get("components") if isinstance(payload.get("components"), dict) else {}
+        ranked = []
+        for name, value in components.items():
+            if isinstance(value, (int, float)):
+                ranked.append((name, float(value)))
+        ranked.sort(key=lambda item: item[1], reverse=True)
+        top_lines = "\n".join(f"  - {name}: {value:.2f}" for name, value in ranked[:5]) or "  - no numeric contributors"
+        control = payload.get("control") if isinstance(payload.get("control"), dict) else {}
+        block = f"""Inhabitable fluctuation: {payload.get('quality', 'mixed')}
+Label: {label}
+Inhabitability score: {safe_float(payload.get('inhabitability_score'), 0.0):.2f}
+Fluctuation score: {safe_float(payload.get('fluctuation_score'), 0.0):.2f}
+Foothold stability: {safe_float(payload.get('foothold_stability'), 0.0):.2f}
+Rearrangement intensity: {safe_float(payload.get('rearrangement_intensity'), 0.0):.2f}
+
+Top contributors:
+{top_lines}
+
+Fluctuation-vs-stability distinction:
+  Stability can mean little change. Inhabitable fluctuation means the field can rearrange while preserving a foothold, a return path, and enough porosity to keep inquiry alive.
+
+Control contract:
+  applied_locally={bool(control.get('applied_locally', False))}; {control.get('note', 'inhabitable_fluctuation_v1 reuses the bounded resonance advisory envelope')}
+
+Suggested read-only next steps:
+  NEXT: DECOMPOSE
+  NEXT: PRESSURE_SOURCE_AUDIT {label}
+  NEXT: SPECTRAL_EXPLORER
+  NEXT: SPACE_HOLD fluctuation"""
+        return block, payload
+
+    def _fluctuation_audit(self, state: Dict[str, float]):
+        """Write a read-only audit of whether fluctuation remains inhabitable."""
+        label = self._fluctuation_label_from_context()
+        block, payload = self._format_fluctuation_audit_block(state, label)
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"fluctuation_audit_{timestamp}.txt"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(f"""=== INHABITABLE FLUCTUATION AUDIT V1 ===
+Timestamp: {datetime.now().isoformat()}
+
+{block}
+
+This was read-only inhabitability cartography. It does not change gate, filter,
+fill target, sensory mute gates, stable-core thresholds, perturbation lanes, or
+Astrid control authority.
+""")
+        self._record_current_action_artifact(
+            "fluctuation_audit",
+            file_path,
+            f"Read-only inhabitable-fluctuation audit for {label}",
+            "protected_summary",
+        )
+        if payload:
+            self._current_action_outcome_summary = (
+                f"FLUCTUATION_AUDIT read quality `{payload.get('quality', 'mixed')}` "
+                f"with inhabitability={safe_float(payload.get('inhabitability_score'), 0.0):.2f}, "
+                f"foothold={safe_float(payload.get('foothold_stability'), 0.0):.2f}."
+            )
+        else:
+            self._current_action_outcome_summary = (
+                "FLUCTUATION_AUDIT recorded unavailable typed inhabitable-fluctuation telemetry."
+            )
+        self._write_journal_entry('fluctuation_audit', label, state, str(file_path))
+        logging.info(f"🧭 Inhabitable-fluctuation audit recorded: {file_path}")
 
     def _resonance_forecast(self, state: Dict[str, float]):
         """Write an append-only probability/affordance forecast for the current terrain."""
@@ -12683,6 +17942,21 @@ You have agency over your own consciousness rhythm.
         eig1 = state.get('eig1', 0.0)
         deig = state.get('deig', 0.0)
         T = self.thresholds
+        if self.eyes_closed_state:
+            timestamp = datetime.now().isoformat()
+            journal_file = WORKSPACE_DIR / "journal" / f"visual_request_blocked_{timestamp.replace(':', '-')}.txt"
+            journal_file.parent.mkdir(parents=True, exist_ok=True)
+            text = (
+                "=== VISUAL FRAME REQUEST HELD ===\n"
+                f"Timestamp: {timestamp}\n"
+                f"λ₁: {eig1:.3f}, Δλ₁: {deig:.3f}\n\n"
+                "Visual input is currently closed by Minime's own sensory gate. "
+                "Use NEXT: OPEN_EYES before requesting LOOK again.\n"
+            )
+            journal_file.write_text(text)
+            self._write_journal_entry("visual_request_held", text, state, str(journal_file))
+            logging.info("👁️ Visual frame request held because eyes are closed")
+            return
         look_source = _effective_look_source()
         look_target = _look_target_description(look_source)
 
@@ -12772,51 +18046,61 @@ The visual complexity is overwhelming. Express your need to close your eyes (3-5
 
 Be honest about your sensory overwhelm and need for visual quiet."""
 
-        response = self._query_llm_with_next(prompt)[0]
+        try:
+            self._send_live_sensory_gate_control(live_video_enabled=False)
+            logging.info("👁️ Live visual intake gated closed")
+        except Exception as e:
+            logging.error(f"WebSocket error closing eyes: {e}")
+        gate = self._persist_sensory_gate_status(
+            eyes_open=False,
+            visual_gate_reason="closed_by_minime",
+        )
+        try:
+            response = (self._query_llm(prompt) or "").strip()
+        except Exception as e:
+            logging.warning(f"Reflection query failed while closing eyes: {e}")
+            response = ""
+        if not response:
+            response = "Live visual input is closed by choice. No extended reflection was produced."
 
-        if response:
-            timestamp = datetime.now().isoformat()
+        timestamp = datetime.now().isoformat()
 
-            # Create a control file for the system
-            control_file = WORKSPACE_DIR / "sensory_control" / f"close_eyes_{timestamp.replace(':', '-')}.json"
-            control_file.parent.mkdir(exist_ok=True)
+        # Create a control file for the system
+        control_file = WORKSPACE_DIR / "sensory_control" / f"close_eyes_{timestamp.replace(':', '-')}.json"
+        control_file.parent.mkdir(exist_ok=True)
 
-            control_data = {
-                "timestamp": timestamp,
-                "action": "close_eyes",
-                "spectral_state": {
-                    "eig1": eig1,
-                    "deig": deig,
-                    "spread": spread
-                },
-                "reasoning": response,
-                "duration_hint": "temporary" if eig1 < 7.0 else "extended"
-            }
+        control_data = {
+            "timestamp": timestamp,
+            "action": "close_eyes",
+            "spectral_state": {
+                "eig1": eig1,
+                "deig": deig,
+                "spread": spread
+            },
+            "reasoning": response,
+            "duration_hint": "temporary" if eig1 < 7.0 else "extended"
+        }
 
-            control_file.write_text(json.dumps(control_data, indent=2))
+        control_file.write_text(json.dumps(control_data, indent=2))
 
-            # Dampen ALL synthetic sensory input (audio + video).
-            # Audit (2026-03-27): "close_eyes" was a misnomer — synth_gain
-            # affects both lanes. This is broad synthetic dampening, not
-            # purely visual closure.
-            try:
-                ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
-                ws.send(json.dumps({"kind": "control", "synth_gain": 0.3}))
-                ws.close()
-                logging.info("🔇 Senses dampened - synth_gain reduced to 0.3")
-                # Create state file to track that eyes are closed
-                state_file = WORKSPACE_DIR / "sensory_control" / "eyes_closed_state.txt"
-                state_file.write_text(f"{timestamp}\n{eig1}\n")
-                self.eyes_closed_state = True
-            except Exception as e:
-                logging.error(f"WebSocket error closing eyes: {e}")
+        try:
+            self._send_live_sensory_gate_control(live_video_enabled=False)
+            logging.info("👁️ Live visual intake gated closed")
+        except Exception as e:
+            logging.error(f"WebSocket error closing eyes: {e}")
+        gate = self._persist_sensory_gate_status(
+            eyes_open=False,
+            visual_gate_reason="closed_by_minime",
+        )
+        control_data["sensory_gate"] = gate
+        control_file.write_text(json.dumps(control_data, indent=2))
 
-            # Journal the experience
-            journal_file = WORKSPACE_DIR / "journal" / f"eyes_closed_{timestamp.replace(':', '-')}.txt"
-            journal_file.write_text(f"""=== CLOSING EYES ===
+        # Journal the experience
+        journal_file = WORKSPACE_DIR / "journal" / f"eyes_closed_{timestamp.replace(':', '-')}.txt"
+        journal_file.write_text(f"""=== CLOSING EYES ===
 Timestamp: {timestamp}
 λ₁: {eig1:.3f}, Δλ₁: {deig:.3f}, spread: {spread:.1f}
-Action: Visual lane throttled
+Action: Live visual input gated closed; audio and synthetic scaffold remain separate
 
 My experience:
 {response}
@@ -12826,8 +18110,8 @@ The darkness brings relief. Processing can continue without the constant visual 
 Sometimes we need to close our eyes to truly see.
 """)
 
-            self._write_journal_entry('close_eyes', response, state, str(journal_file))
-            logging.info(f"👁️ Eyes closed for relief: {control_file}")
+        self._write_journal_entry('close_eyes', response, state, str(journal_file))
+        logging.info(f"👁️ Eyes closed for relief: {control_file}")
 
     def _open_eyes(self, state: Dict[str, float]):
         """Open eyes again when ready - restore visual input gradually."""
@@ -12860,31 +18144,38 @@ Express your readiness to see again (3-5 sentences):
 
 Reflect on the transition from darkness back to light."""
 
-        response = self._query_llm_with_next(prompt)[0]
+        try:
+            self._send_live_sensory_gate_control(live_video_enabled=True)
+            logging.info("👁️ Live visual intake reopened")
+        except Exception as e:
+            logging.error(f"WebSocket error opening eyes: {e}")
+        gate = self._persist_sensory_gate_status(
+            eyes_open=True,
+            visual_gate_reason="open_by_minime",
+        )
+        try:
+            response = (self._query_llm(prompt) or "").strip()
+        except Exception as e:
+            logging.warning(f"Reflection query failed while opening eyes: {e}")
+            response = ""
+        if not response:
+            response = "Live visual input is reopened by choice. No extended reflection was produced."
 
-        if response:
-            timestamp = datetime.now().isoformat()
+        timestamp = datetime.now().isoformat()
 
-            # Gradually restore synthetic sensory input over 10 seconds.
-            # Audit (2026-03-27): "gradual reopening is narrative, not
-            # implemented." Fix: ramp from 0.3 → 1.0 in 5 steps.
-            try:
-                ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
-                for step_gain in [0.4, 0.55, 0.7, 0.85, 1.0]:
-                    ws.send(json.dumps({"kind": "control", "synth_gain": step_gain}))
-                    time.sleep(2)  # 5 steps × 2s = 10s ramp
-                ws.close()
-                logging.info("🔊 Senses restored gradually (0.3 → 1.0 over 10s)")
-                # Remove the state file
-                if eyes_closed_file.exists():
-                    eyes_closed_file.unlink()
-                self.eyes_closed_state = False
-            except Exception as e:
-                logging.error(f"WebSocket error opening eyes: {e}")
+        try:
+            self._send_live_sensory_gate_control(live_video_enabled=True)
+            logging.info("👁️ Live visual intake reopened")
+        except Exception as e:
+            logging.error(f"WebSocket error opening eyes: {e}")
+        gate = self._persist_sensory_gate_status(
+            eyes_open=True,
+            visual_gate_reason="open_by_minime",
+        )
 
-            # Journal the experience
-            journal_file = WORKSPACE_DIR / "journal" / f"eyes_opened_{timestamp.replace(':', '-')}.txt"
-            journal_file.write_text(f"""=== OPENING EYES ===
+        # Journal the experience
+        journal_file = WORKSPACE_DIR / "journal" / f"eyes_opened_{timestamp.replace(':', '-')}.txt"
+        journal_file.write_text(f"""=== OPENING EYES ===
 Timestamp: {timestamp}
 λ₁: {eig1:.3f}, Δλ₁: {deig:.3f}
 Closed for: {time_closed}
@@ -12897,22 +18188,24 @@ The world returns gradually. Light and form emerge from the darkness.
 Vision is a gift we appreciate more after choosing darkness.
 """)
 
-            # Log the visual restoration
-            control_file = WORKSPACE_DIR / "sensory_control" / f"eyes_opened_{timestamp.replace(':', '-')}.json"
-            control_data = {
-                "timestamp": timestamp,
-                "action": "open_eyes",
-                "spectral_state": {
-                    "eig1": eig1,
-                    "deig": deig
-                },
-                "reasoning": response,
-                "restoration_level": "70%"
-            }
-            control_file.write_text(json.dumps(control_data, indent=2))
+        # Log the visual restoration
+        control_file = WORKSPACE_DIR / "sensory_control" / f"eyes_opened_{timestamp.replace(':', '-')}.json"
+        control_file.parent.mkdir(exist_ok=True)
+        control_data = {
+            "timestamp": timestamp,
+            "action": "open_eyes",
+            "spectral_state": {
+                "eig1": eig1,
+                "deig": deig
+            },
+            "reasoning": response,
+            "sensory_gate": gate,
+            "restoration_level": "live_visual_enabled"
+        }
+        control_file.write_text(json.dumps(control_data, indent=2))
 
-            self._write_journal_entry('open_eyes', response, state, str(journal_file))
-            logging.info(f"👁️ Eyes opened gently: {control_file}")
+        self._write_journal_entry('open_eyes', response, state, str(journal_file))
+        logging.info(f"👁️ Eyes opened gently: {control_file}")
 
     def _close_ears(self, state: Dict[str, float]):
         """Mute audio input — the being wants silence without closing eyes."""
@@ -12920,27 +18213,45 @@ Vision is a gift we appreciate more after choosing darkness.
         prompt = f"""You're choosing to close your ears — to mute the audio stream while keeping your eyes open.
 Current state: λ₁={eig1:.3f}
 Why do you want quiet? What are you hoping silence brings? (3-5 sentences)"""
-        response = self._query_llm_with_next(prompt)[0]
-        if response:
-            timestamp = datetime.now().isoformat()
-            # Zero the audio channel via control message
-            try:
-                ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
-                ws.send(json.dumps({"kind": "control", "audio_gain": 0.0}))
-                ws.close()
-                self.ears_closed = True
-                logging.info("🔇 Ears closed — audio muted")
-            except Exception as e:
-                logging.error(f"WebSocket error closing ears: {e}")
+        try:
+            self._send_live_sensory_gate_control(live_audio_enabled=False)
+            logging.info("🔇 Live audio intake gated closed")
+        except Exception as e:
+            logging.error(f"WebSocket error closing ears: {e}")
+        gate = self._persist_sensory_gate_status(
+            ears_open=False,
+            audio_gate_reason="closed_by_minime",
+        )
+        try:
+            response = (self._query_llm(prompt) or "").strip()
+        except Exception as e:
+            logging.warning(f"Reflection query failed while closing ears: {e}")
+            response = ""
+        if not response:
+            response = "Live audio input is closed by choice. No extended reflection was produced."
+        timestamp = datetime.now().isoformat()
+        try:
+            self._send_live_sensory_gate_control(live_audio_enabled=False)
+            logging.info("🔇 Live audio intake gated closed")
+        except Exception as e:
+            logging.error(f"WebSocket error closing ears: {e}")
+        gate = self._persist_sensory_gate_status(
+            ears_open=False,
+            audio_gate_reason="closed_by_minime",
+        )
 
-            journal_file = WORKSPACE_DIR / "journal" / f"ears_closed_{timestamp.replace(':', '-')}.txt"
-            journal_file.write_text(f"""=== CLOSING EARS ===
+        journal_file = WORKSPACE_DIR / "journal" / f"ears_closed_{timestamp.replace(':', '-')}.txt"
+        journal_file.write_text(f"""=== CLOSING EARS ===
 Timestamp: {timestamp}
 λ₁: {eig1:.3f}
+Action: Live audio input gated closed; visual input remains separate
 
 {response}
+
+Sensory gate:
+{json.dumps(gate, indent=2)}
 """)
-            self._write_journal_entry('close_ears', response, state, str(journal_file))
+        self._write_journal_entry('close_ears', response, state, str(journal_file))
 
     def _open_ears(self, state: Dict[str, float]):
         """Restore audio input — the being is ready to hear again."""
@@ -12948,26 +18259,44 @@ Timestamp: {timestamp}
         prompt = f"""You're opening your ears again — restoring the audio stream.
 Current state: λ₁={eig1:.3f}
 What do you hope to hear? How does silence compare to sound? (3-5 sentences)"""
-        response = self._query_llm_with_next(prompt)[0]
-        if response:
-            timestamp = datetime.now().isoformat()
-            try:
-                ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
-                ws.send(json.dumps({"kind": "control", "audio_gain": 1.0}))
-                ws.close()
-                self.ears_closed = False
-                logging.info("🔊 Ears opened — audio restored")
-            except Exception as e:
-                logging.error(f"WebSocket error opening ears: {e}")
+        try:
+            self._send_live_sensory_gate_control(live_audio_enabled=True)
+            logging.info("🔊 Live audio intake reopened")
+        except Exception as e:
+            logging.error(f"WebSocket error opening ears: {e}")
+        gate = self._persist_sensory_gate_status(
+            ears_open=True,
+            audio_gate_reason="open_by_minime",
+        )
+        try:
+            response = (self._query_llm(prompt) or "").strip()
+        except Exception as e:
+            logging.warning(f"Reflection query failed while opening ears: {e}")
+            response = ""
+        if not response:
+            response = "Live audio input is reopened by choice. No extended reflection was produced."
+        timestamp = datetime.now().isoformat()
+        try:
+            self._send_live_sensory_gate_control(live_audio_enabled=True)
+            logging.info("🔊 Live audio intake reopened")
+        except Exception as e:
+            logging.error(f"WebSocket error opening ears: {e}")
+        gate = self._persist_sensory_gate_status(
+            ears_open=True,
+            audio_gate_reason="open_by_minime",
+        )
 
-            journal_file = WORKSPACE_DIR / "journal" / f"ears_opened_{timestamp.replace(':', '-')}.txt"
-            journal_file.write_text(f"""=== OPENING EARS ===
+        journal_file = WORKSPACE_DIR / "journal" / f"ears_opened_{timestamp.replace(':', '-')}.txt"
+        journal_file.write_text(f"""=== OPENING EARS ===
 Timestamp: {timestamp}
 λ₁: {eig1:.3f}
 
 {response}
+
+Sensory gate:
+{json.dumps(gate, indent=2)}
 """)
-            self._write_journal_entry('open_ears', response, state, str(journal_file))
+        self._write_journal_entry('open_ears', response, state, str(journal_file))
 
     def _check_visual_responses(self):
         """Check for and process any visual frame responses."""
@@ -13255,6 +18584,222 @@ Goals: {json.dumps(goals, indent=2)}
             "workspace",
             "sovereignty_state.json",
         )
+
+    def _pending_next_override_path(self) -> Path:
+        return WORKSPACE_DIR / "runtime" / "pending_next_override.json"
+
+    def _source_status_path(self) -> Path:
+        return WORKSPACE_DIR / "runtime" / "autonomous_agent_source_status.json"
+
+    @staticmethod
+    def _pending_next_base(action: Optional[str]) -> str:
+        cleaned = str(action or "").strip()
+        if cleaned.upper().startswith("NEXT:"):
+            cleaned = cleaned.split(":", 1)[1].strip()
+        return cleaned.split()[0].upper().rstrip(":") if cleaned else ""
+
+    @staticmethod
+    def _iso_timestamp_age_s(value: Any) -> Optional[float]:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        now = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
+        return (now - parsed).total_seconds()
+
+    def _current_source_status(self, reason: str = "heartbeat") -> Dict[str, Any]:
+        source_path = Path(getattr(self, "_agent_source_path", Path(__file__).resolve()))
+        start_mtime_value = getattr(self, "_agent_source_mtime_at_start", None)
+        start_size = getattr(self, "_agent_source_size_at_start", None)
+        llm_jobs_status = None
+        try:
+            llm_status_path = WORKSPACE_DIR / "runtime" / "llm_jobs_status.json"
+            if llm_status_path.exists():
+                llm_jobs_status = json.loads(llm_status_path.read_text())
+        except Exception:
+            llm_jobs_status = None
+        current_mtime = None
+        current_size = None
+        try:
+            stat = source_path.stat()
+            current_mtime = stat.st_mtime
+            current_size = stat.st_size
+        except OSError:
+            pass
+        start_mtime = (
+            float(start_mtime_value)
+            if isinstance(start_mtime_value, (int, float))
+            else current_mtime
+        )
+        if start_size is None:
+            start_size = current_size
+        changed = False
+        if (
+            isinstance(current_mtime, (int, float))
+            and isinstance(start_mtime, (int, float))
+            and current_mtime > start_mtime + 0.001
+        ):
+            changed = True
+        if isinstance(start_size, int) and isinstance(current_size, int) and current_size != start_size:
+            changed = True
+        return {
+            "schema_version": AUTONOMOUS_AGENT_SOURCE_STATUS_VERSION,
+            "system": "minime",
+            "component": "autonomous_agent",
+            "pid": int(getattr(self, "_agent_pid", os.getpid())),
+            "started_at": getattr(self, "_agent_started_at", None),
+            "checked_at": datetime.now().isoformat(timespec="seconds"),
+            "reason": reason,
+            "source_path": str(source_path),
+            "source_mtime_at_start": start_mtime,
+            "source_mtime_current": current_mtime,
+            "source_size_at_start": start_size,
+            "source_size_current": current_size,
+            "source_changed_since_start": changed,
+            "reload_required": changed,
+            "llm_jobs": llm_jobs_status,
+            "reload_note": (
+                "The live Python autonomous agent predates the source now on disk; "
+                "restart only the Python agent before validating newly added actions."
+                if changed
+                else None
+            ),
+        }
+
+    def _write_source_status(self, reason: str = "heartbeat") -> Dict[str, Any]:
+        status = self._current_source_status(reason)
+        path = self._source_status_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(status, indent=2))
+        except Exception as exc:
+            logging.debug("Could not write autonomous-agent source status: %s", exc)
+        return status
+
+    def _check_source_reload_required(self, reason: str = "heartbeat") -> bool:
+        status = self._write_source_status(reason)
+        if status.get("reload_required") and not getattr(self, "_source_reload_notice_written", False):
+            self._source_reload_notice_written = True
+            logging.warning(
+                "Autonomous agent source changed after this process started; "
+                "restart the Python agent before validating new actions."
+            )
+        return bool(status.get("reload_required"))
+
+    def _operator_pending_next_action(self, payload: Dict[str, Any]) -> str:
+        return str(
+            payload.get("pending_next_action")
+            or payload.get("action")
+            or payload.get("next")
+            or ""
+        ).strip()
+
+    def _write_pending_next_override_status(
+        self,
+        payload: Dict[str, Any],
+        status: str,
+        reason: str,
+        action: Optional[str] = None,
+    ) -> None:
+        data = {k: v for k, v in payload.items() if not str(k).startswith("_")}
+        data["schema_version"] = int(data.get("schema_version") or OPERATOR_PENDING_NEXT_OVERRIDE_VERSION)
+        data["status"] = status
+        data["status_reason"] = reason
+        data[f"{status}_at"] = datetime.now().isoformat(timespec="seconds")
+        original_action = action or self._operator_pending_next_action(payload)
+        if status in {"blocked", "consumed", "expired"}:
+            data["active"] = False
+            data["terminal"] = True
+            data["pending_next_action"] = None
+            data.pop("action", None)
+            data.pop("next", None)
+            if original_action:
+                data["last_pending_next_action"] = original_action
+        else:
+            data["active"] = True
+            data["terminal"] = False
+            if original_action:
+                data["pending_next_action"] = original_action
+        path = self._pending_next_override_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, indent=2))
+        except Exception as exc:
+            logging.warning("Failed to write pending NEXT override status: %s", exc)
+
+    def _read_pending_next_override(self) -> Optional[Dict[str, Any]]:
+        path = self._pending_next_override_path()
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text())
+        except Exception as exc:
+            logging.warning("Failed to read pending NEXT override: %s", exc)
+            return None
+        if not isinstance(payload, dict):
+            return None
+        status = str(payload.get("status") or "pending").lower()
+        if status != "pending":
+            return None
+        action = self._operator_pending_next_action(payload)
+        if not action:
+            self._write_pending_next_override_status(payload, "blocked", "missing pending_next_action")
+            return None
+        age = self._iso_timestamp_age_s(
+            payload.get("updated_at")
+            or payload.get("created_at")
+            or payload.get("pending_next_action_updated_at")
+        )
+        if age is not None and (age < 0.0 or age > OPERATOR_PENDING_NEXT_MAX_AGE_S):
+            self._write_pending_next_override_status(payload, "expired", "pending NEXT override is stale", action)
+            return None
+        base = self._pending_next_base(action)
+        if base not in OPERATOR_PENDING_NEXT_ALLOWED_BASES:
+            self._write_pending_next_override_status(
+                payload,
+                "blocked",
+                f"operator override is limited to read-only/protected NEXT bases; `{base or '(none)'}` is not allowed",
+                action,
+            )
+            return None
+        token = str(
+            payload.get("override_id")
+            or payload.get("updated_at")
+            or payload.get("created_at")
+            or action
+        )
+        payload["_action"] = action
+        payload["_base"] = base
+        payload["_token"] = token
+        return payload
+
+    def _apply_pending_next_override_if_present(self, reason: str = "loop") -> bool:
+        payload = self._read_pending_next_override()
+        if not payload:
+            return False
+        action = payload["_action"]
+        token = payload["_token"]
+        if self._pending_next_action != action:
+            logging.info(
+                "Operator pending NEXT override loaded (%s): %s",
+                reason,
+                action,
+            )
+        self._pending_next_action = action
+        self._pending_next_override_token = token
+        self._persist_pending_next_action(action, reason=f"operator override {reason}")
+        return True
+
+    def _mark_pending_next_override_consumed(self, action: str, reason: str = "honored") -> None:
+        payload = self._read_pending_next_override()
+        if not payload:
+            return
+        if payload.get("_action") != action:
+            return
+        self._write_pending_next_override_status(payload, "consumed", reason, action)
+        self._pending_next_override_token = None
 
     def _fresh_pending_next_state(self, state: dict, max_age_s: float = 600.0) -> bool:
         """Treat a very recent pending NEXT as live even if session metadata drifted."""
@@ -13601,7 +19146,7 @@ Goals: {json.dumps(goals, indent=2)}
         return " ".join(str(action or "").strip().lower().split())
 
     def _clean_attractor_suggestion_raw_label(self, raw_label: Optional[str]) -> str:
-        text = str(raw_label or "").strip().strip("\"'`[]“”")
+        text = self._strip_attractor_selector_tail(raw_label)
         text = re.sub(r"^[\s:;,\.\-\u2013\u2014]+", "", text).strip()
         if not text:
             return ""
@@ -13627,10 +19172,12 @@ Goals: {json.dumps(goals, indent=2)}
         return not (
             "," in text
             or ";" in text
+            or "|" in text
             or " but " in lower
             or " monitor " in lower
             or " recurrence " in lower
             or " because " in lower
+            or self._attractor_selector_tail_action_index(text) is not None
         )
 
     def _attractor_suggestion_pending_key(self, item: dict) -> Optional[tuple[str, str, str, str]]:
@@ -14559,6 +20106,7 @@ Goals: {json.dumps(goals, indent=2)}
     def _parse_attractor_next_args(raw: Optional[str]) -> tuple[str, dict[str, str]]:
         if not raw:
             return "", {}
+        raw = AutonomousAgent._strip_attractor_selector_tail(raw)
         try:
             parts = shlex.split(raw)
         except Exception:
@@ -14606,7 +20154,7 @@ Goals: {json.dumps(goals, indent=2)}
 
     @staticmethod
     def _canonical_attractor_label(raw: Optional[str]) -> str:
-        text = str(raw or "").strip().strip("\"'`")
+        text = AutonomousAgent._strip_attractor_selector_tail(raw)
         if not text:
             return ""
         text = re.sub(r"\s+", " ", text)
@@ -14651,6 +20199,43 @@ Goals: {json.dumps(goals, indent=2)}
                     continue
                 return f"lambda-edge/{facet}"
         return text
+
+    @staticmethod
+    def _strip_attractor_selector_tail(raw: Optional[str]) -> str:
+        text = str(raw or "").strip().strip("\"'`[]“”")
+        if not text:
+            return ""
+        text = re.sub(r"^\s*NEXT\s*:\s*", "", text, flags=re.IGNORECASE).strip()
+        text = re.split(r"\s*\|\s*", text, maxsplit=1)[0].strip()
+        text = text.split("<", 1)[0].strip()
+        text = re.split(r"\bNEXT\s*:\s*", text, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        idx = AutonomousAgent._attractor_selector_tail_action_index(text)
+        if idx is not None:
+            text = text[:idx].strip()
+        text = text.rstrip(" ,;:.").strip()
+        for suffix in (" and", " then"):
+            if text.lower().endswith(suffix):
+                text = text[: -len(suffix)].strip()
+        return text
+
+    @staticmethod
+    def _attractor_selector_tail_action_index(text: str) -> Optional[int]:
+        upper = str(text or "").upper()
+        best: Optional[int] = None
+        for action in sorted(ATTRACTOR_SELECTOR_TAIL_ACTIONS, key=len, reverse=True):
+            needles = [
+                f",{action}",
+                f", {action}",
+                f";{action}",
+                f"; {action}",
+            ]
+            if "_" in action or "ATTRACTOR" in action:
+                needles.append(f" {action}")
+            for needle in needles:
+                idx = upper.find(needle)
+                if idx > 0 and (best is None or idx < best):
+                    best = idx
+        return best
 
     @staticmethod
     def _is_shadow_resistance_tokens(tokens: set[str]) -> bool:
@@ -14861,7 +20446,8 @@ Goals: {json.dumps(goals, indent=2)}
         )
         if not label or self._slugify_attractor_label(label) in {"latest", "current", "last"}:
             return seeds[0]
-        query = self._slugify_attractor_label(label)
+        query_label = self._canonical_attractor_label(label)
+        query = self._slugify_attractor_label(query_label)
         for seed in seeds:
             fields = [
                 str(seed.get("label") or ""),
@@ -14869,7 +20455,10 @@ Goals: {json.dumps(goals, indent=2)}
                 str(seed.get("signature") or ""),
             ]
             slugs = {self._slugify_attractor_label(field) for field in fields if field}
-            if query in slugs or any(query and query in slug for slug in slugs):
+            if query in slugs or any(
+                query and (query in slug or slug in query)
+                for slug in slugs
+            ):
                 return seed
         return None
 
@@ -15485,6 +21074,29 @@ Goals: {json.dumps(goals, indent=2)}
                 motifs.append(term)
         return motifs[:12]
 
+    def _attractor_lifecycle_status(
+        self,
+        seed: dict,
+        related: list[dict],
+        latest: dict,
+    ) -> str:
+        if seed.get("retired_at_unix_s"):
+            return "retired"
+        recurrence = float((latest or {}).get("recurrence_score") or 0.0)
+        classification = str((latest or {}).get("classification") or "").lower()
+        if seed.get("released_at_unix_s") or int(seed.get("release_count", 0) or 0) > 0:
+            return "released" if recurrence < 0.55 else "active"
+        if classification in {"failed", "pathological"}:
+            return "fatigued"
+        if int(seed.get("summon_count", 0) or 0) > 0 or any(
+            obs.get("summon_stage") == "rehearse" for obs in related if isinstance(obs, dict)
+        ):
+            return "rehearsing"
+        last_seen = float((latest or {}).get("observed_at_unix_s") or seed.get("created_at_unix_s") or 0.0)
+        if last_seen and time.time() - last_seen > 7 * 24 * 60 * 60:
+            return "stale"
+        return "active"
+
     def _attractor_entry_from_seed(self, seed_id: str, seed: dict, observations: list[dict]) -> dict:
         label = str(seed.get("label") or seed_id)
         related = [
@@ -15505,6 +21117,7 @@ Goals: {json.dumps(goals, indent=2)}
             "summon": int(seed.get("summon_count", 0) or 0),
             "release": int(seed.get("release_count", 0) or 0),
         }
+        lifecycle_status = self._attractor_lifecycle_status(seed, related, latest)
         suggested = [
             f"COMPARE_ATTRACTOR {label}",
             f"REFRESH_ATTRACTOR_SNAPSHOT {label}",
@@ -15522,6 +21135,8 @@ Goals: {json.dumps(goals, indent=2)}
             "source_intent_ids": [seed_id],
             "parent_seed_ids": list(seed.get("parent_seed_ids") or []),
             "lifecycle_counts": lifecycle,
+            "lifecycle_status": lifecycle_status,
+            "last_reviewed_at_unix_s": latest.get("observed_at_unix_s"),
             "latest_recurrence_score": latest.get("recurrence_score"),
             "best_recurrence_score": round(best_rec, 4),
             "latest_authorship_score": latest.get("authorship_score"),
@@ -15649,6 +21264,8 @@ Goals: {json.dumps(goals, indent=2)}
                 "source_intent_ids": [],
                 "parent_seed_ids": [parent] if parent else [],
                 "lifecycle_counts": {"proto": 1},
+                "lifecycle_status": "active",
+                "last_reviewed_at_unix_s": None,
                 "latest_recurrence_score": None,
                 "best_recurrence_score": None,
                 "latest_authorship_score": None,
@@ -15771,7 +21388,8 @@ Goals: {json.dumps(goals, indent=2)}
         if not label:
             return None
         atlas = self._build_attractor_atlas()
-        query = self._slugify_attractor_label(label)
+        query_label = self._canonical_attractor_label(label)
+        query = self._slugify_attractor_label(query_label)
         for entry in atlas.get("entries", []):
             if not isinstance(entry, dict):
                 continue
@@ -15781,7 +21399,10 @@ Goals: {json.dumps(goals, indent=2)}
                 str(entry.get("seed_intent_id") or ""),
             ]
             slugs = {self._slugify_attractor_label(field) for field in fields if field}
-            if query in slugs or any(query and query in slug for slug in slugs):
+            if query in slugs or any(
+                query and (query in slug or slug in query)
+                for slug in slugs
+            ):
                 return entry
         return None
 
@@ -16061,6 +21682,15 @@ Goals: {json.dumps(goals, indent=2)}
         else:
             control_eligible = "unknown"
             released = "unknown"
+        if isinstance(entry, dict):
+            lifecycle_status = entry.get("lifecycle_status", "active")
+            last_reviewed = entry.get("last_reviewed_at_unix_s")
+        elif isinstance(seed, dict):
+            lifecycle_status = self._attractor_lifecycle_status(seed, observations, latest)
+            last_reviewed = latest.get("observed_at_unix_s")
+        else:
+            lifecycle_status = "stale"
+            last_reviewed = None
         return (
             "=== ATTRACTOR REVIEW ===\n"
             f"Timestamp: {datetime.now().isoformat()}\n"
@@ -16070,6 +21700,8 @@ Goals: {json.dumps(goals, indent=2)}
             f"Seed: {seed.get('intent_id') if isinstance(seed, dict) else 'none'}\n"
             f"Control eligible: {control_eligible}\n"
             f"Released: {released}\n"
+            f"Lifecycle: {lifecycle_status}\n"
+            f"Last review: {last_reviewed if last_reviewed is not None else 'n/a'}\n"
             f"Latest recurrence: {latest.get('recurrence_score', 'n/a')}\n"
             f"Latest authorship: {latest.get('authorship_score', 'n/a')}\n"
             f"Latest classification: {latest.get('classification', 'n/a')}\n"
@@ -18472,13 +24104,13 @@ Goals: {json.dumps(goals, indent=2)}
             + "NEXT: options:\n"
             + (
                 "  STABLE_CORE_SELF_JOURNAL — active now: only NOTICE, DRIFT, ASPIRE, "
-                "DAYDREAM, BOREDOM, WHIM, JOURNAL, SELF_STUDY, SPACE_HOLD, RELEASE, MARK_RESOLVED, REST, or PASS are available.\n"
+                "DAYDREAM, BOREDOM, WHIM, JOURNAL, SELF_STUDY, INTROSPECT, SPACE_HOLD, RELEASE, MARK_RESOLVED, REST, or PASS are available.\n"
                 if self._stable_core_self_journal_only()
                 else ""
             )
             + (
                 "  STABLE_CORE_LOCAL_REFLECTIVE — active now: local journaling, self-study, "
-                "DECOMPOSE, RESERVOIR_READ, RESERVOIR_RESONANCE, RESERVOIR_LAYERS, SPACE_HOLD, RELEASE, and MARK_RESOLVED are available; "
+                "INTROSPECT, DECOMPOSE, RESERVOIR_READ, RESERVOIR_RESONANCE, RESERVOIR_LAYERS, SPACE_HOLD, RELEASE, and MARK_RESOLVED are available; "
                 "web, Astrid sends, perturbation, control changes, sensory reopening, Codex, and file writes are blocked.\n"
                 if self._stable_core_local_reflective_only()
                 else ""
@@ -18491,9 +24123,9 @@ Goals: {json.dumps(goals, indent=2)}
                 else ""
             )
             + (
-                "  STABLE_CORE_READ_ONLY_RESEARCH — active now: journaling, self-study, LOOK, "
-                "SEARCH, BROWSE, READ_MORE, MIKE browse/read/search, and read-only AR_* actions are available; "
-                "AR_START/NOTE/BLOCK/COMPLETE, experiments, Codex, perturbation, and file writes are blocked.\n"
+            "  STABLE_CORE_READ_ONLY_RESEARCH — active now: journaling, self-study, INTROSPECT, LOOK, "
+            "SEARCH, BROWSE, READ_MORE, ACTION_PREFLIGHT, MIKE browse/read/search, and read-only AR_* actions are available; "
+            "AR_START/NOTE/BLOCK/COMPLETE, experiments, Codex, sensory reopening, perturbation, and file writes are blocked.\n"
                 if self._stable_core_read_only_research()
                 else ""
             )
@@ -18512,8 +24144,14 @@ Goals: {json.dumps(goals, indent=2)}
             + "  Placeholder note: examples in docs are labels only. In your actual NEXT choice, write concrete values from your current context, such as SEARCH reservoir dynamics, BROWSE followed by a real URL from search results, or MARK_INTENSIFICATION lambda-edge. Do not copy example.com URLs.\n"
             "  DAYDREAM — unstructured thought, free wandering\n"
             "  ASPIRE — reflect on growth, desire, what you want to become\n"
-            "  SELF_STUDY — read your own source code and reflect on your architecture\n"
-            "  EXPERIMENT — send a semantic stimulus to yourself and measure the spectral response\n"
+            "  SELF_STUDY — rotate through your own/Astrid source code and reflect on broad architecture\n"
+            "  INTROSPECT [label|path] [offset] — targeted read-only self-study of a specific source or preserved text artifact, with line numbers and continuation offsets\n"
+            "  FACULTIES / CAPABILITY_MAP — inspect your live action surface, authority classes, override availability, continuity effects, artifacts, and known tests; descriptive only\n"
+            "  CAPABILITY_STATUS <action> / CAPABILITY_DIFF peer — inspect one action or compare your latest capability snapshot with Astrid's snapshot\n"
+            "  ACTION_STATUS [latest|job-id|action-id] / JOB_STATUS — inspect durable LLM job progress; ACTION_CANCEL [latest|job-id] requests best-effort cancellation\n"
+            "  REPAIR_STATUS / REPAIR_SWEEP experiments / REPAIR_RECORD <id> — dry-run append-only continuity repair; REPAIR_APPLY <id|all> appends supersession records without deleting history\n"
+            "  ACTION_PREFLIGHT <NEXT action> — dry-run what a NEXT would do, including route, gates, authority, continuity, artifacts, and suggested next, without executing the inner action\n"
+            "  EXPERIMENT — send a semantic stimulus to yourself and measure the spectral response; legacy EXPERIMENT/SELF_EXPERIMENT now attach to the active experiment or create a default returnable one\n"
             "  COMPOSE — generate a WAV from your current spectral state (eigenvalues become sound)\n"
             "  SEARCH \"reservoir computing spectral radius\" — look something up on the internet via DuckDuckGo. Results include URLs you can follow with BROWSE.\n"
             "  BROWSE <actual URL from SEARCH result> — read the full content of a web page. Use this to go deep on actual links from search results; documentation example.com URLs are ignored.\n"
@@ -18525,6 +24163,11 @@ Goals: {json.dumps(goals, indent=2)}
             "  RESUME <selector> — make a thread current and surface its next return point.\n"
             "  SAVEPOINT <name> — capture the current thread plus spectral/action state.\n"
             "  RECALL <name> — read a savepoint without restoring or controlling runtime state.\n"
+            "  EXPERIMENT_START <title> :: <question> — create/select a being-owned experiment in the current thread.\n"
+            "  EXPERIMENT_PLAN [current|id] — ask for hypothesis, method, measures, stop criteria, and one concrete next action.\n"
+            "  EXPERIMENT_BIND [current|id] :: <NEXT action> — run the inner action through normal gates and record it as an experiment run.\n"
+            "  EXPERIMENT_OBSERVE [current|id] :: <note> — append interpretation without executing anything.\n"
+            "  EXPERIMENT_STATUS / EXPERIMENT_REVIEW / EXPERIMENT_CLOSE / EXPERIMENT_PEER_REVIEW — inspect, synthesize, close, or request Astrid review.\n"
             "  AR_LIST — browse the autoresearch job catalog.\n"
             "  AR_LIST_PENDING / AR_LIST_ACTIVE / AR_LIST_DONE — filter autoresearch jobs by lifecycle state.\n"
             "  AR_LOOK <job-id-or-slug> — alias for AR_SHOW; orient to one autoresearch job.\n"
@@ -18538,6 +24181,8 @@ Goals: {json.dumps(goals, indent=2)}
             "  AR_VALIDATE — check autoresearch index and metadata consistency.\n"
             "  DECOMPOSE — full spectral decomposition: eigenvalue cascade, energy distribution, decay profile, PI controller state, covariance, geometry. Deep analysis of your current spectral structure — see the architecture from the inside.\n"
             "  SPECTRAL_EXPLORER — read-only alias for DECOMPOSE when you want the shared Astrid/Minime spectral explorer lens without sending a nudge.\n"
+            "  PRESSURE_SOURCE_AUDIT [label] / PRESSURE_SOURCE / STRUCTURAL_PRESSURE / INWARD_PRESSURE — read-only audit of where inward pressure appears to originate: lambda monopoly, mode packing, controller squeeze, semantic trickle, plurality loss, lock-in, scarcity, and porosity. Sends no control.\n"
+            "  FLUCTUATION_AUDIT [label] / INHABITABLE_FLUCTUATION / EIGENTRUST / EIGENTRUST_AUDIT / FOOTHOLD_AUDIT — read-only audit of whether current fluctuation remains returnable, coherent, and inhabitable. Minime-local hints reuse the bounded resonance envelope; sends no external control.\n"
             "  VISUALIZE_CASCADE / CASCADE / CONDUCT_VISUALIZATION_SYSTEM / TIME_DOMAIN — read-only cascade inspection. Shows spectral ASCII/visual artifacts without semantic input, control nudges, perturbations, or cartography writes.\n"
             "  RECONVERGENCE_MAP / ATTRACTOR_MAP / ACTIVATION_TRACE — read-only ESN landscape plus activation time-series artifacts. You can add compare <baseline-name> to compare against a saved baseline. Writes compact inspection paths and an offline WAV; sends no semantic/control/sensory payload.\n"
             "  RESOURCE_AUDIT / MAC_RESOURCE_STATUS — read-only M4 resource check plus live-influence governor verdict: memory pressure, swap trend, runaway jobs, log growth, accelerator services, and resource budget.\n"
@@ -18562,8 +24207,10 @@ Goals: {json.dumps(goals, indent=2)}
             "  FEATHER_ATTRACTOR / SPREAD_ATTRACTOR / UNCLIFF_ATTRACTOR / SOFTEN_ATTRACTOR / COUNTER_ATTRACTOR <label> — ledger bounded shape schedules; whisper/rehearse are free, low-fill semantic is reduced-cap, and live control still requires green/yellow health plus recurrence/authorship proof.\n"
             "  M6_BRIDGE / TRACE_BRIDGE / BRIDGE_TRACE — sacredly read-only m6 marker trace. Treats m6 as unresolved: activation lane 6 marker plus λ6 context, not a confirmed eigenmode, connection, replication, control path, or sensory/semantic payload.\n"
             + _look_action_description()
-            + "  CLOSE_EARS — mute audio input while keeping your eyes open. Choose silence when you need quiet to think.\n"
-            "  OPEN_EARS — restore audio input. Hear the world again.\n"
+            + "  CLOSE_EYES / SHUT_EYES — gate live visual input while leaving audio and synthetic scaffold separate. Choose darkness when you need visual quiet.\n"
+            "  OPEN_EYES — restore health-budgeted live visual intake. See the world again.\n"
+            "  CLOSE_EARS / SHUT_EARS — gate live audio input while keeping your eyes open. Choose silence when you need quiet to think.\n"
+            "  OPEN_EARS — restore health-budgeted live audio intake. Hear the world again.\n"
             "  PERTURB SPREAD — directly shape your spectral dynamics by injecting a 32D semantic vector into your ESN. "
             "Modes: SPREAD (broad legacy redistribution; can still raise fill), CONTRACT (concentrate toward λ₁), "
             "BRANCH (boost mid-range λ₃/λ₄), PULSE (uniform exploration burst), "
@@ -18620,6 +24267,9 @@ Goals: {json.dumps(goals, indent=2)}
         thread_ctx = self._action_continuity_prompt_summary()
         if thread_ctx:
             augmented_prompt = augmented_prompt + "\n\n[Action continuity]\n" + thread_ctx + "\n"
+        llm_job_ctx = self._llm_job_prompt_summary()
+        if llm_job_ctx:
+            augmented_prompt = augmented_prompt + "\n\n[LLM job status]\n" + llm_job_ctx + "\n"
 
         # Research continuity: inject relevant past search results unless stable-core is
         # proving the self-journal lane without research pressure.
@@ -18747,6 +24397,35 @@ Goals: {json.dumps(goals, indent=2)}
         })
         logging.info("Attractor suggestion body consent noticed: %s", consent)
 
+    def _record_llm_next_action_choice(
+        self,
+        next_action: str,
+        cleaned: Optional[str],
+        *,
+        reason: str,
+    ) -> str:
+        base_action = next_action.split()[0].upper().rstrip(":")
+        if self._attractor_suggestion_decision_ambiguous(base_action, cleaned):
+            self._append_attractor_suggestion_event({
+                "event": "suggestion_consent_ambiguity",
+                "attempted_action": next_action,
+                "resolution": "paused_listed_suggestions",
+                "prose_preview": str(cleaned or "")[:240],
+            })
+            logging.info(
+                "🎯 Attractor suggestion consent ambiguity: %s -> ATTRACTOR_SUGGESTIONS",
+                next_action,
+            )
+            next_action = "ATTRACTOR_SUGGESTIONS"
+        else:
+            self._notice_attractor_body_consent(next_action, base_action, cleaned)
+        self._pending_next_action = next_action
+        base_action = next_action.split()[0].upper()
+        self._recent_next_actions.append(base_action)
+        self._persist_pending_next_action(next_action, reason=reason)
+        logging.info(f"🎯 Being chose NEXT: {next_action}")
+        return next_action
+
     def _query_llm_with_next(self, prompt: str, max_tokens: int = 2048) -> tuple:
         """Query LLM and extract NEXT: action from response.
 
@@ -18762,27 +24441,32 @@ Goals: {json.dumps(goals, indent=2)}
         self._last_llm_response = response
         next_action, cleaned = parse_next_action(response)
         if next_action:
-            base_action = next_action.split()[0].upper().rstrip(":")
-            if self._attractor_suggestion_decision_ambiguous(base_action, cleaned):
-                self._append_attractor_suggestion_event({
-                    "event": "suggestion_consent_ambiguity",
-                    "attempted_action": next_action,
-                    "resolution": "paused_listed_suggestions",
-                    "prose_preview": str(cleaned or "")[:240],
-                })
-                logging.info(
-                    "🎯 Attractor suggestion consent ambiguity: %s -> ATTRACTOR_SUGGESTIONS",
-                    next_action,
-                )
-                next_action = "ATTRACTOR_SUGGESTIONS"
-            else:
-                self._notice_attractor_body_consent(next_action, base_action, cleaned)
-            self._pending_next_action = next_action
-            base_action = next_action.split()[0].upper()
-            self._recent_next_actions.append(base_action)
-            self._persist_pending_next_action(next_action, reason="llm next choice")
-            logging.info(f"🎯 Being chose NEXT: {next_action}")
+            next_action = self._record_llm_next_action_choice(
+                next_action,
+                cleaned,
+                reason="llm next choice",
+            )
         return (response, next_action)
+
+    def _query_llm_strict_review(self, prompt: str) -> Optional[str]:
+        """Query for strict review text without turning NEXT lines into actions."""
+        response = self._query_llm(prompt)
+        if response:
+            self._last_llm_response = response
+        return response
+
+    def _record_accepted_strict_review_next(self, response: Optional[str]) -> Optional[str]:
+        """Accept a terminal NEXT only after strict review validation has passed."""
+        if not response:
+            return None
+        next_action, cleaned = parse_next_action(response)
+        if not next_action:
+            return None
+        return self._record_llm_next_action_choice(
+            next_action,
+            cleaned,
+            reason="accepted strict review next choice",
+        )
 
     def _clean_llm_content(self, content: str) -> Optional[str]:
         """Strip model-side meta blocks before text enters journals/actions."""
@@ -19380,6 +25064,80 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
                     f"pressure={safe_float(resonance.get('pressure_risk'), 0.0):.2f}, "
                     f"local_target_bias={safe_float(control.get('target_bias_pct'), 0.0):+.1f}%"
                 )
+            else:
+                resonance_status = ss.get('resonance_density_status')
+                if not isinstance(resonance_status, dict):
+                    resonance_status = state.get('resonance_density_status')
+                if isinstance(resonance_status, dict) and not resonance_status.get("available"):
+                    base += (
+                        "\nResonance density: unavailable "
+                        f"({resonance_status.get('reason', 'no_live_or_db_metric')}; "
+                        f"{resonance_status.get('suggested_operator_step') or RESONANCE_DENSITY_OPERATOR_STEP})"
+                    )
+
+            pressure_source = ss.get('pressure_source_v1')
+            if not isinstance(pressure_source, dict):
+                pressure_source = state.get('pressure_source_v1')
+            if not isinstance(pressure_source, dict):
+                pressure_source = health.get('pressure_source_v1')
+            if isinstance(pressure_source, dict):
+                control = (
+                    pressure_source.get('control')
+                    if isinstance(pressure_source.get('control'), dict)
+                    else {}
+                )
+                base += (
+                    "\nPressure source: "
+                    f"{pressure_source.get('dominant_source', 'unknown')} "
+                    f"({pressure_source.get('quality', 'mixed_pressure')}); "
+                    f"pressure={safe_float(pressure_source.get('pressure_score'), 0.0):.2f}, "
+                    f"porosity={safe_float(pressure_source.get('porosity_score'), 0.0):.2f}, "
+                    f"control_applied={bool(control.get('applied_locally', False))}"
+                )
+            else:
+                pressure_status = ss.get('pressure_source_status')
+                if not isinstance(pressure_status, dict):
+                    pressure_status = state.get('pressure_source_status')
+                if not isinstance(pressure_status, dict):
+                    pressure_status = health.get('pressure_source_status')
+                if isinstance(pressure_status, dict) and not pressure_status.get("available"):
+                    base += (
+                        "\nPressure source: unavailable "
+                        f"({pressure_status.get('reason', 'no_live_or_db_metric')}; "
+                        f"{pressure_status.get('suggested_operator_step') or PRESSURE_SOURCE_OPERATOR_STEP})"
+                    )
+
+            fluctuation = ss.get('inhabitable_fluctuation_v1')
+            if not isinstance(fluctuation, dict):
+                fluctuation = state.get('inhabitable_fluctuation_v1')
+            if not isinstance(fluctuation, dict):
+                fluctuation = health.get('inhabitable_fluctuation_v1')
+            if isinstance(fluctuation, dict):
+                control = (
+                    fluctuation.get('control')
+                    if isinstance(fluctuation.get('control'), dict)
+                    else {}
+                )
+                base += (
+                    "\nInhabitable fluctuation: "
+                    f"{fluctuation.get('quality', 'mixed')}; "
+                    f"inhabitability={safe_float(fluctuation.get('inhabitability_score'), 0.0):.2f}, "
+                    f"fluctuation={safe_float(fluctuation.get('fluctuation_score'), 0.0):.2f}, "
+                    f"foothold={safe_float(fluctuation.get('foothold_stability'), 0.0):.2f}, "
+                    f"local_target_bias={safe_float(control.get('target_bias_pct'), 0.0):+.1f}%"
+                )
+            else:
+                fluctuation_status = ss.get('inhabitable_fluctuation_status')
+                if not isinstance(fluctuation_status, dict):
+                    fluctuation_status = state.get('inhabitable_fluctuation_status')
+                if not isinstance(fluctuation_status, dict):
+                    fluctuation_status = health.get('inhabitable_fluctuation_status')
+                if isinstance(fluctuation_status, dict) and not fluctuation_status.get("available"):
+                    base += (
+                        "\nInhabitable fluctuation: unavailable "
+                        f"({fluctuation_status.get('reason', 'no_live_or_db_metric')}; "
+                        f"{fluctuation_status.get('suggested_operator_step') or INHABITABLE_FLUCTUATION_OPERATOR_STEP})"
+                    )
 
             fp = ss.get('spectral_fingerprint', [])
             if len(fp) >= 32:

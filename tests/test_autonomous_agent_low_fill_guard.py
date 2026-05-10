@@ -46,6 +46,11 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             Path(agent._test_sovereignty_tmp.name) / "sovereignty_state.json"
         )
         agent._sovereignty_state_path = lambda: str(agent._test_sovereignty_state_path)
+        agent._resource_governor_status = lambda write=True: {
+            "allowed_live": True,
+            "primary_block_reason": None,
+            "block_reasons": [],
+        }
         return agent
 
     def test_guard_status_uses_fixed_reset_target(self):
@@ -1262,6 +1267,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             with (
                 patch.object(aa, "WORKSPACE_DIR", workspace),
                 patch.object(aa, "runtime_health_path", return_value=health_path),
+                patch.object(agent, "_resource_governor_status", return_value={"allowed_live": True}),
                 patch.object(agent, "_write_journal_entry", return_value=None),
                 patch.object(agent, "_send_semantic", side_effect=lambda features: sent.append(features)),
             ):
@@ -1315,6 +1321,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             with (
                 patch.object(aa, "WORKSPACE_DIR", workspace),
                 patch.object(aa, "runtime_health_path", return_value=health_path),
+                patch.object(agent, "_resource_governor_status", return_value={"allowed_live": True}),
                 patch.object(agent, "_write_journal_entry", return_value=None),
                 patch.object(agent, "_send_semantic", side_effect=lambda features: sent.append(features)),
             ):
@@ -4532,6 +4539,50 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         localized = agent._nearest_attractor_for_text("localized gravity")
         self.assertIsNotNone(localized)
         self.assertEqual(localized["label"], "lambda-edge/localized-gravity")
+
+    def test_noisy_attractor_selectors_strip_trailing_actions(self):
+        agent = self._agent()
+        self.assertEqual(
+            agent._canonical_attractor_label(
+                "honey-selection | REFRESH_ATTRACTOR_SNAPSHOT honey-selection"
+            ),
+            "honey-selection",
+        )
+        self.assertEqual(
+            agent._canonical_attractor_label("cooled-theme-edge | READ_MORE"),
+            "cooled-theme-edge",
+        )
+        self.assertEqual(
+            agent._canonical_attractor_label(
+                "cooled-theme-edge, accept_attractor_suggestion latest"
+            ),
+            "cooled-theme-edge",
+        )
+        self.assertEqual(
+            agent._canonical_attractor_label("honey release pattern"),
+            "honey release pattern",
+        )
+        label, options = agent._parse_attractor_next_args(
+            "honey-selection --stage=main | ATTRACTOR_CARD honey-selection"
+        )
+        self.assertEqual(label, "honey-selection")
+        self.assertEqual(options, {"stage": "main"})
+        payload = {
+            "seeds": {
+                "seed-1": {
+                    "label": "honey-selection",
+                    "intent_id": "intent-honey",
+                    "signature": "sig-honey",
+                    "created_at_unix_s": 1.0,
+                }
+            }
+        }
+        seed = agent._match_attractor_seed(
+            payload,
+            "honey-selection | REFRESH_ATTRACTOR_SNAPSHOT honey-selection",
+        )
+        self.assertIsNotNone(seed)
+        self.assertEqual(seed["label"], "honey-selection")
 
     def test_fresh_feedback_facets_are_proto_atlas_cards(self):
         agent = self._agent()
