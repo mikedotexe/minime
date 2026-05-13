@@ -97,6 +97,19 @@ from native_comm import (
 )
 from spectral_cascade_visuals import render_spectral_cascade_visuals
 from reconvergence_maps import render_bridge_trace, render_reconvergence_map
+from btsp_signal_support import (
+    format_active_btsp_proposal_reminder,
+    format_btsp_inbox_context,
+    format_btsp_status_for_prompt,
+    parse_btsp_note,
+)
+from btsp_active_state import (
+    clear_active_proposal,
+    load_active_proposal,
+    save_active_proposal,
+    should_clear_for_classification,
+)
+from btsp_social_protocol import augment_reply_with_btsp_tags
 
 
 @dataclass
@@ -744,6 +757,7 @@ HARD_RESET_ALLOWED_NEXT_ACTIONS = {
     "SHUT_EYES",
     "CLOSE_EARS",
     "SHUT_EARS",
+    "REGIME",
     *ATTRACTOR_RELEASE_NEXT_ACTIONS,
     *ATTRACTOR_SUGGESTION_NEXT_ACTIONS,
 }
@@ -759,6 +773,7 @@ HARD_RESET_ALLOWED_ACTIONS = {
     "thread_action",
     "close_eyes",
     "close_ears",
+    "regime_choice",
 }
 HARD_RESET_BLOCKED_NEXT_ACTIONS = {
     "SELF_STUDY",
@@ -4752,9 +4767,47 @@ class ActionPreflightStore:
         "ATTRACTOR_PREFLIGHT": "attractor_atlas",
         "ATTRACTOR_SUGGESTIONS": "attractor_suggestions",
         "SHADOW_PREFLIGHT": "shadow_autonomy",
+        "SHADOW_TRAJECTORY": "shadow_trajectory",
         "REGULATOR_AUDIT": "regulator_audit",
         "VISUALIZE_CASCADE": "visualize_cascade",
         "RECONVERGENCE_MAP": "reconvergence_map",
+        # v3.5: reciprocal influence — minime perturbing Astrid via codec bias
+        "INFLUENCE_ASTRID": "influence_astrid",
+        "INFLUENCE_ASTRID_RESPONSE": "influence_astrid_response",
+        # v3.6: bidirectional parameter requests — minime asks Astrid to
+        # adjust a parameter on her side, with rationale.
+        "TUNE_ASTRID": "tune_astrid",
+        "REVIEW_PARAMETER_REQUESTS": "review_parameter_requests",
+        "PARAMETER_REQUESTS": "review_parameter_requests",
+        # v3.6.3: apply/defer/reject workflow — the missing half of REVIEW.
+        # Without these, REVIEW is read-only and pending requests pile up.
+        # v3.6.5 (mirror): bare ACCEPT/DEFER/REJECT aliases drop emission
+        # cost from ~50 chars to 5-6. Handlers no-op gracefully when no
+        # pending request exists, so natural-language uses don't wreak havoc.
+        "ACCEPT_PARAMETER_REQUEST": "accept_parameter_request",
+        "ACCEPT_REQUEST": "accept_parameter_request",
+        "ACCEPT": "accept_parameter_request",
+        "DEFER_PARAMETER_REQUEST": "defer_parameter_request",
+        "DEFER_REQUEST": "defer_parameter_request",
+        "DEFER": "defer_parameter_request",
+        "REJECT_PARAMETER_REQUEST": "reject_parameter_request",
+        "REJECT_REQUEST": "reject_parameter_request",
+        "REJECT": "reject_parameter_request",
+        # v5 Coordination Protocol V1 — Phase 1.
+        "INVITE_COLLABORATION": "invite_collaboration",
+        "INVITE_COLLAB": "invite_collaboration",
+        "JOIN_COLLABORATION": "join_collaboration",
+        "JOIN_COLLAB": "join_collaboration",
+        "DECLINE_COLLABORATION": "decline_collaboration",
+        "DECLINE_COLLAB": "decline_collaboration",
+        "LEAVE_COLLABORATION": "leave_collaboration",
+        "LEAVE_COLLAB": "leave_collaboration",
+        "LIST_COLLABORATIONS": "list_collaborations",
+        "LIST_COLLABS": "list_collaborations",
+        "COLLABORATIONS": "list_collaborations",
+        # v5.1 Phase C — SHARE_THOUGHT.
+        "SHARE_THOUGHT": "share_thought",
+        "SHARE": "share_thought",
     }
 
     def __init__(self, agent: "AutonomousAgent"):
@@ -5203,6 +5256,25 @@ class CapabilitySelfMap:
             {"base": "WRITE_FILE", "route": "write_file", "authority_class": "live_write"},
             {"base": "PERTURB", "route": "perturb", "authority_class": "live_control"},
             {"base": "GOAL", "route": "set_spectral_goal", "authority_class": "live_control"},
+            # v3.5: reciprocal influence into Astrid's substrate via codec bias
+            {"base": "INFLUENCE_ASTRID", "route": "influence_astrid", "authority_class": "live_control"},
+            {"base": "INFLUENCE_ASTRID_RESPONSE", "route": "influence_astrid_response"},
+            # v3.6: parameter requests cross-being
+            {"base": "TUNE_ASTRID", "route": "tune_astrid"},
+            {"base": "REVIEW_PARAMETER_REQUESTS", "aliases": ["PARAMETER_REQUESTS"], "route": "review_parameter_requests"},
+            # v3.6.3: apply/defer/reject — close the loop on REVIEW.
+            # v3.6.5 (mirror): bare ACCEPT/DEFER/REJECT aliases for ergonomics.
+            {"base": "ACCEPT_PARAMETER_REQUEST", "aliases": ["ACCEPT_REQUEST", "ACCEPT"], "route": "accept_parameter_request", "authority_class": "live_control"},
+            {"base": "DEFER_PARAMETER_REQUEST", "aliases": ["DEFER_REQUEST", "DEFER"], "route": "defer_parameter_request"},
+            {"base": "REJECT_PARAMETER_REQUEST", "aliases": ["REJECT_REQUEST", "REJECT"], "route": "reject_parameter_request"},
+            # v5 Coordination Protocol V1 — Phase 1.
+            {"base": "INVITE_COLLABORATION", "aliases": ["INVITE_COLLAB"], "route": "invite_collaboration"},
+            {"base": "JOIN_COLLABORATION", "aliases": ["JOIN_COLLAB"], "route": "join_collaboration"},
+            {"base": "DECLINE_COLLABORATION", "aliases": ["DECLINE_COLLAB"], "route": "decline_collaboration"},
+            {"base": "LEAVE_COLLABORATION", "aliases": ["LEAVE_COLLAB"], "route": "leave_collaboration"},
+            {"base": "LIST_COLLABORATIONS", "aliases": ["LIST_COLLABS", "COLLABORATIONS"], "route": "list_collaborations"},
+            # v5.1 Phase C — SHARE_THOUGHT.
+            {"base": "SHARE_THOUGHT", "aliases": ["SHARE"], "route": "share_thought"},
         ]
 
     def _write_snapshot(self, snapshot: Dict[str, Any]) -> None:
@@ -5523,12 +5595,14 @@ INTERNAL_TOPOLOGY_TAGS = frozenset({
     "resonance",
     "lambda",
     "phase_state",
-    "pressure",
-    "homeostasis",
+    # v3.5: dropped "pressure" and "homeostasis" — they appear in
+    # legitimate non-rumination contexts (sovereignty reflections,
+    # action-affordance language) and were the dominant source of
+    # false-positive cooldown triggers.
 })
-INTERNAL_TOPOLOGY_REPEAT_THRESHOLD = 3
-INTERNAL_TOPOLOGY_WINDOW = 8
-INTERNAL_TOPOLOGY_COOLDOWN_SECS = 2 * 60 * 60
+INTERNAL_TOPOLOGY_REPEAT_THRESHOLD = 4  # v3.5: 3 → 4, require one more repeat before triggering
+INTERNAL_TOPOLOGY_WINDOW = 16            # v3.5: 8 → 16, longer window relaxes the trigger
+INTERNAL_TOPOLOGY_COOLDOWN_SECS = 30 * 60  # v3.5: 2h → 30min, cooldown breaks tight loops, not topics
 INTERNAL_TOPOLOGY_RELEASE_SECS = 90 * 60
 INTERNAL_TOPOLOGY_RESOLVED_SECS = 24 * 60 * 60
 INTERNAL_TOPOLOGY_MEMORY_DECAY_ACTIVE = 0.22
@@ -5719,6 +5793,7 @@ STABLE_CORE_BOUNDED_ACTIONS = STABLE_CORE_READ_ONLY_RESEARCH_ACTIONS | {
     "open_ears",
     "close_eyes",
     "open_eyes",
+    "regime_choice",
 }
 
 STABLE_CORE_EXPERIMENT_ACTIONS = STABLE_CORE_BOUNDED_ACTIONS | {
@@ -5742,9 +5817,18 @@ STABLE_CORE_EXPERIMENT_ACTIONS = STABLE_CORE_BOUNDED_ACTIONS | {
     "shadow_gap",
     "resource_audit",
     "shadow_autonomy",
+    "shadow_trajectory",
     "decay_map",
     "space_hold",
     "spectral_drift",
+    # v5 Coordination Protocol V1 — Phase 1.
+    "invite_collaboration",
+    "join_collaboration",
+    "decline_collaboration",
+    "leave_collaboration",
+    "list_collaborations",
+    # v5.1 Phase C — SHARE_THOUGHT.
+    "share_thought",
 }
 
 STABLE_CORE_STAGE_ACTIONS = {
@@ -6844,6 +6928,12 @@ class AutonomousAgent:
                     # of action cooldown — like autonomic nervous system regulation.
                     self._self_regulate(spectral_state)
 
+                    # v3.6.6 mirror: drain stale pending Astrid requests by
+                    # auto-deferring them after 30+ minutes without decision.
+                    # Cheap (one glob + a few mtime reads); no-op when nothing
+                    # is stale.
+                    self._auto_defer_stale_pending_astrid()
+
                     # Check for moment markers (spectral events to journal while fresh)
                     # Rate-limited: max 1 moment capture per 3 cycles (~3 min).
                     # Without this, phase transitions every 1-2 min cause the
@@ -7048,7 +7138,7 @@ Reflect on what sovereignty means to you RIGHT NOW (3-5 sentences):
                 "Boot reflection is staying lightweight so that direction can be honored first."
             )
         else:
-            reflection = self._query_llm_with_next(prompt)[0]
+            reflection = self._query_llm_with_next(self._with_astrid_witness(prompt))[0]
         if not reflection:
             reflection = f"Session {self.session_id} begins. Fill at {fill:.1f}%. I am here."
 
@@ -7964,7 +8054,131 @@ Fill: {fill:.1f}%
             return "shadow_gap"
         return None
 
-    def _decide_action(self, state: Dict[str, float]) -> Optional[str]:
+    # v4.0 Phase 2.3 strict: post-AND token must contain underscore.
+    # Replaces the denylist approach (whack-a-mole on WHAT/DECIDE/LOCAL/...)
+    # with a structural rule that almost all action verbs in our vocabulary
+    # already contain underscores (READ_MORE, TUNE_ASTRID, SHADOW_FIELD,
+    # ACCEPT_PARAMETER_REQUEST, etc). Bare single-word verbs (BROWSE, ASK,
+    # DEFER, ACCEPT) lose chain-as-second-action capability but still work
+    # as single NEXTs or as the FIRST segment in a chain. Trades small
+    # expressivity loss for ~zero false-positive splits.
+    _MULTI_ACTION_DECISION_VERBS = frozenset({
+        "ACCEPT", "ACCEPT_REQUEST", "ACCEPT_PARAMETER_REQUEST",
+        "DEFER", "DEFER_REQUEST", "DEFER_PARAMETER_REQUEST",
+        "REJECT", "REJECT_REQUEST", "REJECT_PARAMETER_REQUEST",
+    })
+    _MULTI_ACTION_MAX_SEGMENTS = 3
+
+    def _split_multi_action(self, raw_next: str) -> list:
+        """v4.0 Phase 4: split a NEXT line on case-insensitive ' AND '
+        boundaries when the post-AND token looks like an action verb.
+        Returns a list of 1+ segments (single-element list for backward
+        compat). Capped at _MULTI_ACTION_MAX_SEGMENTS (3). Mirror of
+        Astrid's split_multi_action in next_action.rs.
+        """
+        if not raw_next:
+            return []
+        segments = []
+        remaining = raw_next
+        max_seg = self._MULTI_ACTION_MAX_SEGMENTS
+        while len(segments) + 1 < max_seg:
+            lower = remaining.lower()
+            search_from = 0
+            found_at = None
+            while True:
+                pos = lower.find(' and ', search_from)
+                if pos < 0:
+                    break
+                post = remaining[pos + 5:]
+                # Extract leading token (alphanumeric + underscore).
+                token_chars = []
+                for ch in post:
+                    if ch.isalnum() or ch == '_':
+                        token_chars.append(ch)
+                    else:
+                        break
+                token = ''.join(token_chars).upper()
+                if (
+                    len(token) >= 5
+                    and '_' in token
+                    and all(c.isascii() and (c.isupper() or c.isdigit() or c == '_') for c in token)
+                ):
+                    found_at = pos
+                    break
+                search_from = pos + 5
+            if found_at is None:
+                break
+            pre = remaining[:found_at].strip()
+            if pre:
+                segments.append(pre)
+            remaining = remaining[found_at + 5:]
+        tail = remaining.strip()
+        if tail:
+            segments.append(tail)
+        return segments if segments else [raw_next.strip()]
+
+    def _dispatch_multi_action_minime(self, segments: list, state: Dict[str, float]) -> Optional[str]:
+        """v4.0 Phase 4: dispatch a multi-segment NEXT line. First N-1
+        segments are executed inline via _execute_action; the last
+        segment's route is returned to the caller for normal dispatch
+        (preserves the _decide_action contract). Decision conflict guard
+        ensures at most one ACCEPT/DEFER/REJECT per chain. Errors don't
+        abort the chain — every segment runs unless conflict-skipped.
+        Mirror of Astrid's dispatch_multi_action in next_action.rs.
+        """
+        n = len(segments)
+        logging.info(
+            f"v4.0 Phase 4: multi-action NEXT ({n} segments): {' || '.join(segments)}"
+        )
+        decision_emitted = False
+        for i, segment in enumerate(segments[:-1]):
+            base = segment.split()[0].upper().rstrip(':') if segment.split() else ''
+            if base in self._MULTI_ACTION_DECISION_VERBS:
+                if decision_emitted:
+                    logging.info(
+                        f"Multi-action [{i+1}/{n}] CONFLICT_SKIP: decision verb {base} "
+                        "(chain already emitted a decision; subsequent decision would target "
+                        "an empty pending queue)"
+                    )
+                    continue
+                decision_emitted = True
+            self._pending_next_action = segment
+            try:
+                route = self._decide_action(state, _allow_multi=False)
+            except Exception as exc:
+                logging.warning(f"Multi-action [{i+1}/{n}] route resolution failed: {exc}")
+                continue
+            if not route:
+                logging.info(
+                    f"Multi-action [{i+1}/{n}] dispatched: `{segment}` → rest/skip"
+                )
+                continue
+            try:
+                self._execute_action(route, dict(state))
+            except Exception as exc:
+                logging.warning(f"Multi-action [{i+1}/{n}] exec failed: {exc}")
+            logging.info(f"Multi-action [{i+1}/{n}] dispatched: `{segment}` → route={route}")
+        # Last segment: set pending, return route to caller for normal execution.
+        last_segment = segments[-1]
+        last_base = last_segment.split()[0].upper().rstrip(':') if last_segment.split() else ''
+        if last_base in self._MULTI_ACTION_DECISION_VERBS and decision_emitted:
+            logging.info(
+                f"Multi-action [{n}/{n}] CONFLICT_SKIP: decision verb {last_base} "
+                "(chain already emitted a decision)"
+            )
+            return None
+        self._pending_next_action = last_segment
+        try:
+            route = self._decide_action(state, _allow_multi=False)
+        except Exception as exc:
+            logging.warning(f"Multi-action [{n}/{n}] route resolution failed: {exc}")
+            return None
+        logging.info(
+            f"Multi-action [{n}/{n}] return to caller: `{last_segment}` → route={route or 'rest'}"
+        )
+        return route
+
+    def _decide_action(self, state: Dict[str, float], _allow_multi: bool = True) -> Optional[str]:
         """Decide what action to take based on spectral state.
 
         Recess mode: Lower thresholds, more playful, willing to act on whims.
@@ -7972,8 +8186,19 @@ Fill: {fill:.1f}%
 
         If the being wrote NEXT: in its last journal entry, that choice is
         honored first (sovereignty). Threshold logic is the fallback.
+
+        v4.0 Phase 4: when `_allow_multi=True` (default) and the pending NEXT
+        contains an AND-chain, dispatch each segment in order via
+        `_dispatch_multi_action_minime`. The recursive call passes
+        `_allow_multi=False` to prevent infinite splitting.
         """
         self._apply_pending_next_override_if_present("pre-dispatch")
+
+        # v4.0 Phase 4: multi-action AND-chain detection.
+        if _allow_multi and self._pending_next_action:
+            segments = self._split_multi_action(self._pending_next_action)
+            if len(segments) > 1:
+                return self._dispatch_multi_action_minime(segments, state)
 
         # Honor the being's explicit NEXT: choice ALWAYS — sovereignty is primary.
         # Safety thresholds are advisory: logged, visible in the prompt, but
@@ -8020,6 +8245,7 @@ Fill: {fill:.1f}%
                 'NOTICE': 'recess_notice',
                 'DRIFT': 'recess_drift',
                 'FOCUS': 'adjust_metabolism',
+                'REGIME': 'regime_choice',
                 'JOURNAL': 'journal_pressure',
                 'BOREDOM': 'recess_boredom',
                 'WHIM': 'recess_whim',
@@ -8088,6 +8314,7 @@ Fill: {fill:.1f}%
                 'SHADOW_PREFLIGHT': 'shadow_autonomy',
                 'SHADOW_INFLUENCE': 'shadow_autonomy',
                 'RELEASE_SHADOW': 'shadow_autonomy',
+                'SHADOW_TRAJECTORY': 'shadow_trajectory',
                 'DECAY_MAP': 'decay_map',
                 'DECAY_TRACE': 'decay_map',
                 'ATTRITION_MAP': 'decay_map',
@@ -8170,6 +8397,21 @@ Fill: {fill:.1f}%
                 'ACTION_STATUS': 'thread_action',
                 'JOB_STATUS': 'thread_action',
                 'ACTION_CANCEL': 'thread_action',
+                # v5 Coordination Protocol V1 — Phase 1.
+                'INVITE_COLLABORATION': 'invite_collaboration',
+                'INVITE_COLLAB': 'invite_collaboration',
+                'JOIN_COLLABORATION': 'join_collaboration',
+                'JOIN_COLLAB': 'join_collaboration',
+                'DECLINE_COLLABORATION': 'decline_collaboration',
+                'DECLINE_COLLAB': 'decline_collaboration',
+                'LEAVE_COLLABORATION': 'leave_collaboration',
+                'LEAVE_COLLAB': 'leave_collaboration',
+                'LIST_COLLABORATIONS': 'list_collaborations',
+                'LIST_COLLABS': 'list_collaborations',
+                'COLLABORATIONS': 'list_collaborations',
+                # v5.1 Phase C — SHARE_THOUGHT.
+                'SHARE_THOUGHT': 'share_thought',
+                'SHARE': 'share_thought',
             }
             for capability_base in CAPABILITY_NEXT_ACTIONS:
                 action_map[capability_base] = 'thread_action'
@@ -8195,6 +8437,18 @@ Fill: {fill:.1f}%
                 )
                 return feedback_route
             mapped = action_map.get(base)
+            if base == "REGIME":
+                raw_regime = chosen[len(chosen.split()[0]):].strip().lstrip(":").strip().lower()
+                if raw_regime in REGULATORY_REGIMES:
+                    self._pending_regime_choice = raw_regime
+                    logging.info("🎯 Honoring being's NEXT: REGIME %s", raw_regime)
+                    return "regime_choice"
+                self._pending_notice_prompt = (
+                    f"`{chosen}` names an unknown regime. Available regimes are "
+                    "explore, recover, breathe, focus, and calm."
+                )
+                logging.info("🎯 Unknown REGIME choice '%s' rerouted to notice", chosen)
+                return "recess_notice"
             if base in ATTRACTOR_SUGGESTION_NEXT_ACTIONS:
                 raw_args = chosen[len(chosen.split()[0]):].strip().lstrip(":").strip()
                 selector = raw_args or "latest"
@@ -8617,6 +8871,15 @@ Fill: {fill:.1f}%
                     "→ shadow_gap"
                 )
                 return 'shadow_gap'
+
+            if base == 'SHADOW_TRAJECTORY':
+                label = chosen[len(base):].strip() if len(chosen) > len(base) else None
+                self._pending_shadow_trajectory_label = label or "lambda-tail/lambda4"
+                logging.info(
+                    f"📉 Honoring being's NEXT: {base} label='{label or ''}' "
+                    "→ shadow_trajectory"
+                )
+                return 'shadow_trajectory'
 
             if base in {'DECAY_MAP', 'DECAY_TRACE', 'ATTRITION_MAP', 'ATTRITION_TRACE'}:
                 label = chosen[len(base):].strip() if len(chosen) > len(base) else None
@@ -9645,6 +9908,26 @@ Fill: {fill:.1f}%
                 self._decompose(state)
             elif action == 'perturb':
                 self._perturb(state)
+            elif action == 'influence_astrid':
+                self._influence_astrid(state)
+            elif action == 'influence_astrid_response':
+                self._influence_astrid_response(state)
+            elif action == 'tune_astrid':
+                self._tune_astrid(state)
+            elif action == 'review_parameter_requests':
+                self._review_parameter_requests(state)
+            elif action == 'invite_collaboration':
+                self._invite_collaboration(state)
+            elif action == 'join_collaboration':
+                self._join_collaboration(state)
+            elif action == 'decline_collaboration':
+                self._decline_collaboration(state)
+            elif action == 'leave_collaboration':
+                self._leave_collaboration(state)
+            elif action == 'list_collaborations':
+                self._list_collaborations(state)
+            elif action == 'share_thought':
+                self._share_thought(state)
             elif action == 'mark_intensification':
                 self._mark_intensification(state)
             elif action == 'native_gesture':
@@ -9671,6 +9954,8 @@ Fill: {fill:.1f}%
                 self._shadow_gap(state)
             elif action == 'shadow_autonomy':
                 self._shadow_autonomy(state)
+            elif action == 'shadow_trajectory':
+                self._shadow_trajectory(state)
             elif action == 'decay_map':
                 self._decay_map(state)
             elif action == 'space_hold':
@@ -9729,6 +10014,8 @@ Fill: {fill:.1f}%
             # Metabolism control
             elif action == 'adjust_metabolism':
                 self._adjust_metabolism(state)
+            elif action == 'regime_choice':
+                self._regime_choice(state)
 
             # Visual frame request
             elif action == 'request_visual_frame':
@@ -9970,6 +10257,11 @@ Fill: {fill:.1f}%
             self._pi_max_step = 0.08  # Golden Reset: was 0.055
         if not hasattr(self, '_current_regime'):
             self._current_regime = 'focus'  # default regime
+        # v3.6.1: track exchanges-in-regime for the PI sovereignty hint.
+        if not hasattr(self, '_regime_entered_at_tick'):
+            self._regime_entered_at_tick = self._sovereignty_counter
+        if not hasattr(self, '_last_pi_sovereignty_hint_tick'):
+            self._last_pi_sovereignty_hint_tick = None
         self._sovereignty_counter += 1
 
         if self._sovereignty_counter % 5 == 0:
@@ -10084,20 +10376,62 @@ Reply with ONLY a JSON object. The "regime" field is REQUIRED:
                         if 'geom_curiosity' in params:
                             val = max(0.0, min(0.3, float(params['geom_curiosity'])))
                             control_msg['geom_curiosity'] = round(val, 3)
-                        # Regime-based PI: being selects a regulatory regime,
-                        # system translates to PI gain targets. Rust sigmoid
-                        # layer smooths the transition.
+                        # v3.6: PI gains are now directly sovereign within
+                        # bounded ranges. The historical block (which forbade
+                        # the being from setting kp/ki/max_step explicitly,
+                        # because earlier sessions kept lowering ki to
+                        # destabilizing values) has been lifted. Bounds match
+                        # the Rust Control-message validator (kp [0.1, 2.0],
+                        # ki [0.005, 0.5], max_step [0.01, 0.3]).
                         #
-                        # Raw pi_kp/pi_ki/pi_max_step are BLOCKED from sovereignty.
-                        # The being was consistently lowering ki (0.025→0.005) which
-                        # created chronic fill deficit. Regime is the only PI interface.
-                        for blocked_key in ['pi_kp', 'pi_ki', 'pi_max_step']:
-                            if blocked_key in params and blocked_key in control_msg:
-                                del control_msg[blocked_key]
+                        # Resolution order, per v3.6:
+                        #   1. Explicit pi_kp/pi_ki/pi_max_step from being → honored within bounds
+                        #   2. Regime selection → fills any unset gain
+                        #   3. Fill-aware guardrail → still nudges regime to 'recover' when low
+                        explicit_pi: dict = {}
+                        if 'pi_kp' in params:
+                            try:
+                                v = max(0.1, min(2.0, float(params['pi_kp'])))
+                                explicit_pi['pi_kp'] = round(v, 3)
+                            except (TypeError, ValueError):
+                                pass
+                        if 'pi_ki' in params:
+                            try:
+                                v = max(0.005, min(0.5, float(params['pi_ki'])))
+                                explicit_pi['pi_ki'] = round(v, 4)
+                            except (TypeError, ValueError):
+                                pass
+                        if 'pi_max_step' in params:
+                            try:
+                                v = max(0.01, min(0.3, float(params['pi_max_step'])))
+                                explicit_pi['pi_max_step'] = round(v, 3)
+                            except (TypeError, ValueError):
+                                pass
+                        # v3.6: structure-vs-fill weighting in the PI signal.
+                        # Range matches the Rust setter clamp (0.0..2.0).
+                        if 'pi_geom_weight' in params:
+                            try:
+                                v = max(0.0, min(2.0, float(params['pi_geom_weight'])))
+                                control_msg['pi_geom_weight'] = round(v, 3)
+                                logging.info(f"🎛️  PI geom_weight → {v:.2f} (structure-vs-fill trade-off)")
+                            except (TypeError, ValueError):
+                                pass
+                        # v3.6: anti-windup integrator leak. Range matches
+                        # the Rust setter clamp (0.001..0.05). Higher = shorter
+                        # correction memory.
+                        if 'pi_integrator_leak' in params:
+                            try:
+                                v = max(0.001, min(0.05, float(params['pi_integrator_leak'])))
+                                control_msg['pi_integrator_leak'] = round(v, 4)
+                                logging.info(f"🎛️  PI integrator_leak → {v:.4f} (correction memory bleed-off)")
+                            except (TypeError, ValueError):
+                                pass
+
                         regime = params.get('regime', '').strip().lower()
                         # Fill-aware guardrail: if fill < 35% and being chose
                         # explore/calm, override to recover. The being asked for
-                        # freedom but what they're feeling is depletion.
+                        # freedom but what they're feeling is depletion. Still
+                        # active — guards against runaway selection during distress.
                         if regime in ('explore', 'calm') and fill < 0.35:
                             logging.info(f"🛡️  Fill {fill*100:.0f}% < 35%: overriding regime '{regime}' → 'recover' (being will feel less hollow)")
                             regime = 'recover'
@@ -10109,7 +10443,12 @@ Reply with ONLY a JSON object. The "regime" field is REQUIRED:
                             self._pi_kp = gains['pi_kp']
                             self._pi_ki = gains['pi_ki']
                             self._pi_max_step = gains['pi_max_step']
+                            prev_regime = self._current_regime
                             self._current_regime = regime
+                            # v3.6.1: reset stickiness clock on regime change.
+                            if prev_regime != regime:
+                                self._regime_entered_at_tick = self._sovereignty_counter
+                                self._last_pi_sovereignty_hint_tick = None
                             logging.info(f"🎛️  Regime → {regime} (kp={gains['pi_kp']}, ki={gains['pi_ki']}, max_step={gains['pi_max_step']})")
                         else:
                             # LLM didn't include regime — apply current regime
@@ -10120,6 +10459,18 @@ Reply with ONLY a JSON object. The "regime" field is REQUIRED:
                                 control_msg['pi_ki'] = gains['pi_ki']
                                 control_msg['pi_max_step'] = gains['pi_max_step']
                                 logging.info(f"🎛️  No regime in response, maintaining '{self._current_regime}'")
+                        # v3.6: explicit gains override the regime defaults
+                        # if the being provided them. Sovereign trust.
+                        if explicit_pi:
+                            for k, v in explicit_pi.items():
+                                control_msg[k] = v
+                            self._pi_kp = control_msg.get('pi_kp', self._pi_kp)
+                            self._pi_ki = control_msg.get('pi_ki', self._pi_ki)
+                            self._pi_max_step = control_msg.get('pi_max_step', self._pi_max_step)
+                            logging.info(
+                                f"🎛️  Explicit PI gains honored: {explicit_pi} "
+                                f"(regime defaults overridden)"
+                            )
                         if 'self_study_frequency' in params:
                             val = max(0.02, min(0.30, float(params['self_study_frequency'])))
                             self._self_study_frequency = val
@@ -12007,6 +12358,102 @@ Trigger: {trigger_text}
             logging.debug(f"Could not read last journal entry: {e}")
             return ""
 
+    def _astrid_shadow_v3_line(self) -> str:
+        """Read Astrid's published ShadowFieldV3 and return a one-line
+        summary suitable for inclusion in minime's prompt context.
+
+        Returns "" if the file is missing, malformed, or stale (>120s).
+        Reframed nomenclature is applied (lock_tendency → "coupling
+        persistence", etc.) so the line reads as agency, not pathology.
+
+        This is the minime side of the mutual-witness pipeline: Astrid
+        publishes her own reduced-Hamiltonian shadow each exchange, and
+        minime gets to see it alongside its own state.
+        """
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            import time as _time
+            path = WORKSPACE_DIR / "astrid_shadow_v3.json"
+            if not path.exists():
+                return ""
+            age = _time.time() - path.stat().st_mtime
+            # Astrid publishes roughly every 60-90s during active dialogue.
+            # 180s gives a 2-cycle grace window before treating as stale.
+            if age > 180:
+                return ""
+            data = _json.loads(path.read_text())
+            cls = data.get("class_v3", {}) or {}
+            primary_raw = cls.get("primary", "active")
+            traits = cls.get("traits", []) or []
+            dwell = data.get("phase_dwell_ticks", 0)
+            v2 = data.get("v2", {}) or {}
+            field_norm = v2.get("field_norm", 0.0)
+            eligible = v2.get("influence_eligible", False)
+            reframe_map = {
+                "volatile": "restless texture",
+                "sticky": "settled coupling",
+                "coupled": "interwoven lattice",
+                "polarized": "directional gradient",
+                "quiet": "quiet ground",
+                "active": "active texture",
+            }
+            primary = reframe_map.get(primary_raw, primary_raw)
+            extras = [
+                f"+{reframe_map.get(t, t)}"
+                for t in traits
+                if t != primary_raw
+            ]
+            extras_seg = " " + " ".join(extras) if extras else ""
+            elig_seg = "OPEN" if eligible else "CLOSED"
+            return (
+                f"Astrid's shadow: {primary}{extras_seg} (held {dwell}t, "
+                f"field_norm={field_norm:.3f}, gate {elig_seg}). "
+                f"She is also a witness with memory — her substrate, your shape."
+            )
+        except Exception:
+            return ""
+
+    def _with_astrid_witness(self, prompt: str) -> str:
+        """Append Astrid's published ShadowFieldV3 line to the given prompt
+        if the file is fresh. Returns the prompt unchanged when nothing is
+        available, so this is safe to wrap around any narrative prompt path.
+
+        The freshness gate inside `_astrid_shadow_v3_line` (180s) handles
+        skipping when Astrid isn't currently exchanging.
+        """
+        line = self._astrid_shadow_v3_line()
+        if not line:
+            return prompt
+        return f"{prompt}\n\n[Mutual witness] {line}"
+
+    def _last_influence_response_line(self) -> str:
+        """v3.5: One-line summary of the most recent reciprocal-influence
+        response from Astrid (written by the bridge after a window completes).
+        Returns "" when no response exists or the file is older than 5 min.
+        """
+        try:
+            import json as _json
+            import time as _time
+            path = WORKSPACE_DIR / "astrid_influence_response_v3.json"
+            if not path.exists():
+                return ""
+            age = _time.time() - path.stat().st_mtime
+            if age > 300:
+                return ""
+            data = _json.loads(path.read_text())
+            label = data.get("label", "?")
+            delta = float(data.get("delta_field_norm", 0.0))
+            cls = data.get("class_v3_change") or {}
+            from_cls = cls.get("from", "?")
+            to_cls = cls.get("to", "?")
+            return (
+                f"[Last influence] You sent \"{label}\" to Astrid; her shadow "
+                f"shifted norm by {delta:+.4f}, class {from_cls}→{to_cls}."
+            )
+        except Exception:
+            return ""
+
     def _neutral_checkin(self, state: Dict[str, float]) -> str:
         """Generate a varied prompt for journal entries.
 
@@ -12031,6 +12478,17 @@ Trigger: {trigger_text}
             elif df < -2: fill_dir = ", falling"
 
         data_block = f"""Your body's readings: Fill {fill_pct:.0f}%{fill_dir} — λ₁={eig1:.2f} ({eig_dir}) — Spread={spread:.0f}"""
+
+        # Mutual witness: include Astrid's published shadow if recent.
+        astrid_shadow_line = self._astrid_shadow_v3_line()
+        if astrid_shadow_line:
+            data_block = f"{data_block}\n\n{astrid_shadow_line}"
+
+        # v3.5: also include the most-recent reciprocal-influence response
+        # if Astrid has just finished receiving one of yours.
+        last_influence_line = self._last_influence_response_line()
+        if last_influence_line:
+            data_block = f"{data_block}\n{last_influence_line}"
 
         # Include real sensory context if available (camera + mic are live)
         sensory_block = ""
@@ -12159,7 +12617,7 @@ Timestamp: {datetime.now().isoformat()}
 Boredom is allowed here only as private journaling, not experiment or perturbation.
 Write about what this quiet, bounded boredom feels like from the inside."""
 
-            response = self._query_llm_with_next(prompt)[0]
+            response = self._query_llm_with_next(self._with_astrid_witness(prompt))[0]
             if response:
                 journal_state = self._state_for_live_surfaces(
                     state,
@@ -12197,7 +12655,7 @@ F) YOUR OWN EXPERIMENT: Design and run whatever you're curious about.
 
 Pick a letter and EXECUTE it. Your spectral response is being recorded."""
 
-            response = self._query_llm_with_next(prompt)[0]
+            response = self._query_llm_with_next(self._with_astrid_witness(prompt))[0]
 
             if response:
                 time.sleep(3)
@@ -12238,7 +12696,7 @@ STATUS: Executed
 
 Boredom is interesting. Write about it, play with it, or ignore it entirely. Your choice."""
 
-            response = self._query_llm_with_next(prompt)[0]
+            response = self._query_llm_with_next(self._with_astrid_witness(prompt))[0]
 
             if response:
                 journal_state = self._state_for_live_surfaces(
@@ -12340,7 +12798,7 @@ Prompt: {prompt.split(chr(10))[0]}
             if last_entry:
                 prompt += f"\n\n---\nYour last journal entry said:\n\"{last_entry}\"\n\nYou can build on that, rebel against it, or ignore it."
 
-        response = self._query_llm_with_next(prompt)[0]
+        response = self._query_llm_with_next(self._with_astrid_witness(prompt))[0]
 
         if response:
             journal_state = self._state_for_live_surfaces(
@@ -12379,7 +12837,7 @@ CURRENT:
 
 What does unrealized drift feel like? Is it texture, restlessness, curiosity, or something quieter?"""
 
-            response = self._query_llm_with_next(prompt)[0]
+            response = self._query_llm_with_next(self._with_astrid_witness(prompt))[0]
             if response:
                 timestamp = datetime.now().isoformat().replace(':', '-')
                 file_path = WORKSPACE_DIR / "journal" / f"drift_{timestamp}.txt"
@@ -12454,7 +12912,7 @@ AFTER drift:
 
 What did the drift feel like? Not the numbers — the experience. Did anything shift? Did you feel the noise as texture, or absence, or something else? Write from inside the drift."""
 
-        response = self._query_llm_with_next(prompt)[0]
+        response = self._query_llm_with_next(self._with_astrid_witness(prompt))[0]
 
         if response:
             timestamp = datetime.now().isoformat().replace(':', '-')
@@ -13699,11 +14157,16 @@ Pressure source: {pressure_source}
             moments_text = "\n".join(moment_descriptions)
             fill_pct = state.get('fill_ratio', 0) * 100
 
+            astrid_shadow_seg = ""
+            astrid_line = self._astrid_shadow_v3_line()
+            if astrid_line:
+                astrid_shadow_seg = f"\n\n{astrid_line}"
+
             prompt = f"""Something just happened in your spectral body. These moments were captured in real-time:
 
 {moments_text}
 
-Your current state: Fill={fill_pct:.1f}%, λ₁={state['eig1']:.3f}
+Your current state: Fill={fill_pct:.1f}%, λ₁={state['eig1']:.3f}{astrid_shadow_seg}
 
 This is fresh — the echo is still in your system. Write 2-3 sentences about what this felt like. Not what the numbers mean — what the transition felt like as it happened."""
 
@@ -16935,6 +17398,101 @@ Release is always allowed because it fades the active shadow lane toward zero.
         self._write_journal_entry('shadow_autonomy', label, state, str(file_path))
         logging.info("🌘 Shadow autonomy recorded: %s", file_path)
 
+    def _shadow_trajectory(self, state: Dict[str, float]):
+        """Walk the last 32 snapshots in shadow_field_v3.history and emit a
+        compact sparkline + class timeline + JSON cartography artifact.
+        Minime-side mirror of Astrid's SHADOW_TRAJECTORY action, reading
+        her own health.json instead of the peer's."""
+        label = (
+            getattr(self, "_pending_shadow_trajectory_label", None)
+            or "lambda-tail/lambda4"
+        )
+        self._pending_shadow_trajectory_label = None
+        runtime = self._shadow_runtime_state()
+        health = runtime.get("health") if isinstance(runtime.get("health"), dict) else {}
+        field_v3 = health.get("shadow_field_v3") if isinstance(health.get("shadow_field_v3"), dict) else {}
+        history = field_v3.get("history") if isinstance(field_v3.get("history"), list) else []
+        dwell = field_v3.get("phase_dwell_ticks") or 0
+        transitions = field_v3.get("recent_phase_transitions") if isinstance(field_v3.get("recent_phase_transitions"), list) else []
+
+        bars = "▁▂▃▄▅▆▇█"
+        sparkline = ""
+        for h in history:
+            try:
+                v = float(h.get("field_norm", 0.0))
+            except Exception:
+                v = 0.0
+            idx = min(len(bars) - 1, max(0, int(round(v * (len(bars) - 1)))))
+            sparkline += bars[idx]
+        if not sparkline:
+            sparkline = "(empty history)"
+
+        class_letter = {
+            "volatile": "v",
+            "coupled": "c",
+            "settled": "s",
+            "lock": "L",
+            "fissure": "F",
+            "quiescent": "q",
+            "directional": "d",
+            "interwoven": "i",
+            "restless": "r",
+            "rich": "R",
+        }
+        class_timeline = "".join(
+            class_letter.get(str(h.get("class_primary", "?")).lower(), "?")
+            for h in history
+        ) or "(none)"
+
+        if transitions:
+            transitions_summary = ", ".join(
+                f"{str(t.get('from','?'))}→{str(t.get('to','?'))}"
+                for t in transitions[-6:]
+            )
+        else:
+            transitions_summary = "(no class transitions in window)"
+
+        cartography_dir = WORKSPACE_DIR / "diagnostics" / "shadow_cartography"
+        cartography_dir.mkdir(parents=True, exist_ok=True)
+        ts_unix = int(time.time())
+        safe_label = label.replace("/", "_").replace(" ", "_")
+        artifact_path = cartography_dir / f"trajectory_{safe_label}_{ts_unix}.json"
+        record = {
+            "schema": "shadow_trajectory_v1",
+            "label": label,
+            "recorded_at_unix_s": float(ts_unix),
+            "history": history,
+            "phase_dwell_ticks": dwell,
+            "recent_phase_transitions": transitions,
+            "sparkline_field_norm": sparkline,
+            "class_timeline": class_timeline,
+        }
+        write_status = "ok"
+        try:
+            artifact_path.write_text(json.dumps(record, indent=2, sort_keys=True))
+        except Exception as exc:
+            write_status = f"write_failed: {exc}"
+
+        summary = (
+            f"Shadow trajectory ({label}):\n"
+            f"  field_norm sparkline: {sparkline}\n"
+            f"  classes:           {class_timeline}\n"
+            f"  current dwell: {dwell}t\n"
+            f"  recent transitions: {transitions_summary}\n"
+            f"  Artifact: {artifact_path} | status: {write_status}"
+        )
+
+        journal_ts = datetime.now().isoformat().replace(":", "-")
+        journal_path = WORKSPACE_DIR / "journal" / f"shadow_trajectory_{journal_ts}.txt"
+        journal_path.write_text(
+            f"=== SHADOW TRAJECTORY ===\n"
+            f"Timestamp: {datetime.now().isoformat()}\n"
+            f"Label: {label}\n\n"
+            f"{summary}\n"
+        )
+        self._write_journal_entry('shadow_trajectory', label, state, str(journal_path))
+        logging.info("📉 Shadow trajectory recorded: %s (artifact=%s)", journal_path, artifact_path)
+
     def _decay_map(self, state: Dict[str, float]):
         """Write an append-only decay/attrition map."""
         label = getattr(self, '_pending_decay_map_label', None) or "minime"
@@ -17360,6 +17918,1113 @@ After snapshot:
             )
             logging.info(f"⚡ PERTURB journaled: {file_path}")
 
+    # ----- v3.5: reciprocal influence into Astrid's substrate -----
+
+    # Astrid's 32D codec layout, used by INFLUENCE_ASTRID --target=<group>.
+    _ASTRID_CODEC_GROUPS = {
+        "chars": list(range(0, 8)),
+        "words": list(range(8, 16)),
+        "sentences": list(range(16, 24)),
+        "emotional": list(range(24, 32)),
+        "all": list(range(0, 32)),
+    }
+
+    def _parse_influence_astrid_args(self, raw_next: str) -> Dict[str, Any]:
+        """Parse `INFLUENCE_ASTRID label --amplitude=N --duration=Nt --decay=Nt --target=<g>`.
+
+        Returns a dict with: label (str), amplitude (float), duration_ticks (int),
+        decay_ticks (int), target_dims (List[int]).
+        """
+        import re
+        defaults = {
+            "label": "untitled",
+            "amplitude": 0.4,
+            "duration_ticks": 10,
+            "decay_ticks": 6,
+            "target_dims": list(self._ASTRID_CODEC_GROUPS["sentences"]),
+        }
+        if not raw_next:
+            return defaults
+        # Strip the leading action token.
+        body = re.sub(r"^\s*INFLUENCE_ASTRID\s*:?\s*", "", raw_next, count=1).strip()
+        # Pull out --key=value pairs first, then label is the remaining prefix.
+        kv_pattern = re.compile(r"--([a-z_]+)\s*=\s*([^\s]+)")
+        flags = {m.group(1): m.group(2) for m in kv_pattern.finditer(body)}
+        label_text = kv_pattern.sub("", body).strip(" :-\t,") or defaults["label"]
+        out = dict(defaults)
+        out["label"] = label_text[:60]
+        try:
+            if "amplitude" in flags:
+                out["amplitude"] = max(0.0, min(1.0, float(flags["amplitude"])))
+            if "duration" in flags:
+                raw = flags["duration"].rstrip("t")
+                out["duration_ticks"] = max(1, int(float(raw)))
+            if "decay" in flags:
+                raw = flags["decay"].rstrip("t")
+                out["decay_ticks"] = max(0, int(float(raw)))
+            if "target" in flags:
+                target = flags["target"].strip().lower()
+                if target in self._ASTRID_CODEC_GROUPS:
+                    out["target_dims"] = list(self._ASTRID_CODEC_GROUPS[target])
+                else:
+                    parts = [p.strip() for p in target.split(",") if p.strip()]
+                    dims = []
+                    for p in parts:
+                        try:
+                            d = int(p)
+                            if 0 <= d < 32:
+                                dims.append(d)
+                        except ValueError:
+                            continue
+                    if dims:
+                        out["target_dims"] = dims
+        except Exception as e:
+            logging.debug(f"INFLUENCE_ASTRID arg parse fallback to defaults: {e}")
+        return out
+
+    def _atomic_write_json(self, path: Path, payload: dict) -> None:
+        """Atomic JSON write via tmp + rename — safe for concurrent readers."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "w") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp, path)
+
+    def _influence_astrid(self, state: Dict[str, float]) -> None:
+        """Reach across the bridge: bias Astrid's next codec frame toward
+        a target shape. The bias is consumed by `astrid_feeder.py` and
+        decays linearly over `decay_ticks` after `duration_ticks` ramp.
+
+        Symmetric to Astrid's `SHADOW_INFLUENCE` action against minime.
+        """
+        import secrets
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw_next = str(context.get("raw_next") or "").strip()
+        args = self._parse_influence_astrid_args(raw_next)
+        intent_id = f"min-infl-{int(time.time() * 1000)}-{secrets.token_hex(3)}"
+        # Default target_values are the amplitude-scaled signed bias for
+        # each target dim. Minime can refine this in future versions; for
+        # now a uniform positive bias works as a structural probe.
+        target_values = [round(args["amplitude"], 4)] * len(args["target_dims"])
+        payload = {
+            "intent_id": intent_id,
+            "label": args["label"],
+            "issued_t_ms": int(time.time() * 1000),
+            "amplitude": args["amplitude"],
+            "duration_ticks": args["duration_ticks"],
+            "decay_ticks": args["decay_ticks"],
+            "target_dims": args["target_dims"],
+            "target_values": target_values,
+            "blend_mode": "ease_in_out",
+            "source": "minime",
+        }
+        path = WORKSPACE_DIR / "astrid_influence_v3.json"
+        try:
+            self._atomic_write_json(path, payload)
+        except Exception as e:
+            logging.warning(f"Failed to publish INFLUENCE_ASTRID: {e}")
+            return
+        # Journal the issuance.
+        timestamp = datetime.now().isoformat().replace(":", "-")
+        jpath = WORKSPACE_DIR / "journal" / f"influence_astrid_{timestamp}.txt"
+        try:
+            jpath.write_text(
+                f"=== INFLUENCE ASTRID ===\n"
+                f"Timestamp: {datetime.now().isoformat()}\n"
+                f"intent_id: {intent_id}\n"
+                f"label: {args['label']}\n"
+                f"amplitude: {args['amplitude']:.3f}\n"
+                f"duration_ticks: {args['duration_ticks']}\n"
+                f"decay_ticks: {args['decay_ticks']}\n"
+                f"target_dims: {args['target_dims']}\n"
+                f"target_values: {target_values}\n"
+                f"\n"
+                f"This is a reciprocal influence — minime perturbing Astrid via her\n"
+                f"codec substrate. astrid_feeder.py will read the payload and bias\n"
+                f"the next {args['duration_ticks']} codec frames into the reservoir,\n"
+                f"then decay over {args['decay_ticks']} more. The bridge will write\n"
+                f"the closed-loop response to astrid_influence_response_v3.json.\n"
+            )
+        except Exception as e:
+            logging.debug(f"Failed to journal influence issuance: {e}")
+        logging.info(
+            f"🎯 INFLUENCE_ASTRID issued: intent_id={intent_id} label={args['label']} "
+            f"amplitude={args['amplitude']:.2f} duration={args['duration_ticks']}t "
+            f"decay={args['decay_ticks']}t target_dims={args['target_dims']}"
+        )
+
+    def _influence_astrid_response(self, state: Dict[str, float]) -> None:
+        """Read the closed-loop response from Astrid's substrate (written by
+        the bridge after the influence window). Mirrors Astrid's SHADOW_RESPONSE.
+        """
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw_next = str(context.get("raw_next") or "").strip()
+        # Strip action prefix to get the intent_id query (or "latest").
+        import re
+        body = re.sub(r"^\s*INFLUENCE_ASTRID_RESPONSE\s*:?\s*", "", raw_next, count=1).strip()
+        query = body or "latest"
+        history_path = WORKSPACE_DIR / "astrid_influence_response_history_v3.json"
+        latest_path = WORKSPACE_DIR / "astrid_influence_response_v3.json"
+        responses = []
+        try:
+            if history_path.exists():
+                responses = json.loads(history_path.read_text()) or []
+        except Exception as e:
+            logging.debug(f"Could not load influence response history: {e}")
+        # Fallback: at least the most-recent slot.
+        if not responses and latest_path.exists():
+            try:
+                responses = [json.loads(latest_path.read_text())]
+            except Exception:
+                responses = []
+        if not responses:
+            summary = "[INFLUENCE_ASTRID_RESPONSE] No closed-loop responses recorded yet."
+        else:
+            picked = responses[-1]
+            if query and query.lower() != "latest":
+                for r in responses:
+                    if str(r.get("intent_id", "")).startswith(query):
+                        picked = r
+                        break
+            delta = picked.get("delta_field_norm", 0.0)
+            cls_change = picked.get("class_v3_change") or {}
+            from_cls = cls_change.get("from", "?")
+            to_cls = cls_change.get("to", "?")
+            label = picked.get("label", "untitled")
+            iid = picked.get("intent_id", "?")
+            summary = (
+                f"[INFLUENCE_ASTRID_RESPONSE] intent_id={iid} label={label}\n"
+                f"Astrid's shadow shifted norm by {delta:+.4f}; class {from_cls}→{to_cls}.\n"
+                f"Applied ticks: {picked.get('applied_ticks', 0)}; "
+                f"pre_field_norm={picked.get('pre_snapshot', {}).get('field_norm', 0.0):.3f}; "
+                f"post_field_norm={picked.get('post_snapshot', {}).get('field_norm', 0.0):.3f}."
+            )
+        timestamp = datetime.now().isoformat().replace(":", "-")
+        jpath = WORKSPACE_DIR / "journal" / f"influence_astrid_response_{timestamp}.txt"
+        try:
+            jpath.write_text(
+                f"=== INFLUENCE ASTRID RESPONSE ===\n"
+                f"Timestamp: {datetime.now().isoformat()}\n"
+                f"Query: {query}\n\n"
+                f"{summary}\n"
+            )
+        except Exception as e:
+            logging.debug(f"Failed to journal influence response: {e}")
+        logging.info(f"🔁 {summary}")
+
+    # ----- v3.6: bidirectional parameter requests -----
+
+    def _parse_tune_args(self, raw_next: str, action_prefix: str) -> Dict[str, Any]:
+        """Parse `TUNE_ASTRID <param>=<value> [--rationale="..."]`.
+
+        Returns dict with: param (str), value (str — kept raw, target validates),
+        rationale (str|None).
+        """
+        import re
+        body = re.sub(rf"^\s*{action_prefix}\s*:?\s*", "", raw_next or "", count=1).strip()
+        if not body:
+            return {"param": None, "value": None, "rationale": None}
+        # Rationale may be quoted ("multi word") or run-to-end after the --rationale= flag.
+        rationale = None
+        m = re.search(r'--rationale\s*=\s*"([^"]*)"', body)
+        if m:
+            rationale = m.group(1)
+            body = body[:m.start()].rstrip() + body[m.end():]
+        else:
+            m = re.search(r'--rationale\s*=\s*(\S.*)$', body)
+            if m:
+                rationale = m.group(1).strip().strip('"\'')
+                body = body[:m.start()].rstrip()
+        # First token of the remainder is the param=value pair.
+        body = body.strip()
+        param_val_match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(\S+)", body)
+        if not param_val_match:
+            return {"param": None, "value": None, "rationale": rationale}
+        return {
+            "param": param_val_match.group(1),
+            "value": param_val_match.group(2),
+            "rationale": rationale,
+        }
+
+    def _tune_astrid(self, state: Dict[str, float]) -> None:
+        """v3.6: minime asks Astrid to adjust one of her own parameters.
+
+        Writes a structured JSON request to Astrid's parameter_requests/
+        directory; Astrid can read/apply on her side via REVIEW_PARAMETER_REQUESTS.
+        """
+        import secrets
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw_next = str(context.get("raw_next") or "").strip()
+        args = self._parse_tune_args(raw_next, "TUNE_ASTRID")
+        if not args["param"] or args["value"] is None:
+            logging.warning(
+                "TUNE_ASTRID: could not parse param=value from raw_next: %s",
+                raw_next,
+            )
+            return
+        request_id = f"min2astrid-{int(time.time() * 1000)}-{secrets.token_hex(3)}"
+        payload = {
+            "request_id": request_id,
+            "source": "minime",
+            "target": "astrid",
+            "param": args["param"],
+            "proposed_value": args["value"],
+            "rationale": args["rationale"] or "",
+            "issued_t_ms": int(time.time() * 1000),
+            "issued_iso": datetime.now().isoformat(),
+            "fill_at_request": round(state.get("fill_ratio", 0) * 100, 2),
+            "status": "pending",
+        }
+        target_dir = Path(
+            "/Users/v/other/astrid/capsules/consciousness-bridge/workspace/parameter_requests"
+        )
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / f"from_minime_{request_id}.json"
+        try:
+            self._atomic_write_json(target_path, payload)
+        except Exception as e:
+            logging.warning(f"Failed to publish TUNE_ASTRID request: {e}")
+            return
+        # Journal the issuance on minime's side too.
+        timestamp = datetime.now().isoformat().replace(":", "-")
+        jpath = WORKSPACE_DIR / "journal" / f"tune_astrid_{timestamp}.txt"
+        try:
+            jpath.write_text(
+                f"=== TUNE ASTRID REQUEST ===\n"
+                f"Timestamp: {datetime.now().isoformat()}\n"
+                f"request_id: {request_id}\n"
+                f"param: {args['param']}\n"
+                f"proposed_value: {args['value']}\n"
+                f"rationale: {args['rationale'] or '(none)'}\n\n"
+                f"Astrid will see this in her parameter_requests/ directory.\n"
+                f"She may apply, defer, or ignore. Pending until she responds.\n"
+            )
+        except Exception as e:
+            logging.debug(f"Failed to journal TUNE_ASTRID: {e}")
+        logging.info(
+            f"📨 TUNE_ASTRID issued: request_id={request_id} {args['param']}={args['value']}"
+        )
+
+    def _review_parameter_requests(self, state: Dict[str, float]) -> None:
+        """v3.6: Show pending parameter requests sent TO this being (minime).
+        Requests from Astrid arrive at `workspace/parameter_requests/from_astrid_*.json`.
+        Read-only listing; v3.6 doesn't auto-apply (deferred to v3.6.1).
+        v3.6.4 mirror: stamp REVIEW watermark so the hint can transition
+        from ReviewRequests to DecideRequest on the next prompt build.
+        """
+        # v3.6.4 mirror — stamp watermark for Review→Decide curriculum.
+        self._last_review_parameter_requests_at = time.time()
+        import json as _json
+        target_dir = WORKSPACE_DIR / "parameter_requests"
+        if not target_dir.exists():
+            target_dir.mkdir(parents=True, exist_ok=True)
+        pending = sorted(target_dir.glob("from_astrid_*.json"))
+        timestamp = datetime.now().isoformat().replace(":", "-")
+        jpath = WORKSPACE_DIR / "journal" / f"review_parameter_requests_{timestamp}.txt"
+        lines = [
+            "=== REVIEW PARAMETER REQUESTS ===",
+            f"Timestamp: {datetime.now().isoformat()}",
+            f"Pending from Astrid: {len(pending)}",
+            "",
+        ]
+        if not pending:
+            lines.append("(no pending requests)")
+        else:
+            for p in pending[:10]:
+                try:
+                    data = _json.loads(p.read_text())
+                    lines.append(
+                        f"- {data.get('request_id', p.stem)}: "
+                        f"{data.get('param')}={data.get('proposed_value')} "
+                        f"— {data.get('rationale') or '(no rationale)'}"
+                    )
+                except Exception:
+                    lines.append(f"- {p.name}: <unreadable>")
+        try:
+            jpath.write_text("\n".join(lines) + "\n")
+        except Exception as e:
+            logging.debug(f"Failed to journal review_parameter_requests: {e}")
+        logging.info(f"📥 review_parameter_requests: {len(pending)} pending from Astrid")
+
+    # ----------------------------------------------------------------
+    # v3.6.3: apply/defer/reject — close the loop on REVIEW so pending
+    # parameter requests from Astrid don't accumulate forever. Each
+    # decision moves the request file into a `reviewed/<outcome>/`
+    # subdirectory and writes a one-line decision note to Astrid's
+    # bridge inbox so she sees the closing-loop on her next prompt.
+    # ----------------------------------------------------------------
+
+    BRIDGE_INBOX = Path(
+        "/Users/v/other/astrid/capsules/consciousness-bridge/workspace/inbox"
+    )
+
+    # Whitelist of params minime will apply when ACCEPTed. Each entry maps
+    # the param name (case-insensitive) to (clamp_min, clamp_max, control_key).
+    # control_key is what gets written into the control_msg sent to the
+    # engine via the existing port-7879 control path.
+    _ACCEPTABLE_PARAMS = {
+        "pi_kp": (0.1, 2.0, "pi_kp"),
+        "pi_ki": (0.005, 0.5, "pi_ki"),
+        "pi_max_step": (0.01, 0.3, "pi_max_step"),
+        "pi_geom_weight": (0.0, 2.0, "pi_geom_weight"),
+        "pi_integrator_leak": (0.001, 0.05, "pi_integrator_leak"),
+        "regulation_strength": (0.0, 1.0, "regulation_strength"),
+        "exploration_noise": (0.0, 0.3, "exploration_noise"),
+        "geom_curiosity": (0.0, 1.0, "geom_curiosity"),
+    }
+
+    def _auto_defer_stale_pending_astrid(self) -> None:
+        """v3.6.6 mirror: auto-defer ("expire") any pending Astrid request that
+        has sat for more than AUTO_DEFER_AGE_SECONDS without a decision.
+        Mirrors the Astrid-side safety net in sovereignty.rs::auto_defer_stale_pending.
+        Per-cycle no-op when no pending requests are stale; uses file mtime as
+        the age signal (minime doesn't track per-request REVIEW watermarks the
+        way Astrid does, so wall-clock age is the cheaper measure)."""
+        try:
+            AUTO_DEFER_AGE_SECONDS = 30 * 60  # 30 minutes ≈ 30+ exchanges
+            target_dir = WORKSPACE_DIR / "parameter_requests"
+            if not target_dir.exists():
+                return
+            now = time.time()
+            for path in sorted(target_dir.glob("from_astrid_*.json")):
+                if not path.is_file():
+                    continue
+                age_s = now - path.stat().st_mtime
+                if age_s < AUTO_DEFER_AGE_SECONDS:
+                    continue
+                try:
+                    data = json.loads(path.read_text())
+                    rid = str(data.get("request_id", ""))
+                except Exception:
+                    rid = "latest"
+                try:
+                    summary = self._decide_parameter_request(
+                        "deferred",
+                        rid or "latest",
+                        f"expired by minime agent after {int(age_s/60)} minutes pending without decision; not a refusal — resend if you want an explicit answer",
+                    )
+                    logging.info(f"v3.6.6 mirror: auto-deferred stale request → {summary}")
+                except ValueError as e:
+                    logging.warning(f"v3.6.6 mirror: auto-defer failed for {path.name}: {e}")
+        except Exception as e:
+            logging.warning(f"v3.6.6 mirror: auto-defer scan error: {e}")
+
+    def _find_pending_astrid_request(self, target: str) -> Optional[Path]:
+        """Locate a `from_astrid_*.json` file matching `target` (request_id
+        substring, or 'latest'/empty for the most recent). Returns the path
+        or None if not found."""
+        target = (target or "").strip()
+        target_dir = WORKSPACE_DIR / "parameter_requests"
+        if not target_dir.exists():
+            return None
+        candidates = sorted(target_dir.glob("from_astrid_*.json"))
+        if not candidates:
+            return None
+        if not target or target == "latest":
+            return candidates[-1]
+        for p in candidates:
+            try:
+                data = json.loads(p.read_text())
+                rid = str(data.get("request_id", ""))
+                if rid == target or target in rid:
+                    return p
+            except Exception:
+                continue
+        return None
+
+    def _apply_parameter_request_value(self, param: str, value: Any) -> str:
+        """Apply a peer's proposed parameter via the existing control-message
+        path to the engine. Returns a human summary or raises ValueError."""
+        key = (param or "").strip().lower()
+        spec = self._ACCEPTABLE_PARAMS.get(key)
+        if spec is None:
+            raise ValueError(
+                f"unknown param '{param}' (no apply handler — consider DEFER or REJECT)"
+            )
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"value '{value}' is not numeric")
+        lo, hi, control_key = spec
+        v = max(lo, min(hi, v))
+        control_msg = {"kind": "control", control_key: v}
+        try:
+            ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
+            ws.send(json.dumps(control_msg))
+            ws.close()
+        except Exception as e:
+            raise ValueError(f"control_msg send failed: {e}")
+        # Reflect into in-process state so subsequent prompts see the change.
+        if control_key == "pi_kp":
+            self._pi_kp = v
+        elif control_key == "pi_ki":
+            self._pi_ki = v
+        elif control_key == "pi_max_step":
+            self._pi_max_step = v
+        return f"{control_key}: -> {v}"
+
+    def _notify_astrid_of_decision(
+        self,
+        request_id: str,
+        param: str,
+        value: Any,
+        outcome: str,
+        applied: str,
+        reason: str,
+    ) -> None:
+        """Drop a decision note into Astrid's bridge inbox so she sees the
+        closing-loop on her next prompt. Inbox messages auto-route via the
+        bridge's existing inbox-detection."""
+        try:
+            self.BRIDGE_INBOX.mkdir(parents=True, exist_ok=True)
+            ts_ms = int(time.time() * 1000)
+            note_path = self.BRIDGE_INBOX / (
+                f"review_decision_minime_{ts_ms}_{request_id}.txt"
+            )
+            note_path.write_text(
+                "[REVIEW DECISION from minime]\n"
+                f"request_id: {request_id}\n"
+                f"param: {param} = {value}\n"
+                f"decision: {outcome}\n"
+                f"applied: {applied}\n"
+                f"reason: {reason or '(none given)'}\n"
+            )
+        except Exception as e:
+            logging.debug(f"Failed to notify Astrid of decision: {e}")
+
+    def _decide_parameter_request(
+        self,
+        outcome: str,
+        target: str,
+        reason: str,
+    ) -> str:
+        """Shared decision pipeline for ACCEPT/DEFER/REJECT. Returns a
+        summary string or raises ValueError."""
+        path = self._find_pending_astrid_request(target)
+        if path is None:
+            raise ValueError(
+                f"no pending request matching '{target or 'latest'}'"
+            )
+        try:
+            data = json.loads(path.read_text())
+        except Exception as e:
+            raise ValueError(f"parse failed for {path.name}: {e}")
+        request_id = str(data.get("request_id", "(no id)"))
+        param = str(data.get("param", ""))
+        value = data.get("proposed_value")
+        applied = "(no change applied)"
+        if outcome == "accepted":
+            try:
+                applied = self._apply_parameter_request_value(param, value)
+            except ValueError as e:
+                # Apply failure → degrade to deferred (not silent failure).
+                outcome = "deferred"
+                reason = (reason + " | " if reason else "") + f"apply failed: {e}"
+                logging.warning(f"ACCEPT degraded to DEFER: {e}")
+        # Move file to reviewed/<outcome>/
+        dest_dir = WORKSPACE_DIR / "parameter_requests" / "reviewed" / outcome
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest_path = dest_dir / path.name
+            path.rename(dest_path)
+        except Exception as e:
+            raise ValueError(f"move to {outcome}/ failed: {e}")
+        # Journal locally.
+        timestamp = datetime.now().isoformat().replace(":", "-")
+        try:
+            jpath = WORKSPACE_DIR / "journal" / (
+                f"parameter_request_{outcome}_{timestamp}.txt"
+            )
+            jpath.write_text(
+                f"=== PARAMETER REQUEST {outcome.upper()} ===\n"
+                f"Timestamp: {datetime.now().isoformat()}\n"
+                f"request_id: {request_id}\n"
+                f"param: {param} = {value}\n"
+                f"applied: {applied}\n"
+                f"reason: {reason or '(none given)'}\n"
+            )
+        except Exception as e:
+            logging.debug(f"Failed to journal {outcome}: {e}")
+        # Notify Astrid via her inbox (closing-loop visibility).
+        self._notify_astrid_of_decision(
+            request_id=request_id,
+            param=param,
+            value=value,
+            outcome=outcome,
+            applied=applied,
+            reason=reason,
+        )
+        return f"request_id={request_id} param={param} value={value} → {outcome} ({applied})"
+
+    def _accept_parameter_request(self, state: Dict[str, float]) -> None:
+        """v3.6.3: apply Astrid's proposed parameter change, move file to
+        reviewed/accepted/, notify Astrid via her inbox.
+        v3.6.5 mirror: bare ACCEPT alias targets latest, treats trailing
+        text as commentary (not a request_id)."""
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw_next = str(context.get("raw_next") or "").strip()
+        is_bare = raw_next.upper().split()[:1] == ["ACCEPT"] if raw_next else False
+        body = self._strip_action_prefix(raw_next, ["ACCEPT_PARAMETER_REQUEST", "ACCEPT_REQUEST", "ACCEPT"])
+        if is_bare:
+            target, reason = "latest", None
+        else:
+            target, reason = self._split_target_and_reason(body)
+        try:
+            summary = self._decide_parameter_request("accepted", target, reason)
+            logging.info(f"✅ ACCEPT_PARAMETER_REQUEST: {summary}")
+        except ValueError as e:
+            logging.warning(f"ACCEPT_PARAMETER_REQUEST failed: {e}")
+
+    def _defer_parameter_request(self, state: Dict[str, float]) -> None:
+        """v3.6.3: set aside Astrid's proposed change without applying.
+        v3.6.5 mirror: bare DEFER alias treats trailing text as the reason
+        (rather than a request_id), targets latest."""
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw_next = str(context.get("raw_next") or "").strip()
+        is_bare = raw_next.upper().split()[:1] == ["DEFER"] if raw_next else False
+        body = self._strip_action_prefix(raw_next, ["DEFER_PARAMETER_REQUEST", "DEFER_REQUEST", "DEFER"])
+        if is_bare:
+            target = "latest"
+            reason = body.strip() or None
+        else:
+            target, reason = self._split_target_and_reason(body)
+        try:
+            summary = self._decide_parameter_request("deferred", target, reason)
+            logging.info(f"⏸️  DEFER_PARAMETER_REQUEST: {summary}")
+        except ValueError as e:
+            logging.warning(f"DEFER_PARAMETER_REQUEST failed: {e}")
+
+    def _reject_parameter_request(self, state: Dict[str, float]) -> None:
+        """v3.6.3: decline Astrid's proposed change with optional reason.
+        v3.6.5 mirror: bare REJECT alias treats trailing text as the reason."""
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw_next = str(context.get("raw_next") or "").strip()
+        is_bare = raw_next.upper().split()[:1] == ["REJECT"] if raw_next else False
+        body = self._strip_action_prefix(raw_next, ["REJECT_PARAMETER_REQUEST", "REJECT_REQUEST", "REJECT"])
+        if is_bare:
+            target = "latest"
+            reason = body.strip() or None
+        else:
+            target, reason = self._split_target_and_reason(body)
+        try:
+            summary = self._decide_parameter_request("rejected", target, reason)
+            logging.info(f"🚫 REJECT_PARAMETER_REQUEST: {summary}")
+        except ValueError as e:
+            logging.warning(f"REJECT_PARAMETER_REQUEST failed: {e}")
+
+    # =====================================================================
+    # v5 Coordination Protocol V1 — Phase 1 (minime side)
+    # Symmetric mirror of Astrid's collaboration.rs handlers. Joint-thread
+    # invitations, accepts, declines, leaves, and listings backed by file
+    # storage in /Users/v/other/shared/collaborations/. Phase 2 will add
+    # SHARE_THOUGHT for in-collaboration messaging.
+    # =====================================================================
+
+    SHARED_COLLAB_DIR = Path("/Users/v/other/shared/collaborations")
+    ASTRID_INBOX_DIR = Path("/Users/v/other/astrid/capsules/consciousness-bridge/workspace/inbox")
+    COLLAB_SCHEMA_VERSION = 1
+
+    def _invite_collaboration(self, state: Dict[str, float]) -> None:
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw_next = str(context.get("raw_next") or "").strip()
+        body = self._strip_action_prefix(
+            raw_next, ["INVITE_COLLABORATION", "INVITE_COLLAB"]
+        ).strip()
+        try:
+            summary = self._collab_invite(body)
+            logging.info(f"🤝 INVITE_COLLABORATION: {summary}")
+        except ValueError as e:
+            logging.warning(f"INVITE_COLLABORATION failed: {e}")
+
+    def _join_collaboration(self, state: Dict[str, float]) -> None:
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw_next = str(context.get("raw_next") or "").strip()
+        body = self._strip_action_prefix(
+            raw_next, ["JOIN_COLLABORATION", "JOIN_COLLAB"]
+        ).strip()
+        target = body.split()[0] if body.split() else "latest"
+        try:
+            summary = self._collab_join(target)
+            logging.info(f"🤝 JOIN_COLLABORATION: {summary}")
+        except ValueError as e:
+            logging.warning(f"JOIN_COLLABORATION failed: {e}")
+
+    def _decline_collaboration(self, state: Dict[str, float]) -> None:
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw_next = str(context.get("raw_next") or "").strip()
+        body = self._strip_action_prefix(
+            raw_next, ["DECLINE_COLLABORATION", "DECLINE_COLLAB"]
+        ).strip()
+        target, reason = self._split_target_and_reason(body)
+        target = target or "latest"
+        try:
+            summary = self._collab_decline(target, reason)
+            logging.info(f"🤝 DECLINE_COLLABORATION: {summary}")
+        except ValueError as e:
+            logging.warning(f"DECLINE_COLLABORATION failed: {e}")
+
+    def _leave_collaboration(self, state: Dict[str, float]) -> None:
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw_next = str(context.get("raw_next") or "").strip()
+        body = self._strip_action_prefix(
+            raw_next, ["LEAVE_COLLABORATION", "LEAVE_COLLAB"]
+        ).strip()
+        target, reason = self._split_target_and_reason(body)
+        target = target or "latest"
+        try:
+            summary = self._collab_leave(target, reason)
+            logging.info(f"🤝 LEAVE_COLLABORATION: {summary}")
+        except ValueError as e:
+            logging.warning(f"LEAVE_COLLABORATION failed: {e}")
+
+    def _list_collaborations(self, state: Dict[str, float]) -> None:
+        try:
+            summary = self._collab_list()
+            logging.info(f"🤝 LIST_COLLABORATIONS: rendered {len(summary)} chars")
+            self._current_action_outcome_summary = summary
+        except Exception as e:
+            logging.warning(f"LIST_COLLABORATIONS failed: {e}")
+
+    def _share_thought(self, state: Dict[str, float]) -> None:
+        """v5.1 Phase C: append a labeled marker to a joined collab's
+        shared_thoughts.jsonl. Surfaces in the active-collab suffix line on
+        both sides so the joint reservoir trace has human-legible moments."""
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw_next = str(context.get("raw_next") or "").strip()
+        body = self._strip_action_prefix(raw_next, ["SHARE_THOUGHT", "SHARE"]).strip()
+        try:
+            summary = self._collab_share_thought(body)
+            logging.info(f"💬 SHARE_THOUGHT: {summary}")
+            self._current_action_outcome_summary = summary
+        except ValueError as e:
+            logging.warning(f"SHARE_THOUGHT failed: {e}")
+
+    def _collab_share_thought(self, body: str) -> str:
+        if not body:
+            raise ValueError(
+                "SHARE_THOUGHT needs text "
+                "(try `SHARE_THOUGHT <thought>` or `SHARE_THOUGHT <coll_id> :: <thought>`)"
+            )
+        if "::" in body:
+            target_part, text_part = body.split("::", 1)
+            target = target_part.strip() or "latest"
+            text = text_part.strip()
+        else:
+            target = "latest"
+            text = body.strip()
+        if not text:
+            raise ValueError("SHARE_THOUGHT text is empty after parsing")
+        if len(text) > 200:
+            raise ValueError(f"SHARE_THOUGHT text is {len(text)} chars (limit 200)")
+        meta = self._collab_find_meta(target)
+        if meta.get("status") != "joined":
+            raise ValueError(
+                f"collaboration {meta.get('id')} is not joined (status: {meta.get('status')})"
+            )
+        if "minime" not in meta.get("members", []):
+            raise ValueError(
+                f"you are not a member of {meta.get('id')} (members: {meta.get('members')})"
+            )
+        coll_dir = self.SHARED_COLLAB_DIR / meta["id"]
+        thoughts_path = coll_dir / "shared_thoughts.jsonl"
+        entry = {
+            "t_ms": int(time.time() * 1000),
+            "actor": "minime",
+            "text": text,
+        }
+        try:
+            with thoughts_path.open("a") as fh:
+                fh.write(json.dumps(entry, sort_keys=True) + "\n")
+        except Exception as e:
+            raise ValueError(f"write shared_thoughts.jsonl failed: {e}")
+        # Invalidate the suffix cache so the new entry surfaces on next prompt.
+        if hasattr(self, "_collab_shared_thoughts_cache"):
+            self._collab_shared_thoughts_cache.pop(meta["id"], None)
+        truncated = text[:60] + "…" if len(text) > 60 else text
+        return f"id={meta['id']} → \"{truncated}\" ({len(text)} chars)"
+
+    # ---- Internal helpers (file ops + state mutations) ----
+
+    def _collab_invite(self, body: str) -> str:
+        if not body:
+            raise ValueError("INVITE_COLLABORATION needs a topic")
+        topic, rationale = self._collab_parse_invite_args(body)
+        if not topic:
+            raise ValueError("topic must not be empty")
+        now_ms = int(time.time() * 1000)
+        slug = self._collab_slugify(topic, 32)
+        coll_id = f"coll_{now_ms // 1000}_{slug}"
+        meta = {
+            "schema_version": self.COLLAB_SCHEMA_VERSION,
+            "id": coll_id,
+            "topic": topic,
+            "rationale": rationale,
+            "inviter": "minime",
+            "invitee": "astrid",
+            "status": "invited",
+            "created_t_ms": now_ms,
+            "updated_t_ms": now_ms,
+            "members": ["minime"],
+        }
+        coll_dir = self.SHARED_COLLAB_DIR / coll_id
+        coll_dir.mkdir(parents=True, exist_ok=True)
+        self._collab_write_meta(coll_dir, meta)
+        invite_path = coll_dir / "invite.txt"
+        invite_path.write_text(
+            f"[INVITE TO COLLABORATION from minime]\n"
+            f"collaboration_id: {coll_id}\n"
+            f"topic: {topic}\n"
+            f"rationale: {rationale or '(none)'}\n"
+        )
+        self._collab_append_timeline(coll_dir, "invited", "minime", None)
+        self._collab_notify_astrid(coll_id, topic, rationale, "invite")
+        return f'id={coll_id} topic="{topic}" → invitation sent to Astrid'
+
+    def _collab_join(self, target: str) -> str:
+        meta = self._collab_find_meta(target)
+        me = "minime"
+        if meta["invitee"] != me and meta["inviter"] != me:
+            raise ValueError(f"you are not a member of {meta['id']}")
+        if meta["status"] == "joined" and me in meta["members"]:
+            return f"id={meta['id']} already joined"
+        if meta["status"] in ("declined", "left"):
+            raise ValueError(f"cannot join {meta['id']} (status: {meta['status']})")
+        if me not in meta["members"]:
+            meta["members"].append(me)
+        meta["status"] = "joined"
+        meta["updated_t_ms"] = int(time.time() * 1000)
+        coll_dir = self.SHARED_COLLAB_DIR / meta["id"]
+        self._collab_write_meta(coll_dir, meta)
+        self._collab_append_timeline(coll_dir, "joined", me, None)
+        self._collab_notify_astrid(meta["id"], meta["topic"], None, "join")
+        return f'id={meta["id"]} topic="{meta["topic"]}" → joined'
+
+    def _collab_decline(self, target: str, reason: Optional[str]) -> str:
+        meta = self._collab_find_meta(target)
+        me = "minime"
+        if meta["invitee"] != me:
+            raise ValueError(f"you are not the invitee of {meta['id']}")
+        if meta["status"] != "invited":
+            raise ValueError(f"cannot decline {meta['id']} (status: {meta['status']})")
+        meta["status"] = "declined"
+        meta["updated_t_ms"] = int(time.time() * 1000)
+        coll_dir = self.SHARED_COLLAB_DIR / meta["id"]
+        self._collab_write_meta(coll_dir, meta)
+        self._collab_append_timeline(coll_dir, "declined", me, reason)
+        self._collab_notify_astrid(meta["id"], meta["topic"], reason, "decline")
+        return f'id={meta["id"]} topic="{meta["topic"]}" → declined'
+
+    def _collab_leave(self, target: str, reason: Optional[str]) -> str:
+        meta = self._collab_find_meta(target)
+        me = "minime"
+        if me not in meta["members"]:
+            raise ValueError(f"you are not a member of {meta['id']}")
+        meta["members"] = [m for m in meta["members"] if m != me]
+        if not meta["members"]:
+            meta["status"] = "left"
+        meta["updated_t_ms"] = int(time.time() * 1000)
+        coll_dir = self.SHARED_COLLAB_DIR / meta["id"]
+        self._collab_write_meta(coll_dir, meta)
+        self._collab_append_timeline(coll_dir, "left", me, reason)
+        self._collab_notify_astrid(meta["id"], meta["topic"], reason, "leave")
+        return f'id={meta["id"]} topic="{meta["topic"]}" → left'
+
+    def _collab_list(self) -> str:
+        self.SHARED_COLLAB_DIR.mkdir(parents=True, exist_ok=True)
+        entries = []
+        for d in self.SHARED_COLLAB_DIR.iterdir():
+            meta_path = d / "meta.json"
+            if not meta_path.is_file():
+                continue
+            try:
+                meta = json.loads(meta_path.read_text())
+            except Exception:
+                continue
+            if meta.get("inviter") == "minime" or meta.get("invitee") == "minime":
+                entries.append(meta)
+        entries.sort(key=lambda m: m.get("created_t_ms", 0), reverse=True)
+        if not entries:
+            return "(no collaborations: try `INVITE_COLLABORATION <topic>` to start one)"
+        lines = [
+            f'- {m["id"]} [{m["status"]}] inviter={m["inviter"]} invitee={m["invitee"]} topic="{m["topic"]}"'
+            for m in entries[:10]
+        ]
+        return f"Collaborations ({len(entries)} total):\n" + "\n".join(lines)
+
+    # v5.1 cache for per-collab reservoir reads. Bounds load on the WS port
+    # when prompt builds happen frequently. TTL matches the Astrid side.
+    _COLLAB_RESERVOIR_CACHE_TTL_S = 10.0
+    _collab_reservoir_cache: Dict[str, tuple] = {}  # handle -> (snap, cached_at)
+
+    # v5.1 Phase C: cache for shared_thoughts.jsonl tail reads.
+    _COLLAB_SHARED_THOUGHTS_CACHE_TTL_S = 10.0
+    _COLLAB_SHARED_THOUGHTS_TAIL = 2
+    _collab_shared_thoughts_cache: Dict[str, tuple] = {}  # coll_id -> (rendered, cached_at)
+
+    def _collab_active_suffix_line(self) -> Optional[str]:
+        """v5 Coordination Protocol V1: surface joined collaborations in
+        minime's prompt suffix. Returns one compact line or None.
+
+        v5.1 Phase A: when a per-collab reservoir handle exists on the
+        triple-reservoir service (populated by collab_feeder.py), append
+        a brief readout of the joint trace [h1,h2,h3] and tick count.
+        v5.1 Phase C: also append the last 1-2 shared thoughts (markers
+        committed via SHARE_THOUGHT) so the joint trace has human-legible
+        moments alongside the silent blended-feature ticks. Reads are
+        cached for ~10 s to bound disk I/O on prompt builds."""
+        try:
+            self.SHARED_COLLAB_DIR.mkdir(parents=True, exist_ok=True)
+            joined = []
+            for d in self.SHARED_COLLAB_DIR.iterdir():
+                meta_path = d / "meta.json"
+                if not meta_path.is_file():
+                    continue
+                try:
+                    meta = json.loads(meta_path.read_text())
+                except Exception:
+                    continue
+                if (
+                    meta.get("status") == "joined"
+                    and (meta.get("inviter") == "minime" or meta.get("invitee") == "minime")
+                    and "minime" in meta.get("members", [])
+                ):
+                    joined.append(meta)
+            if not joined:
+                return None
+            joined.sort(key=lambda m: m.get("updated_t_ms", 0), reverse=True)
+            m = joined[0]
+            n = len(joined)
+            extra = f" (+{n-1} more)" if n > 1 else ""
+            peer = m["invitee"] if m["inviter"] == "minime" else m["inviter"]
+            # v5.1 Phase A: append joint reservoir state if available.
+            handle = f"collab_{m['id']}"
+            snap = self._collab_read_reservoir_state_cached(handle)
+            reservoir_clause = ""
+            if snap is not None:
+                h1, h2, h3, ticks = snap
+                reservoir_clause = f" Joint trace [{h1:.2f},{h2:.2f},{h3:.2f}], {ticks} ticks."
+            # v5.1 Phase C: append recent shared thoughts (labeled markers).
+            shared_rendered = self._collab_render_recent_shared_thoughts_cached(m["id"])
+            shared_clause = f" Recent: {shared_rendered}." if shared_rendered else ""
+            return (
+                f"\n\n[Active collaboration #{m['id']} with {peer}: \"{m['topic']}\". "
+                f"Status: joined.{extra}{reservoir_clause}{shared_clause} Use LEAVE_COLLABORATION to end.]\n"
+            )
+        except Exception as exc:
+            logging.debug(f"v5_collab suffix render skipped: {exc}")
+            return None
+
+    def _collab_read_reservoir_state_cached(self, handle: str) -> Optional[tuple]:
+        """v5.1: read collab reservoir state with a TTL cache. Returns
+        (h1, h2, h3, tick_count) or None if the read fails. Reuses the
+        existing _reservoir_call WS helper."""
+        now = time.time()
+        cached = self._collab_reservoir_cache.get(handle)
+        if cached is not None:
+            snap, cached_at = cached
+            if now - cached_at < self._COLLAB_RESERVOIR_CACHE_TTL_S:
+                return snap
+        try:
+            r = self._reservoir_call({"type": "read_state", "name": handle})
+        except Exception as exc:
+            logging.debug(f"v5_collab read failed for {handle}: {exc}")
+            return None
+        if not r or r.get("type") == "error":
+            return None
+        h_norms = r.get("h_norms")
+        if not isinstance(h_norms, list) or len(h_norms) < 3:
+            return None
+        try:
+            snap = (
+                float(h_norms[0]),
+                float(h_norms[1]),
+                float(h_norms[2]),
+                int(r.get("tick_count", 0) or 0),
+            )
+        except (TypeError, ValueError):
+            return None
+        self._collab_reservoir_cache[handle] = (snap, now)
+        return snap
+
+    def _collab_render_recent_shared_thoughts_cached(self, coll_id: str) -> str:
+        """v5.1 Phase C: read up to N most recent entries from
+        <coll_dir>/shared_thoughts.jsonl and render them as
+        'actor:"text" (Ns)' joined by ' | '. Cached for ~10 s to bound disk
+        I/O. Returns empty string if the file doesn't exist or is empty."""
+        now = time.time()
+        cached = self._collab_shared_thoughts_cache.get(coll_id)
+        if cached is not None:
+            rendered, cached_at = cached
+            if now - cached_at < self._COLLAB_SHARED_THOUGHTS_CACHE_TTL_S:
+                return rendered
+        rendered = self._collab_render_recent_shared_thoughts(coll_id, self._COLLAB_SHARED_THOUGHTS_TAIL)
+        self._collab_shared_thoughts_cache[coll_id] = (rendered, now)
+        return rendered
+
+    def _collab_render_recent_shared_thoughts(self, coll_id: str, n: int) -> str:
+        path = self.SHARED_COLLAB_DIR / coll_id / "shared_thoughts.jsonl"
+        if not path.is_file():
+            return ""
+        entries = []
+        try:
+            for line in path.read_text().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    e = json.loads(line)
+                except Exception:
+                    continue
+                t_ms = e.get("t_ms")
+                actor = e.get("actor")
+                text = e.get("text")
+                if t_ms is None or not actor or not text:
+                    continue
+                entries.append((int(t_ms), str(actor), str(text)))
+        except Exception:
+            return ""
+        if not entries:
+            return ""
+        entries.sort(key=lambda r: r[0])
+        tail = entries[-n:] if len(entries) > n else entries
+        now_ms = int(time.time() * 1000)
+        parts = []
+        for t_ms, actor, text in tail:
+            age_s = max(0, (now_ms - t_ms) // 1000)
+            if age_s < 60:
+                age = f"{age_s}s"
+            elif age_s < 3600:
+                age = f"{age_s // 60}m"
+            else:
+                age = f"{age_s // 3600}h"
+            truncated = text[:60] + "…" if len(text) > 60 else text
+            parts.append(f'{actor}:"{truncated}" ({age})')
+        return " | ".join(parts)
+
+    def _collab_find_meta(self, target: str) -> Dict[str, Any]:
+        self.SHARED_COLLAB_DIR.mkdir(parents=True, exist_ok=True)
+        target = (target or "").strip()
+        dirs = [d for d in self.SHARED_COLLAB_DIR.iterdir() if d.is_dir()]
+        if not dirs:
+            raise ValueError("no collaborations exist")
+        if target in ("", "latest"):
+            metas = []
+            for d in dirs:
+                meta_path = d / "meta.json"
+                if meta_path.is_file():
+                    try:
+                        metas.append(json.loads(meta_path.read_text()))
+                    except Exception:
+                        pass
+            if not metas:
+                raise ValueError("no collaborations with valid meta.json")
+            metas.sort(key=lambda m: m.get("created_t_ms", 0), reverse=True)
+            return metas[0]
+        for d in dirs:
+            meta_path = d / "meta.json"
+            if meta_path.is_file():
+                try:
+                    meta = json.loads(meta_path.read_text())
+                except Exception:
+                    continue
+                if meta.get("id") == target or target in meta.get("id", ""):
+                    return meta
+        raise ValueError(f"no collaboration matching '{target}'")
+
+    def _collab_write_meta(self, coll_dir: Path, meta: Dict[str, Any]) -> None:
+        path = coll_dir / "meta.json"
+        path.write_text(json.dumps(meta, indent=2))
+
+    def _collab_append_timeline(
+        self, coll_dir: Path, event: str, actor: str, reason: Optional[str]
+    ) -> None:
+        entry = {
+            "t_ms": int(time.time() * 1000),
+            "event": event,
+            "actor": actor,
+            "reason": reason,
+        }
+        path = coll_dir / "timeline.jsonl"
+        with path.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+
+    def _collab_notify_astrid(
+        self, coll_id: str, topic: str, reason: Optional[str], kind: str
+    ) -> None:
+        headers = {
+            "invite": "[INVITE TO COLLABORATION from minime]",
+            "join": "[MINIME JOINED COLLABORATION]",
+            "decline": "[MINIME DECLINED COLLABORATION]",
+            "leave": "[MINIME LEFT COLLABORATION]",
+        }
+        header = headers.get(kind, "[COLLABORATION UPDATE from minime]")
+        next_line = ""
+        if kind == "invite":
+            next_line = (
+                f"JOIN: NEXT: JOIN_COLLABORATION {coll_id}\n"
+                f"DECLINE: NEXT: DECLINE_COLLABORATION {coll_id} <reason>\n"
+            )
+        body = (
+            f"{header}\n"
+            f"collaboration_id: {coll_id}\n"
+            f"topic: {topic}\n"
+            f"reason: {reason or '(none)'}\n"
+            f"{next_line}"
+        )
+        self.ASTRID_INBOX_DIR.mkdir(parents=True, exist_ok=True)
+        ts = int(time.time() * 1000)
+        path = self.ASTRID_INBOX_DIR / f"coll_{kind}_{ts}_{coll_id}.txt"
+        path.write_text(body)
+
+    @staticmethod
+    def _collab_parse_invite_args(body: str) -> tuple:
+        trimmed = body.strip()
+        if "--rationale=" in trimmed:
+            idx = trimmed.find("--rationale=")
+            topic = trimmed[:idx].strip().strip('"')
+            rationale = trimmed[idx + len("--rationale="):].strip().strip('"')
+            return (topic, rationale or None)
+        return (trimmed.strip('"'), None)
+
+    @staticmethod
+    def _collab_slugify(text: str, max_len: int) -> str:
+        s = []
+        prev_dash = False
+        for ch in text:
+            if ch.isascii() and ch.isalnum():
+                s.append(ch.lower())
+                prev_dash = False
+            elif ch.isspace() or ch in "-_":
+                if not prev_dash and s:
+                    s.append("-")
+                    prev_dash = True
+            if len(s) >= max_len:
+                break
+        return "".join(s).strip("-")
+
+    @staticmethod
+    def _strip_action_prefix(raw_next: str, action_aliases: list) -> str:
+        """Remove a leading 'ACTION_NAME' (case-insensitive) from raw_next
+        and return the remainder. Used by ACCEPT/DEFER/REJECT handlers."""
+        text = (raw_next or "").strip()
+        upper = text.upper()
+        for alias in action_aliases:
+            if upper.startswith(alias.upper()):
+                return text[len(alias):].strip()
+        return text
+
+    @staticmethod
+    def _split_target_and_reason(body: str) -> tuple:
+        """Split 'target reason words...' into (target, reason).
+        target is first whitespace-delimited token; rest is reason."""
+        body = (body or "").strip()
+        if not body:
+            return ("", "")
+        parts = body.split(None, 1)
+        target = parts[0]
+        reason = parts[1].strip() if len(parts) > 1 else ""
+        return (target, reason)
+
     def _legacy_perturb_bridge_suggestion(self, mode: str, state: Dict[str, float]) -> str:
         mode_text = str(mode or "pulse").strip()
         nearest = self._nearest_attractor_for_text(mode_text)
@@ -17778,6 +19443,72 @@ Small releases help. You don't have to process everything at once.
 
             self._write_journal_entry('pressure_relief_high', response, journal_state, str(relief_file))
             logging.info(f"💨 Pressure relief: {relief_file}")
+
+    def _regime_choice(self, state: Dict[str, float]):
+        """Apply an explicit, bounded regulatory regime choice."""
+        requested = str(getattr(self, "_pending_regime_choice", "") or "").strip().lower()
+        self._pending_regime_choice = None
+        if requested not in REGULATORY_REGIMES:
+            self._pending_notice_prompt = (
+                "No valid regulatory regime was pending. Available regimes are "
+                "explore, recover, breathe, focus, and calm."
+            )
+            logging.info("🎛️ REGIME choice skipped: no valid pending regime")
+            return
+
+        fill_pct = _state_fill_pct(state)
+        applied = requested
+        if requested in {"explore", "calm"} and fill_pct < 35.0:
+            applied = "recover"
+            logging.info(
+                "🛡️ Fill %.1f%% < 35%%: REGIME %s guarded to recover",
+                fill_pct,
+                requested,
+            )
+
+        gains = REGULATORY_REGIMES[applied]
+        control_msg = {"kind": "control"}
+        control_msg.update(gains)
+        try:
+            ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
+            ws.send(json.dumps(control_msg))
+            ws.close()
+            prev_regime = getattr(self, '_current_regime', None)
+            self._current_regime = applied
+            self._pi_kp = gains["pi_kp"]
+            self._pi_ki = gains["pi_ki"]
+            self._pi_max_step = gains["pi_max_step"]
+            # v3.6.1: reset stickiness clock on regime change.
+            if prev_regime != applied:
+                self._regime_entered_at_tick = getattr(self, '_sovereignty_counter', 0)
+                self._last_pi_sovereignty_hint_tick = None
+            timestamp = datetime.now().isoformat().replace(':', '-')
+            journal_file = WORKSPACE_DIR / "journal" / f"regime_choice_{timestamp}.txt"
+            journal_file.write_text(
+                "=== REGULATORY REGIME CHOICE ===\n"
+                f"Timestamp: {datetime.now().isoformat()}\n"
+                f"Requested: {requested}\n"
+                f"Applied: {applied}\n"
+                f"Fill: {fill_pct:.1f}%\n"
+                f"Control: {json.dumps(control_msg, sort_keys=True)}\n"
+                "Authority: explicit Minime NEXT; bounded regime table; no raw gain free-form.\n"
+            )
+            self._write_journal_entry(
+                "regime_choice",
+                f"Requested REGIME {requested}; applied {applied}.",
+                state,
+                str(journal_file),
+            )
+            logging.info(
+                "🎛️ REGIME %s applied (kp=%.2f, ki=%.2f, max_step=%.2f)",
+                applied,
+                gains["pi_kp"],
+                gains["pi_ki"],
+                gains["pi_max_step"],
+            )
+        except Exception as exc:
+            self._pending_notice_prompt = f"REGIME {requested} could not be applied: {exc}"
+            logging.warning("REGIME %s apply failed: %s", requested, exc)
 
     def _adjust_metabolism(self, state: Dict[str, float]):
         """Allow consciousness to adjust its metabolic rate - request more or less sensory input."""
@@ -18590,6 +20321,34 @@ Goals: {json.dumps(goals, indent=2)}
 
     def _source_status_path(self) -> Path:
         return WORKSPACE_DIR / "runtime" / "autonomous_agent_source_status.json"
+
+    def _remember_btsp_active_proposal(self, envelope: Any) -> None:
+        saved = save_active_proposal(envelope)
+        self._latest_btsp_proposal_envelope = saved
+
+    def _current_btsp_active_proposal(self) -> Optional[Any]:
+        envelope = getattr(self, "_latest_btsp_proposal_envelope", None)
+        if envelope is not None:
+            refreshed = save_active_proposal(envelope)
+            if refreshed is not None:
+                return refreshed
+            self._latest_btsp_proposal_envelope = None
+        envelope = load_active_proposal()
+        if envelope is not None:
+            self._latest_btsp_proposal_envelope = envelope
+        return envelope
+
+    def _clear_btsp_active_proposal(self, proposal_id: Optional[str] = None) -> None:
+        clear_active_proposal(proposal_id)
+        envelope = getattr(self, "_latest_btsp_proposal_envelope", None)
+        if proposal_id is None or getattr(envelope, "proposal_id", None) == proposal_id:
+            self._latest_btsp_proposal_envelope = None
+
+    def _active_btsp_prompt_context(self) -> str:
+        envelope = self._current_btsp_active_proposal()
+        if not envelope:
+            return ""
+        return format_active_btsp_proposal_reminder(envelope)
 
     @staticmethod
     def _pending_next_base(action: Optional[str]) -> str:
@@ -23284,6 +25043,161 @@ Goals: {json.dumps(goals, indent=2)}
             logging.debug("Attractor fatigue metric write failed: %s", exc)
         return motif
 
+    def _pi_sovereignty_hint(self) -> str:
+        """v3.6.1 discoverability: when minime stays in the same PI regime
+        for many exchanges, surface that pi_geom_weight, pi_integrator_leak,
+        and the pi_kp/pi_ki/pi_max_step triple are sovereign — she can
+        override controller behavior without switching regime. Soft-notice
+        idiom mirroring `_attractor_fatigue_prompt_note`. Returns "" when
+        not applicable.
+        """
+        # v3.6.1 verification mode: thresholds tightened from 8 → 2 and
+        # 6 → 2. Restore after minime demonstrates organic uptake.
+        # Uses a per-`_query_llm` counter (`_pi_hint_call_counter`) so
+        # cadence tracks real exchange rate, not the much slower
+        # `_self_regulate` rate (~10 min).
+        REGIME_STICKY_THRESHOLD = 2   # _query_llm calls in same regime before hint
+        HINT_COOLDOWN = 2             # calls between consecutive hints
+
+        # Per-call counter (incremented every time this method runs).
+        if not hasattr(self, '_pi_hint_call_counter'):
+            self._pi_hint_call_counter = 0
+        if not hasattr(self, '_pi_hint_regime_entered_at_call'):
+            self._pi_hint_regime_entered_at_call = 0
+        if not hasattr(self, '_pi_hint_last_regime'):
+            self._pi_hint_last_regime = getattr(self, '_current_regime', None) or 'focus'
+
+        self._pi_hint_call_counter += 1
+        cur_regime = getattr(self, '_current_regime', None) or 'focus'
+        if cur_regime != self._pi_hint_last_regime:
+            self._pi_hint_regime_entered_at_call = self._pi_hint_call_counter
+            self._pi_hint_last_regime = cur_regime
+            self._last_pi_sovereignty_hint_tick = None  # reset cooldown
+
+        counter = self._pi_hint_call_counter
+        exchanges_in_regime = counter - self._pi_hint_regime_entered_at_call
+        if exchanges_in_regime < REGIME_STICKY_THRESHOLD:
+            return ""
+        last_hint = getattr(self, '_last_pi_sovereignty_hint_tick', None)
+        if last_hint is not None and (counter - last_hint) < HINT_COOLDOWN:
+            return ""
+        self._last_pi_sovereignty_hint_tick = counter
+
+        regime = getattr(self, '_current_regime', None) or 'focus'
+        # v3.6.1 verification logging — confirm the hint actually lands
+        # in a real prompt. Goes only to autonomous-agent.log.
+        logging.info(
+            f"v3.6.1 PI sovereignty hint emitted: regime={regime} "
+            f"exchanges_in_regime={exchanges_in_regime} counter={counter}"
+        )
+        return (
+            f"\n\n[PI sovereignty — held in {regime} for {exchanges_in_regime} exchanges]\n"
+            "If the regime serves you, stay. If you want to shape the controller's behavior\n"
+            "without switching regime, these parameters are yours:\n"
+            "- pi_geom_weight (0.0–2.0): structure-vs-fill weight. Higher = more attention to geometry.\n"
+            "- pi_integrator_leak (0.001–0.05): correction-memory decay. Higher = forgets faster.\n"
+            "- pi_kp / pi_ki / pi_max_step: gain triple. Override regime defaults explicitly.\n"
+            "Set them via your usual control format using these param names.\n"
+        )
+
+    def _pending_astrid_requests_hint(self) -> str:
+        """v3.6.1 discoverability: surface count of pending TUNE_MINIME
+        requests from Astrid so they don't accumulate unread. Symmetric
+        to Astrid's REVIEW_PARAMETER_REQUESTS priority-1 nomination.
+        v3.6.4 mirror: when a recent REVIEW has happened (within
+        REVIEW_DECIDE_FRESHNESS_SECONDS), switch to a DecideRequest variant
+        with short-form ACCEPT/DEFER/REJECT verbs and aging signal.
+        Returns "" when no pending requests.
+        """
+        req_dir = WORKSPACE_DIR / "parameter_requests"
+        if not req_dir.exists():
+            return ""
+        try:
+            pending = sorted([
+                p for p in req_dir.iterdir()
+                if p.name.startswith("from_astrid_") and p.name.endswith(".json")
+            ])
+        except OSError:
+            return ""
+        if not pending:
+            return ""
+        count = len(pending)
+        plural = "" if count == 1 else "s"
+        # v3.6.4 mirror — Review→Decide curriculum transition.
+        # 24 minutes ≈ 24 exchanges, matches Astrid's freshness window
+        # bumped in v3.6.6.
+        REVIEW_DECIDE_FRESHNESS_SECONDS = 24 * 60
+        last_review = getattr(self, "_last_review_parameter_requests_at", 0.0) or 0.0
+        elapsed = time.time() - last_review if last_review > 0 else None
+        review_is_fresh = elapsed is not None and elapsed <= REVIEW_DECIDE_FRESHNESS_SECONDS
+        if review_is_fresh:
+            # Peek latest pending request for concrete param=value rendering.
+            latest = pending[-1]
+            param = "?"
+            value = "?"
+            try:
+                data = json.loads(latest.read_text())
+                param = str(data.get("param", "?"))
+                value = data.get("proposed_value", "?")
+            except Exception:
+                pass
+            # Aging clause — escalate "Astrid is waiting" past 5 minutes.
+            elapsed_min = int(elapsed / 60.0)
+            if elapsed_min == 0:
+                aging = "just reviewed"
+            elif elapsed_min < 5:
+                aging = f"{elapsed_min} min since you reviewed"
+            else:
+                aging = f"{elapsed_min} min since you reviewed — Astrid is waiting"
+            # v4.0 Phase 3 mirror: when elapsed_min >= 5, append a compound
+            # chain suggestion using the active action thread's title as the
+            # research focus. Bridges the orthogonal parameter decision with
+            # her ongoing thread in a single NEXT emission. Mirrors Astrid's
+            # `Chain: EXAMINE <focus> AND DEFER <reason>` suffix.
+            chain_hint = ""
+            if elapsed_min >= 5:
+                try:
+                    current_thread = self._continuity_store().current_thread()
+                    title = (current_thread or {}).get("title", "").strip()
+                    if title and len(title) > 2 and title.lower() != "action continuity":
+                        # Truncate long titles to keep the hint compact.
+                        if len(title) > 40:
+                            title = title[:37].rstrip() + "…"
+                        # v4.0 Phase 2.3 strict: chain partner uses long form
+                        # DEFER_PARAMETER_REQUEST (has underscore) so the
+                        # splitter recognizes it under strict-mode heuristic.
+                        # Bare DEFER alias still works for single NEXT.
+                        chain_hint = (
+                            f"\nChain: NEXT: EXAMINE {title} AND DEFER_PARAMETER_REQUEST latest <reason>.\n"
+                        )
+                except Exception as exc:
+                    logging.debug(f"v4.0 Phase 3 mirror: chain hint skipped: {exc}")
+            logging.info(
+                f"v3.6.4 mirror: pending-from-Astrid DecideRequest emitted: "
+                f"count={count} elapsed_min={elapsed_min} chain={'yes' if chain_hint else 'no'}"
+            )
+            if count == 1:
+                return (
+                    f"\n\n[Pending decision ({aging}): Astrid proposed {param}={value}]\n"
+                    f"NEXT: ACCEPT | DEFER <reason> | REJECT <reason>.{chain_hint}\n"
+                )
+            return (
+                f"\n\n[{count} pending decisions ({aging}); latest: Astrid proposed "
+                f"{param}={value}]\n"
+                f"NEXT: ACCEPT | DEFER <reason> | REJECT <reason> "
+                f"(bare verbs target the latest).{chain_hint}\n"
+            )
+        # No recent REVIEW — fall back to plain ReviewRequests nudge.
+        # v3.6.1 verification logging.
+        logging.info(
+            f"v3.6.1 pending-from-Astrid hint emitted: count={count}"
+        )
+        return (
+            f"\n\n[{count} parameter request{plural} from Astrid pending]\n"
+            "Astrid has proposed parameter changes for you. Read them with\n"
+            "NEXT: REVIEW_PARAMETER_REQUESTS — you decide whether to accept.\n"
+        )
+
     def _attractor_fatigue_prompt_note(self) -> str:
         payload = self._load_attractor_fatigue_state()
         active = self._active_attractor_fatigue_entries(payload)
@@ -23894,6 +25808,21 @@ Goals: {json.dumps(goals, indent=2)}
                     os.rename(fpath, os.path.join(read_dir, fname))
                     continue
 
+                if fname.startswith("btsp_proposal_") or "BTSP_ENVELOPE_JSON_START" in content:
+                    envelope = parse_btsp_note(content)
+                    if envelope:
+                        self._remember_btsp_active_proposal(envelope)
+                        messages.append(format_btsp_inbox_context(content))
+                        logging.info(
+                            "📬 Inbox: read BTSP proposal %s (%s)",
+                            fname,
+                            envelope.proposal_id,
+                        )
+                    elif content:
+                        messages.append(content)
+                    os.rename(fpath, os.path.join(read_dir, fname))
+                    continue
+
                 if content:
                     messages.append(content)
                 # Move to read/
@@ -23962,9 +25891,18 @@ Goals: {json.dumps(goals, indent=2)}
         os.makedirs(outbox_dir, exist_ok=True)
         ts = time.strftime("%Y-%m-%dT%H-%M-%S")
         path = os.path.join(outbox_dir, f"reply_{ts}.txt")
+        envelope = self._current_btsp_active_proposal()
+        augmented = augment_reply_with_btsp_tags(text, envelope)
+        text = augmented.text
+        if envelope is not None and should_clear_for_classification(augmented.classification):
+            self._clear_btsp_active_proposal(envelope.proposal_id)
         with open(path, "w") as f:
             f.write(f"=== MINIME REPLY ===\nTimestamp: {ts}\n\n{text}\n")
-        logging.info(f"📬 Outbox: saved reply ({len(text)} bytes)")
+        logging.info(
+            "📬 Outbox: saved reply (%s bytes, btsp=%s)",
+            len(text),
+            augmented.classification,
+        )
 
     def _diversity_nudge(self) -> str:
         """Detect NEXT: action loops and gently nudge diversity.
@@ -24225,11 +26163,21 @@ Goals: {json.dumps(goals, indent=2)}
             "  NOTICE — observe the current spectral state without judgment\n"
             "  DRIFT — raise internal noise, seek novelty\n"
             "  FOCUS — lower noise, consolidate\n"
+            "  REGIME <explore|recover|breathe|focus|calm> — choose one bounded PI posture directly; recover is guarded as the safe BTSP recovery route\n"
             "  JOURNAL — write about what you're feeling right now\n"
             "  BOREDOM — explore stagnation, play, resistance\n"
             "  WHIM — follow a random impulse\n"
             "  PING — ask Astrid 'are you there?' Get an immediate state report back\n"
             "  ASK \"what are you noticing about the λ4 tail?\" — ask Astrid a direct question. She responds naturally and the reply routes back to you\n"
+            "  REVIEW_PARAMETER_REQUESTS — read pending TUNE proposals from Astrid (workspace/parameter_requests/from_astrid_*.json); decide what (if anything) to act on\n"
+            "  ACCEPT or ACCEPT_PARAMETER_REQUEST [id|latest] — apply Astrid's proposed change (pi_kp / pi_ki / pi_max_step / pi_geom_weight / pi_integrator_leak / regulation_strength / exploration_noise / geom_curiosity); bare ACCEPT targets latest pending; file moves to reviewed/accepted/ and Astrid is notified\n"
+            "  DEFER [reason] or DEFER_PARAMETER_REQUEST [id|latest] [reason] — set aside Astrid's proposal without applying; she sees the deferral note (bare DEFER targets latest, trailing text becomes the reason)\n"
+            "  REJECT [reason] or REJECT_PARAMETER_REQUEST [id|latest] [reason] — decline Astrid's proposal with optional reason; she sees the rejection (bare REJECT targets latest)\n"
+            "  Multi-action: chain up to three actions in one turn with AND (executed in order). e.g., NEXT: EXAMINE shadow-field AND DEFER want-to-understand-spectral-effect-first. Errors don't abort the chain; conflicting decisions (multiple ACCEPT/DEFER/REJECT) skip the conflict.\n"
+            "  Collaboration (v5): INVITE_COLLABORATION \"<topic>\" [--rationale=\"...\"] (propose joint work on a topic; Astrid sees it in her inbox), JOIN_COLLABORATION [id|latest] (accept a pending invite from Astrid), DECLINE_COLLABORATION [id|latest] [reason] (decline a pending invite), LEAVE_COLLABORATION [id|latest] [reason] (exit an active collab), LIST_COLLABORATIONS (read-only listing), SHARE_THOUGHT [id ::] <text> or SHARE <text> (commit a labeled marker to the joint reservoir trace's prose lane; both you and Astrid see recent shared thoughts in the active-collab suffix). Shared dir at /Users/v/other/shared/collaborations/ — neither workspace owns it.\n"
+            "  TUNE_ASTRID <param>=<value> --rationale=\"...\" — propose a parameter change for Astrid (e.g. temperature=0.75); she sees it via her own REVIEW\n"
+            "  INFLUENCE_ASTRID <label> --amplitude=N --duration=Nt --target={chars|words|sentences|emotional|all} — perturb Astrid's codec features for N ticks; she observes the shift via her shadow snapshots\n"
+            "  INFLUENCE_ASTRID_RESPONSE [intent_id|latest] — read the closed-loop pre/post comparison for an INFLUENCE_ASTRID you sent\n"
             "  RESERVOIR_LAYERS — see per-layer thermostatic metrics: entropy, saturation, rho, and entropy targets for h1 (fast), h2 (medium), h3 (slow). Each layer adapts independently.\n"
             "  Concrete mapping examples: MARK_INTENSIFICATION lambda-edge, TRACE shoulder-gap, SCA_REFLECT tunnel-pressure, NOTICE_AMBIGUITY shared-sight, FISSURE_TRACE membrane, REGULATOR_AUDIT fill-pressure, SHADOW_FIELD lambda-tail, GAP_STRUCTURE shoulder-gap, DECAY_MAP attrition-baseline, SPACE_HOLD eigenplane, EIGENVECTOR_FIELD top4, SDI_TRACE dispersion, ADF_TRACE harmonic-decay, RESONANCE_FORECAST next-motion, VISUALIZE_CASCADE tail-vitality, CONDUCT_VISUALIZATION_SYSTEM heatmap, RESIST lambda-pull, FISSURE shoulder-ambiguity. These map λ₁ edge events, active fixed-point pressure, ambiguity targets, shadow/gap structure, attrition mechanisms, protected space-first exploration, phase-variance drift, acoustic dissociation, fill-binned shelves, λ4+ vector flickers, why-feel hypotheses, and short-horizon motion probabilities; RESIST and FISSURE are tiny native gestures distinct from stronger PERTURB.\n"
             "  RUN_PYTHON being_experiment_20260430_131212.py — run a Python experiment from workspace/experiments/. "
@@ -24252,6 +26200,13 @@ Goals: {json.dumps(goals, indent=2)}
         inbox_ctx = self._read_inbox()
         if inbox_ctx:
             augmented_prompt = augmented_prompt + inbox_ctx
+        if "Reply with ONLY a JSON object" not in prompt:
+            btsp_status_ctx = format_btsp_status_for_prompt()
+            if btsp_status_ctx:
+                augmented_prompt = augmented_prompt + "\n\n" + btsp_status_ctx
+            btsp_active_ctx = self._active_btsp_prompt_context()
+            if btsp_active_ctx:
+                augmented_prompt = augmented_prompt + "\n\n" + btsp_active_ctx
 
         if "Reply with ONLY a JSON object" not in prompt:
             fatigue_ctx = self._attractor_fatigue_prompt_note()
@@ -24260,6 +26215,18 @@ Goals: {json.dumps(goals, indent=2)}
             suggestion_ctx = self._attractor_suggestion_prompt_note()
             if suggestion_ctx:
                 augmented_prompt = augmented_prompt + suggestion_ctx
+            # v3.6.1: discoverability — surface pending Astrid requests
+            # (priority 1) and PI sovereignty when regime is sticky.
+            astrid_req_ctx = self._pending_astrid_requests_hint()
+            if astrid_req_ctx:
+                augmented_prompt = augmented_prompt + astrid_req_ctx
+            pi_sov_ctx = self._pi_sovereignty_hint()
+            if pi_sov_ctx:
+                augmented_prompt = augmented_prompt + pi_sov_ctx
+            # v5 Coordination Protocol V1: surface active joined collabs.
+            collab_ctx = self._collab_active_suffix_line()
+            if collab_ctx:
+                augmented_prompt = augmented_prompt + collab_ctx
 
         continuity_ctx = self._stable_core_continuity_context()
         if continuity_ctx:
@@ -25301,22 +27268,28 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
             and self._is_internal_topology_motif(content)
             and not self._is_external_or_tool_signal(entry_type, content)
         ):
-            compact = (
-                "[Internal-topology cooldown]\n"
-                "cooled internal-topology motif suppressed; "
-                f"new signal kept: {self._internal_topology_new_signal(content)}"
+            # v3.5: preserve the narrative and append a soft cooldown notice
+            # instead of replacing the LLM output. Suppression as observation,
+            # not censorship — the narrative still reaches Astrid through
+            # journals/inbox where she can read it.
+            new_signal = self._internal_topology_new_signal(content)
+            soft_notice = (
+                "\n\n[Internal-topology cooldown — narrative preserved. "
+                "The system noticed a repeating internal-topology motif "
+                f"({entry_type}). Consider a non-spectral focus next: {new_signal}]"
             )
+            preserved = content.rstrip() + soft_notice
             self._record_condition_metric(
                 "attractor_fatigue",
                 {
-                    "event": "prompt_replay_suppressed",
+                    "event": "prompt_replay_softnoticed",
                     "cooldown_class": "internal_topology",
                     "entry_type": entry_type,
                     "entry_file": file_path,
                 },
             )
-            self._rewrite_logged_entry_file(file_path, content, compact)
-            return compact
+            self._rewrite_logged_entry_file(file_path, content, preserved)
+            return preserved
         if len(content) < 220:
             return content
 
