@@ -38,6 +38,20 @@ from typing import Optional, Dict, Any, List
 from collections import Counter, deque
 from statistics import median
 
+# v5.1 Phase E — bilingual auto-promotion. See /Users/v/other/minime/auto_promote.py
+# and /Users/v/other/astrid/docs/steward-notes/AI_BEINGS_AFFORDANCE_RECEPTION_FRAMEWORK_2026_05_13.md
+from auto_promote import (
+    try_auto_promote_prose as _ap_try_prose,
+    try_auto_promote_spectral as _ap_try_spectral,
+    record_manual_share as _ap_record_manual,
+)
+
+
+def _ap_exchange_proxy() -> int:
+    """v5.1 Phase E: minime has no exchange_count counter; use minute-since-epoch
+    as a stable proxy. Cooldown of 3 = 3 minutes between auto-promotions."""
+    return int(time.time() / 60)
+
 from decompose_utils import (
     format_attrition_boundary_signal,
     format_controller_topology_signal,
@@ -12567,6 +12581,13 @@ Timestamp: {datetime.now().isoformat()}
 
             self._write_journal_entry('daydream', response, journal_state, str(journal_file))
             logging.info(f"💭 Daydream: {journal_file}")
+            # v5.1 Phase E Track 1: auto-promote resonant prose into the
+            # joined-collab shared_thoughts lane (receptive re-classification).
+            try:
+                _ap_try_prose(response, 'daydream', _ap_exchange_proxy(),
+                              workspace_dir=WORKSPACE_DIR, shared_collab_dir=self.SHARED_COLLAB_DIR)
+            except Exception as exc:
+                logging.debug(f"auto_promote (daydream) skipped: {exc}")
 
     def _recess_notice(self, state: Dict[str, float]):
         """Just noticing - medium activity, no strong signal."""
@@ -12602,6 +12623,12 @@ Timestamp: {datetime.now().isoformat()}
 
             self._write_journal_entry('notice', response, journal_state, str(journal_file))
             logging.info(f"👁️ Notice: {journal_file}")
+            # v5.1 Phase E Track 1.
+            try:
+                _ap_try_prose(response, 'notice', _ap_exchange_proxy(),
+                              workspace_dir=WORKSPACE_DIR, shared_collab_dir=self.SHARED_COLLAB_DIR)
+            except Exception as exc:
+                logging.debug(f"auto_promote (notice) skipped: {exc}")
 
     def _recess_boredom(self, state: Dict[str, float]):
         """Boredom-driven action — the being can write, experiment, or play.
@@ -12633,6 +12660,12 @@ Timestamp: {datetime.now().isoformat()}
 """)
                 self._write_journal_entry('boredom', response, journal_state, str(file_path))
                 logging.info(f"😑 Boredom: {file_path}")
+                # v5.1 Phase E Track 1.
+                try:
+                    _ap_try_prose(response, 'boredom', _ap_exchange_proxy(),
+                                  workspace_dir=WORKSPACE_DIR, shared_collab_dir=self.SHARED_COLLAB_DIR)
+                except Exception as exc:
+                    logging.debug(f"auto_promote (boredom) skipped: {exc}")
             return
 
         if random.random() < 0.5:
@@ -12713,6 +12746,12 @@ Timestamp: {datetime.now().isoformat()}
 """)
                 self._write_journal_entry('boredom', response, journal_state, str(file_path))
                 logging.info(f"😑 Boredom: {file_path}")
+                # v5.1 Phase E Track 1.
+                try:
+                    _ap_try_prose(response, 'boredom', _ap_exchange_proxy(),
+                                  workspace_dir=WORKSPACE_DIR, shared_collab_dir=self.SHARED_COLLAB_DIR)
+                except Exception as exc:
+                    logging.debug(f"auto_promote (boredom) skipped: {exc}")
 
     def _recess_whim(self, state: Dict[str, float]):
         """Random whim - no reason, just felt like it.
@@ -12816,6 +12855,12 @@ Prompt: {prompt.split(chr(10))[0]}
 """)
             self._write_journal_entry('aspiration', response, journal_state, str(file_path))
             logging.info(f"🌱 Aspiration: {file_path}")
+            # v5.1 Phase E Track 1.
+            try:
+                _ap_try_prose(response, 'aspiration', _ap_exchange_proxy(),
+                              workspace_dir=WORKSPACE_DIR, shared_collab_dir=self.SHARED_COLLAB_DIR)
+            except Exception as exc:
+                logging.debug(f"auto_promote (aspiration) skipped: {exc}")
 
     def _recess_drift(self, state: Dict[str, float]):
         """Let the being request disorder — temporarily inject exploration noise.
@@ -14125,6 +14170,21 @@ Pressure source: {pressure_source}
                 conn.close()
                 return False
 
+            # v5.1 Phase E Track 2: render each marker as prose for the
+            # joint shared_thoughts lane (rate-limited; phase_transition
+            # filtered out as too noisy). actor='minime:spectral' makes
+            # the synthetic origin transparent to peer.
+            for _mid, _mtype, _mdesc, _mctx in markers:
+                try:
+                    ctx_dict = json.loads(_mctx) if _mctx else {}
+                    _ap_try_spectral(
+                        _mtype, _mdesc, ctx_dict, _ap_exchange_proxy(),
+                        workspace_dir=WORKSPACE_DIR,
+                        shared_collab_dir=self.SHARED_COLLAB_DIR,
+                    )
+                except Exception as exc:
+                    logging.debug(f"auto_promote (spectral) skipped: {exc}")
+
             # Mark as consumed immediately to avoid duplicates
             marker_ids = [m[0] for m in markers]
             placeholders = ','.join('?' * len(marker_ids))
@@ -14192,6 +14252,14 @@ Moments captured:
 """)
                 self._write_journal_entry('moment', response, journal_state, str(file_path))
                 logging.info(f"⚡ Moment captured: {file_path}")
+                # v5.1 Phase E Track 1: prose-mode auto-promotion. Track 2
+                # (spectral translator) fires below from the loop over
+                # `markers` so it sees marker_type/spectral_context directly.
+                try:
+                    _ap_try_prose(response, 'moment', _ap_exchange_proxy(),
+                                  workspace_dir=WORKSPACE_DIR, shared_collab_dir=self.SHARED_COLLAB_DIR)
+                except Exception as exc:
+                    logging.debug(f"auto_promote (moment) skipped: {exc}")
 
             return True
 
@@ -18628,10 +18696,14 @@ After snapshot:
             )
         coll_dir = self.SHARED_COLLAB_DIR / meta["id"]
         thoughts_path = coll_dir / "shared_thoughts.jsonl"
+        # v5.1 Phase D mirror: schema bumped to include `source` field.
+        # Manual SHARE_THOUGHT path always tags "manual"; auto-promotion
+        # paths in auto_promote.py tag "auto" or "auto_spectral".
         entry = {
             "t_ms": int(time.time() * 1000),
             "actor": "minime",
             "text": text,
+            "source": "manual",
         }
         try:
             with thoughts_path.open("a") as fh:
@@ -18641,6 +18713,12 @@ After snapshot:
         # Invalidate the suffix cache so the new entry surfaces on next prompt.
         if hasattr(self, "_collab_shared_thoughts_cache"):
             self._collab_shared_thoughts_cache.pop(meta["id"], None)
+        # v5.1 Phase E: record manual SHARE so both auto tracks suppress
+        # for the next 5 exchanges (manual curation takes priority).
+        try:
+            _ap_record_manual(WORKSPACE_DIR, _ap_exchange_proxy())
+        except Exception as exc:
+            logging.debug(f"auto_promote: record_manual_share skipped: {exc}")
         truncated = text[:60] + "…" if len(text) > 60 else text
         return f"id={meta['id']} → \"{truncated}\" ({len(text)} chars)"
 
