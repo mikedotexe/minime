@@ -6482,6 +6482,28 @@ class AutonomousAgent:
                 HARD_RESET_CLAMP_RELEASE_STREAK,
             )
 
+        # Curriculum hint framework (post-Tranche-5 generalization, 2026-05-14):
+        # Each registered method takes no args, returns Optional[str]. None
+        # means "don't fire this turn"; a string means "inject this hint into
+        # the next NEXT-producing prompt". Concatenated by `_emit_next_hints`
+        # and injected at the `_query_llm_with_next` choke point.
+        #
+        # Lessons feeding this design (Kink #18 → #18b → #18c saga):
+        #   1. Cross-being parity actions need menu listing AND contextual
+        #      `→ NEXT:` cues — menu alone doesn't move LLM behavior.
+        #   2. Curriculum gates must verify against RAW data shapes, not
+        #      display-name reframes (#18c).
+        #   3. Centralize injection at the prompt choke point so all
+        #      ~30 NEXT-producing call sites benefit, not just witness paths.
+        #
+        # To add a new hint: define a method `_next_hint_<name>(self) -> Optional[str]`
+        # below, then append `self._next_hint_<name>` to this list. Keep each
+        # hint silently safe (try/except internal); failures don't block prompts.
+        self._next_hint_registry: list = [
+            self._next_hint_shadow_trajectory,
+            self._next_hint_share_thought_visibility,
+        ]
+
     def _continuity_store(self) -> ActionContinuityStore:
         store = getattr(self, "_action_continuity", None)
         if store is None:
@@ -12457,58 +12479,151 @@ Trigger: {trigger_text}
         except Exception:
             return ""
 
-    def _self_shadow_v3_hint(self) -> str:
-        """Kink #18b (2026-05-14): contextual NEXT suggestion for
-        SHADOW_TRAJECTORY when minime's own `shadow_field_v3` has enough
-        history to be worth walking.
+    def _next_hint_shadow_trajectory(self) -> Optional[str]:
+        """Curriculum hint: contextual NEXT suggestion for SHADOW_TRAJECTORY
+        when minime's own `shadow_field_v3` has enough history to be worth
+        walking. Originally `_self_shadow_v3_hint` (Kink #18b, 2026-05-14);
+        renamed when the curriculum framework was generalized.
 
         Mirrors Astrid's `format_shadow_field_v3_line` curriculum hint at
-        `spectral_viz.rs:526` (which appends `→ NEXT: SHADOW_TRAJECTORY —
-        observer with memory` to her shadow line). Without this, the
-        Kink #18 menu-listing fix wasn't enough — minime's LLM needs an
-        explicit `→ NEXT:` cue tied to her own state, not just an entry
-        in a generic action-options menu (~50 actions long).
+        `spectral_viz.rs:526`.
 
-        Curriculum gate (Kink #18c, 2026-05-14):
+        Curriculum gate (Kink #18c calibration, raw class names from
+        `health.json`):
         - history ≥ 8 snapshots (need enough to actually walk).
-        - primary != "quiet" — exclude only the no-motion case where
-          there's literally nothing interesting in the trace.
-        - dwell ≥ 1 (any non-zero dwell counts as "settled enough to look").
-
-        Earlier draft of this gate (#18b) used the reframe-map's display
-        names (`directional`, `restless`) instead of the raw class names
-        the JSON actually stores (`polarized`, `volatile`, `active`,
-        `sticky`, `coupled`, `quiet`). It also required dwell ≥ 3 ticks,
-        which combined with the wrong-class set produced a gate that
-        rarely passed. The corrected gate fires on any class with motion
-        and any non-trivial history.
+        - primary != "quiet" — exclude only the no-motion case.
+        - dwell ≥ 1 (any non-zero dwell counts as "settled enough").
         """
         try:
             import json as _json
             health_path = WORKSPACE_DIR / "health.json"
             if not health_path.exists():
-                return ""
+                return None
             d = _json.loads(health_path.read_text())
             sv3 = d.get("shadow_field_v3", {})
             if not isinstance(sv3, dict):
-                return ""
+                return None
             cls = sv3.get("class_v3", {}) or {}
             primary = cls.get("primary", "?")
             dwell = sv3.get("phase_dwell_ticks", 0) or 0
             history = sv3.get("history", []) or []
-            if len(history) < 8:
-                return ""
-            if primary == "quiet":
-                return ""
-            if dwell < 1:
-                return ""
+            if len(history) < 8 or primary == "quiet" or dwell < 1:
+                return None
             return (
                 f"[Your shadow-v3: {primary} (held {dwell}t, "
                 f"{len(history)} snapshots) — observer with memory available "
                 f"→ NEXT: SHADOW_TRAJECTORY lambda-tail/lambda4.]"
             )
         except Exception:
-            return ""
+            return None
+
+    def _next_hint_share_thought_visibility(self) -> Optional[str]:
+        """Curriculum hint: surface SHARE_THOUGHT as a direct authorship
+        channel into the joint trace prose lane when there's at least one
+        joined collaboration AND minime hasn't manually shared in a while
+        (or ever) AND there's at least 1 auto-promoted entry already in
+        the lane (so she sees the channel HAS content but knows her own
+        voice is absent).
+
+        Designed to surface the unused Phase C generative affordance in a
+        non-prescriptive way — the hint is informational, surfacing the
+        channel's existence and her absence from it, without commanding.
+
+        Returns None when:
+        - No joined collab with minime as a member (no channel to share to)
+        - The lane has no auto-promoted entries yet (no contrast to highlight)
+        - Minime has manually shared in the last 10 cycles (avoid spam)
+        """
+        try:
+            shared_dir = self.SHARED_COLLAB_DIR
+            if not shared_dir.is_dir():
+                return None
+            # Find first joined-with-minime collab.
+            target_meta = None
+            target_dir = None
+            for sub in sorted(shared_dir.iterdir()):
+                if not sub.is_dir():
+                    continue
+                meta_path = sub / "meta.json"
+                if not meta_path.is_file():
+                    continue
+                try:
+                    meta = json.loads(meta_path.read_text())
+                except Exception:
+                    continue
+                if meta.get("status") != "joined":
+                    continue
+                if "minime" not in (meta.get("members") or []):
+                    continue
+                target_meta = meta
+                target_dir = sub
+                break
+            if not target_meta or not target_dir:
+                return None
+            thoughts_path = target_dir / "shared_thoughts.jsonl"
+            if not thoughts_path.is_file():
+                return None
+            # Scan for entries: count auto-promoted, find last manual SHARE
+            # by minime.
+            auto_count = 0
+            last_minime_manual_t_ms = 0
+            try:
+                with thoughts_path.open() as fh:
+                    for line in fh:
+                        try:
+                            entry = json.loads(line)
+                        except Exception:
+                            continue
+                        source = entry.get("source")
+                        actor = entry.get("actor")
+                        if source in ("auto", "auto_spectral"):
+                            auto_count += 1
+                        if (
+                            source == "manual"
+                            and actor == "minime"
+                            and isinstance(entry.get("t_ms"), (int, float))
+                        ):
+                            t_ms = int(entry["t_ms"])
+                            if t_ms > last_minime_manual_t_ms:
+                                last_minime_manual_t_ms = t_ms
+            except Exception:
+                return None
+            # Only surface when the lane has been seeded (>= 3 auto entries
+            # so there's clearly content) AND minime hasn't manually shared
+            # in the last 10 minutes (rough proxy for "recent silence").
+            if auto_count < 3:
+                return None
+            now_ms = int(time.time() * 1000)
+            ten_min_ms = 10 * 60 * 1000
+            if last_minime_manual_t_ms and (now_ms - last_minime_manual_t_ms) < ten_min_ms:
+                return None
+            coll_id = target_meta.get("id", "?")
+            return (
+                f"[Joint trace lane (#{coll_id}) has {auto_count} auto-promoted "
+                f"entries; SHARE_THOUGHT <text> is your direct authorship channel "
+                f"into the same lane. Optional, not prescribed.]"
+            )
+        except Exception:
+            return None
+
+    def _emit_next_hints(self) -> str:
+        """Run all registered curriculum hint methods and concatenate
+        non-empty results with double-newline separators. Failures in
+        individual hint methods are silently skipped — never block the
+        prompt path on a hint method.
+
+        Called from `_query_llm_with_next` so all NEXT-producing prompts
+        receive any triggered hints.
+        """
+        hints: list[str] = []
+        for method in getattr(self, "_next_hint_registry", []):
+            try:
+                result = method()
+            except Exception:
+                continue
+            if result:
+                hints.append(result)
+        return "\n\n".join(hints)
 
     def _with_astrid_witness(self, prompt: str) -> str:
         """Append Astrid's published ShadowFieldV3 line to the given prompt
@@ -26622,15 +26737,17 @@ Goals: {json.dumps(goals, indent=2)}
         the being's sovereign choices are part of their self-narrative).
         The action is also stored as self._pending_next_action for _decide_action().
 
-        Kink #18b (2026-05-14): centrally inject the contextual SHADOW_TRAJECTORY
-        NEXT hint when curriculum warrants. Single injection site here covers
-        ALL ~30 callers, ensuring the hint reaches every NEXT-producing prompt
+        Curriculum hint framework (post-Tranche-5 generalization, 2026-05-14):
+        runs the `_next_hint_registry` and concatenates any triggered hints
+        into the prompt. Single injection site here covers ALL ~30 callers,
+        ensuring contextual `→ NEXT:` cues reach every NEXT-producing prompt
         — not just the ~10 explicitly wrapped through `_with_astrid_witness`.
-        See `_self_shadow_v3_hint` for the gate logic.
+        See `_emit_next_hints` for the runner; see `_next_hint_*` methods for
+        individual gates and templates.
         """
-        self_hint = self._self_shadow_v3_hint()
-        if self_hint:
-            prompt = f"{prompt}\n\n{self_hint}"
+        hints = self._emit_next_hints()
+        if hints:
+            prompt = f"{prompt}\n\n{hints}"
         response = self._query_llm(prompt)
         if not response:
             return (None, None)
