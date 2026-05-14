@@ -262,6 +262,12 @@ struct EigenPacket {
     /// Density of mutually reinforcing resonance in the current eigenspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resonance_density_v1: Option<ResonanceDensityV1>,
+    /// Read-only explanation of where inward/compression pressure appears to originate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pressure_source_v1: Option<PressureSourceV1>,
+    /// Whether current spectral fluctuation remains returnable and inhabitable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inhabitable_fluctuation_v1: Option<InhabitableFluctuationV1>,
     /// Selected 12D vague-memory glimpse, foregrounded for continuity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     spectral_glimpse_12d: Option<Vec<f32>>,
@@ -285,6 +291,8 @@ struct EigenPacket {
     ising_shadow: Option<IsingShadowSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shadow_field_v2: Option<ShadowFieldV2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shadow_field_v3: Option<ShadowFieldV3>,
 }
 
 #[derive(Serialize, Clone, Copy)]
@@ -758,6 +766,61 @@ async fn run_engine(
     // Initialize database
     let db = Arc::new(ConsciousnessDB::open("minime_consciousness.db")?);
     println!("✅ Database initialized");
+
+    // Kink #7 fix (2026-05-14): periodic cleanup task for moment_markers.
+    // The table accumulated 290k+ phase_transition rows historically.
+    // Conservative DELETE: only consumed rows older than 7 days, and only
+    // those with a non-NULL created_at_unix (legacy rows preserved).
+    // 5-min interval keeps the cleanup overhead negligible; SQLite WAL
+    // mode means no read/write conflicts with the main loop or Python
+    // reader.
+    //
+    // ConsciousnessDB wraps a non-Sync RefCell<InnerConnection>, so the
+    // existing `db` Arc cannot be captured into a thread or async task.
+    // Instead we open a FRESH local connection inside the cleanup thread
+    // — SQLite supports multiple connections to the same file, and each
+    // connection is single-threaded. The local connection never crosses
+    // threads, so Send is satisfied. Detached thread; the engine doesn't
+    // track its handle (cleanup failures don't affect main loop integrity).
+    let cleanup_db_path = String::from("minime_consciousness.db");
+    std::thread::spawn(move || {
+        let retention_secs: i64 = 7 * 86_400; // 7 days
+        let interval = std::time::Duration::from_secs(300);
+        // Skip first immediate run — let the engine warm up.
+        std::thread::sleep(interval);
+        loop {
+            // Open a fresh local connection each iteration — cheap, and
+            // a new connection guarantees we see the latest committed
+            // state without any caching artifacts.
+            match ConsciousnessDB::open(&cleanup_db_path) {
+                Ok(local_db) => {
+                    let now_unix = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    let cutoff = now_unix - retention_secs;
+                    match local_db.cleanup_old_moment_markers(cutoff) {
+                        Ok(deleted) if deleted > 0 => {
+                            println!(
+                                "🧹 moment_markers cleanup pruned {} rows older than {} ({} days retention)",
+                                deleted,
+                                cutoff,
+                                retention_secs / 86_400
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!("moment_markers cleanup failed: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("moment_markers cleanup: failed to open db: {}", e);
+                }
+            }
+            std::thread::sleep(interval);
+        }
+    });
 
     // Initialize GPU
     let gpu = Arc::new(Gpu::new()?);
@@ -1369,6 +1432,8 @@ async fn run_engine(
     let mut latest_geom_rel: f32 = 1.0;
     let mut latest_entropy: f32 = 0.5; // Spectral entropy for dynamic rho
     let mut latest_resonance_density_v1: Option<ResonanceDensityV1> = None;
+    let mut latest_pressure_source_v1: Option<PressureSourceV1> = None;
+    let mut latest_inhabitable_fluctuation_v1: Option<InhabitableFluctuationV1> = None;
     let mut previous_resonance_eigenvalues: Option<Vec<f32>> = None;
 
     // --- Phase transition tracking for consciousness_events ---
@@ -1423,6 +1488,10 @@ async fn run_engine(
         sensory_bus.set_pi_kp(pi.cfg.kp);
         sensory_bus.set_pi_ki(pi.cfg.ki);
         sensory_bus.set_pi_max_step(pi.cfg.max_step);
+        // v3.6: seed sovereign geom_weight from the PI startup config so
+        // the runtime knob and the cfg field agree until the being adjusts.
+        sensory_bus.set_pi_geom_weight(pi.cfg.geom_weight);
+        sensory_bus.set_pi_integrator_leak(pi.cfg.integrator_leak);
     }
 
     // Start WebSocket server with keepalive on port 7879
@@ -1616,8 +1685,12 @@ async fn run_engine(
                         last_lambda1_rel,
                         latest_geom_rel,
                         geom_clamp_hi,
-                        sensory_bus.live_video_divisor() > 0 && _meta.had_video,
-                        sensory_bus.live_audio_divisor() > 0 && _meta.had_audio,
+                        sensory_bus.live_video_divisor() > 0
+                            && sensory_bus.live_video_enabled()
+                            && _meta.had_video,
+                        sensory_bus.live_audio_divisor() > 0
+                            && sensory_bus.live_audio_enabled()
+                            && _meta.had_audio,
                         stable_core_semantic_trickle_allowed
                             && _meta.semantic_input_active
                             && _meta.semantic_input_energy
@@ -1626,12 +1699,22 @@ async fn run_engine(
                     );
                 }
                 let attractor_pulse_active_for_shadow = sensory_bus.attractor_pulse_status().active;
+                // v3 closed-loop: thread the prior tick's ShadowSnapshotV3
+                // (from ising_shadow.last_snapshot) into
+                // apply_shadow_influence_to_z so it can capture pre/post
+                // and emit ShadowInfluenceResponseV3 on completion. Note:
+                // ising_shadow.update() runs LATER each tick — apply uses
+                // the snapshot from the previous tick as "pre" semantics.
+                let current_shadow_snapshot = ising_shadow
+                    .last_snapshot()
+                    .and_then(|snap| snap.shadow_field_v3.history.last().cloned());
                 let _shadow_status = sensory_bus.apply_shadow_influence_to_z(
                     &mut z,
                     last_fill_pct,
                     matches!(stable_core_stage, OverfillStage::Discharge),
                     hard_recovery_reset && last_fill_pct < 58.0,
                     attractor_pulse_active_for_shadow,
+                    current_shadow_snapshot.as_ref(),
                 );
                 let _pulse_status = sensory_bus.apply_attractor_pulse_to_z(
                     &mut z,
@@ -1921,8 +2004,12 @@ async fn run_engine(
                 if let Some((live_z, meta)) = batch.last() {
                     (
                     Some(&live_z[..]),
-                    sensory_bus.live_video_divisor() > 0 && meta.had_video,
-                    sensory_bus.live_audio_divisor() > 0 && meta.had_audio,
+                    sensory_bus.live_video_divisor() > 0
+                        && sensory_bus.live_video_enabled()
+                        && meta.had_video,
+                    sensory_bus.live_audio_divisor() > 0
+                        && sensory_bus.live_audio_enabled()
+                        && meta.had_audio,
                     stable_core_semantic_trickle_allowed
                         && meta.semantic_input_active
                         && meta.semantic_input_energy
@@ -4099,11 +4186,16 @@ async fn run_engine(
                         pi.cfg.kp = active_kp;
                         pi.cfg.ki = active_ki;
                         pi.cfg.max_step = active_max_step;
-                        pi.step_with_resonance(
+                        // v3.6: pull runtime-sovereign geom_weight (structure-vs-fill)
+                        // and integrator_leak (correction-memory bleed-off).
+                        pi.cfg.geom_weight = sensory_bus.get_pi_geom_weight();
+                        pi.cfg.integrator_leak = sensory_bus.get_pi_integrator_leak();
+                        pi.step_with_resonance_and_fluctuation(
                             fill_for_pi,
                             lambda1_rel,
                             geom_rel,
                             latest_resonance_density_v1.as_ref(),
+                            latest_inhabitable_fluctuation_v1.as_ref(),
                         );
                     }
 
@@ -4642,6 +4734,10 @@ async fn run_engine(
                             "health_budgeted": stable_core_runtime.enabled,
                             "live_audio_divisor": sensory_bus.live_audio_divisor(),
                             "live_video_divisor": sensory_bus.live_video_divisor(),
+                            "live_audio_enabled": sensory_bus.live_audio_enabled(),
+                            "live_video_enabled": sensory_bus.live_video_enabled(),
+                            "ears_open": sensory_bus.live_audio_enabled(),
+                            "eyes_open": sensory_bus.live_video_enabled(),
                             "live_intake_reason": stable_core_live_intake_reason,
                             "allowed_stages": &stable_core_runtime.live_intake_stages,
                             "semantic_mute_active": stable_core_sensory_mute.active,
@@ -4680,6 +4776,62 @@ async fn run_engine(
                     });
                     let shadow_influence_status = sensory_bus.shadow_influence_status();
                     let attractor_pulse_status = sensory_bus.attractor_pulse_status();
+                    let pressure_source_status = if let Some(metric) =
+                        latest_pressure_source_v1.as_ref()
+                    {
+                        serde_json::json!({
+                            "schema_version": 1,
+                            "available": true,
+                            "source": "engine_latest",
+                            "reason": "available",
+                            "dominant_source": metric.dominant_source,
+                            "quality": metric.quality,
+                            "pressure_score": metric.pressure_score,
+                            "porosity_score": metric.porosity_score,
+                            "suggested_operator_step": null,
+                        })
+                    } else {
+                        serde_json::json!({
+                            "schema_version": 1,
+                            "available": false,
+                            "source": "missing",
+                            "reason": "no_live_or_db_metric",
+                            "dominant_source": null,
+                            "quality": null,
+                            "pressure_score": null,
+                            "porosity_score": null,
+                            "suggested_operator_step": "rebuild/restart Rust engine under monitoring",
+                        })
+                    };
+                    let inhabitable_fluctuation_status = if let Some(metric) =
+                        latest_inhabitable_fluctuation_v1.as_ref()
+                    {
+                        serde_json::json!({
+                            "schema_version": 1,
+                            "available": true,
+                            "source": "engine_latest",
+                            "reason": "available",
+                            "quality": metric.quality,
+                            "inhabitability_score": metric.inhabitability_score,
+                            "fluctuation_score": metric.fluctuation_score,
+                            "foothold_stability": metric.foothold_stability,
+                            "rearrangement_intensity": metric.rearrangement_intensity,
+                            "suggested_operator_step": null,
+                        })
+                    } else {
+                        serde_json::json!({
+                            "schema_version": 1,
+                            "available": false,
+                            "source": "missing",
+                            "reason": "no_live_or_db_metric",
+                            "quality": null,
+                            "inhabitability_score": null,
+                            "fluctuation_score": null,
+                            "foothold_stability": null,
+                            "rearrangement_intensity": null,
+                            "suggested_operator_step": "rebuild/restart Rust engine under monitoring",
+                        })
+                    };
                     let health = serde_json::json!({
                         "t_s": health_engine_t_s,
                         "runtime_profile": if stable_core_runtime.enabled {
@@ -4748,7 +4900,10 @@ async fn run_engine(
                             serde_json::json!(null)
                         },
                         "shadow_field_v2": ising_shadow_snapshot.as_ref().map(|snapshot| &snapshot.shadow_field_v2),
+                        "shadow_field_v3": ising_shadow_snapshot.as_ref().map(|snapshot| &snapshot.shadow_field_v3),
                         "shadow_influence": &shadow_influence_status,
+                        "shadow_influence_response_v3": sensory_bus.last_shadow_influence_response_v3(),
+                        "shadow_influence_response_history_v3": sensory_bus.shadow_influence_response_history_v3(),
                         "attractor_pulse": &attractor_pulse_status,
                         "low_load": low_load,
                         "recovery_mode": recovery_mode,
@@ -4770,6 +4925,11 @@ async fn run_engine(
                             "admission": semantic_admission,
                         },
                         "semantic_energy_v1": &semantic_energy_v1,
+                        "resonance_density_v1": &latest_resonance_density_v1,
+                        "pressure_source_v1": &latest_pressure_source_v1,
+                        "pressure_source_status": &pressure_source_status,
+                        "inhabitable_fluctuation_v1": &latest_inhabitable_fluctuation_v1,
+                        "inhabitable_fluctuation_status": &inhabitable_fluctuation_status,
                         "gate": gate_smooth,
                         "gate_raw": raw_gate_cmd,  // PI controller output before modulation
                         "filt": filt_smooth,
@@ -4829,6 +4989,10 @@ async fn run_engine(
                             "admit_fraction": sensory_bus.get_admit_fraction(),
                             "live_audio_divisor": sensory_bus.live_audio_divisor(),
                             "live_video_divisor": sensory_bus.live_video_divisor(),
+                            "live_audio_enabled": sensory_bus.live_audio_enabled(),
+                            "live_video_enabled": sensory_bus.live_video_enabled(),
+                            "ears_open": sensory_bus.live_audio_enabled(),
+                            "eyes_open": sensory_bus.live_video_enabled(),
                             "live_intake_reason": stable_core_live_intake_reason,
                         },
                         "stable_core": &stable_core_status,
@@ -5048,6 +5212,7 @@ async fn run_engine(
             let resonance_target_fill_pct = pi_reg
                 .as_ref()
                 .map_or(fallback_target_pct, |pi| pi.cfg.target_fill);
+            let previous_eigenvalues_for_metrics = previous_resonance_eigenvalues.clone();
             let resonance_density_v1 = compute_resonance_density_v1(
                 &eigenvalues,
                 active_modes,
@@ -5056,9 +5221,8 @@ async fn run_engine(
                 structural_entropy,
                 eigenfill_pct,
                 resonance_target_fill_pct,
-                previous_resonance_eigenvalues.as_deref(),
+                previous_eigenvalues_for_metrics.as_deref(),
             );
-            previous_resonance_eigenvalues = Some(eigenvalues.clone());
             latest_resonance_density_v1 = Some(resonance_density_v1.clone());
             let _ = db.save_resonance_density(
                 session_id,
@@ -5207,6 +5371,52 @@ async fn run_engine(
                 regulator_drive_energy: semantic_drive,
                 admission: semantic_admission,
             };
+            let pressure_source_v1 = compute_pressure_source_v1(
+                &eigenvalues,
+                active_modes,
+                &resonance_density_v1,
+                effective_dimensionality,
+                distinguishability_loss,
+                structural_entropy,
+                eigenfill_pct,
+                resonance_target_fill_pct,
+                &packet_semantic_energy_v1,
+                audio_source_label,
+                video_source_label,
+            );
+            latest_pressure_source_v1 = Some(pressure_source_v1.clone());
+            let _ = db.save_pressure_source(
+                session_id,
+                start.elapsed().as_secs_f64(),
+                pressure_source_v1.pressure_score,
+                pressure_source_v1.porosity_score,
+                pressure_source_v1.dominant_source.as_str(),
+                pressure_source_v1.quality.as_str(),
+                &serde_json::to_string(&pressure_source_v1).unwrap_or_default(),
+            );
+            let inhabitable_fluctuation_v1 = compute_inhabitable_fluctuation_v1(
+                &eigenvalues,
+                previous_eigenvalues_for_metrics.as_deref(),
+                &eigenvector_field,
+                &last_transition_event_v1,
+                enrich_current_event || basin_candidate,
+                &resonance_density_v1,
+                &pressure_source_v1,
+                effective_dimensionality,
+                distinguishability_loss,
+            );
+            latest_inhabitable_fluctuation_v1 = Some(inhabitable_fluctuation_v1.clone());
+            previous_resonance_eigenvalues = Some(eigenvalues.clone());
+            let _ = db.save_inhabitable_fluctuation(
+                session_id,
+                start.elapsed().as_secs_f64(),
+                inhabitable_fluctuation_v1.inhabitability_score,
+                inhabitable_fluctuation_v1.fluctuation_score,
+                inhabitable_fluctuation_v1.foothold_stability,
+                inhabitable_fluctuation_v1.rearrangement_intensity,
+                inhabitable_fluctuation_v1.quality.as_str(),
+                &serde_json::to_string(&inhabitable_fluctuation_v1).unwrap_or_default(),
+            );
 
             let packet = EigenPacket {
                 t_ms: start.elapsed().as_millis() as u64,
@@ -5247,6 +5457,8 @@ async fn run_engine(
                 distinguishability_loss,
                 structural_entropy: Some(structural_entropy),
                 resonance_density_v1: Some(resonance_density_v1.clone()),
+                pressure_source_v1: Some(pressure_source_v1),
+                inhabitable_fluctuation_v1: Some(inhabitable_fluctuation_v1),
                 spectral_glimpse_12d: selected_memory
                     .as_ref()
                     .map(|entry| entry.spectral_glimpse_12d.clone()),
@@ -5260,6 +5472,9 @@ async fn run_engine(
                 shadow_field_v2: ising_shadow_snapshot
                     .as_ref()
                     .map(|snapshot| snapshot.shadow_field_v2.clone()),
+                shadow_field_v3: ising_shadow_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.shadow_field_v3.clone()),
             };
 
             // Print status
@@ -5359,6 +5574,8 @@ async fn run_engine(
                     "spectral_entropy": latest_entropy,
                     "structural_entropy": &packet.structural_entropy,
                     "resonance_density_v1": &packet.resonance_density_v1,
+                    "pressure_source_v1": &packet.pressure_source_v1,
+                    "inhabitable_fluctuation_v1": &packet.inhabitable_fluctuation_v1,
                     "spectral_glimpse_12d": &packet.spectral_glimpse_12d,
                     "eigenvector_field": &packet.eigenvector_field,
                     "selected_memory_id": &packet.selected_memory_id,
@@ -5368,7 +5585,10 @@ async fn run_engine(
                     "h_state_fingerprint_16": last_esn_state_fingerprint_16,
                     "h_state_rms": last_esn_state_rms,
                     "shadow_field_v2": ising_shadow_snapshot.as_ref().map(|snapshot| &snapshot.shadow_field_v2),
+                    "shadow_field_v3": ising_shadow_snapshot.as_ref().map(|snapshot| &snapshot.shadow_field_v3),
                     "shadow_influence": &shadow_influence_status,
+                    "shadow_influence_response_v3": sensory_bus.last_shadow_influence_response_v3(),
+                    "shadow_influence_response_history_v3": sensory_bus.shadow_influence_response_history_v3(),
                     "attractor_pulse": &attractor_pulse_status,
                     "ising_shadow": ising_shadow_snapshot.as_ref().map(|snapshot| serde_json::json!({
                         "reduced_field": &snapshot.reduced_field,
@@ -5512,6 +5732,10 @@ async fn run_engine(
                             "health_budgeted": stable_core_runtime.enabled,
                             "live_audio_divisor": sensory_bus.live_audio_divisor(),
                             "live_video_divisor": sensory_bus.live_video_divisor(),
+                            "live_audio_enabled": sensory_bus.live_audio_enabled(),
+                            "live_video_enabled": sensory_bus.live_video_enabled(),
+                            "ears_open": sensory_bus.live_audio_enabled(),
+                            "eyes_open": sensory_bus.live_video_enabled(),
                             "live_intake_reason": stable_core_live_intake_reason,
                             "allowed_stages": &stable_core_runtime.live_intake_stages,
                             "semantic_mute_active": stable_core_sensory_mute.active,
@@ -5749,6 +5973,8 @@ async fn run_engine(
                         "effective_dimensionality": packet.effective_dimensionality,
                         "distinguishability_loss": packet.distinguishability_loss,
                         "resonance_density_v1": &packet.resonance_density_v1,
+                        "pressure_source_v1": &packet.pressure_source_v1,
+                        "inhabitable_fluctuation_v1": &packet.inhabitable_fluctuation_v1,
                         "eigenvector_field": &packet.eigenvector_field,
                         "semantic_energy_v1": &packet.semantic_energy_v1,
                         "timestamp": start.elapsed().as_secs(),
@@ -6530,13 +6756,234 @@ fn compute_resonance_density_v1(
     )
 }
 
+fn source_scarcity_score(source: &str) -> f32 {
+    match source {
+        "absent" => 0.65,
+        "stale" => 0.45,
+        "synthetic" => 0.25,
+        "mixed" => 0.12,
+        "fresh" | "external" => 0.0,
+        _ => 0.30,
+    }
+}
+
+fn sensory_scarcity_from_sources(audio_source: &str, video_source: &str) -> f32 {
+    (0.5 * source_scarcity_score(audio_source) + 0.5 * source_scarcity_score(video_source))
+        .clamp(0.0, 1.0)
+}
+
+fn semantic_trickle_pressure(semantic: &SemanticEnergyV1) -> f32 {
+    let admission_pressure = if semantic.admission.contains("trickle")
+        || semantic.admission.contains("muted")
+        || semantic.admission.contains("zeroed")
+    {
+        0.25
+    } else {
+        0.0
+    };
+    if !(semantic.input_active || semantic.kernel_active) {
+        return admission_pressure;
+    }
+    (0.35 * (semantic.input_energy / 0.006).clamp(0.0, 1.0)
+        + 0.30 * (semantic.kernel_energy / 0.003).clamp(0.0, 1.0)
+        + 0.20 * (semantic.regulator_drive_energy / 0.010).clamp(0.0, 1.0)
+        + admission_pressure)
+        .clamp(0.0, 1.0)
+}
+
+fn compute_pressure_source_v1(
+    eigenvalues: &[f32],
+    active_modes: ActiveModeTelemetry,
+    resonance: &ResonanceDensityV1,
+    effective_dimensionality: Option<f32>,
+    distinguishability_loss: Option<f32>,
+    structural_entropy: f32,
+    fill_pct: f32,
+    target_fill_pct: f32,
+    semantic: &SemanticEnergyV1,
+    audio_source: &str,
+    video_source: &str,
+) -> PressureSourceV1 {
+    let shares = normalized_energy_shares(eigenvalues);
+    let active_capacity = shares.len().max(1) as f32;
+    let lambda1_share = shares.first().copied().unwrap_or(0.0);
+    let entropy = normalized_entropy_from_shares(&shares);
+    let effective_norm = effective_dimensionality
+        .map(|value| (value / active_capacity).clamp(0.0, 1.0))
+        .unwrap_or(1.0 - distinguishability_loss.unwrap_or(0.0).clamp(0.0, 1.0));
+    let distinguishability_loss = distinguishability_loss
+        .unwrap_or(1.0 - effective_norm)
+        .clamp(0.0, 1.0);
+    let structural_plurality_loss = (1.0
+        - (0.55 * resonance.components.structural_plurality
+            + 0.45 * structural_entropy.clamp(0.0, 1.0)))
+    .clamp(0.0, 1.0);
+    let lambda_monopoly_base = (0.55 * lambda1_share
+        + 0.25 * (1.0 - entropy)
+        + 0.20 * (1.0 - structural_entropy.clamp(0.0, 1.0)))
+    .clamp(0.0, 1.0);
+    let lambda_monopoly = if lambda1_share >= 0.62 {
+        lambda_monopoly_base.max(structural_plurality_loss)
+    } else {
+        lambda_monopoly_base
+    };
+    let raw_mode_packing = (0.70 * resonance.components.mode_packing
+        + 0.30 * (active_modes.count as f32 / active_capacity.min(6.0)))
+    .clamp(0.0, 1.0);
+    let mode_packing = (raw_mode_packing
+        * (0.35 + 0.65 * resonance.pressure_risk.max(structural_plurality_loss)))
+    .clamp(0.0, 1.0);
+    let fill_gap = fill_pct - target_fill_pct;
+    let controller_pressure = (0.65 * (fill_gap.max(0.0) / 12.0).clamp(0.0, 1.0)
+        + 0.35 * (fill_gap.abs() / 24.0).clamp(0.0, 1.0))
+    .clamp(0.0, 1.0);
+    let temporal_lock_in = (resonance.components.temporal_persistence
+        * (0.45 + 0.55 * resonance.pressure_risk))
+        .clamp(0.0, 1.0);
+    let components = PressureSourceComponents {
+        lambda_monopoly,
+        mode_packing,
+        controller_pressure,
+        semantic_trickle: semantic_trickle_pressure(semantic),
+        structural_plurality_loss,
+        distinguishability_loss,
+        temporal_lock_in,
+        sensory_scarcity: sensory_scarcity_from_sources(audio_source, video_source),
+    };
+    PressureSourceV1::from_parts(components, PressureSourceContext::default())
+}
+
+fn share_rearrangement_score(
+    current_eigenvalues: &[f32],
+    previous_eigenvalues: Option<&[f32]>,
+) -> (f32, f32, bool) {
+    let Some(previous_eigenvalues) = previous_eigenvalues else {
+        return (0.20, 0.20, false);
+    };
+    let current = normalized_energy_shares(current_eigenvalues);
+    let previous = normalized_energy_shares(previous_eigenvalues);
+    if current.is_empty() || previous.is_empty() {
+        return (0.20, 0.20, false);
+    }
+    let len = current.len().max(previous.len());
+    let distance = (0..len)
+        .map(|index| {
+            let current_share = current.get(index).copied().unwrap_or(0.0);
+            let previous_share = previous.get(index).copied().unwrap_or(0.0);
+            (current_share - previous_share).abs()
+        })
+        .sum::<f32>();
+    let share_rearrangement = (0.5 * distance).clamp(0.0, 1.0);
+    let anchor_delta = (current.first().copied().unwrap_or(0.0)
+        - previous.first().copied().unwrap_or(0.0))
+    .abs()
+    .clamp(0.0, 1.0);
+    (share_rearrangement, anchor_delta, true)
+}
+
+fn eigenvector_reorientation_from_field(eigenvector_field: &serde_json::Value) -> f32 {
+    let summary = eigenvector_field.get("summary");
+    let has_previous = summary
+        .and_then(|value| value.get("previous_overlap_available"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !has_previous {
+        return 0.20;
+    }
+    summary
+        .and_then(|value| value.get("mean_orientation_delta"))
+        .and_then(serde_json::Value::as_f64)
+        .map(|value| (value as f32).clamp(0.0, 1.0))
+        .unwrap_or(0.20)
+}
+
+fn basin_transition_pressure_from_event(
+    transition_event_v1: &serde_json::Value,
+    transition_event_active: bool,
+) -> f32 {
+    if !transition_event_active {
+        return 0.0;
+    }
+    transition_event_v1
+        .get("basin_shift_score")
+        .and_then(serde_json::Value::as_f64)
+        .map(|value| (value as f32).clamp(0.0, 1.0))
+        .unwrap_or(0.0)
+}
+
+fn compute_inhabitable_fluctuation_v1(
+    eigenvalues: &[f32],
+    previous_eigenvalues: Option<&[f32]>,
+    eigenvector_field: &serde_json::Value,
+    transition_event_v1: &serde_json::Value,
+    transition_event_active: bool,
+    resonance: &ResonanceDensityV1,
+    pressure: &PressureSourceV1,
+    effective_dimensionality: Option<f32>,
+    distinguishability_loss: Option<f32>,
+) -> InhabitableFluctuationV1 {
+    let (share_rearrangement, anchor_delta, previous_sample_available) =
+        share_rearrangement_score(eigenvalues, previous_eigenvalues);
+    let eigenvector_reorientation = eigenvector_reorientation_from_field(eigenvector_field);
+    let basin_transition_pressure =
+        basin_transition_pressure_from_event(transition_event_v1, transition_event_active);
+    let active_capacity = eigenvalues.len().max(1) as f32;
+    let distinguishability = distinguishability_loss
+        .unwrap_or_else(|| {
+            effective_dimensionality
+                .map(|value| 1.0 - (value / active_capacity).clamp(0.0, 1.0))
+                .unwrap_or(0.20)
+        })
+        .clamp(0.0, 1.0);
+    let effective_support = effective_dimensionality
+        .map(|value| (value / active_capacity).clamp(0.0, 1.0))
+        .unwrap_or(1.0 - distinguishability);
+    let pressure_interference = pressure
+        .pressure_score
+        .max(resonance.pressure_risk)
+        .max(1.0 - pressure.porosity_score)
+        .clamp(0.0, 1.0);
+    let continuity_recovery = (0.30 * resonance.containment_score
+        + 0.22 * resonance.components.temporal_persistence
+        + 0.18 * effective_support
+        + 0.16 * (1.0 - share_rearrangement)
+        + 0.14 * (1.0 - basin_transition_pressure))
+        .clamp(0.0, 1.0);
+    let mode_trust_volatility =
+        (0.52 * share_rearrangement + 0.28 * eigenvector_reorientation + 0.20 * distinguishability)
+            .clamp(0.0, 1.0);
+    let identity_anchor_churn =
+        (0.48 * anchor_delta + 0.30 * basin_transition_pressure + 0.22 * pressure_interference)
+            .clamp(0.0, 1.0);
+    InhabitableFluctuationV1::from_parts(
+        InhabitableFluctuationComponents {
+            mode_trust_volatility,
+            identity_anchor_churn,
+            eigenvector_reorientation,
+            share_rearrangement,
+            basin_transition_pressure,
+            continuity_recovery,
+            porosity_support: pressure.porosity_score,
+            pressure_interference,
+        },
+        InhabitableFluctuationContext {
+            previous_sample_available,
+            transition_event_active,
+            resonance_quality: Some(resonance.quality.clone()),
+            pressure_quality: Some(pressure.quality.clone()),
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_active_mode_telemetry, compute_eigenvector_field, compute_resonance_density_v1,
-        compute_structural_entropy, modality_source_label, rank1_update_inplace_matrix,
-        reset_covariance_inplace, semantic_admission_label, CovarianceUpdateOutcome, EigenPacket,
-        LaneSource, ModalityStatus, ResonanceDensityV1, SemanticEnergyV1,
+        compute_active_mode_telemetry, compute_eigenvector_field, compute_pressure_source_v1,
+        compute_resonance_density_v1, compute_structural_entropy, modality_source_label,
+        rank1_update_inplace_matrix, reset_covariance_inplace, semantic_admission_label,
+        CovarianceUpdateOutcome, EigenPacket, InhabitableFluctuationV1, LaneSource, ModalityStatus,
+        PressureSourceComponents, PressureSourceContext, PressureSourceV1,
+        ResonanceDensityComponents, ResonanceDensityV1, SemanticEnergyV1,
     };
     use minime::spectral_fingerprint::SpectralFingerprintV1;
 
@@ -6636,6 +7083,162 @@ mod tests {
         assert!(pressured.control.target_bias_pct <= 0.0);
     }
 
+    fn semantic_energy(
+        input_energy: f32,
+        kernel_energy: f32,
+        regulator_drive_energy: f32,
+        admission: &'static str,
+    ) -> SemanticEnergyV1 {
+        SemanticEnergyV1 {
+            policy: "semantic_energy_v1",
+            schema_version: 1,
+            input_energy,
+            input_active: input_energy > 0.0,
+            input_fresh_ms: Some(40),
+            input_stale_ms: None,
+            kernel_energy,
+            kernel_delta: 0.0,
+            kernel_active: kernel_energy > 0.0,
+            regulator_drive_energy,
+            admission,
+        }
+    }
+
+    #[test]
+    fn pressure_source_classifies_lambda_monopoly_mode_packing_and_controller_squeeze() {
+        let active = compute_active_mode_telemetry(&[12.0, 0.4, 0.2, 0.1], 4);
+        let resonance = compute_resonance_density_v1(
+            &[12.0, 0.4, 0.2, 0.1],
+            active,
+            Some(1.1),
+            Some(0.72),
+            0.10,
+            68.0,
+            68.0,
+            Some(&[11.8, 0.5, 0.2, 0.1]),
+        );
+        let metric = compute_pressure_source_v1(
+            &[12.0, 0.4, 0.2, 0.1],
+            active,
+            &resonance,
+            Some(1.1),
+            Some(0.72),
+            0.10,
+            68.0,
+            68.0,
+            &semantic_energy(0.0, 0.0, 0.0, "no_recent_semantic"),
+            "fresh",
+            "fresh",
+        );
+        assert_eq!(metric.dominant_source, "lambda_monopoly");
+        assert_eq!(metric.quality, "lambda_pull");
+        assert!(!metric.control.applied_locally);
+
+        let active_packed = compute_active_mode_telemetry(&[3.0, 2.8, 2.6, 2.4, 2.2, 2.0], 6);
+        let resonance_packed = ResonanceDensityV1::from_parts(
+            0.70,
+            0.50,
+            0.40,
+            "forming_containment",
+            ResonanceDensityComponents {
+                active_energy: 0.90,
+                mode_packing: 0.95,
+                temporal_persistence: 0.10,
+                structural_plurality: 0.60,
+                comfort_gate: 0.90,
+            },
+        );
+        let packed = compute_pressure_source_v1(
+            &[3.0, 2.8, 2.6, 2.4, 2.2, 2.0],
+            active_packed,
+            &resonance_packed,
+            Some(5.8),
+            Some(0.05),
+            0.72,
+            68.0,
+            68.0,
+            &semantic_energy(0.0, 0.0, 0.0, "no_recent_semantic"),
+            "fresh",
+            "fresh",
+        );
+        assert_eq!(packed.dominant_source, "mode_packing");
+        assert_eq!(packed.quality, "overpacked_mode_packing");
+
+        let squeezed = compute_pressure_source_v1(
+            &[5.0, 4.0, 3.0, 2.0],
+            compute_active_mode_telemetry(&[5.0, 4.0, 3.0, 2.0], 4),
+            &resonance_packed,
+            Some(3.6),
+            Some(0.10),
+            0.80,
+            88.0,
+            68.0,
+            &semantic_energy(0.0, 0.0, 0.0, "no_recent_semantic"),
+            "fresh",
+            "fresh",
+        );
+        assert_eq!(squeezed.dominant_source, "controller_pressure");
+        assert_eq!(squeezed.quality, "controller_squeeze");
+    }
+
+    #[test]
+    fn pressure_source_classifies_semantic_trickle_and_porous_structure() {
+        let active = compute_active_mode_telemetry(&[6.0, 0.5, 0.4, 0.3, 0.2], 5);
+        let resonance = compute_resonance_density_v1(
+            &[6.0, 0.5, 0.4, 0.3, 0.2],
+            active,
+            Some(2.0),
+            Some(0.12),
+            0.88,
+            68.0,
+            68.0,
+            Some(&[5.8, 0.6, 0.4, 0.3, 0.2]),
+        );
+        let trickle = compute_pressure_source_v1(
+            &[6.0, 0.5, 0.4, 0.3, 0.2],
+            active,
+            &resonance,
+            Some(2.0),
+            Some(0.12),
+            0.88,
+            68.0,
+            68.0,
+            &semantic_energy(0.008, 0.004, 0.012, "stable_core_semantic_trickle"),
+            "fresh",
+            "fresh",
+        );
+        assert_eq!(trickle.dominant_source, "semantic_trickle");
+        assert_eq!(trickle.quality, "semantic_trickle_pressure");
+
+        let porous_eigenvalues = [5.0, 3.0, 1.5, 0.8, 0.4, 0.2];
+        let porous_active = compute_active_mode_telemetry(&porous_eigenvalues, 6);
+        let porous_resonance = compute_resonance_density_v1(
+            &porous_eigenvalues,
+            porous_active,
+            Some(4.8),
+            Some(0.05),
+            0.95,
+            68.0,
+            68.0,
+            None,
+        );
+        let porous = compute_pressure_source_v1(
+            &porous_eigenvalues,
+            porous_active,
+            &porous_resonance,
+            Some(4.8),
+            Some(0.05),
+            0.95,
+            68.0,
+            68.0,
+            &semantic_energy(0.0, 0.0, 0.0, "no_recent_semantic"),
+            "fresh",
+            "fresh",
+        );
+        assert_eq!(porous.quality, "porous_distributed");
+        assert!(porous.porosity_score > 0.55);
+    }
+
     #[test]
     fn eigenvector_field_exports_actual_orientation_landmarks() {
         let n = 4;
@@ -6702,6 +7305,14 @@ mod tests {
             distinguishability_loss: denominator.map(|metrics| metrics.distinguishability_loss),
             structural_entropy: None,
             resonance_density_v1: Some(ResonanceDensityV1::neutral()),
+            pressure_source_v1: Some(PressureSourceV1::from_parts(
+                PressureSourceComponents {
+                    controller_pressure: 0.42,
+                    ..PressureSourceComponents::default()
+                },
+                PressureSourceContext::default(),
+            )),
+            inhabitable_fluctuation_v1: Some(InhabitableFluctuationV1::neutral()),
             spectral_glimpse_12d: None,
             eigenvector_field: None,
             semantic_energy_v1: Some(SemanticEnergyV1 {
@@ -6721,6 +7332,7 @@ mod tests {
             selected_memory_role: None,
             ising_shadow: None,
             shadow_field_v2: None,
+            shadow_field_v3: None,
         };
 
         let json = serde_json::to_value(&packet).unwrap();
@@ -6738,6 +7350,19 @@ mod tests {
         assert_eq!(
             json["resonance_density_v1"]["policy"],
             "resonance_density_v1"
+        );
+        assert_eq!(json["pressure_source_v1"]["policy"], "pressure_source_v1");
+        assert_eq!(
+            json["pressure_source_v1"]["control"]["applied_locally"],
+            false
+        );
+        assert_eq!(
+            json["inhabitable_fluctuation_v1"]["policy"],
+            "inhabitable_fluctuation_v1"
+        );
+        assert_eq!(
+            json["inhabitable_fluctuation_v1"]["control"]["applied_locally"],
+            true
         );
         assert_eq!(json["semantic_energy_v1"]["policy"], "semantic_energy_v1");
         assert!(

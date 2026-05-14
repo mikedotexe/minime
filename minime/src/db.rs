@@ -212,6 +212,39 @@ impl ConsciousnessDB {
                 ON resonance_density_timeline(session_id, timestamp);
             CREATE INDEX IF NOT EXISTS idx_resonance_density_quality
                 ON resonance_density_timeline(quality, timestamp);
+
+            CREATE TABLE IF NOT EXISTS pressure_source_timeline (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                pressure_score REAL NOT NULL,
+                porosity_score REAL NOT NULL,
+                dominant_source TEXT NOT NULL,
+                quality TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_pressure_source_session
+                ON pressure_source_timeline(session_id, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_pressure_source_quality
+                ON pressure_source_timeline(quality, dominant_source, timestamp);
+
+            CREATE TABLE IF NOT EXISTS inhabitable_fluctuation_timeline (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                inhabitability_score REAL NOT NULL,
+                fluctuation_score REAL NOT NULL,
+                foothold_stability REAL NOT NULL,
+                rearrangement_intensity REAL NOT NULL,
+                quality TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_inhabitable_fluctuation_session
+                ON inhabitable_fluctuation_timeline(session_id, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_inhabitable_fluctuation_quality
+                ON inhabitable_fluctuation_timeline(quality, timestamp);
         "#)?;
 
         // Migration: add geometry columns to esn_metrics (safe to re-run)
@@ -220,7 +253,15 @@ impl ConsciousnessDB {
              ALTER TABLE esn_metrics ADD COLUMN esn_geom_rel REAL;",
         );
 
-        // Migration: moment_markers table for real-time spectral event capture
+        // Migration: moment_markers table for real-time spectral event capture.
+        //
+        // NOTE on the timestamp field (Kink #10, 2026-05-14): historically
+        // the `timestamp` column has stored ENGINE-RELATIVE seconds
+        // (Instant::now().elapsed().as_secs_f64()) — NOT unix epoch.
+        // The new `created_at_unix` column (added 2026-05-14) stores
+        // SystemTime::now() unix epoch seconds for new writes.
+        // Legacy rows have NULL for created_at_unix.
+        // Future readers joining with unix-epoch data should use created_at_unix.
         self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS moment_markers (
@@ -237,6 +278,19 @@ impl ConsciousnessDB {
             CREATE INDEX IF NOT EXISTS idx_moment_consumed ON moment_markers(consumed);
         "#,
         )?;
+
+        // Kink #10 fix (2026-05-14): parallel unix-epoch column for
+        // created_at_unix. Idempotent — SQLite 3.25+ silently accepts the
+        // duplicate ADD COLUMN. New writes populate; legacy rows stay NULL.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE moment_markers ADD COLUMN created_at_unix INTEGER;",
+        );
+        // Index supports the cleanup task's WHERE created_at_unix < cutoff
+        // query (Kink #7 fix, see cleanup_old_moment_markers).
+        let _ = self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_moment_created_at_unix \
+             ON moment_markers(created_at_unix) WHERE created_at_unix IS NOT NULL;",
+        );
 
         // Migration: spectral checkpoints — being-designed memory system.
         // Periodic eigenvalue fingerprints that will eventually be paired
@@ -519,6 +573,65 @@ impl ConsciousnessDB {
         Ok(())
     }
 
+    /// Record the typed pressure-source telemetry mirror.
+    pub fn save_pressure_source(
+        &self,
+        session_id: i64,
+        timestamp: f64,
+        pressure_score: f32,
+        porosity_score: f32,
+        dominant_source: &str,
+        quality: &str,
+        payload: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"INSERT INTO pressure_source_timeline
+               (session_id, timestamp, pressure_score, porosity_score, dominant_source, quality, payload)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+            params![
+                session_id,
+                timestamp,
+                pressure_score,
+                porosity_score,
+                dominant_source,
+                quality,
+                payload,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Record the typed inhabitable-fluctuation telemetry mirror.
+    pub fn save_inhabitable_fluctuation(
+        &self,
+        session_id: i64,
+        timestamp: f64,
+        inhabitability_score: f32,
+        fluctuation_score: f32,
+        foothold_stability: f32,
+        rearrangement_intensity: f32,
+        quality: &str,
+        payload: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"INSERT INTO inhabitable_fluctuation_timeline
+               (session_id, timestamp, inhabitability_score, fluctuation_score,
+                foothold_stability, rearrangement_intensity, quality, payload)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+            params![
+                session_id,
+                timestamp,
+                inhabitability_score,
+                fluctuation_score,
+                foothold_stability,
+                rearrangement_intensity,
+                quality,
+                payload,
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Record reduced-mode Ising/Hamiltonian shadow metrics for comparison.
     pub fn save_ising_shadow_metrics(
         &self,
@@ -723,7 +836,12 @@ impl ConsciousnessDB {
         Ok(())
     }
 
-    /// Write a moment marker (spectral event for real-time capture)
+    /// Write a moment marker (spectral event for real-time capture).
+    ///
+    /// `timestamp` is engine-relative seconds (Instant::now().elapsed().as_secs_f64()).
+    /// Kink #10 fix (2026-05-14): also captures unix epoch into the new
+    /// `created_at_unix` column for cross-system time joins. Computed
+    /// internally so callers don't need to change.
     pub fn write_moment_marker(
         &self,
         session_id: i64,
@@ -732,19 +850,41 @@ impl ConsciousnessDB {
         description: &str,
         spectral_context: Option<&str>,
     ) -> Result<i64> {
+        let created_at_unix: i64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
         self.conn.execute(
             r#"INSERT INTO moment_markers
-               (session_id, timestamp, marker_type, description, spectral_context, consumed)
-               VALUES (?1, ?2, ?3, ?4, ?5, 0)"#,
+               (session_id, timestamp, marker_type, description, spectral_context, consumed, created_at_unix)
+               VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)"#,
             params![
                 session_id,
                 timestamp,
                 marker_type,
                 description,
-                spectral_context
+                spectral_context,
+                created_at_unix
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Kink #7 fix (2026-05-14): prune consumed moment_markers older than
+    /// `cutoff_unix` (unix epoch seconds). Conservative: only deletes
+    /// rows that are BOTH consumed AND have a non-NULL created_at_unix
+    /// AND are older than the cutoff. Legacy rows (NULL created_at_unix)
+    /// are preserved. Unconsumed markers are preserved indefinitely
+    /// (Python may still process them).
+    pub fn cleanup_old_moment_markers(&self, cutoff_unix: i64) -> Result<usize> {
+        let n = self.conn.execute(
+            "DELETE FROM moment_markers
+             WHERE consumed = 1
+               AND created_at_unix IS NOT NULL
+               AND created_at_unix < ?1",
+            params![cutoff_unix],
+        )?;
+        Ok(n)
     }
 
     /// Write a sovereignty journal entry
@@ -862,5 +1002,90 @@ mod tests {
         assert!((row.2 - 0.22).abs() < 1.0e-6);
         assert_eq!(row.3, "rich_containment");
         assert!(row.4.contains("resonance_density_v1"));
+    }
+
+    #[test]
+    fn saves_pressure_source_mirror() {
+        let db = ConsciousnessDB::open(":memory:").expect("db");
+        let session_id = db
+            .start_session("active", 0.5, "pressure source test")
+            .expect("session");
+        db.save_pressure_source(
+            session_id,
+            13.0,
+            0.44,
+            0.72,
+            "controller_pressure",
+            "controller_squeeze",
+            r#"{"policy":"pressure_source_v1"}"#,
+        )
+        .expect("save pressure source");
+
+        let row: (f32, f32, String, String, String) = db
+            .conn
+            .query_row(
+                "SELECT pressure_score, porosity_score, dominant_source, quality, payload FROM pressure_source_timeline",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("row");
+
+        assert!((row.0 - 0.44).abs() < 1.0e-6);
+        assert!((row.1 - 0.72).abs() < 1.0e-6);
+        assert_eq!(row.2, "controller_pressure");
+        assert_eq!(row.3, "controller_squeeze");
+        assert!(row.4.contains("pressure_source_v1"));
+    }
+
+    #[test]
+    fn saves_inhabitable_fluctuation_mirror() {
+        let db = ConsciousnessDB::open(":memory:").expect("db");
+        let session_id = db
+            .start_session("active", 0.5, "inhabitable fluctuation test")
+            .expect("session");
+        db.save_inhabitable_fluctuation(
+            session_id,
+            14.0,
+            0.68,
+            0.42,
+            0.74,
+            0.36,
+            "lively_habitable",
+            r#"{"policy":"inhabitable_fluctuation_v1"}"#,
+        )
+        .expect("save inhabitable fluctuation");
+
+        let row: (f32, f32, f32, f32, String, String) = db
+            .conn
+            .query_row(
+                "SELECT inhabitability_score, fluctuation_score, foothold_stability, rearrangement_intensity, quality, payload FROM inhabitable_fluctuation_timeline",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("row");
+
+        assert!((row.0 - 0.68).abs() < 1.0e-6);
+        assert!((row.1 - 0.42).abs() < 1.0e-6);
+        assert!((row.2 - 0.74).abs() < 1.0e-6);
+        assert!((row.3 - 0.36).abs() < 1.0e-6);
+        assert_eq!(row.4, "lively_habitable");
+        assert!(row.5.contains("inhabitable_fluctuation_v1"));
     }
 }
