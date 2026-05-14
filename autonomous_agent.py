@@ -26593,6 +26593,40 @@ Goals: {json.dumps(goals, indent=2)}
         content = re.sub(r'<(analysis|thinking|Thinking|writing_mode|denial_record)>.*?</\1>\s*', '', content, flags=re.DOTALL).strip()
         return content if content else None
 
+    @staticmethod
+    def _strip_model_artifacts(text: str) -> str:
+        """Kink #16 fix (2026-05-14): strip gemma / sentencepiece end-of-turn
+        and related artifact tokens that occasionally leak into LLM output.
+
+        Empirically observed: ~19% of recent minime journals (1382 of 7345
+        in the last week) ended with literal `<end_of_turn>` text — the
+        gemma3 EOT token being emitted as raw bytes rather than consumed
+        by the tokenizer. Each one made the journal appear truncated
+        ('c' last char from `...because.<end_of_turn>`) when in fact the
+        prose was complete.
+
+        Astrid's mlx_chat does this stripping at the response level
+        (`mlx_chat stripped leaked model artifact tokens` log lines).
+        Minime previously stripped only from the NEXT action token via
+        parse_next_action, leaving the journal body intact.
+        """
+        if not text:
+            return text
+        artifacts = (
+            "<end_of_turn>",
+            "<start_of_turn>",
+            "</s>",
+            "<eos>",
+            "<bos>",
+            "<pad>",
+            "<unk>",
+        )
+        cleaned = text
+        for tok in artifacts:
+            if tok in cleaned:
+                cleaned = cleaned.replace(tok, "")
+        return cleaned.strip()
+
     def _query_llm_raw(
         self,
         prompt: str,
@@ -26624,7 +26658,8 @@ Goals: {json.dumps(goals, indent=2)}
                 if result:
                     if idx > 0:
                         logging.info(f"LLM fallback succeeded via {backend}")
-                    return result
+                    # Kink #16 fix: sanitize before any caller sees the text.
+                    return self._strip_model_artifacts(result)
                 logging.warning(f"LLM query returned empty content ({backend})")
             except Exception as exc:
                 logging.error(f"LLM query failed ({backend}): {exc}")
