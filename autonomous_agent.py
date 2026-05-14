@@ -12693,7 +12693,12 @@ Trigger: {trigger_text}
             ]
             if not fresh:
                 return None
-            # Compare suggestion-file mtime vs most recent attractor_review journal.
+            # Compare suggestion-file mtime vs the most recent attractor-touch
+            # journal. We gate on the MAX of attractor_review_*.txt and
+            # attractor_suggestions_*.txt mtimes — either reviewing OR inspecting
+            # the queue counts as "she has looked," so inspecting alone breaks
+            # the hint→inspect→hint loop instead of leaving the gate forever
+            # behind the last full ATTRACTOR_REVIEW.
             sugs_mtime = sugs_path.stat().st_mtime
             review_files = sorted(
                 (WORKSPACE_DIR / "journal").glob("attractor_review_*.txt"),
@@ -12703,12 +12708,22 @@ Trigger: {trigger_text}
             last_review_mtime = (
                 review_files[0].stat().st_mtime if review_files else 0.0
             )
+            inspect_files = sorted(
+                (WORKSPACE_DIR / "journal").glob("attractor_suggestions_*.txt"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            last_inspect_mtime = (
+                inspect_files[0].stat().st_mtime if inspect_files else 0.0
+            )
+            last_touch_mtime = max(last_review_mtime, last_inspect_mtime)
             now = time.time()
-            # Only fire when (a) suggestions are newer than the last review AND
-            # (b) at least 5 min since her last review (avoid double-cue).
-            if sugs_mtime <= last_review_mtime:
+            # Only fire when (a) suggestions are newer than the last attractor
+            # touch AND (b) at least 5 min since that touch (avoid double-cue
+            # and inspect-loops).
+            if sugs_mtime <= last_touch_mtime:
                 return None
-            if last_review_mtime and (now - last_review_mtime) < 5 * 60:
+            if last_touch_mtime and (now - last_touch_mtime) < 5 * 60:
                 return None
             n_fresh = len(fresh)
             return (
