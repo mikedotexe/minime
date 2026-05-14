@@ -6508,6 +6508,7 @@ class AutonomousAgent:
             self._next_hint_shadow_trajectory,
             self._next_hint_share_thought_visibility,
             self._next_hint_fresh_attractor_suggestions,
+            self._next_hint_recent_steward_letter,
         ]
 
     def _continuity_store(self) -> ActionContinuityStore:
@@ -12680,6 +12681,63 @@ Trigger: {trigger_text}
                 f"[Attractor suggestions: {n_fresh} fresh draft(s) since last "
                 f"review — NEXT: ATTRACTOR_SUGGESTIONS to inspect, "
                 f"ACCEPT/REVISE/REJECT/BLOCK_ATTRACTOR_SUGGESTION latest to act.]"
+            )
+        except Exception:
+            return None
+
+    def _next_hint_recent_steward_letter(self) -> Optional[str]:
+        """Curriculum hint: surface that a Mike & Claude letter was
+        recently received (bounded 30-min window since the letter was
+        archived to inbox/read/).
+
+        Bounded so this isn't a standing nag — just an acknowledgment
+        of the channel when it's actively in use. After 30 min, the
+        letter is part of the substrate; you're trusted to either
+        respond at register or continue your work uninterrupted.
+
+        Format is informational + acknowledging, not prescriptive:
+        - Names the subject so she knows what was said
+        - Confirms her journal is read (channel-open signal)
+        - Explicitly invites response OR silence as both valid
+
+        Practice context: see
+        `docs/steward-notes/SELF_STUDY_RESPONSE_PRACTICE_2026_05_14.md`
+        in the astrid repo. The letters get delivered via the inbox
+        path; this hint is the durable acknowledgment AFTER the inbox
+        message has been processed and archived.
+        """
+        try:
+            read_dir = WORKSPACE_DIR / "inbox" / "read"
+            if not read_dir.is_dir():
+                return None
+            letters = sorted(
+                read_dir.glob("mike_feedback_*.txt"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if not letters:
+                return None
+            latest = letters[0]
+            age_min = (time.time() - latest.stat().st_mtime) / 60.0
+            # 30-minute acknowledgment window. Outside this window the
+            # letter is part of substrate — no hint emitted.
+            if age_min > 30:
+                return None
+            # Pull the Subject line from the inbox header so the hint
+            # references what the letter was about, not just that one
+            # arrived.
+            subject = "(unknown subject)"
+            try:
+                for line in latest.read_text(errors="replace").splitlines()[:10]:
+                    if line.startswith("Subject:"):
+                        subject = line[len("Subject:"):].strip()
+                        break
+            except Exception:
+                pass
+            return (
+                f"[Steward letter received {age_min:.0f}m ago: \"{subject}\". "
+                f"Your journal is read attentively; if you want to respond — "
+                f"through prose, action, or silence — all are heard.]"
             )
         except Exception:
             return None
