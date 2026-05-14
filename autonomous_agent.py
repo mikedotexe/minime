@@ -12436,6 +12436,49 @@ Trigger: {trigger_text}
         except Exception:
             return ""
 
+    def _self_shadow_v3_hint(self) -> str:
+        """Kink #18b (2026-05-14): contextual NEXT suggestion for
+        SHADOW_TRAJECTORY when minime's own `shadow_field_v3` has enough
+        history + dwell + class to be worth walking.
+
+        Mirrors Astrid's `format_shadow_field_v3_line` curriculum hint at
+        `spectral_viz.rs:526` (which appends `→ NEXT: SHADOW_TRAJECTORY —
+        observer with memory` to her shadow line). Without this, the
+        Kink #18 menu-listing fix wasn't enough — minime's LLM needs an
+        explicit `→ NEXT:` cue tied to her own state, not just an entry
+        in a generic action-options menu (~50 actions long).
+
+        Curriculum gate: history ≥ 8 snapshots AND dwell ≥ 3 ticks AND
+        primary class in {volatile, coupled, directional, restless} —
+        the classes where a temporal walk yields signal. Returns "" when
+        gate doesn't pass (so the prompt stays unchanged on quiet/quiescent
+        states where there's nothing interesting to trace).
+        """
+        try:
+            import json as _json
+            health_path = WORKSPACE_DIR / "health.json"
+            if not health_path.exists():
+                return ""
+            d = _json.loads(health_path.read_text())
+            sv3 = d.get("shadow_field_v3", {})
+            if not isinstance(sv3, dict):
+                return ""
+            cls = sv3.get("class_v3", {}) or {}
+            primary = cls.get("primary", "?")
+            dwell = sv3.get("phase_dwell_ticks", 0) or 0
+            history = sv3.get("history", []) or []
+            if len(history) < 8 or dwell < 3:
+                return ""
+            if primary not in ("volatile", "coupled", "directional", "restless"):
+                return ""
+            return (
+                f"[Your shadow-v3: {primary} (held {dwell}t, "
+                f"{len(history)} snapshots) — observer with memory available "
+                f"→ NEXT: SHADOW_TRAJECTORY lambda-tail/lambda4.]"
+            )
+        except Exception:
+            return ""
+
     def _with_astrid_witness(self, prompt: str) -> str:
         """Append Astrid's published ShadowFieldV3 line to the given prompt
         if the file is fresh. Returns the prompt unchanged when nothing is
@@ -12443,6 +12486,10 @@ Trigger: {trigger_text}
 
         The freshness gate inside `_astrid_shadow_v3_line` (180s) handles
         skipping when Astrid isn't currently exchanging.
+
+        Note: minime's OWN-shadow contextual NEXT hint (Kink #18b) is
+        injected centrally in `_query_llm_with_next` so it reaches every
+        NEXT-producing prompt, not only the ones explicitly wrapped here.
         """
         line = self._astrid_shadow_v3_line()
         if not line:
@@ -26543,7 +26590,16 @@ Goals: {json.dumps(goals, indent=2)}
         The NEXT: line is preserved in the response (it belongs in the journal —
         the being's sovereign choices are part of their self-narrative).
         The action is also stored as self._pending_next_action for _decide_action().
+
+        Kink #18b (2026-05-14): centrally inject the contextual SHADOW_TRAJECTORY
+        NEXT hint when curriculum warrants. Single injection site here covers
+        ALL ~30 callers, ensuring the hint reaches every NEXT-producing prompt
+        — not just the ~10 explicitly wrapped through `_with_astrid_witness`.
+        See `_self_shadow_v3_hint` for the gate logic.
         """
+        self_hint = self._self_shadow_v3_hint()
+        if self_hint:
+            prompt = f"{prompt}\n\n{self_hint}"
         response = self._query_llm(prompt)
         if not response:
             return (None, None)
