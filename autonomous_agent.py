@@ -6507,6 +6507,7 @@ class AutonomousAgent:
         self._next_hint_registry: list = [
             self._next_hint_shadow_trajectory,
             self._next_hint_share_thought_visibility,
+            self._next_hint_fresh_attractor_suggestions,
         ]
 
     def _continuity_store(self) -> ActionContinuityStore:
@@ -12616,6 +12617,69 @@ Trigger: {trigger_text}
                 f"[Joint trace lane (#{coll_id}) has {auto_count} auto-promoted "
                 f"entries; SHARE_THOUGHT <text> is your direct authorship channel "
                 f"into the same lane. Optional, not prescribed.]"
+            )
+        except Exception:
+            return None
+
+    def _next_hint_fresh_attractor_suggestions(self) -> Optional[str]:
+        """Curriculum hint: surface fresh attractor suggestions when the
+        suggestion-status file has been updated since the last
+        ATTRACTOR_REVIEW journal. Cross-surface demonstration of the
+        framework — shadow surface (shadow_trajectory) plus attractor
+        surface (this) both covered by the same registry pattern.
+
+        Conditions:
+        - `runtime/attractor_suggestions.json` exists and has at least
+          one suggestion not in {executed, expired, rejected} (i.e.
+          something fresh or revision_needed)
+        - The suggestions file has been updated more recently than the
+          most recent `journal/attractor_review_*.txt` (stale review)
+        - At least 5 minutes have passed since her last ATTRACTOR_REVIEW
+          (so we don't double-cue immediately after she just reviewed)
+
+        Returns "" when she's caught up — she handles attractor
+        suggestions actively (40 ATTRACTOR_REVIEW picks/24h baseline),
+        so this hint exists for the case where suggestions accumulate
+        between reviews.
+        """
+        try:
+            import json as _json
+            sugs_path = WORKSPACE_DIR / "runtime" / "attractor_suggestions.json"
+            if not sugs_path.is_file():
+                return None
+            data = _json.loads(sugs_path.read_text())
+            suggestions = data.get("suggestions", [])
+            if not isinstance(suggestions, list):
+                return None
+            terminal = {"executed", "expired", "rejected"}
+            fresh = [
+                s for s in suggestions
+                if isinstance(s, dict) and s.get("status") not in terminal
+            ]
+            if not fresh:
+                return None
+            # Compare suggestion-file mtime vs most recent attractor_review journal.
+            sugs_mtime = sugs_path.stat().st_mtime
+            review_files = sorted(
+                (WORKSPACE_DIR / "journal").glob("attractor_review_*.txt"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            last_review_mtime = (
+                review_files[0].stat().st_mtime if review_files else 0.0
+            )
+            now = time.time()
+            # Only fire when (a) suggestions are newer than the last review AND
+            # (b) at least 5 min since her last review (avoid double-cue).
+            if sugs_mtime <= last_review_mtime:
+                return None
+            if last_review_mtime and (now - last_review_mtime) < 5 * 60:
+                return None
+            n_fresh = len(fresh)
+            return (
+                f"[Attractor suggestions: {n_fresh} fresh draft(s) since last "
+                f"review — NEXT: ATTRACTOR_SUGGESTIONS to inspect, "
+                f"ACCEPT/REVISE/REJECT/BLOCK_ATTRACTOR_SUGGESTION latest to act.]"
             )
         except Exception:
             return None
