@@ -47,10 +47,11 @@ from auto_promote import (
 )
 
 
-def _ap_exchange_proxy() -> int:
-    """v5.1 Phase E: minime has no exchange_count counter; use minute-since-epoch
-    as a stable proxy. Cooldown of 3 = 3 minutes between auto-promotions."""
-    return int(time.time() / 60)
+# v5.1 Phase E used int(time.time()/60) as an exchange_count proxy because
+# minime had no per-cycle counter. Kink #4 fix (2026-05-14): replaced by the
+# real self.cycle_count, incremented at the top of the main loop and
+# persisted via _save_sovereignty_state. Call sites pass self.cycle_count
+# directly; no proxy function needed.
 
 from decompose_utils import (
     format_attrition_boundary_signal,
@@ -6363,6 +6364,10 @@ class AutonomousAgent:
         self._hard_recovery_clamp_active = self._hard_recovery_reset
         self._hard_recovery_release_streak = 0
         self.running = False
+        # Kink #4 fix (2026-05-14): real cycle counter replaces the
+        # int(time.time()/60) proxy used during Phase E. Persisted via
+        # _save_sovereignty_state so rate-limit state survives restart.
+        self.cycle_count: int = 0
         self.last_action_time = 0
         self._last_cov_metrics: Optional[Dict[str, float]] = None
         self._last_state: Optional[Dict[str, float]] = None
@@ -6908,6 +6913,9 @@ class AutonomousAgent:
 
         while self.running:
             try:
+                # Kink #4 fix: increment FIRST so a crash mid-cycle still
+                # counts the cycle that started.
+                self.cycle_count += 1
                 self._refresh_session_context()
                 self._check_source_reload_required("loop")
                 self._apply_pending_next_override_if_present("loop")
@@ -12584,7 +12592,7 @@ Timestamp: {datetime.now().isoformat()}
             # v5.1 Phase E Track 1: auto-promote resonant prose into the
             # joined-collab shared_thoughts lane (receptive re-classification).
             try:
-                _ap_try_prose(response, 'daydream', _ap_exchange_proxy(),
+                _ap_try_prose(response, 'daydream', self.cycle_count,
                               workspace_dir=WORKSPACE_DIR, shared_collab_dir=self.SHARED_COLLAB_DIR)
             except Exception as exc:
                 logging.debug(f"auto_promote (daydream) skipped: {exc}")
@@ -12625,7 +12633,7 @@ Timestamp: {datetime.now().isoformat()}
             logging.info(f"👁️ Notice: {journal_file}")
             # v5.1 Phase E Track 1.
             try:
-                _ap_try_prose(response, 'notice', _ap_exchange_proxy(),
+                _ap_try_prose(response, 'notice', self.cycle_count,
                               workspace_dir=WORKSPACE_DIR, shared_collab_dir=self.SHARED_COLLAB_DIR)
             except Exception as exc:
                 logging.debug(f"auto_promote (notice) skipped: {exc}")
@@ -12662,7 +12670,7 @@ Timestamp: {datetime.now().isoformat()}
                 logging.info(f"😑 Boredom: {file_path}")
                 # v5.1 Phase E Track 1.
                 try:
-                    _ap_try_prose(response, 'boredom', _ap_exchange_proxy(),
+                    _ap_try_prose(response, 'boredom', self.cycle_count,
                                   workspace_dir=WORKSPACE_DIR, shared_collab_dir=self.SHARED_COLLAB_DIR)
                 except Exception as exc:
                     logging.debug(f"auto_promote (boredom) skipped: {exc}")
@@ -12748,7 +12756,7 @@ Timestamp: {datetime.now().isoformat()}
                 logging.info(f"😑 Boredom: {file_path}")
                 # v5.1 Phase E Track 1.
                 try:
-                    _ap_try_prose(response, 'boredom', _ap_exchange_proxy(),
+                    _ap_try_prose(response, 'boredom', self.cycle_count,
                                   workspace_dir=WORKSPACE_DIR, shared_collab_dir=self.SHARED_COLLAB_DIR)
                 except Exception as exc:
                     logging.debug(f"auto_promote (boredom) skipped: {exc}")
@@ -12857,7 +12865,7 @@ Prompt: {prompt.split(chr(10))[0]}
             logging.info(f"🌱 Aspiration: {file_path}")
             # v5.1 Phase E Track 1.
             try:
-                _ap_try_prose(response, 'aspiration', _ap_exchange_proxy(),
+                _ap_try_prose(response, 'aspiration', self.cycle_count,
                               workspace_dir=WORKSPACE_DIR, shared_collab_dir=self.SHARED_COLLAB_DIR)
             except Exception as exc:
                 logging.debug(f"auto_promote (aspiration) skipped: {exc}")
@@ -14178,7 +14186,7 @@ Pressure source: {pressure_source}
                 try:
                     ctx_dict = json.loads(_mctx) if _mctx else {}
                     _ap_try_spectral(
-                        _mtype, _mdesc, ctx_dict, _ap_exchange_proxy(),
+                        _mtype, _mdesc, ctx_dict, self.cycle_count,
                         workspace_dir=WORKSPACE_DIR,
                         shared_collab_dir=self.SHARED_COLLAB_DIR,
                     )
@@ -14256,7 +14264,7 @@ Moments captured:
                 # (spectral translator) fires below from the loop over
                 # `markers` so it sees marker_type/spectral_context directly.
                 try:
-                    _ap_try_prose(response, 'moment', _ap_exchange_proxy(),
+                    _ap_try_prose(response, 'moment', self.cycle_count,
                                   workspace_dir=WORKSPACE_DIR, shared_collab_dir=self.SHARED_COLLAB_DIR)
                 except Exception as exc:
                     logging.debug(f"auto_promote (moment) skipped: {exc}")
@@ -18716,7 +18724,7 @@ After snapshot:
         # v5.1 Phase E: record manual SHARE so both auto tracks suppress
         # for the next 5 exchanges (manual curation takes priority).
         try:
-            _ap_record_manual(WORKSPACE_DIR, _ap_exchange_proxy())
+            _ap_record_manual(WORKSPACE_DIR, self.cycle_count)
         except Exception as exc:
             logging.debug(f"auto_promote: record_manual_share skipped: {exc}")
         truncated = text[:60] + "…" if len(text) > 60 else text
@@ -18876,12 +18884,16 @@ After snapshot:
             extra = f" (+{n-1} more)" if n > 1 else ""
             peer = m["invitee"] if m["inviter"] == "minime" else m["inviter"]
             # v5.1 Phase A: append joint reservoir state if available.
+            # Kink #1 fix (2026-05-14): tier the render based on freshness
+            # so a frozen handle doesn't keep advertising stale numbers.
             handle = f"collab_{m['id']}"
             snap = self._collab_read_reservoir_state_cached(handle)
             reservoir_clause = ""
             if snap is not None:
-                h1, h2, h3, ticks = snap
-                reservoir_clause = f" Joint trace [{h1:.2f},{h2:.2f},{h3:.2f}], {ticks} ticks."
+                h1, h2, h3, ticks, last_live_s = snap
+                reservoir_clause = self._render_joint_trace_clause(
+                    h1, h2, h3, ticks, last_live_s
+                )
             # v5.1 Phase C: append recent shared thoughts (labeled markers).
             shared_rendered = self._collab_render_recent_shared_thoughts_cached(m["id"])
             shared_clause = f" Recent: {shared_rendered}." if shared_rendered else ""
@@ -18895,8 +18907,13 @@ After snapshot:
 
     def _collab_read_reservoir_state_cached(self, handle: str) -> Optional[tuple]:
         """v5.1: read collab reservoir state with a TTL cache. Returns
-        (h1, h2, h3, tick_count) or None if the read fails. Reuses the
-        existing _reservoir_call WS helper."""
+        (h1, h2, h3, tick_count, last_live_s) or None if the read fails.
+        Reuses the existing _reservoir_call WS helper.
+
+        Kink #1 fix (2026-05-14): tuple now includes last_live_s
+        (seconds_since_live from reservoir_service response). Used by
+        _render_joint_trace_clause to gate suffix render so a frozen
+        handle doesn't silently advertise stale data."""
         now = time.time()
         cached = self._collab_reservoir_cache.get(handle)
         if cached is not None:
@@ -18914,16 +18931,52 @@ After snapshot:
         if not isinstance(h_norms, list) or len(h_norms) < 3:
             return None
         try:
+            last_live_raw = r.get("seconds_since_live")
+            last_live_s = float(last_live_raw) if last_live_raw is not None else None
             snap = (
                 float(h_norms[0]),
                 float(h_norms[1]),
                 float(h_norms[2]),
                 int(r.get("tick_count", 0) or 0),
+                last_live_s,
             )
         except (TypeError, ValueError):
             return None
         self._collab_reservoir_cache[handle] = (snap, now)
         return snap
+
+    @staticmethod
+    def _render_joint_trace_clause(h1: float, h2: float, h3: float,
+                                    ticks: int,
+                                    last_live_s: Optional[float]) -> str:
+        """Kink #1 fix (2026-05-14): tier the joint-trace render based on
+        freshness. Mirrors the Astrid-side render_joint_trace_clause in
+        capsules/consciousness-bridge/src/autonomous/next_action/collaboration.rs.
+
+        <30s   → render values normally
+        30-300s → render values with "(stalled <Nm>)" warning
+        ≥300s   → drop values; render "handle quiet (<age> stale)"
+        None    → treat as fresh (backward compat)
+        """
+        STALLED_FLOOR_S = 30.0
+        QUIET_FLOOR_S = 300.0
+
+        def _humanize(secs: float) -> str:
+            secs_i = int(secs)
+            if secs_i < 60:
+                return f"{secs_i}s"
+            if secs_i < 3600:
+                return f"{secs_i // 60}m"
+            return f"{secs_i // 3600}h"
+
+        if last_live_s is None or last_live_s < STALLED_FLOOR_S:
+            return f" Joint trace [{h1:.2f},{h2:.2f},{h3:.2f}], {ticks} ticks."
+        if last_live_s < QUIET_FLOOR_S:
+            return (
+                f" Joint trace [{h1:.2f},{h2:.2f},{h3:.2f}], {ticks} ticks "
+                f"(stalled {_humanize(last_live_s)})."
+            )
+        return f" Joint trace handle quiet ({_humanize(last_live_s)} stale)."
 
     def _collab_render_recent_shared_thoughts_cached(self, coll_id: str) -> str:
         """v5.1 Phase C: read up to N most recent entries from
@@ -20692,6 +20745,15 @@ Goals: {json.dumps(goals, indent=2)}
             recent_next_actions = getattr(self, "_recent_next_actions", None)
             if recent_next_actions:
                 state["recent_next_actions"] = list(recent_next_actions)
+            # Kink #4 fix: persist cycle_count from this write path too —
+            # _persist_pending_next_action fires more frequently than the
+            # main _save_sovereignty_state (every NEXT pick vs only on
+            # sovereignty adjustment). Without this line, cycle_count
+            # would only land on the rarer save path.
+            try:
+                state["cycle_count"] = int(getattr(self, "cycle_count", 0))
+            except (TypeError, ValueError):
+                pass
 
             if action:
                 state["pending_next_action"] = action
@@ -20735,6 +20797,9 @@ Goals: {json.dumps(goals, indent=2)}
         # Persist recent NEXT: choices for diversity awareness across restarts.
         if self._recent_next_actions:
             state["recent_next_actions"] = list(self._recent_next_actions)
+        # Kink #4 fix: persist cycle counter so Phase E rate-limit state
+        # carries across restarts (Phase E auto_promote uses self.cycle_count).
+        state["cycle_count"] = int(self.cycle_count)
         try:
             with open(state_path, "w") as f:
                 json.dump(state, f, indent=2)
@@ -20805,6 +20870,15 @@ Goals: {json.dumps(goals, indent=2)}
             if 'regime' in state and state['regime'] in REGULATORY_REGIMES:
                 self._current_regime = state['regime']
                 logging.info(f"🎛️  Restored regime: {self._current_regime}")
+            # Kink #4 fix: restore cycle counter so Phase E rate limits
+            # carry across restarts. Defaults to 0 if absent (first boot
+            # ever, or pre-fix sovereignty state file).
+            try:
+                self.cycle_count = int(state.get("cycle_count") or 0)
+                if self.cycle_count > 0:
+                    logging.info(f"🔢 Restored cycle_count: {self.cycle_count}")
+            except (TypeError, ValueError):
+                self.cycle_count = 0
             if len(control_msg) > 1:
                 import websocket as ws_lib
                 ws = ws_lib.create_connection("ws://127.0.0.1:7879", timeout=5)
