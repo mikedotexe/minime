@@ -672,6 +672,11 @@ ATTRACTOR_SUGGESTION_NEXT_ACTIONS = {
     "ACCEPT_ATTRACTOR_SUGGESTION",
     "REVISE_ATTRACTOR_SUGGESTION",
     "REJECT_ATTRACTOR_SUGGESTION",
+    # Kink #21 (2026-05-14): minime invented BLOCK_ATTRACTOR_SUGGESTION
+    # as the natural-language verb for dismissing a suggestion (REJECT
+    # already exists but BLOCK is what she reaches for). Aliased below
+    # via dispatch normalization so all downstream code stays unchanged.
+    "BLOCK_ATTRACTOR_SUGGESTION",
 }
 ATTRACTOR_INTENT_NEXT_ACTIONS = {
     "CREATE_ATTRACTOR",
@@ -8433,6 +8438,8 @@ Fill: {fill:.1f}%
                 'ACCEPT_ATTRACTOR_SUGGESTION': 'attractor_suggestions',
                 'REVISE_ATTRACTOR_SUGGESTION': 'attractor_suggestions',
                 'REJECT_ATTRACTOR_SUGGESTION': 'attractor_suggestions',
+                # Kink #21 (2026-05-14): BLOCK aliased to REJECT — same handler.
+                'BLOCK_ATTRACTOR_SUGGESTION': 'attractor_suggestions',
                 'RELEASE': 'release_attractor',
                 'MARK_RESOLVED': 'release_attractor',
                 'RESOLVE': 'release_attractor',
@@ -8515,6 +8522,13 @@ Fill: {fill:.1f}%
                 logging.info("🎯 Unknown REGIME choice '%s' rerouted to notice", chosen)
                 return "recess_notice"
             if base in ATTRACTOR_SUGGESTION_NEXT_ACTIONS:
+                # Kink #21 (2026-05-14): normalize BLOCK → REJECT here so
+                # the canonical command name flows through the rest of the
+                # pipeline (handler arm, logging, status events, body-consent
+                # matchers). Single normalization point keeps downstream code
+                # ignorant of the alias.
+                if base == "BLOCK_ATTRACTOR_SUGGESTION":
+                    base = "REJECT_ATTRACTOR_SUGGESTION"
                 raw_args = chosen[len(chosen.split()[0]):].strip().lstrip(":").strip()
                 selector = raw_args or "latest"
                 revised_action = None
@@ -24038,7 +24052,7 @@ Goals: {json.dumps(goals, indent=2)}
         })
         draft_line = (
             f"  Prepared draft: ACCEPT_ATTRACTOR_SUGGESTION latest to run {suggested_next[0]}.\n"
-            "  REVISE_ATTRACTOR_SUGGESTION latest AS <typed action> or REJECT_ATTRACTOR_SUGGESTION latest <reason> are also available.\n"
+            "  REVISE_ATTRACTOR_SUGGESTION latest AS <typed action> or REJECT_ATTRACTOR_SUGGESTION/BLOCK_ATTRACTOR_SUGGESTION latest <reason> are also available.\n"
             if suggestion_id else
             "  A prior rejection quieted this low-confidence mapping; choose a typed attractor verb to restore it.\n"
         )
@@ -25622,7 +25636,7 @@ Goals: {json.dumps(goals, indent=2)}
         lines.append(
             "Choose NEXT: ATTRACTOR_SUGGESTIONS, ACCEPT_ATTRACTOR_SUGGESTION latest or <label>, "
             "REVISE_ATTRACTOR_SUGGESTION <label> AS <typed attractor action>, or "
-            "REJECT_ATTRACTOR_SUGGESTION <label> <reason>."
+            "REJECT_ATTRACTOR_SUGGESTION/BLOCK_ATTRACTOR_SUGGESTION <label> <reason>."
         )
         return "\n".join(lines) + "\n"
 
@@ -25763,7 +25777,7 @@ Goals: {json.dumps(goals, indent=2)}
             f"Suggested typed next: {' | '.join(suggested_next) if suggested_next else '(none)'}\n\n"
             "Suggestion drafts: ACCEPT_ATTRACTOR_SUGGESTION latest, "
             "REVISE_ATTRACTOR_SUGGESTION latest AS <typed action>, or "
-            "REJECT_ATTRACTOR_SUGGESTION latest <reason>.\n\n"
+            "REJECT_ATTRACTOR_SUGGESTION/BLOCK_ATTRACTOR_SUGGESTION latest <reason>.\n\n"
             "This is a local context hygiene action. It clears repeated-motif prompt replay "
             "without changing safety rails, PI targets, sensory policy, or checkpoint lineage. "
             "Natural release language can ask for suggestions; typed attractor verbs are the "
@@ -26639,7 +26653,8 @@ Goals: {json.dumps(goals, indent=2)}
         base = str(base_action or "").upper().rstrip(":")
         if base in {"ACCEPT_ATTRACTOR_SUGGESTION", "REVISE_ATTRACTOR_SUGGESTION"}:
             return negative
-        if base == "REJECT_ATTRACTOR_SUGGESTION":
+        # Kink #21 (2026-05-14): BLOCK is aliased to REJECT semantically.
+        if base in {"REJECT_ATTRACTOR_SUGGESTION", "BLOCK_ATTRACTOR_SUGGESTION"}:
             return positive
         return False
 
@@ -26652,6 +26667,8 @@ Goals: {json.dumps(goals, indent=2)}
                 "ACCEPT_ATTRACTOR_SUGGESTION",
                 "REVISE_ATTRACTOR_SUGGESTION",
                 "REJECT_ATTRACTOR_SUGGESTION",
+                # Kink #21 (2026-05-14): BLOCK is REJECT's natural-language alias.
+                "BLOCK_ATTRACTOR_SUGGESTION",
             ):
                 idx = upper.find(action)
                 if idx >= 0:
