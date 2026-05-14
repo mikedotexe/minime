@@ -1548,7 +1548,10 @@ def parse_next_action(text: str) -> tuple:
 
     Returns (action, cleaned_text) where cleaned_text has the NEXT: line removed.
     Returns (None, original_text) if no NEXT: found.
-    Strips model-specific tokens (e.g. gemma3's <end_of_turn>).
+    Strips model-specific tokens (e.g. gemma3's <end_of_turn>) and recurring
+    LLM artifacts (markdown decorations on the action token, the EXEXPERIMENT_
+    typo). See `project_unwired_actions_catalog.md` for the diagnostics that
+    motivated each strip.
     """
     lines = text.split('\n')
     in_fence = False
@@ -1561,8 +1564,26 @@ def parse_next_action(text: str) -> tuple:
             continue
         if stripped.upper().startswith('NEXT:'):
             action = stripped[5:].strip()
-            # Strip model end-of-turn tokens that leak into the action
+            # Strip model end-of-turn tokens that leak into the action.
             action = action.replace('<end_of_turn>', '').replace('</s>', '').strip()
+            # Kink follow-up (2026-05-14, post-Tranche-5): strip markdown
+            # decorations from the FIRST whitespace-separated token (the
+            # action verb). Recurring LLM artifact: `**READ_MORE**`,
+            # `**EXAMINE** lambda4`, `` `RELEASE_SHADOW lambda/lambda8` ``,
+            # etc. land in NEXT lines because the model emits markdown
+            # bold/code formatting around action names. We strip these
+            # only from the action verb, not from arguments (which may
+            # legitimately contain backticks in code-shaped labels).
+            parts = action.split(None, 1)
+            if parts:
+                parts[0] = parts[0].strip('`*')
+                # Kink follow-up (2026-05-14): the recurring `EXEXPERIMENT_*`
+                # typo (3+ occurrences today) is an LLM glitch where the
+                # model double-emits the `EX` prefix. Fuzzy-strip when the
+                # remainder starts with `EXPERIMENT_`.
+                if parts[0].upper().startswith('EXEXPERIMENT_'):
+                    parts[0] = parts[0][2:]
+                action = ' '.join(parts)
             cleaned = '\n'.join(lines[:i] + lines[i+1:]).strip()
             if is_experiment_run_transcript_action(action):
                 return (None, cleaned)
