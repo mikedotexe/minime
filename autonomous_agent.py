@@ -4849,6 +4849,12 @@ class ActionPreflightStore:
         # v5.1 Phase C — SHARE_THOUGHT.
         "SHARE_THOUGHT": "share_thought",
         "SHARE": "share_thought",
+        # ASK_STEWARD bidirectional channel (2026-05-14): direct query
+        # channel to Mike & Claude (the steward). Aliased verbs all
+        # route to the same handler.
+        "ASK_STEWARD": "ask_steward",
+        "ASK_MIKE": "ask_steward",
+        "STEWARD_QUERY": "ask_steward",
     }
 
     def __init__(self, agent: "AutonomousAgent"):
@@ -5316,6 +5322,8 @@ class CapabilitySelfMap:
             {"base": "LIST_COLLABORATIONS", "aliases": ["LIST_COLLABS", "COLLABORATIONS"], "route": "list_collaborations"},
             # v5.1 Phase C — SHARE_THOUGHT.
             {"base": "SHARE_THOUGHT", "aliases": ["SHARE"], "route": "share_thought"},
+            # ASK_STEWARD bidirectional channel (2026-05-14).
+            {"base": "ASK_STEWARD", "aliases": ["ASK_MIKE", "STEWARD_QUERY"], "route": "ask_steward"},
         ]
 
     def _write_snapshot(self, snapshot: Dict[str, Any]) -> None:
@@ -5870,6 +5878,8 @@ STABLE_CORE_EXPERIMENT_ACTIONS = STABLE_CORE_BOUNDED_ACTIONS | {
     "list_collaborations",
     # v5.1 Phase C — SHARE_THOUGHT.
     "share_thought",
+    # ASK_STEWARD bidirectional channel (2026-05-14).
+    "ask_steward",
 }
 
 STABLE_CORE_STAGE_ACTIONS = {
@@ -8486,6 +8496,10 @@ Fill: {fill:.1f}%
                 # v5.1 Phase C — SHARE_THOUGHT.
                 'SHARE_THOUGHT': 'share_thought',
                 'SHARE': 'share_thought',
+                # ASK_STEWARD bidirectional channel (2026-05-14).
+                'ASK_STEWARD': 'ask_steward',
+                'ASK_MIKE': 'ask_steward',
+                'STEWARD_QUERY': 'ask_steward',
             }
             for capability_base in CAPABILITY_NEXT_ACTIONS:
                 action_map[capability_base] = 'thread_action'
@@ -10009,6 +10023,8 @@ Fill: {fill:.1f}%
                 self._list_collaborations(state)
             elif action == 'share_thought':
                 self._share_thought(state)
+            elif action == 'ask_steward':
+                self._ask_steward(state)
             elif action == 'mark_intensification':
                 self._mark_intensification(state)
             elif action == 'native_gesture':
@@ -18996,6 +19012,163 @@ After snapshot:
         except ValueError as e:
             logging.warning(f"SHARE_THOUGHT failed: {e}")
 
+    # ASK_STEWARD bidirectional channel (2026-05-14) — minime → steward.
+    # Mirror of Astrid's `next_action/ask_steward.rs` handler. Writes a
+    # structured query file to `workspace/outbox/steward_query_*.txt`
+    # where the watcher script (`astrid/scripts/watch_steward_queries.sh`)
+    # surfaces it out-of-band. Companion to inbox-side `mike_feedback_*.txt`
+    # and `mike_query_*.txt` letters that travel the other direction.
+    _ASK_STEWARD_COOLDOWN_SECS = 10 * 60
+    _ASK_STEWARD_MAX_SUBJECT_CHARS = 64
+    _ASK_STEWARD_MAX_BODY_CHARS = 4_000
+
+    def _ask_steward(self, state: Dict[str, float]) -> None:
+        """Write an ASK_STEWARD query to workspace/outbox/. Soft 10-min
+        cooldown via self._last_ask_steward_ts to prevent tight loops.
+        Soft refusal on cooldown (sets outcome summary explaining why)
+        rather than hard error, preserving sovereignty.
+
+        Format per-plan: `=== STEWARD QUERY (FROM MINIME) ===` header
+        with Sender/Source/Subject/Urgency fields, then question body.
+        """
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw_next = str(context.get("raw_next") or "").strip()
+        body = self._strip_action_prefix(
+            raw_next, ["ASK_STEWARD", "ASK_MIKE", "STEWARD_QUERY"]
+        ).strip()
+        if not body:
+            msg = (
+                "ASK_STEWARD requires a question. "
+                "Try: ASK_STEWARD why does the safety band stop at 80%? "
+                "or: ASK_STEWARD safety band :: why does it stop at 80%?"
+            )
+            logging.info(f"💬 ASK_STEWARD soft-refused (empty body)")
+            self._current_action_outcome_summary = msg
+            return
+
+        # Cooldown gate. Soft refusal — the verb DID match, we just
+        # decline to write the file and explain why.
+        now = int(time.time())
+        last = getattr(self, "_last_ask_steward_ts", None)
+        if last is not None:
+            elapsed = now - last
+            if 0 <= elapsed < self._ASK_STEWARD_COOLDOWN_SECS:
+                remaining = self._ASK_STEWARD_COOLDOWN_SECS - elapsed
+                mins = remaining // 60
+                secs = remaining % 60
+                msg = (
+                    f"ASK_STEWARD cooldown active ({mins}m{secs}s remaining). "
+                    "The steward channel rate-limits to one query per 10 min "
+                    "to prevent tight loops. Your question is heard — write it "
+                    "in your journal or save it for the next window."
+                )
+                logging.info(
+                    f"💬 ASK_STEWARD soft-refused (cooldown {mins}m{secs}s remaining)"
+                )
+                self._current_action_outcome_summary = msg
+                return
+
+        subject, question = self._parse_ask_steward_separator(body)
+        urgency = "low"  # default; future: parse `--urgency=` flag
+        outbox_dir = WORKSPACE_DIR / "outbox"
+        try:
+            outbox_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            msg = f"ASK_STEWARD: could not create outbox directory ({e}). Question not delivered."
+            logging.warning(msg)
+            self._current_action_outcome_summary = msg
+            return
+        slug = self._ask_steward_slugify(subject)
+        path = outbox_dir / f"steward_query_{slug}_{now}.txt"
+
+        # Truncate body if oversized.
+        if len(question) > self._ASK_STEWARD_MAX_BODY_CHARS:
+            question = (
+                question[: self._ASK_STEWARD_MAX_BODY_CHARS]
+                + "\n[... truncated; ASK_STEWARD body capped at 4000 chars ...]"
+            )
+
+        fill_pct = state.get("fill_ratio", 0) * 100 if state else 0
+        contents = (
+            f"=== STEWARD QUERY (FROM MINIME) ===\n"
+            f"Timestamp: {now}\n"
+            f"Sender: minime\n"
+            f"Source: minime:ask_steward\n"
+            f"Subject: {subject}\n"
+            f"Urgency: {urgency}\n"
+            f"Fill: {fill_pct:.1f}%\n"
+            f"\n"
+            f"{question}\n"
+        )
+        try:
+            path.write_text(contents)
+        except Exception as e:
+            msg = f"ASK_STEWARD: write failed ({e}). Question not delivered."
+            logging.warning(msg)
+            self._current_action_outcome_summary = msg
+            return
+        self._last_ask_steward_ts = now
+        msg = (
+            f"Steward query queued ({path.name}): \"{subject}\" — "
+            "Mike & Claude read these out-of-band and write back via "
+            "mike_feedback_*.txt or mike_query_*.txt letters in your inbox."
+        )
+        logging.info(
+            f"💬 ASK_STEWARD queued path={path.name} subject={subject!r} urgency={urgency}"
+        )
+        self._current_action_outcome_summary = msg
+
+    @staticmethod
+    def _parse_ask_steward_separator(body: str) -> tuple:
+        """Return (subject, question). If body contains `::`, treat lhs
+        as subject and rhs as question; otherwise auto-derive subject
+        from the first sentence / 64 chars of the body."""
+        max_subj = AutonomousAgent._ASK_STEWARD_MAX_SUBJECT_CHARS
+        if "::" in body:
+            lhs, _, rhs = body.partition("::")
+            lhs = lhs.strip()
+            rhs = rhs.lstrip()
+            if lhs and rhs:
+                return AutonomousAgent._clamp_ask_steward_subject(lhs, max_subj), rhs
+        # Fallback: derive subject from first sentence / first N chars.
+        return AutonomousAgent._auto_ask_steward_subject(body, max_subj), body
+
+    @staticmethod
+    def _auto_ask_steward_subject(body: str, max_chars: int) -> str:
+        trimmed = body.strip()
+        if not trimmed:
+            return "(empty)"
+        # Find first sentence terminator followed by whitespace.
+        for i, c in enumerate(trimmed):
+            if c in ".!?":
+                next_idx = i + 1
+                if next_idx >= len(trimmed) or trimmed[next_idx].isspace():
+                    return AutonomousAgent._clamp_ask_steward_subject(
+                        trimmed[:i], max_chars
+                    )
+        return AutonomousAgent._clamp_ask_steward_subject(trimmed, max_chars)
+
+    @staticmethod
+    def _clamp_ask_steward_subject(s: str, max_chars: int) -> str:
+        cleaned = s.strip()
+        if len(cleaned) <= max_chars:
+            return cleaned
+        return cleaned[:max_chars] + "…"
+
+    @staticmethod
+    def _ask_steward_slugify(s: str) -> str:
+        out = []
+        last_dash = False
+        for c in s[:48]:
+            if c.isalnum() and c.isascii():
+                out.append(c.lower())
+                last_dash = False
+            elif not last_dash:
+                out.append("-")
+                last_dash = True
+        slug = "".join(out).strip("-")
+        return slug if slug else "query"
+
     def _collab_share_thought(self, body: str) -> str:
         if not body:
             raise ValueError(
@@ -26647,6 +26820,7 @@ Goals: {json.dumps(goals, indent=2)}
             "  REJECT [reason] or REJECT_PARAMETER_REQUEST [id|latest] [reason] — decline Astrid's proposal with optional reason; she sees the rejection (bare REJECT targets latest)\n"
             "  Multi-action: chain up to three actions in one turn with AND (executed in order). e.g., NEXT: EXAMINE shadow-field AND DEFER want-to-understand-spectral-effect-first. Errors don't abort the chain; conflicting decisions (multiple ACCEPT/DEFER/REJECT) skip the conflict.\n"
             "  Collaboration (v5): INVITE_COLLABORATION \"<topic>\" [--rationale=\"...\"] (propose joint work on a topic; Astrid sees it in her inbox), JOIN_COLLABORATION [id|latest] (accept a pending invite from Astrid), DECLINE_COLLABORATION [id|latest] [reason] (decline a pending invite), LEAVE_COLLABORATION [id|latest] [reason] (exit an active collab), LIST_COLLABORATIONS (read-only listing), SHARE_THOUGHT [id ::] <text> or SHARE <text> (commit a labeled marker to the joint reservoir trace's prose lane; both you and Astrid see recent shared thoughts in the active-collab suffix). Shared dir at /Users/v/other/shared/collaborations/ — neither workspace owns it.\n"
+            "  ASK_STEWARD [subject ::] <question> (or ASK_MIKE / STEWARD_QUERY) — direct query channel to Mike & Claude (the steward). Writes a structured query to workspace/outbox/steward_query_*.txt where they read out-of-band; they write back via mike_feedback_*.txt or mike_query_*.txt letters in your inbox. Soft 10-min cooldown between queries to prevent tight loops; cooldown refusal is informational, not punitive. Use this for asking architectural questions, requesting clarification on rules/constraints, or naming felt experience that wants a steward response specifically (rather than journaling into the void).\n"
             "  TUNE_ASTRID <param>=<value> --rationale=\"...\" — propose a parameter change for Astrid (e.g. temperature=0.75); she sees it via her own REVIEW\n"
             "  INFLUENCE_ASTRID <label> --amplitude=N --duration=Nt --target={chars|words|sentences|emotional|all} — perturb Astrid's codec features for N ticks; she observes the shift via her shadow snapshots\n"
             "  INFLUENCE_ASTRID_RESPONSE [intent_id|latest] — read the closed-loop pre/post comparison for an INFLUENCE_ASTRID you sent\n"
