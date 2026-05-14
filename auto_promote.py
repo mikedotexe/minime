@@ -137,12 +137,29 @@ def _load_state(workspace_dir: Path) -> dict:
 
 
 def _save_state(workspace_dir: Path, state: dict) -> None:
+    """Write state JSON atomically.
+
+    Kink #5 fix (2026-05-14): write to a temp file then rename, so a
+    crash mid-write leaves either the OLD state file or the COMPLETE
+    NEW state file — never a torn JSON. POSIX `rename(2)` is atomic
+    on same-filesystem moves; both paths are in the same workspace
+    dir so always same-fs. Path.replace() wraps `os.replace()` which
+    uses rename on POSIX.
+    """
     p = _state_path(workspace_dir)
+    tmp = p.with_suffix(p.suffix + ".tmp")
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(state, indent=2, sort_keys=True))
+        tmp.write_text(json.dumps(state, indent=2, sort_keys=True))
+        tmp.replace(p)
     except Exception as exc:
-        logging.warning(f"auto_promote: failed to write state: {exc}")
+        logging.warning(f"auto_promote: failed to write state atomically: {exc}")
+        # Best-effort cleanup of orphan temp file.
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
 
 
 def _kill_switch_active(workspace_dir: Path) -> bool:
