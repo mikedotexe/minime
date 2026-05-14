@@ -52,6 +52,12 @@ ENV_DISABLED = "MINIME_AUTO_PROMOTE_DISABLED"
 ENV_DRY_RUN = "MINIME_AUTO_PROMOTE_DRY_RUN"
 SENTINEL_FILENAME = "auto_promote.disabled"
 SENTINEL_SPECTRAL_FILENAME = "auto_promote_spectral.disabled"
+# Kink #6 fix (2026-05-14): sentinel-file alternative to MINIME_AUTO_PROMOTE_DRY_RUN.
+# launchctl setenv does NOT propagate env vars to launchd-managed processes
+# whose plist defines an EnvironmentVariables block (the agent plist sets PATH
+# explicitly, so the EV block REPLACES the inherited launchd-domain env).
+# A sentinel file works regardless of plist config and survives kickstart.
+SENTINEL_DRY_RUN_FILENAME = "auto_promote.dry_run"
 STATE_FILENAME = "auto_promote_state.json"
 
 MAX_PROMOTION_LEN = 200
@@ -172,7 +178,14 @@ def _spectral_only_kill(workspace_dir: Path) -> bool:
     return _spectral_sentinel_path(workspace_dir).is_file()
 
 
-def _dry_run_active() -> bool:
+def _dry_run_active(workspace_dir: Optional[Path] = None) -> bool:
+    """Kink #6 fix: sentinel file takes priority over env var. Either signal
+    engages dry-run; sentinel works even when launchctl setenv is silently
+    dropped by the plist's EnvironmentVariables block."""
+    if workspace_dir is not None:
+        sentinel = workspace_dir / SENTINEL_DRY_RUN_FILENAME
+        if sentinel.is_file():
+            return True
     return os.environ.get(ENV_DRY_RUN) in ("1", "true", "TRUE")
 
 
@@ -471,7 +484,7 @@ def try_auto_promote_prose(
     if sentence is None:
         return None
 
-    if _dry_run_active():
+    if _dry_run_active(workspace_dir):
         logging.info(
             f"minime_auto_promote (prose) DRY RUN: would have promoted "
             f'mode={mode} ex={exchange_count} text="{sentence}"'
@@ -556,7 +569,7 @@ def try_auto_promote_spectral(
             )
         return None
 
-    if _dry_run_active():
+    if _dry_run_active(workspace_dir):
         logging.info(
             f"minime_auto_promote (spectral) DRY RUN: would have promoted "
             f'marker_type={marker_type} ex={exchange_count} text="{sentence}"'
@@ -712,6 +725,36 @@ def _tests():
         allowed, reason = _check_rate_limits(st, coll_id, "track_prose", 500, 6)
         assert not allowed and reason == "daily_cap"
         print("  PASS: daily cap engages at 6 promotions/day")
+
+    print()
+    print("=== Sentinel-file dry-run tests (Kink #6) ===")
+
+    # Pure path-taking variant — no global state, no env-var poisoning.
+    # The env-var fallback is unchanged from before this fix and not
+    # asserted here (it would interact with whatever inherited env the
+    # test harness runs in).
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = Path(tmp)
+
+        # Initially: no sentinel.
+        # If MINIME_AUTO_PROMOTE_DRY_RUN is set in the environment, skip
+        # the negative assertion (developer-set env should not fail CI).
+        env_already_set = os.environ.get("MINIME_AUTO_PROMOTE_DRY_RUN") in ("1", "true", "TRUE")
+        if not env_already_set:
+            assert not _dry_run_active(ws), "no sentinel + no env should be off"
+            print("  PASS: no sentinel + no env var → off")
+
+        # Drop the sentinel → engages.
+        sentinel = ws / SENTINEL_DRY_RUN_FILENAME
+        sentinel.write_text("")
+        assert _dry_run_active(ws), "sentinel file should engage dry-run"
+        print("  PASS: sentinel file engages dry-run")
+
+        # Remove sentinel → clears (unless env set).
+        sentinel.unlink()
+        if not env_already_set:
+            assert not _dry_run_active(ws), "removing sentinel should clear"
+            print("  PASS: removing sentinel clears dry-run")
 
     print()
     print("All tests passed.")

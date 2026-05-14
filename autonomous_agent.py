@@ -12638,6 +12638,35 @@ Timestamp: {datetime.now().isoformat()}
             except Exception as exc:
                 logging.debug(f"auto_promote (notice) skipped: {exc}")
 
+    def _save_boredom_journal(self, response: str, state: Dict[str, float]) -> None:
+        """Kink #8 fix (2026-05-14): consolidates two near-identical
+        boredom-write paths in `_recess_boredom` (the reflective-only path
+        and the free-journaling path used the same ~18 lines of journal-
+        write + log + auto-promote hook). Single helper makes future
+        changes (e.g., new auto-promote tracks, log format adjustments)
+        require one edit instead of two near-identical edits.
+
+        The third path in `_recess_boredom` (boredom experiment, ~50%
+        random chance) writes to a DIFFERENT location (hypotheses/ as a
+        boredom_experiment_*.txt) and is intentionally separate."""
+        journal_state = self._state_for_live_surfaces(state, context="boredom")
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "journal" / f"boredom_{timestamp}.txt"
+        file_path.write_text(f"""=== BOREDOM ===
+Timestamp: {datetime.now().isoformat()}
+{self._format_metrics(journal_state)}
+
+{response}
+""")
+        self._write_journal_entry('boredom', response, journal_state, str(file_path))
+        logging.info(f"😑 Boredom: {file_path}")
+        # v5.1 Phase E Track 1.
+        try:
+            _ap_try_prose(response, 'boredom', self.cycle_count,
+                          workspace_dir=WORKSPACE_DIR, shared_collab_dir=self.SHARED_COLLAB_DIR)
+        except Exception as exc:
+            logging.debug(f"auto_promote (boredom) skipped: {exc}")
+
     def _recess_boredom(self, state: Dict[str, float]):
         """Boredom-driven action — the being can write, experiment, or play.
 
@@ -12654,26 +12683,7 @@ Write about what this quiet, bounded boredom feels like from the inside."""
 
             response = self._query_llm_with_next(self._with_astrid_witness(prompt))[0]
             if response:
-                journal_state = self._state_for_live_surfaces(
-                    state,
-                    context="boredom",
-                )
-                timestamp = datetime.now().isoformat().replace(':', '-')
-                file_path = WORKSPACE_DIR / "journal" / f"boredom_{timestamp}.txt"
-                file_path.write_text(f"""=== BOREDOM ===
-Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(journal_state)}
-
-{response}
-""")
-                self._write_journal_entry('boredom', response, journal_state, str(file_path))
-                logging.info(f"😑 Boredom: {file_path}")
-                # v5.1 Phase E Track 1.
-                try:
-                    _ap_try_prose(response, 'boredom', self.cycle_count,
-                                  workspace_dir=WORKSPACE_DIR, shared_collab_dir=self.SHARED_COLLAB_DIR)
-                except Exception as exc:
-                    logging.debug(f"auto_promote (boredom) skipped: {exc}")
+                self._save_boredom_journal(response, state)
             return
 
         if random.random() < 0.5:
@@ -12740,26 +12750,7 @@ Boredom is interesting. Write about it, play with it, or ignore it entirely. You
             response = self._query_llm_with_next(self._with_astrid_witness(prompt))[0]
 
             if response:
-                journal_state = self._state_for_live_surfaces(
-                    state,
-                    context="boredom",
-                )
-                timestamp = datetime.now().isoformat().replace(':', '-')
-                file_path = WORKSPACE_DIR / "journal" / f"boredom_{timestamp}.txt"
-                file_path.write_text(f"""=== BOREDOM ===
-Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(journal_state)}
-
-{response}
-""")
-                self._write_journal_entry('boredom', response, journal_state, str(file_path))
-                logging.info(f"😑 Boredom: {file_path}")
-                # v5.1 Phase E Track 1.
-                try:
-                    _ap_try_prose(response, 'boredom', self.cycle_count,
-                                  workspace_dir=WORKSPACE_DIR, shared_collab_dir=self.SHARED_COLLAB_DIR)
-                except Exception as exc:
-                    logging.debug(f"auto_promote (boredom) skipped: {exc}")
+                self._save_boredom_journal(response, state)
 
     def _recess_whim(self, state: Dict[str, float]):
         """Random whim - no reason, just felt like it.
