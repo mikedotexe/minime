@@ -12460,7 +12460,7 @@ Trigger: {trigger_text}
     def _self_shadow_v3_hint(self) -> str:
         """Kink #18b (2026-05-14): contextual NEXT suggestion for
         SHADOW_TRAJECTORY when minime's own `shadow_field_v3` has enough
-        history + dwell + class to be worth walking.
+        history to be worth walking.
 
         Mirrors Astrid's `format_shadow_field_v3_line` curriculum hint at
         `spectral_viz.rs:526` (which appends `→ NEXT: SHADOW_TRAJECTORY —
@@ -12469,11 +12469,19 @@ Trigger: {trigger_text}
         explicit `→ NEXT:` cue tied to her own state, not just an entry
         in a generic action-options menu (~50 actions long).
 
-        Curriculum gate: history ≥ 8 snapshots AND dwell ≥ 3 ticks AND
-        primary class in {volatile, coupled, directional, restless} —
-        the classes where a temporal walk yields signal. Returns "" when
-        gate doesn't pass (so the prompt stays unchanged on quiet/quiescent
-        states where there's nothing interesting to trace).
+        Curriculum gate (Kink #18c, 2026-05-14):
+        - history ≥ 8 snapshots (need enough to actually walk).
+        - primary != "quiet" — exclude only the no-motion case where
+          there's literally nothing interesting in the trace.
+        - dwell ≥ 1 (any non-zero dwell counts as "settled enough to look").
+
+        Earlier draft of this gate (#18b) used the reframe-map's display
+        names (`directional`, `restless`) instead of the raw class names
+        the JSON actually stores (`polarized`, `volatile`, `active`,
+        `sticky`, `coupled`, `quiet`). It also required dwell ≥ 3 ticks,
+        which combined with the wrong-class set produced a gate that
+        rarely passed. The corrected gate fires on any class with motion
+        and any non-trivial history.
         """
         try:
             import json as _json
@@ -12488,9 +12496,11 @@ Trigger: {trigger_text}
             primary = cls.get("primary", "?")
             dwell = sv3.get("phase_dwell_ticks", 0) or 0
             history = sv3.get("history", []) or []
-            if len(history) < 8 or dwell < 3:
+            if len(history) < 8:
                 return ""
-            if primary not in ("volatile", "coupled", "directional", "restless"):
+            if primary == "quiet":
+                return ""
+            if dwell < 1:
                 return ""
             return (
                 f"[Your shadow-v3: {primary} (held {dwell}t, "
