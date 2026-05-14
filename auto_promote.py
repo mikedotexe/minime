@@ -390,6 +390,17 @@ def _record_promotion(
     return int(daily["count"])
 
 
+def _log_scanned(track: str, mode_or_marker: str, exchange_count: int, text_match: bool) -> None:
+    """Kink #9 fix (2026-05-14): single info-level outcome line so dry-run
+    validation can tell "function ran the detector" from "function never
+    ran" (the latter has no log entry at all). Mirrors the Rust side's
+    log_scanned helper."""
+    logging.info(
+        f"minime_auto_promote ({track}): scanned "
+        f"mode={mode_or_marker} ex={exchange_count} text_match={text_match}"
+    )
+
+
 def try_auto_promote_prose(
     text: str,
     mode: str,
@@ -400,12 +411,22 @@ def try_auto_promote_prose(
 ) -> Optional[str]:
     """Track 1 entry point. Returns the promoted text on success, None
     otherwise. In dry-run mode, logs but doesn't write."""
+    # Kink #9 fix: silent early returns previously made calibration
+    # difficult — log at debug so calibrators can see exactly which gate
+    # rejected the call. info-level "scanned" line below fires only after
+    # all gates pass, distinguishing detector-ran from gates-rejected.
     if _kill_switch_active(workspace_dir):
+        logging.debug(f"minime_auto_promote (prose) skipped: kill_switch ex={exchange_count}")
         return None
     if mode not in PROMOTABLE_MODES:
+        logging.debug(
+            f"minime_auto_promote (prose) skipped: mode_not_whitelisted "
+            f"mode={mode} ex={exchange_count}"
+        )
         return None
     found = _latest_joined_collab(shared_collab_dir, "minime")
     if found is None:
+        logging.debug(f"minime_auto_promote (prose) skipped: no_joined_collab ex={exchange_count}")
         return None
     coll_id, coll_dir = found
 
@@ -420,9 +441,16 @@ def try_auto_promote_prose(
             )
             if reason == "burst_lockout_engaged":
                 _save_state(workspace_dir, state)
+        else:
+            logging.debug(
+                f"minime_auto_promote (prose) skipped: {reason} mode={mode} ex={exchange_count}"
+            )
         return None
 
     sentence = detect_prose_resonance(text)
+    # Kink #9: emit scanned signal regardless of match. Operators can grep
+    # this to confirm the detector ran on each prose-mode write.
+    _log_scanned("prose", mode, exchange_count, sentence is not None)
     if sentence is None:
         return None
 
@@ -459,18 +487,36 @@ def try_auto_promote_spectral(
     The distinct actor string preserves transparency about synthetic
     origin — both beings can distinguish translated data from her
     authored prose."""
+    # Kink #9 fix: see try_auto_promote_prose for the same tier rationale.
     if _kill_switch_active(workspace_dir):
+        logging.debug(f"minime_auto_promote (spectral) skipped: kill_switch ex={exchange_count}")
         return None
     if _spectral_only_kill(workspace_dir):
+        logging.debug(
+            f"minime_auto_promote (spectral) skipped: spectral_only_kill "
+            f"ex={exchange_count}"
+        )
         return None
     sentence = render_moment_marker(marker_type, description, spectral_context)
+    # Kink #9: emit scanned signal regardless of render result. text_match
+    # here means "marker_type was renderable" (passed the conservative
+    # PROMOTABLE_MARKER_TYPES filter and produced a sentence).
+    _log_scanned("spectral", marker_type, exchange_count, sentence is not None)
     if sentence is None:
         return None
     if len(sentence) > MAX_PROMOTION_LEN:
+        logging.debug(
+            f"minime_auto_promote (spectral) skipped: too_long "
+            f"marker_type={marker_type} ex={exchange_count} len={len(sentence)}"
+        )
         return None
 
     found = _latest_joined_collab(shared_collab_dir, "minime")
     if found is None:
+        logging.debug(
+            f"minime_auto_promote (spectral) skipped: no_joined_collab "
+            f"ex={exchange_count}"
+        )
         return None
     coll_id, coll_dir = found
 
@@ -486,6 +532,11 @@ def try_auto_promote_spectral(
             )
             if reason == "burst_lockout_engaged":
                 _save_state(workspace_dir, state)
+        else:
+            logging.debug(
+                f"minime_auto_promote (spectral) skipped: {reason} "
+                f"marker_type={marker_type} ex={exchange_count}"
+            )
         return None
 
     if _dry_run_active():
