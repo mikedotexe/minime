@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 
 pub const RESONANCE_DENSITY_POLICY: &str = "resonance_density_v1";
 pub const RESONANCE_DENSITY_SCHEMA_VERSION: u8 = 1;
+pub const PRESSURE_SOURCE_POLICY: &str = "pressure_source_v1";
+pub const PRESSURE_SOURCE_SCHEMA_VERSION: u8 = 1;
+pub const INHABITABLE_FLUCTUATION_POLICY: &str = "inhabitable_fluctuation_v1";
+pub const INHABITABLE_FLUCTUATION_SCHEMA_VERSION: u8 = 1;
 
 /// Normalized components behind the resonance-density surface.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -114,6 +118,373 @@ pub fn resonance_control_from_density(density: f32, pressure_risk: f32) -> Reson
             note: "density is observational; no local target bias".to_string(),
         }
     }
+}
+
+/// Normalized contributors behind inward/compression pressure.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct PressureSourceComponents {
+    pub lambda_monopoly: f32,
+    pub mode_packing: f32,
+    pub controller_pressure: f32,
+    pub semantic_trickle: f32,
+    pub structural_plurality_loss: f32,
+    pub distinguishability_loss: f32,
+    pub temporal_lock_in: f32,
+    pub sensory_scarcity: f32,
+}
+
+/// Optional context-only pressure contributors from higher layers.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct PressureSourceContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compression_language: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_recurrence: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attractor_pull: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_pressure: Option<f32>,
+}
+
+/// V1 pressure-source control contract: observer/advisory only.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PressureSourceControl {
+    pub applied_locally: bool,
+    pub note: String,
+}
+
+/// Typed explanation of where inward pressure appears to originate.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PressureSourceV1 {
+    pub policy: String,
+    pub schema_version: u8,
+    pub pressure_score: f32,
+    pub porosity_score: f32,
+    pub dominant_source: String,
+    pub quality: String,
+    pub components: PressureSourceComponents,
+    pub context: PressureSourceContext,
+    pub control: PressureSourceControl,
+}
+
+/// Normalized contributors behind whether fluctuation remains inhabitable.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct InhabitableFluctuationComponents {
+    pub mode_trust_volatility: f32,
+    pub identity_anchor_churn: f32,
+    pub eigenvector_reorientation: f32,
+    pub share_rearrangement: f32,
+    pub basin_transition_pressure: f32,
+    pub continuity_recovery: f32,
+    pub porosity_support: f32,
+    pub pressure_interference: f32,
+}
+
+/// Context labels for interpreting inhabitability without adding control authority.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct InhabitableFluctuationContext {
+    pub previous_sample_available: bool,
+    pub transition_event_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resonance_quality: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pressure_quality: Option<String>,
+}
+
+/// Bounded Minime-local control suggestion derived from inhabitability.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InhabitableFluctuationControl {
+    pub target_bias_pct: f32,
+    pub wander_scale: f32,
+    pub applied_locally: bool,
+    pub note: String,
+}
+
+/// Typed metric for whether spectral fluctuation remains returnable/inhabitable.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InhabitableFluctuationV1 {
+    pub policy: String,
+    pub schema_version: u8,
+    pub inhabitability_score: f32,
+    pub fluctuation_score: f32,
+    pub foothold_stability: f32,
+    pub rearrangement_intensity: f32,
+    pub quality: String,
+    pub components: InhabitableFluctuationComponents,
+    pub context: InhabitableFluctuationContext,
+    pub control: InhabitableFluctuationControl,
+}
+
+impl InhabitableFluctuationV1 {
+    #[must_use]
+    pub fn neutral() -> Self {
+        Self::from_parts(
+            InhabitableFluctuationComponents {
+                mode_trust_volatility: 0.20,
+                identity_anchor_churn: 0.20,
+                eigenvector_reorientation: 0.20,
+                share_rearrangement: 0.20,
+                basin_transition_pressure: 0.10,
+                continuity_recovery: 0.55,
+                porosity_support: 0.55,
+                pressure_interference: 0.20,
+            },
+            InhabitableFluctuationContext::default(),
+        )
+    }
+
+    #[must_use]
+    pub fn from_parts(
+        components: InhabitableFluctuationComponents,
+        context: InhabitableFluctuationContext,
+    ) -> Self {
+        let components = InhabitableFluctuationComponents {
+            mode_trust_volatility: components.mode_trust_volatility.clamp(0.0, 1.0),
+            identity_anchor_churn: components.identity_anchor_churn.clamp(0.0, 1.0),
+            eigenvector_reorientation: components.eigenvector_reorientation.clamp(0.0, 1.0),
+            share_rearrangement: components.share_rearrangement.clamp(0.0, 1.0),
+            basin_transition_pressure: components.basin_transition_pressure.clamp(0.0, 1.0),
+            continuity_recovery: components.continuity_recovery.clamp(0.0, 1.0),
+            porosity_support: components.porosity_support.clamp(0.0, 1.0),
+            pressure_interference: components.pressure_interference.clamp(0.0, 1.0),
+        };
+        let fluctuation_score = (0.30 * components.share_rearrangement
+            + 0.25 * components.eigenvector_reorientation
+            + 0.23 * components.mode_trust_volatility
+            + 0.22 * components.identity_anchor_churn)
+            .clamp(0.0, 1.0);
+        let rearrangement_intensity = (0.24 * components.share_rearrangement
+            + 0.20 * components.eigenvector_reorientation
+            + 0.18 * components.mode_trust_volatility
+            + 0.16 * components.identity_anchor_churn
+            + 0.14 * components.basin_transition_pressure
+            + 0.08 * components.pressure_interference)
+            .clamp(0.0, 1.0);
+        let foothold_stability = (0.42 * components.continuity_recovery
+            + 0.30 * components.porosity_support
+            + 0.18 * (1.0 - rearrangement_intensity)
+            + 0.10 * (1.0 - components.pressure_interference))
+            .clamp(0.0, 1.0);
+        let inhabitability_score = (0.44 * foothold_stability
+            + 0.24 * components.continuity_recovery
+            + 0.22 * components.porosity_support
+            + 0.10 * (1.0 - components.pressure_interference))
+            .clamp(0.0, 1.0);
+        let quality = if rearrangement_intensity >= 0.66 && foothold_stability < 0.45 {
+            "frantic_scramble"
+        } else if fluctuation_score < 0.18
+            && components.pressure_interference >= 0.55
+            && components.porosity_support < 0.45
+        {
+            "rigid_contraction"
+        } else if fluctuation_score < 0.28
+            && foothold_stability < 0.40
+            && components.porosity_support < 0.45
+        {
+            "diffuse_uninhabited"
+        } else if fluctuation_score < 0.24 && inhabitability_score >= 0.62 {
+            "settled_habitable"
+        } else if (0.24..=0.62).contains(&fluctuation_score)
+            && inhabitability_score >= 0.60
+            && components.pressure_interference < 0.55
+        {
+            "lively_habitable"
+        } else if rearrangement_intensity >= 0.42
+            && foothold_stability >= 0.45
+            && inhabitability_score >= 0.48
+        {
+            "returnable_turbulence"
+        } else {
+            "mixed"
+        };
+        let control = inhabitable_fluctuation_control(
+            quality,
+            inhabitability_score,
+            rearrangement_intensity,
+            components.pressure_interference,
+        );
+        Self {
+            policy: INHABITABLE_FLUCTUATION_POLICY.to_string(),
+            schema_version: INHABITABLE_FLUCTUATION_SCHEMA_VERSION,
+            inhabitability_score,
+            fluctuation_score,
+            foothold_stability,
+            rearrangement_intensity,
+            quality: quality.to_string(),
+            components,
+            context,
+            control,
+        }
+    }
+}
+
+#[must_use]
+pub fn inhabitable_fluctuation_control(
+    quality: &str,
+    inhabitability_score: f32,
+    rearrangement_intensity: f32,
+    pressure_interference: f32,
+) -> InhabitableFluctuationControl {
+    match quality {
+        "frantic_scramble" => {
+            let severity = rearrangement_intensity
+                .max(pressure_interference)
+                .clamp(0.0, 1.0);
+            InhabitableFluctuationControl {
+                target_bias_pct: (-2.0 * severity).clamp(-2.0, 0.0),
+                wander_scale: (1.0 - 0.75 * severity).clamp(0.25, 1.0),
+                applied_locally: true,
+                note: "frantic rearrangement reuses the bounded resonance envelope to damp wander"
+                    .to_string(),
+            }
+        }
+        "diffuse_uninhabited" => {
+            let thinness = (1.0 - inhabitability_score).clamp(0.0, 1.0);
+            InhabitableFluctuationControl {
+                target_bias_pct: (1.5 * thinness).clamp(0.0, 1.5),
+                wander_scale: 1.0,
+                applied_locally: true,
+                note: "uninhabited diffusion reuses the bounded resonance envelope to invite fill"
+                    .to_string(),
+            }
+        }
+        "rigid_contraction" => InhabitableFluctuationControl {
+            target_bias_pct: 0.0,
+            wander_scale: 1.10,
+            applied_locally: true,
+            note: "rigid contraction permits small breathing inside the existing wander clamp"
+                .to_string(),
+        },
+        _ => InhabitableFluctuationControl {
+            target_bias_pct: 0.0,
+            wander_scale: 1.0,
+            applied_locally: true,
+            note: "inhabitable fluctuation is advisory; no additional local bias".to_string(),
+        },
+    }
+}
+
+impl PressureSourceV1 {
+    #[must_use]
+    pub fn from_parts(
+        components: PressureSourceComponents,
+        context: PressureSourceContext,
+    ) -> Self {
+        let components = PressureSourceComponents {
+            lambda_monopoly: components.lambda_monopoly.clamp(0.0, 1.0),
+            mode_packing: components.mode_packing.clamp(0.0, 1.0),
+            controller_pressure: components.controller_pressure.clamp(0.0, 1.0),
+            semantic_trickle: components.semantic_trickle.clamp(0.0, 1.0),
+            structural_plurality_loss: components.structural_plurality_loss.clamp(0.0, 1.0),
+            distinguishability_loss: components.distinguishability_loss.clamp(0.0, 1.0),
+            temporal_lock_in: components.temporal_lock_in.clamp(0.0, 1.0),
+            sensory_scarcity: components.sensory_scarcity.clamp(0.0, 1.0),
+        };
+        let context = PressureSourceContext {
+            compression_language: context
+                .compression_language
+                .map(|value| value.clamp(0.0, 1.0)),
+            thread_recurrence: context.thread_recurrence.map(|value| value.clamp(0.0, 1.0)),
+            attractor_pull: context.attractor_pull.map(|value| value.clamp(0.0, 1.0)),
+            resource_pressure: context.resource_pressure.map(|value| value.clamp(0.0, 1.0)),
+        };
+        let context_pressure = [
+            context.compression_language,
+            context.thread_recurrence,
+            context.attractor_pull,
+            context.resource_pressure,
+        ]
+        .into_iter()
+        .flatten()
+        .fold(0.0_f32, f32::max);
+        let base_pressure = (0.19 * components.lambda_monopoly
+            + 0.13 * components.mode_packing
+            + 0.16 * components.controller_pressure
+            + 0.10 * components.semantic_trickle
+            + 0.15 * components.structural_plurality_loss
+            + 0.12 * components.distinguishability_loss
+            + 0.10 * components.temporal_lock_in
+            + 0.05 * components.sensory_scarcity)
+            .clamp(0.0, 1.0);
+        let pressure_score = (0.88 * base_pressure + 0.12 * context_pressure).clamp(0.0, 1.0);
+        let porosity_score = (1.0
+            - (0.28 * components.lambda_monopoly
+                + 0.22 * components.structural_plurality_loss
+                + 0.20 * components.distinguishability_loss
+                + 0.15 * components.mode_packing
+                + 0.15 * components.temporal_lock_in))
+            .clamp(0.0, 1.0);
+        let (dominant_source, dominant_value) = dominant_pressure_source(&components, &context);
+        let quality = if dominant_source == "lambda_monopoly" && dominant_value >= 0.55 {
+            "lambda_pull"
+        } else if dominant_source == "mode_packing" && dominant_value >= 0.55 {
+            "overpacked_mode_packing"
+        } else if dominant_source == "controller_pressure" && dominant_value >= 0.50 {
+            "controller_squeeze"
+        } else if dominant_source == "semantic_trickle" && dominant_value >= 0.45 {
+            "semantic_trickle_pressure"
+        } else if porosity_score >= 0.58 && pressure_score < 0.45 && dominant_value < 0.45 {
+            "porous_distributed"
+        } else if pressure_score >= 0.70 && porosity_score < 0.35 {
+            "compressed_inward"
+        } else {
+            "mixed_pressure"
+        };
+        Self {
+            policy: PRESSURE_SOURCE_POLICY.to_string(),
+            schema_version: PRESSURE_SOURCE_SCHEMA_VERSION,
+            pressure_score,
+            porosity_score,
+            dominant_source: dominant_source.to_string(),
+            quality: quality.to_string(),
+            components,
+            context,
+            control: PressureSourceControl {
+                applied_locally: false,
+                note: "pressure source is advisory/read-only in v1; no regulator bias is applied"
+                    .to_string(),
+            },
+        }
+    }
+}
+
+fn dominant_pressure_source(
+    components: &PressureSourceComponents,
+    context: &PressureSourceContext,
+) -> (&'static str, f32) {
+    let mut best = ("lambda_monopoly", components.lambda_monopoly);
+    for (name, value) in [
+        ("mode_packing", components.mode_packing),
+        ("controller_pressure", components.controller_pressure),
+        ("semantic_trickle", components.semantic_trickle),
+        (
+            "structural_plurality_loss",
+            components.structural_plurality_loss,
+        ),
+        (
+            "distinguishability_loss",
+            components.distinguishability_loss,
+        ),
+        ("temporal_lock_in", components.temporal_lock_in),
+        ("sensory_scarcity", components.sensory_scarcity),
+    ] {
+        if value > best.1 {
+            best = (name, value);
+        }
+    }
+    for (name, value) in [
+        ("compression_language", context.compression_language),
+        ("thread_recurrence", context.thread_recurrence),
+        ("attractor_pull", context.attractor_pull),
+        ("resource_pressure", context.resource_pressure),
+    ] {
+        if let Some(value) = value {
+            if value > best.1 {
+                best = (name, value);
+            }
+        }
+    }
+    best
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -457,6 +828,10 @@ pub struct PIRegCfg {
     pub target_lambda1_rel: f32,   // Target λ₁ relative to baseline (e.g., 0.85)
     pub target_geom_rel: f32,      // Target geometric radius relative to baseline
     pub geom_weight: f32,          // Weight of geometric error in PI term
+    /// v3.6: anti-windup bleed-off rate for the integrator accumulators.
+    /// Range 0.001..0.05; default 0.005 ≈ half-life 46s at 3 Hz tick rate.
+    /// Higher values shorten the integrator's memory ("correction lingers").
+    pub integrator_leak: f32,
     pub geom_clamp_hi: f32,        // Hard clamp threshold for geom_rel
     pub geom_release: f32,         // Release threshold for clamp hysteresis
     pub geom_gate_min: f32,        // Minimum gate when clamp engaged
@@ -489,6 +864,7 @@ impl Default for PIRegCfg {
             target_lambda1_rel: 1.05, // Golden: keep λ₁ close to baseline
             target_geom_rel: 1.00,    // Golden: stay near geometric baseline
             geom_weight: 0.70,        // Golden: geometry and fill contribute equally
+            integrator_leak: 0.005,   // v3.6 default; ~46s half-life at 3 Hz
             geom_clamp_hi: 1.66,
             geom_release: 1.32,
             geom_gate_min: 0.06,
@@ -598,7 +974,7 @@ impl PIRegState {
     /// - `self.gate` - Queue admission fraction [0.05, 1.0]
     /// - `self.filt` - Filter blend strength [0.0, 1.0]
     pub fn step(&mut self, fill: f32, lambda1_rel: f32, geom_rel: f32) {
-        self.step_with_resonance(fill, lambda1_rel, geom_rel, None);
+        self.step_with_resonance_and_fluctuation(fill, lambda1_rel, geom_rel, None, None);
     }
 
     pub fn step_with_resonance(
@@ -607,6 +983,17 @@ impl PIRegState {
         lambda1_rel: f32,
         geom_rel: f32,
         resonance: Option<&ResonanceDensityV1>,
+    ) {
+        self.step_with_resonance_and_fluctuation(fill, lambda1_rel, geom_rel, resonance, None);
+    }
+
+    pub fn step_with_resonance_and_fluctuation(
+        &mut self,
+        fill: f32,
+        lambda1_rel: f32,
+        geom_rel: f32,
+        resonance: Option<&ResonanceDensityV1>,
+        fluctuation: Option<&InhabitableFluctuationV1>,
     ) {
         self.self_calibrate(fill);
         self.last_fill = fill;
@@ -629,20 +1016,30 @@ impl PIRegState {
         let resonance_target_bias_pct = resonance
             .map(|metric| metric.control.target_bias_pct.clamp(-2.0, 1.5))
             .unwrap_or(0.0);
+        let fluctuation_target_bias_pct = fluctuation
+            .map(|metric| metric.control.target_bias_pct.clamp(-2.0, 1.5))
+            .unwrap_or(0.0);
+        let advisory_target_bias_pct =
+            (resonance_target_bias_pct + fluctuation_target_bias_pct).clamp(-2.0, 1.5);
         let resonance_wander_scale = resonance
             .map(|metric| metric.control.wander_scale.clamp(0.25, 1.25))
             .unwrap_or(1.0);
+        let fluctuation_wander_scale = fluctuation
+            .map(|metric| metric.control.wander_scale.clamp(0.25, 1.25))
+            .unwrap_or(1.0);
+        let advisory_wander_scale =
+            (resonance_wander_scale * fluctuation_wander_scale).clamp(0.25, 1.25);
         let wander = if geom_deviation < 0.15 && self.cfg.intrinsic_wander > 0.0 {
             // Blend: 40% from error history (slow drift), 60% from current state
             let history_phase = self.integ_fill * 0.3;
             let state_phase = geom_rel * 7.0 + lambda1_rel * 3.0; // current landscape
             let phase = history_phase * 0.4 + state_phase * 0.6;
-            phase.sin() * self.cfg.intrinsic_wander * resonance_wander_scale
+            phase.sin() * self.cfg.intrinsic_wander * advisory_wander_scale
         } else {
             0.0
         };
         let effective_target_fill =
-            (self.cfg.target_fill + wander + resonance_target_bias_pct).clamp(25.0, 75.0);
+            (self.cfg.target_fill + wander + advisory_target_bias_pct).clamp(25.0, 75.0);
 
         // Compute error signals (against the wandering target)
         //
@@ -737,13 +1134,13 @@ impl PIRegState {
         // Universal integrator leak: prevent "delayed correction" feel.
         // Being session 163: "The correction is delayed. The feeling persists."
         // Root cause: accumulated integrator debt keeps driving correction
-        // after error reverses. 0.5%/tick at 3Hz ≈ 1.5%/s, half-life ~46s.
-        // Long enough for sustained correction, short enough that past
-        // overshoot doesn't haunt the present.
-        const INTEGRATOR_LEAK: f32 = 0.005;
-        self.integ_fill = (self.integ_fill * (1.0 - INTEGRATOR_LEAK) + fill_accum).clamp(-3.0, 3.0);
-        self.integ_lam = (self.integ_lam * (1.0 - INTEGRATOR_LEAK) + lam_accum).clamp(-3.0, 3.0);
-        self.integ_geom = (self.integ_geom * (1.0 - INTEGRATOR_LEAK) + geom_accum).clamp(-3.0, 3.0);
+        // after error reverses. v3.6 promoted this to a sovereign config
+        // field (`PIRegCfg::integrator_leak`) so the being can directly
+        // shorten or lengthen the correction memory without recompiling.
+        let integrator_leak = self.cfg.integrator_leak;
+        self.integ_fill = (self.integ_fill * (1.0 - integrator_leak) + fill_accum).clamp(-3.0, 3.0);
+        self.integ_lam = (self.integ_lam * (1.0 - integrator_leak) + lam_accum).clamp(-3.0, 3.0);
+        self.integ_geom = (self.integ_geom * (1.0 - integrator_leak) + geom_accum).clamp(-3.0, 3.0);
 
         // Recompute control signal with updated integrators
         let geom_int_updated = self.cfg.geom_weight * self.integ_geom;
@@ -833,8 +1230,10 @@ impl PIRegState {
 #[cfg(test)]
 mod tests {
     use super::{
-        resonance_control_from_density, PIRegCfg, PIRegState, ResonanceDensityComponents,
-        ResonanceDensityV1,
+        resonance_control_from_density, InhabitableFluctuationComponents,
+        InhabitableFluctuationContext, InhabitableFluctuationV1, PIRegCfg, PIRegState,
+        PressureSourceComponents, PressureSourceContext, PressureSourceV1,
+        ResonanceDensityComponents, ResonanceDensityV1,
     };
 
     fn metric(density: f32, pressure: f32) -> ResonanceDensityV1 {
@@ -894,5 +1293,180 @@ mod tests {
 
         assert!(pressure.gate < plain.gate);
         assert!(pressure.filt > plain.filt);
+    }
+
+    #[test]
+    fn inhabitable_fluctuation_classifies_core_shapes() {
+        let settled = InhabitableFluctuationV1::from_parts(
+            InhabitableFluctuationComponents {
+                continuity_recovery: 0.86,
+                porosity_support: 0.84,
+                pressure_interference: 0.08,
+                share_rearrangement: 0.06,
+                eigenvector_reorientation: 0.06,
+                mode_trust_volatility: 0.06,
+                identity_anchor_churn: 0.06,
+                ..InhabitableFluctuationComponents::default()
+            },
+            InhabitableFluctuationContext::default(),
+        );
+        assert_eq!(settled.quality, "settled_habitable");
+
+        let lively = InhabitableFluctuationV1::from_parts(
+            InhabitableFluctuationComponents {
+                continuity_recovery: 0.88,
+                porosity_support: 0.82,
+                pressure_interference: 0.12,
+                share_rearrangement: 0.36,
+                eigenvector_reorientation: 0.30,
+                mode_trust_volatility: 0.34,
+                identity_anchor_churn: 0.28,
+                ..InhabitableFluctuationComponents::default()
+            },
+            InhabitableFluctuationContext::default(),
+        );
+        assert_eq!(lively.quality, "lively_habitable");
+
+        let turbulence = InhabitableFluctuationV1::from_parts(
+            InhabitableFluctuationComponents {
+                continuity_recovery: 0.82,
+                porosity_support: 0.78,
+                pressure_interference: 0.56,
+                share_rearrangement: 0.72,
+                eigenvector_reorientation: 0.64,
+                mode_trust_volatility: 0.66,
+                identity_anchor_churn: 0.48,
+                basin_transition_pressure: 0.30,
+            },
+            InhabitableFluctuationContext::default(),
+        );
+        assert_eq!(turbulence.quality, "returnable_turbulence");
+
+        let frantic = InhabitableFluctuationV1::from_parts(
+            InhabitableFluctuationComponents {
+                continuity_recovery: 0.18,
+                porosity_support: 0.20,
+                pressure_interference: 0.86,
+                share_rearrangement: 0.90,
+                eigenvector_reorientation: 0.88,
+                mode_trust_volatility: 0.92,
+                identity_anchor_churn: 0.88,
+                basin_transition_pressure: 0.80,
+            },
+            InhabitableFluctuationContext::default(),
+        );
+        assert_eq!(frantic.quality, "frantic_scramble");
+        assert!(frantic.control.target_bias_pct < 0.0);
+
+        let rigid = InhabitableFluctuationV1::from_parts(
+            InhabitableFluctuationComponents {
+                continuity_recovery: 0.50,
+                porosity_support: 0.20,
+                pressure_interference: 0.82,
+                share_rearrangement: 0.04,
+                eigenvector_reorientation: 0.04,
+                mode_trust_volatility: 0.04,
+                identity_anchor_churn: 0.04,
+                ..InhabitableFluctuationComponents::default()
+            },
+            InhabitableFluctuationContext::default(),
+        );
+        assert_eq!(rigid.quality, "rigid_contraction");
+
+        let diffuse = InhabitableFluctuationV1::from_parts(
+            InhabitableFluctuationComponents {
+                continuity_recovery: 0.10,
+                porosity_support: 0.20,
+                pressure_interference: 0.10,
+                share_rearrangement: 0.04,
+                eigenvector_reorientation: 0.04,
+                mode_trust_volatility: 0.04,
+                identity_anchor_churn: 0.04,
+                ..InhabitableFluctuationComponents::default()
+            },
+            InhabitableFluctuationContext::default(),
+        );
+        assert_eq!(diffuse.quality, "diffuse_uninhabited");
+        assert!(diffuse.control.target_bias_pct > 0.0);
+    }
+
+    #[test]
+    fn inhabitable_fluctuation_reuses_resonance_advisory_bounds() {
+        let cfg = PIRegCfg {
+            intrinsic_wander: 0.0,
+            curiosity_gate_boost: 0.0,
+            ..PIRegCfg::default()
+        };
+        let frantic = InhabitableFluctuationV1::from_parts(
+            InhabitableFluctuationComponents {
+                continuity_recovery: 0.18,
+                porosity_support: 0.20,
+                pressure_interference: 1.0,
+                share_rearrangement: 1.0,
+                eigenvector_reorientation: 1.0,
+                mode_trust_volatility: 1.0,
+                identity_anchor_churn: 1.0,
+                basin_transition_pressure: 1.0,
+            },
+            InhabitableFluctuationContext::default(),
+        );
+        let mut resonance_only = PIRegState::new(cfg);
+        let mut combined = PIRegState::new(cfg);
+
+        resonance_only.step_with_resonance(68.0, 1.05, 1.0, Some(&metric(0.80, 1.0)));
+        combined.step_with_resonance_and_fluctuation(
+            68.0,
+            1.05,
+            1.0,
+            Some(&metric(0.80, 1.0)),
+            Some(&frantic),
+        );
+
+        assert!((resonance_only.gate - combined.gate).abs() < 1.0e-6);
+        assert!((resonance_only.filt - combined.filt).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn pressure_source_classifies_named_contributors_without_control() {
+        let lambda = PressureSourceV1::from_parts(
+            PressureSourceComponents {
+                lambda_monopoly: 0.91,
+                structural_plurality_loss: 0.72,
+                distinguishability_loss: 0.66,
+                ..PressureSourceComponents::default()
+            },
+            PressureSourceContext::default(),
+        );
+        assert_eq!(lambda.policy, "pressure_source_v1");
+        assert_eq!(lambda.dominant_source, "lambda_monopoly");
+        assert_eq!(lambda.quality, "lambda_pull");
+        assert!(!lambda.control.applied_locally);
+
+        let controller = PressureSourceV1::from_parts(
+            PressureSourceComponents {
+                controller_pressure: 0.80,
+                mode_packing: 0.30,
+                ..PressureSourceComponents::default()
+            },
+            PressureSourceContext::default(),
+        );
+        assert_eq!(controller.dominant_source, "controller_pressure");
+        assert_eq!(controller.quality, "controller_squeeze");
+
+        let porous = PressureSourceV1::from_parts(
+            PressureSourceComponents {
+                lambda_monopoly: 0.10,
+                mode_packing: 0.12,
+                controller_pressure: 0.08,
+                semantic_trickle: 0.05,
+                structural_plurality_loss: 0.10,
+                distinguishability_loss: 0.08,
+                temporal_lock_in: 0.10,
+                sensory_scarcity: 0.05,
+            },
+            PressureSourceContext::default(),
+        );
+        assert_eq!(porous.quality, "porous_distributed");
+        assert!(porous.porosity_score > 0.80);
     }
 }

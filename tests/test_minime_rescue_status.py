@@ -103,6 +103,11 @@ class TestMinimeRescueStatus(unittest.TestCase):
             self.assertEqual(payload["video_disconnect_count"], 7)
             self.assertEqual(payload["audio_last_disconnect_reason"], "audio_timeout")
             self.assertEqual(payload["video_last_disconnect_reason"], "gpu_close_frame")
+            self.assertEqual(
+                payload["video_physical_status"]["classification"],
+                "physical_camera_unavailable_host_fallback_active",
+            )
+            self.assertIn("Host fallback", payload["video_physical_status"]["operator_note"])
             self.assertFalse(payload["engine_pid_changed_without_watchdog_restart"])
             self.assertIsNone(payload["engine_pid_changed_at"])
             self.assertTrue(payload["scaffold_available"])
@@ -240,6 +245,10 @@ class TestMinimeRescueStatus(unittest.TestCase):
             self.assertEqual(payload["video_disconnect_count"], 0)
             self.assertIsNone(payload["audio_last_disconnect_reason"])
             self.assertIsNone(payload["video_last_disconnect_reason"])
+            self.assertEqual(
+                payload["video_physical_status"]["classification"],
+                "physical_camera_unavailable_host_fallback_active",
+            )
             self.assertFalse(payload["scaffold_available"])
             self.assertFalse(payload["scaffold_activation_pending"])
             self.assertFalse(payload["scaffold_archived_stale_at_startup"])

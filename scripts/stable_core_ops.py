@@ -491,6 +491,86 @@ def now_unix_s() -> float:
     return time.time()
 
 
+LINEAGE_CANARY_RECENT_FAILURE_BLOCKER_S = 30 * 60
+
+
+def build_lineage_canary_status_view(
+    status: dict[str, Any],
+    *,
+    now_s: float | None = None,
+) -> dict[str, Any]:
+    if not isinstance(status, dict):
+        status = {}
+    now_value = now_unix_s() if now_s is None else now_s
+    started_at = status.get("started_at_unix_s")
+    age_s = None
+    if isinstance(started_at, (int, float)) and math.isfinite(float(started_at)):
+        age_s = max(0.0, now_value - float(started_at))
+    active = bool(status.get("active"))
+    result = status.get("result")
+    failed = result == "failed"
+    recent = age_s is None or age_s <= LINEAGE_CANARY_RECENT_FAILURE_BLOCKER_S
+    blocker = bool(failed and (active or recent))
+    if active and failed:
+        classification = "active_failed_blocker"
+    elif failed and recent:
+        classification = "recent_failed_blocker"
+    elif failed:
+        classification = "historical_failed_not_active"
+    elif active:
+        classification = "active_monitoring"
+    elif result:
+        classification = f"inactive_{result}"
+    else:
+        classification = "inactive_none"
+    return {
+        "active": active,
+        "result": result,
+        "classification": classification,
+        "blocker": blocker,
+        "age_s": age_s,
+        "stale_after_s": LINEAGE_CANARY_RECENT_FAILURE_BLOCKER_S,
+        "mode": status.get("mode"),
+        "rollback_reason": status.get("rollback_reason"),
+        "bundle_dir": status.get("bundle_dir"),
+        "operator_note": (
+            "Historical inactive canary failure retained for audit; not a current restore blocker."
+            if classification == "historical_failed_not_active"
+            else None
+        ),
+    }
+
+
+def classify_physical_camera_status(
+    camera: dict[str, Any],
+    *,
+    active_video: str | None,
+    host_video_ready: bool,
+) -> dict[str, Any]:
+    if not isinstance(camera, dict):
+        camera = {}
+    camera_healthy = bool(camera.get("healthy")) and bool(camera.get("connected", True))
+    if camera_healthy:
+        classification = "physical_camera_healthy"
+        operator_note = None
+    elif active_video == "host" and host_video_ready:
+        classification = "physical_camera_unavailable_host_fallback_active"
+        operator_note = "Host video fallback is active; restart the physical camera lane only when physical video is needed."
+    else:
+        classification = "physical_camera_unavailable"
+        operator_note = "Physical camera is unavailable and host video is not fresh; inspect the camera feeder before relying on vision."
+    return {
+        "classification": classification,
+        "healthy": camera_healthy,
+        "last_error": camera.get("last_error"),
+        "state": camera.get("state"),
+        "connected": camera.get("connected"),
+        "consecutive_failures": camera.get("consecutive_failures"),
+        "capture_failures": camera.get("capture_failures"),
+        "operator_note": operator_note,
+    }
+
+
 def build_bridge_write_status_view(bridge_status: dict[str, Any]) -> dict[str, Any]:
     now = now_unix_s()
     cooldown_until = bridge_status.get("cooldown_until_unix_s")
@@ -1786,6 +1866,11 @@ def build_sensory_fallback_status() -> dict[str, Any]:
 
     active_video = video_state.get("source") or ("physical" if camera_healthy else "host")
     active_audio = audio_state.get("source") or ("physical" if mic_healthy else "host")
+    camera_classification = classify_physical_camera_status(
+        camera,
+        active_video=active_video,
+        host_video_ready=host_video_ready,
+    )
 
     return {
         "status": "ok"
@@ -1802,11 +1887,15 @@ def build_sensory_fallback_status() -> dict[str, Any]:
             "camera_state": camera.get("state"),
             "camera_connected": camera.get("connected"),
             "camera_last_success_at": camera.get("last_success_at"),
+            "camera_availability": camera_classification["classification"],
+            "camera_last_error": camera_classification["last_error"],
+            "camera_operator_note": camera_classification["operator_note"],
             "mic_healthy": mic_healthy,
             "mic_state": mic.get("state"),
             "mic_connected": mic.get("connected"),
             "mic_last_success_at": mic.get("last_success_at"),
         },
+        "physical_camera": camera_classification,
         "synthetic_host": {
             "video_ready": host_video_ready,
             "audio_ready": host_audio_ready,
@@ -2085,6 +2174,9 @@ def build_status() -> dict[str, Any]:
         if lineage_checkpoint_enabled
         else profile.get("checkpoint_source")
     )
+    lineage_canary_view = build_lineage_canary_status_view(
+        lineage_canary_status if isinstance(lineage_canary_status, dict) else {}
+    )
 
     payload = {
         "mode": "stable_core_v1" if stable_core_enabled else "inactive",
@@ -2162,6 +2254,10 @@ def build_status() -> dict[str, Any]:
             "restore_canary_bundle_dir": lineage_canary_status.get("bundle_dir")
             if isinstance(lineage_canary_status, dict)
             else None,
+            "restore_canary_health": lineage_canary_view,
+            "restore_canary_classification": lineage_canary_view.get("classification"),
+            "restore_canary_blocker": lineage_canary_view.get("blocker"),
+            "restore_canary_age_s": lineage_canary_view.get("age_s"),
         },
         "sensory_sources": sensory,
         "sensory_profile": {
@@ -2183,6 +2279,12 @@ def build_status() -> dict[str, Any]:
                 "active_source": sensory_active.get("video"),
                 "synthetic_host_ready": synthetic_host.get("video_ready"),
                 "fallback_reason": sensory_fallback_reason.get("video"),
+                "availability": sensory.get("physical_camera", {}).get("classification")
+                if isinstance(sensory.get("physical_camera"), dict)
+                else None,
+                "operator_note": sensory.get("physical_camera", {}).get("operator_note")
+                if isinstance(sensory.get("physical_camera"), dict)
+                else None,
             },
             "mic": {
                 "state": mic.get("state"),

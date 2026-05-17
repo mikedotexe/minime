@@ -84,6 +84,23 @@ def _as_int(value: Any, default: int = 0) -> int:
     return default
 
 
+def _camera_lane_classification(camera_status: dict[str, Any]) -> dict[str, Any]:
+    healthy = bool(camera_status.get("healthy")) and bool(camera_status.get("connected", True))
+    if healthy:
+        classification = "physical_camera_healthy"
+        note = None
+    else:
+        classification = "physical_camera_unavailable_host_fallback_active"
+        note = "Host fallback may remain usable; restart the camera lane only when physical video is needed."
+    return {
+        "classification": classification,
+        "healthy": healthy,
+        "state": camera_status.get("state"),
+        "last_error": camera_status.get("last_error"),
+        "operator_note": note,
+    }
+
+
 def _active_engine_target_fill(
     active_profile: dict[str, Any],
     rescue_health: dict[str, Any],
@@ -106,6 +123,7 @@ def _active_engine_target_fill(
 def _input_lane_snapshot() -> dict[str, Any]:
     mic_status = _load_runtime_status(MIC_STATUS_PATH)
     camera_status = _load_runtime_status(CAMERA_STATUS_PATH)
+    camera_lane = _camera_lane_classification(camera_status)
     return {
         "socket_liveness": {
             "7879": bool(mic_status.get("connected", False)),
@@ -115,6 +133,7 @@ def _input_lane_snapshot() -> dict[str, Any]:
         "video_disconnect_count": _as_int(camera_status.get("reconnect_count")),
         "audio_last_disconnect_reason": mic_status.get("last_error"),
         "video_last_disconnect_reason": camera_status.get("last_error"),
+        "video_physical_status": camera_lane,
     }
 
 
@@ -249,6 +268,7 @@ def build_active_status(
         "previous_engine_pid": previous_engine_pid if pid_changed else current.get("previous_engine_pid"),
         "video_disconnect_count": lane_snapshot["video_disconnect_count"],
         "video_last_disconnect_reason": lane_snapshot["video_last_disconnect_reason"],
+        "video_physical_status": lane_snapshot["video_physical_status"],
         "watchdog_state": watchdog_state,
         "workspace_path": active_profile.get("workspace_path"),
     }
@@ -297,6 +317,13 @@ def build_inactive_status(*, watchdog_state: str) -> dict[str, Any]:
         "telemetry_state": "inactive",
         "video_disconnect_count": 0,
         "video_last_disconnect_reason": None,
+        "video_physical_status": {
+            "classification": "physical_camera_unavailable_host_fallback_active",
+            "healthy": False,
+            "state": None,
+            "last_error": None,
+            "operator_note": "Inactive status preserves host-fallback framing; no camera restart is implied.",
+        },
         "watchdog_state": watchdog_state,
         "workspace_path": current.get("workspace_path"),
     }

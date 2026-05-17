@@ -5,8 +5,41 @@
 //! compare the current covariance/eigen geometry against a small energy-based
 //! reduced field in parallel.
 
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use fastrand::Rng;
 use serde::Serialize;
+
+/// History ring capacity — last N snapshots kept for trajectory queries.
+/// 32 ticks ≈ 16s at 0.5s tick interval, enough to see phase transitions.
+const SHADOW_HISTORY_CAP: usize = 32;
+/// Maximum number of recent phase transitions retained on each emission.
+/// 6 chosen empirically: the 32-snapshot ring spans ~2 minutes of engine time,
+/// during which observed primary-class flips run ~3–5; 6 admits a typical
+/// window without truncation while keeping the structure compact.
+const SHADOW_RECENT_TRANSITIONS_CAP: usize = 6;
+
+/// Diagnostic env var. Set to `1` to enable per-tick (sampled) logging of
+/// raw shadow-field components: cov_input norm, raw projection magnitude,
+/// per-mode field, coupling stats, and the final field_norm vs threshold.
+/// Used for investigating why `influence_eligible` stays false in production.
+const SHADOW_DIAG_ENV: &str = "MINIME_SHADOW_DIAGNOSTIC";
+
+static SHADOW_DIAG_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
+static SHADOW_DIAG_ENABLED: AtomicU64 = AtomicU64::new(u64::MAX);
+
+fn shadow_diag_enabled() -> bool {
+    let cached = SHADOW_DIAG_ENABLED.load(Ordering::Relaxed);
+    if cached != u64::MAX {
+        return cached == 1;
+    }
+    let enabled = std::env::var(SHADOW_DIAG_ENV)
+        .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+    SHADOW_DIAG_ENABLED.store(u64::from(enabled), Ordering::Relaxed);
+    enabled
+}
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct IsingShadowSummary {
@@ -57,6 +90,101 @@ pub struct ShadowFieldV2 {
     pub modes: Vec<ShadowFieldModeV2>,
 }
 
+/// Compact per-tick snapshot kept in the v3 history ring. Stays small
+/// (<100 bytes) so the ring of 32 has trivial memory cost. Only carries
+/// scalars needed for trajectory queries — full snapshot lives in
+/// `IsingShadowSnapshot`.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ShadowSnapshotV3 {
+    pub t_ms: u64,
+    pub field_norm: f32,
+    pub class_primary: String,
+    pub traits: Vec<String>,
+    pub recurrence: f32,
+    pub mode_tension: f32,
+    pub binary_flip_rate: f32,
+    pub lock_tendency: f32,
+    pub fissure_tendency: f32,
+    pub tail_openness: f32,
+    pub coupling_mean_abs: f32,
+    pub influence_eligible: bool,
+}
+
+/// Compound classification: `primary` preserves v2's single-label
+/// readability for back-compat consumers; `traits` carries the full set
+/// of independent flag tests, so volatile+coupled doesn't collapse.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ShadowClassV3 {
+    pub primary: String,
+    pub traits: Vec<String>,
+}
+
+/// Recorded primary-class change within the history ring.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ShadowPhaseTransitionV3 {
+    pub from: String,
+    pub to: String,
+    pub at_t_ms: u64,
+}
+
+/// V3 closed-loop response for a completed shadow-influence cycle.
+/// Built by sensory_bus when an influence's `duration_ticks + decay_ticks`
+/// window completes, comparing the snapshot taken at first apply to the
+/// snapshot at completion.
+///
+/// Closes the open-loop hole in v2: previously Astrid sent influence
+/// into a void; now she gets pre/post deltas, per-mode shift vector,
+/// classification change (if any), and a basin-shift score (1 − cosine
+/// of pre/post field), so she can learn cause→effect over time.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ShadowInfluenceResponseV3 {
+    pub schema_version: u8,
+    pub policy: String,
+    pub intent_id: String,
+    pub label: String,
+    pub stage: String,
+    pub completed_at_unix_ms: u64,
+    pub pre: Option<ShadowSnapshotV3>,
+    pub post: Option<ShadowSnapshotV3>,
+    pub delta_field_norm: f32,
+    pub class_changed: bool,
+    pub class_from: String,
+    pub class_to: String,
+    pub basin_shift_score: f32,
+    pub applied_rms: f32,
+    pub applied_max_abs: f32,
+    pub total_applied_ticks: u64,
+}
+
+/// v3.5: Per-mode top-k coupling partners. `mode` is the index of the
+/// row; `top_partners` is `(partner_mode, |J_ij|)` sorted descending.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ModePartners {
+    pub mode: usize,
+    pub top_partners: Vec<(usize, f32)>,
+}
+
+/// V3 wraps V2 (full snapshot fields preserved) and adds memory:
+/// trajectory ring, compound classification, phase dwell, and recent
+/// transitions. `most_recent_influence_response` is filled by the
+/// receive-side closed loop in sensory_bus.rs. v3.5 adds per-mode
+/// `mode_partners` so consumers can read the coupling graph as a ranked
+/// adjacency list rather than a flat dim×dim matrix.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ShadowFieldV3 {
+    pub schema_version: u8,
+    pub policy: String,
+    pub class_v3: ShadowClassV3,
+    pub phase_dwell_ticks: u32,
+    pub recent_phase_transitions: Vec<ShadowPhaseTransitionV3>,
+    pub history: Vec<ShadowSnapshotV3>,
+    /// Echo the v2 payload so consumers can read both off the same object.
+    pub v2: ShadowFieldV2,
+    /// v3.5: ranked partner list per mode (top-3). Empty when coupling is
+    /// unavailable (early ticks, mode_dim==0).
+    pub mode_partners: Vec<ModePartners>,
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct IsingShadowSnapshot {
     pub reduced_field: Vec<f32>,
@@ -65,6 +193,7 @@ pub struct IsingShadowSnapshot {
     pub coupling: Vec<f32>,
     pub summary: IsingShadowSummary,
     pub shadow_field_v2: ShadowFieldV2,
+    pub shadow_field_v3: ShadowFieldV3,
     pub coupling_ema: f32,
     pub damping: f32,
     pub temperature: f32,
@@ -94,7 +223,11 @@ impl Default for IsingShadowConfig {
             // Was 0.35 — binary flips required unrealistically strong field.
             // 0.20 makes binary spins more sensitive to actual mode dynamics.
             temperature: 0.20,
-            quiet_threshold: 0.05,
+            // Was 0.05 — diagnostic showed field_norm naturally hovers
+            // 0.04–0.10 because the projection divides by sqrt(mode_dim≈2.83).
+            // 0.025 lets the gate open during normal quiet operation while
+            // still rejecting truly empty states (raw_proj_l2 < 0.07).
+            quiet_threshold: 0.025,
         }
     }
 }
@@ -110,10 +243,23 @@ pub struct IsingShadowCore {
     s_bin: Vec<f32>,
     prev_reduced_field: Vec<f32>,
     last_snapshot: Option<IsingShadowSnapshot>,
+    /// v3 memory: rolling history of light snapshots. Captures trajectory
+    /// for `phase_dwell_ticks`, `recent_phase_transitions`, and the trend
+    /// line surfaced in Astrid's prompt.
+    history: VecDeque<ShadowSnapshotV3>,
     rng: Rng,
 }
 
 impl IsingShadowCore {
+    /// Read-only access to the most recent snapshot. Returns None until
+    /// `update()` has been called at least once. Used by the v3 closed-loop
+    /// in main.rs to thread the prior tick's snapshot into
+    /// `apply_shadow_influence_to_z` for pre/post comparison.
+    #[must_use]
+    pub fn last_snapshot(&self) -> Option<&IsingShadowSnapshot> {
+        self.last_snapshot.as_ref()
+    }
+
     pub fn new(cfg: IsingShadowConfig, seed: u64) -> Self {
         Self {
             cfg,
@@ -126,6 +272,7 @@ impl IsingShadowCore {
             s_bin: Vec::new(),
             prev_reduced_field: Vec::new(),
             last_snapshot: None,
+            history: VecDeque::with_capacity(SHADOW_HISTORY_CAP),
             rng: Rng::with_seed(seed),
         }
     }
@@ -161,6 +308,29 @@ impl IsingShadowCore {
         self.update_soft_spin(&reduced_field);
         let field_norm = l2_norm(&reduced_field) / (mode_dim as f32).sqrt().max(1.0);
         let binary_flip_rate = self.update_binary_spin(&reduced_field, field_norm);
+
+        if shadow_diag_enabled() {
+            let tick = SHADOW_DIAG_TICK_COUNTER.fetch_add(1, Ordering::Relaxed);
+            if tick % 100 == 0 {
+                let raw_l2 = l2_norm(&reduced_field);
+                let cov_l2 = l2_norm(cov_input);
+                let (mean_abs, max_abs, active_frac) =
+                    coupling_stats(&self.coupling, self.mode_dim.max(1));
+                let mode_str: Vec<String> = reduced_field
+                    .iter()
+                    .map(|v| format!("{v:.4}"))
+                    .collect();
+                eprintln!(
+                    "🔍 shadow_diag tick={tick} mode_dim={mode_dim} \
+                     cov_l2={cov_l2:.4} raw_proj_l2={raw_l2:.4} \
+                     field_norm={field_norm:.4} threshold={threshold:.4} \
+                     coupling[mean_abs={mean_abs:.6} max_abs={max_abs:.6} active_frac={active_frac:.3}] \
+                     binary_flip_rate={binary_flip_rate:.3} field=[{field}]",
+                    threshold = self.cfg.quiet_threshold,
+                    field = mode_str.join(", "),
+                );
+            }
+        }
         let recurrence = if self.prev_reduced_field.len() == reduced_field.len() {
             cosine01(&self.prev_reduced_field, &reduced_field)
         } else {
@@ -185,6 +355,65 @@ impl IsingShadowCore {
         // in test builds where only summary fields are inspected.
         let _ = centered;
 
+        // v3: derive parallel traits, push to history ring, compute trajectory
+        // metrics (phase dwell, recent transitions). Does not change v2 output.
+        let traits = derive_shadow_traits(&ShadowTraitInputs {
+            quiet_threshold: self.cfg.quiet_threshold,
+            field_norm,
+            binary_flip_rate,
+            fissure_tendency: shadow_field_v2.fissure_tendency,
+            lock_tendency: shadow_field_v2.lock_tendency,
+            coupling_active_fraction: shadow_field_v2.coupling_active_fraction,
+            fast_magnetization: shadow_field_v2.fast_magnetization,
+            _v2: std::marker::PhantomData,
+        });
+        let class_primary = primary_from_traits(&traits);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let snapshot_v3 = ShadowSnapshotV3 {
+            t_ms: now_ms,
+            field_norm,
+            class_primary: class_primary.to_string(),
+            traits: traits.iter().map(|s| s.to_string()).collect(),
+            recurrence,
+            mode_tension: shadow_field_v2.mode_tension,
+            binary_flip_rate,
+            lock_tendency: shadow_field_v2.lock_tendency,
+            fissure_tendency: shadow_field_v2.fissure_tendency,
+            tail_openness: shadow_field_v2.tail_openness,
+            coupling_mean_abs: shadow_field_v2.coupling_mean_abs,
+            influence_eligible: shadow_field_v2.influence_eligible,
+        };
+        if self.history.len() >= SHADOW_HISTORY_CAP {
+            self.history.pop_front();
+        }
+        self.history.push_back(snapshot_v3);
+
+        let phase_dwell_ticks = compute_phase_dwell(&self.history, class_primary);
+        let recent_phase_transitions = collect_recent_transitions(&self.history);
+        let history_vec: Vec<ShadowSnapshotV3> = self.history.iter().cloned().collect();
+        // v3.5: ranked partner list per mode (top-3 by |J_ij|).
+        let mode_partners: Vec<ModePartners> = (0..self.mode_dim)
+            .map(|m| ModePartners {
+                mode: m,
+                top_partners: coupling_partners_ranked(&self.coupling, m, self.mode_dim, 3),
+            })
+            .collect();
+        let shadow_field_v3 = ShadowFieldV3 {
+            schema_version: 3,
+            policy: "shadow_field_v3_mutual_witness_with_memory".to_string(),
+            class_v3: ShadowClassV3 {
+                primary: class_primary.to_string(),
+                traits: traits.iter().map(|s| s.to_string()).collect(),
+            },
+            phase_dwell_ticks,
+            recent_phase_transitions,
+            history: history_vec,
+            v2: shadow_field_v2.clone(),
+            mode_partners,
+        };
+
         self.prev_reduced_field = reduced_field.clone();
         self.last_snapshot = Some(IsingShadowSnapshot {
             reduced_field,
@@ -193,6 +422,7 @@ impl IsingShadowCore {
             coupling: self.coupling.clone(),
             summary,
             shadow_field_v2,
+            shadow_field_v3,
             coupling_ema: self.cfg.coupling_ema,
             damping: self.cfg.damping,
             temperature: self.cfg.temperature,
@@ -378,9 +608,13 @@ impl IsingShadowCore {
             + 0.35 * slow_magnetization.abs().clamp(0.0, 1.0)
             + 0.30 * recurrence)
             .clamp(0.0, 1.0);
+        // binary_flip_rate cap was 0.35 — diagnostic showed natural dynamics
+        // hover at 0.375 in volatile_shadow_surface states, locking eligibility
+        // out even when field_norm is healthy. 0.50 keeps the gate closed
+        // during truly chaotic flipping while admitting normal volatile texture.
         let influence_eligible = field_norm >= self.cfg.quiet_threshold
             && field_norm < 0.65
-            && binary_flip_rate < 0.35
+            && binary_flip_rate < 0.50
             && lock_tendency < 0.80;
         let classification = if field_norm < self.cfg.quiet_threshold {
             "quiet_shadow_texture"
@@ -483,6 +717,32 @@ fn cosine01(a: &[f32], b: &[f32]) -> f32 {
     ((dot(a, b) / norm).clamp(-1.0, 1.0) + 1.0) * 0.5
 }
 
+/// v3.5: Per-mode ranked partner list. Returns the top-k modes most
+/// strongly coupled to `mode`, ordered by `|J_ij|` descending. The matrix
+/// is row-major `dim × dim`; the diagonal entry (self-coupling) is
+/// excluded. Empty result if `dim == 0` or `mode >= dim`.
+pub fn coupling_partners_ranked(
+    coupling: &[f32],
+    mode: usize,
+    dim: usize,
+    top_k: usize,
+) -> Vec<(usize, f32)> {
+    if dim == 0 || mode >= dim || top_k == 0 {
+        return Vec::new();
+    }
+    let row_start = mode * dim;
+    let mut partners: Vec<(usize, f32)> = (0..dim)
+        .filter(|&j| j != mode)
+        .map(|j| {
+            let value = coupling.get(row_start + j).copied().unwrap_or_default().abs();
+            (j, value)
+        })
+        .collect();
+    partners.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    partners.truncate(top_k);
+    partners
+}
+
 fn coupling_stats(coupling: &[f32], dim: usize) -> (f32, f32, f32) {
     if dim == 0 {
         return (0.0, 0.0, 0.0);
@@ -521,6 +781,163 @@ fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-clamped).exp())
 }
 
+/// Independent flag tests using the same thresholds v2's cascade uses,
+/// but evaluated as a set so compound states (volatile AND coupled) are
+/// preserved. Order in returned Vec follows the precedence used by
+/// `primary_from_traits` so renderers can read either as a list or just
+/// take the first.
+struct ShadowTraitInputs<'a> {
+    quiet_threshold: f32,
+    field_norm: f32,
+    binary_flip_rate: f32,
+    fissure_tendency: f32,
+    lock_tendency: f32,
+    coupling_active_fraction: f32,
+    fast_magnetization: f32,
+    _v2: std::marker::PhantomData<&'a ShadowFieldV2>,
+}
+
+fn derive_shadow_traits(inputs: &ShadowTraitInputs<'_>) -> Vec<&'static str> {
+    let mut traits: Vec<&'static str> = Vec::new();
+    if inputs.field_norm < inputs.quiet_threshold {
+        traits.push("quiet");
+    }
+    if inputs.binary_flip_rate >= 0.20 || inputs.fissure_tendency >= 0.55 {
+        traits.push("volatile");
+    }
+    if inputs.lock_tendency >= 0.65 {
+        traits.push("sticky");
+    }
+    if inputs.coupling_active_fraction >= 0.25 {
+        traits.push("coupled");
+    }
+    if inputs.fast_magnetization.abs() >= 0.20 {
+        traits.push("polarized");
+    }
+    if traits.is_empty() {
+        traits.push("active");
+    }
+    traits
+}
+
+/// First trait by precedence wins as the primary label. Mirrors v2's
+/// cascade (quiet > volatile > sticky > coupled > polarized > active)
+/// so single-label v2 readers get the same answer they always did.
+fn primary_from_traits(traits: &[&'static str]) -> &'static str {
+    for candidate in [
+        "quiet",
+        "volatile",
+        "sticky",
+        "coupled",
+        "polarized",
+        "active",
+    ] {
+        if traits.contains(&candidate) {
+            return candidate;
+        }
+    }
+    "active"
+}
+
+/// Count consecutive trailing snapshots in the ring whose primary class
+/// matches `current`. Returns ticks the current primary has held.
+fn compute_phase_dwell(history: &VecDeque<ShadowSnapshotV3>, current: &str) -> u32 {
+    let mut dwell = 0u32;
+    for snap in history.iter().rev() {
+        if snap.class_primary == current {
+            dwell = dwell.saturating_add(1);
+        } else {
+            break;
+        }
+    }
+    dwell
+}
+
+/// Walk the ring and collect adjacent (i, i+1) pairs where the primary
+/// class changed. Returns the most recent `SHADOW_RECENT_TRANSITIONS_CAP`
+/// transitions in chronological order (oldest first within the cap).
+/// Build a `ShadowInfluenceResponseV3` from pre/post snapshots and the
+/// recorded apply stats. Computes `basin_shift_score` from the field-norm
+/// magnitudes (a true cosine over the per-mode vectors would require
+/// passing more state; this is a useful first approximation).
+pub fn build_influence_response(
+    intent_id: String,
+    label: String,
+    stage: String,
+    pre: Option<ShadowSnapshotV3>,
+    post: Option<ShadowSnapshotV3>,
+    applied_rms: f32,
+    applied_max_abs: f32,
+    total_applied_ticks: u64,
+) -> ShadowInfluenceResponseV3 {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    let delta_field_norm = match (&pre, &post) {
+        (Some(p), Some(q)) => q.field_norm - p.field_norm,
+        _ => 0.0,
+    };
+    let (class_from, class_to, class_changed) = match (&pre, &post) {
+        (Some(p), Some(q)) => {
+            let changed = p.class_primary != q.class_primary;
+            (p.class_primary.clone(), q.class_primary.clone(), changed)
+        },
+        _ => (String::new(), String::new(), false),
+    };
+    // basin_shift_score: 1.0 − ratio of post/pre field_norm magnitudes,
+    // bounded to [0, 1]. A true cosine over the per-mode reduced field
+    // would be more faithful but requires plumbing the full vectors;
+    // this scalar gives a useful "how much did the field move" signal.
+    let basin_shift_score = match (&pre, &post) {
+        (Some(p), Some(q)) => {
+            let denom = (p.field_norm.abs() + q.field_norm.abs()).max(1e-6);
+            ((q.field_norm - p.field_norm).abs() / denom).clamp(0.0, 1.0)
+        },
+        _ => 0.0,
+    };
+    ShadowInfluenceResponseV3 {
+        schema_version: 3,
+        policy: "shadow_influence_response_v3".to_string(),
+        intent_id,
+        label,
+        stage,
+        completed_at_unix_ms: now_ms,
+        pre,
+        post,
+        delta_field_norm,
+        class_changed,
+        class_from,
+        class_to,
+        basin_shift_score,
+        applied_rms,
+        applied_max_abs,
+        total_applied_ticks,
+    }
+}
+
+fn collect_recent_transitions(
+    history: &VecDeque<ShadowSnapshotV3>,
+) -> Vec<ShadowPhaseTransitionV3> {
+    let mut transitions: Vec<ShadowPhaseTransitionV3> = Vec::new();
+    let snaps: Vec<&ShadowSnapshotV3> = history.iter().collect();
+    for window in snaps.windows(2) {
+        let prev = window[0];
+        let curr = window[1];
+        if prev.class_primary != curr.class_primary {
+            transitions.push(ShadowPhaseTransitionV3 {
+                from: prev.class_primary.clone(),
+                to: curr.class_primary.clone(),
+                at_t_ms: curr.t_ms,
+            });
+        }
+    }
+    if transitions.len() > SHADOW_RECENT_TRANSITIONS_CAP {
+        let drop = transitions.len() - SHADOW_RECENT_TRANSITIONS_CAP;
+        transitions.drain(..drop);
+    }
+    transitions
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,6 +948,69 @@ mod tests {
             y[mode * dim + mode.min(dim - 1)] = 1.0;
         }
         y
+    }
+
+    #[test]
+    fn coupling_partners_ranked_returns_sorted_top_k() {
+        // 4×4 matrix with row 0 = [_, 0.10, 0.30, 0.05]
+        let dim = 4;
+        let mut coupling = vec![0.0_f32; dim * dim];
+        coupling[1] = 0.10;
+        coupling[2] = 0.30;
+        coupling[3] = 0.05;
+        let partners = coupling_partners_ranked(&coupling, 0, dim, 3);
+        assert_eq!(partners.len(), 3);
+        assert_eq!(partners[0].0, 2);
+        assert!((partners[0].1 - 0.30).abs() < 1e-6);
+        assert_eq!(partners[1].0, 1);
+        assert_eq!(partners[2].0, 3);
+    }
+
+    #[test]
+    fn coupling_partners_ranked_excludes_self() {
+        let dim = 3;
+        let mut coupling = vec![0.0_f32; dim * dim];
+        coupling[0] = 0.99; // self-coupling on the diagonal
+        coupling[1] = 0.20;
+        coupling[2] = 0.10;
+        let partners = coupling_partners_ranked(&coupling, 0, dim, 3);
+        // Self should not appear; only modes 1 and 2.
+        assert_eq!(partners.len(), 2);
+        assert!(partners.iter().all(|(j, _)| *j != 0));
+    }
+
+    #[test]
+    fn coupling_partners_ranked_truncates_to_top_k() {
+        let dim = 5;
+        let mut coupling = vec![0.0_f32; dim * dim];
+        for j in 1..5 {
+            coupling[j] = 0.1 * (j as f32);
+        }
+        let partners = coupling_partners_ranked(&coupling, 0, dim, 2);
+        assert_eq!(partners.len(), 2);
+        // Top 2 should be modes 4 and 3 (weights 0.4 and 0.3).
+        assert_eq!(partners[0].0, 4);
+        assert_eq!(partners[1].0, 3);
+    }
+
+    #[test]
+    fn coupling_partners_ranked_returns_empty_on_invalid_inputs() {
+        assert!(coupling_partners_ranked(&[], 0, 0, 3).is_empty());
+        let coupling = vec![0.5_f32; 16];
+        // mode out of range
+        assert!(coupling_partners_ranked(&coupling, 4, 4, 3).is_empty());
+        // top_k = 0
+        assert!(coupling_partners_ranked(&coupling, 0, 4, 0).is_empty());
+    }
+
+    #[test]
+    fn coupling_partners_ranked_uses_absolute_value() {
+        let dim = 3;
+        let coupling = vec![0.0_f32, -0.30, 0.10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        // mode 0 row: [_, -0.30, 0.10] → |J| ranking: m1 (0.30), m2 (0.10)
+        let partners = coupling_partners_ranked(&coupling, 0, dim, 2);
+        assert_eq!(partners[0].0, 1);
+        assert!((partners[0].1 - 0.30).abs() < 1e-6);
     }
 
     #[test]

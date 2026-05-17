@@ -4832,6 +4832,50 @@ async fn run_engine(
                             "suggested_operator_step": "rebuild/restart Rust engine under monitoring",
                         })
                     };
+                    let recovery_control_status = if stable_core_runtime.enabled && recovery_mode {
+                        "stable_core_controller_owns_gate_filter"
+                    } else if recovery_mode
+                        && (gate_smooth + 0.001 < recovery_gate_floor
+                            || filt_smooth - 0.001 > recovery_filt_ceil)
+                    {
+                        "possible_recovery_control_mismatch"
+                    } else if recovery_mode {
+                        "legacy_recovery_rails_applied"
+                    } else if eigenfill_pct < target_fill_pct {
+                        "under_target_soft_recovery"
+                    } else {
+                        "not_in_recovery"
+                    };
+                    let recovery_control_reason = if stable_core_runtime.enabled && recovery_mode {
+                        "stable-core runtime is enabled, so fixed stable-core commands override legacy low-fill gate/filter rails"
+                    } else if recovery_mode
+                        && (gate_smooth + 0.001 < recovery_gate_floor
+                            || filt_smooth - 0.001 > recovery_filt_ceil)
+                    {
+                        "observed gate/filter do not satisfy the expected recovery floor/ceiling"
+                    } else if recovery_mode {
+                        "observed gate/filter satisfy the expected recovery floor/ceiling"
+                    } else if eigenfill_pct < target_fill_pct {
+                        "fill is under target but outside the hard recovery band"
+                    } else {
+                        "fill is at or above target"
+                    };
+                    let recovery_control_diagnostic_v1 = serde_json::json!({
+                        "schema_version": 1,
+                        "status": recovery_control_status,
+                        "reason": recovery_control_reason,
+                        "recovery_mode": recovery_mode,
+                        "hard_recovery": hard_recovery,
+                        "stable_core_enabled": stable_core_runtime.enabled,
+                        "fill_pct": eigenfill_pct,
+                        "target_fill_pct": target_fill_pct,
+                        "observed_gate": gate_smooth,
+                        "observed_filt": filt_smooth,
+                        "expected_gate_floor": recovery_gate_floor,
+                        "expected_filt_ceil": recovery_filt_ceil,
+                        "legacy_rails_applicable": !stable_core_runtime.enabled
+                            && eigenfill_pct < target_fill_pct,
+                    });
                     let health = serde_json::json!({
                         "t_s": health_engine_t_s,
                         "runtime_profile": if stable_core_runtime.enabled {
@@ -4909,6 +4953,7 @@ async fn run_engine(
                         "recovery_mode": recovery_mode,
                         "recovery_gate_floor": recovery_gate_floor,
                         "recovery_filt_ceil": recovery_filt_ceil,
+                        "recovery_control_diagnostic_v1": &recovery_control_diagnostic_v1,
                         "semantic_fresh_ms": semantic_fresh_ms,
                         "semantic_stale_ms": semantic_stale_ms,
                         "semantic": {

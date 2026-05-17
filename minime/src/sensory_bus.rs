@@ -321,12 +321,23 @@ struct ShadowInfluenceState {
     total_applied_ticks: u64,
     applied_rms: f32,
     applied_max_abs: f32,
+    /// Pre-influence snapshot captured at the first call to
+    /// `apply_shadow_influence_to_z`. Compared against the post-influence
+    /// snapshot to build a `ShadowInfluenceResponseV3` when the window
+    /// completes — closes the open-loop hole in v2.
+    pre_snapshot: Option<crate::ising_shadow::ShadowSnapshotV3>,
 }
 
 #[derive(Clone, Debug)]
 struct ShadowInfluenceSlot {
     active: Option<ShadowInfluenceState>,
     status: ShadowInfluenceStatus,
+    /// Most recent v3 closed-loop response. Persisted to
+    /// `health.json:shadow_influence_response_v3` each tick.
+    last_response_v3: Option<crate::ising_shadow::ShadowInfluenceResponseV3>,
+    /// Ring of recent v3 responses (cap 8). Read by Astrid's
+    /// `SHADOW_RESPONSE` typed action to walk influence history.
+    response_history_v3: std::collections::VecDeque<crate::ising_shadow::ShadowInfluenceResponseV3>,
 }
 
 impl Default for ShadowInfluenceSlot {
@@ -337,6 +348,8 @@ impl Default for ShadowInfluenceSlot {
                 policy: "shadow_influence_v1",
                 ..ShadowInfluenceStatus::default()
             },
+            last_response_v3: None,
+            response_history_v3: std::collections::VecDeque::with_capacity(8),
         }
     }
 }
@@ -593,6 +606,8 @@ pub struct SensoryBus {
     rng: Mutex<SmallRng>,
     live_audio_divisor: Mutex<u32>,
     live_video_divisor: Mutex<u32>,
+    live_audio_enabled: Mutex<bool>,
+    live_video_enabled: Mutex<bool>,
     live_audio_counter: Mutex<u64>,
     live_video_counter: Mutex<u64>,
 
@@ -631,6 +646,16 @@ pub struct SensoryBus {
     pi_kp: Mutex<f32>,
     pi_ki: Mutex<f32>,
     pi_max_step: Mutex<f32>,
+    /// v3.6: PI structure-vs-fill weighting (0.0..2.0, default 0.70).
+    /// Promoted from PIRegCfg::geom_weight constant. Higher = geometry
+    /// error contributes more to the PI signal; lower = fill error
+    /// dominates. Beings asked for trade-off control between structure
+    /// stability and fill stability.
+    pi_geom_weight: Mutex<f32>,
+    /// v3.6: anti-windup integrator bleed-off rate (0.001..0.05, default 0.005).
+    /// Promoted from regulator.rs's INTEGRATOR_LEAK constant. Shortens or
+    /// extends the integrator's memory of past error.
+    pi_integrator_leak: Mutex<f32>,
     shadow_influence: Mutex<ShadowInfluenceSlot>,
     attractor_pulse: Mutex<AttractorPulseSlot>,
 }
@@ -668,6 +693,8 @@ impl SensoryBus {
             rng: Mutex::new(SmallRng::seed_from_u64(seed)),
             live_audio_divisor: Mutex::new(1),
             live_video_divisor: Mutex::new(1),
+            live_audio_enabled: Mutex::new(true),
+            live_video_enabled: Mutex::new(true),
             live_audio_counter: Mutex::new(0),
             live_video_counter: Mutex::new(0),
             synth_gain: Mutex::new(1.0),
@@ -699,6 +726,10 @@ impl SensoryBus {
             pi_kp: Mutex::new(0.75),
             pi_ki: Mutex::new(0.03),
             pi_max_step: Mutex::new(0.055),
+            // v3.6: structure-vs-fill weighting, promoted from PIRegCfg::geom_weight.
+            pi_geom_weight: Mutex::new(0.70),
+            // v3.6: anti-windup leak, promoted from regulator.rs INTEGRATOR_LEAK.
+            pi_integrator_leak: Mutex::new(0.005),
             shadow_influence: Mutex::new(ShadowInfluenceSlot::default()),
             attractor_pulse: Mutex::new(AttractorPulseSlot::default()),
         })
@@ -719,6 +750,26 @@ impl SensoryBus {
     pub fn set_live_intake_divisors(&self, audio_divisor: u32, video_divisor: u32) {
         *self.live_audio_divisor.lock() = audio_divisor;
         *self.live_video_divisor.lock() = video_divisor;
+    }
+
+    #[inline]
+    pub fn set_live_audio_enabled(&self, enabled: bool) {
+        *self.live_audio_enabled.lock() = enabled;
+    }
+
+    #[inline]
+    pub fn set_live_video_enabled(&self, enabled: bool) {
+        *self.live_video_enabled.lock() = enabled;
+    }
+
+    #[inline]
+    pub fn live_audio_enabled(&self) -> bool {
+        *self.live_audio_enabled.lock()
+    }
+
+    #[inline]
+    pub fn live_video_enabled(&self) -> bool {
+        *self.live_video_enabled.lock()
     }
 
     #[inline]
@@ -1029,6 +1080,26 @@ impl SensoryBus {
     pub fn get_pi_max_step(&self) -> f32 {
         *self.pi_max_step.lock()
     }
+    /// v3.6: PI structure-vs-fill weighting (clamped 0.0..2.0). Default 0.70.
+    /// Higher values give geometry error more influence over the PI signal.
+    #[inline]
+    pub fn set_pi_geom_weight(&self, v: f32) {
+        *self.pi_geom_weight.lock() = v.clamp(0.0, 2.0);
+    }
+    #[inline]
+    pub fn get_pi_geom_weight(&self) -> f32 {
+        *self.pi_geom_weight.lock()
+    }
+    /// v3.6: anti-windup integrator leak (clamped 0.001..0.05). Default 0.005.
+    /// Higher values shorten the integrator's memory of past error.
+    #[inline]
+    pub fn set_pi_integrator_leak(&self, v: f32) {
+        *self.pi_integrator_leak.lock() = v.clamp(0.001, 0.05);
+    }
+    #[inline]
+    pub fn get_pi_integrator_leak(&self) -> f32 {
+        *self.pi_integrator_leak.lock()
+    }
 
     #[inline]
     pub fn set_llava_embedding(&self, embedding: &[f32]) {
@@ -1143,6 +1214,7 @@ impl SensoryBus {
             total_applied_ticks: 0,
             applied_rms: 0.0,
             applied_max_abs: 0.0,
+            pre_snapshot: None,
         });
         slot.status.last_event = Some("apply_accepted".to_string());
         slot.status.last_block_reason = None;
@@ -1157,6 +1229,7 @@ impl SensoryBus {
         discharge_active: bool,
         hard_recovery_reset: bool,
         attractor_pulse_active: bool,
+        current_snapshot: Option<&crate::ising_shadow::ShadowSnapshotV3>,
     ) -> ShadowInfluenceStatus {
         let mut slot = self.shadow_influence.lock();
         let Some(active_releasing) = slot.active.as_ref().map(|active| active.releasing) else {
@@ -1184,11 +1257,17 @@ impl SensoryBus {
             return slot.status.clone();
         }
 
-        let (event, finished) = {
+        let (event, finished, completed_response) = {
             let active = slot
                 .active
                 .as_mut()
                 .expect("active shadow influence exists after early return");
+            // v3 closed-loop: capture pre-snapshot at the very first apply
+            // (before any influence has touched z), so the post comparison
+            // measures *only* what this influence produced.
+            if active.total_applied_ticks == 0 && active.pre_snapshot.is_none() {
+                active.pre_snapshot = current_snapshot.cloned();
+            }
             let gain = if active.releasing {
                 active.release_ticks_remaining as f32 / active.decay_ticks.max(1) as f32
             } else {
@@ -1225,15 +1304,59 @@ impl SensoryBus {
             } else {
                 "influence_applied"
             };
-            (event.to_string(), finished)
+            // v3 closed-loop: when the window completes, build a response
+            // comparing pre/post snapshots so Astrid can read what her
+            // perturbation actually produced.
+            let response = if finished {
+                Some(crate::ising_shadow::build_influence_response(
+                    active.intent_id.clone(),
+                    active.label.clone(),
+                    active.stage.clone(),
+                    active.pre_snapshot.clone(),
+                    current_snapshot.cloned(),
+                    active.applied_rms,
+                    active.applied_max_abs,
+                    active.total_applied_ticks,
+                ))
+            } else {
+                None
+            };
+            (event.to_string(), finished, response)
         };
         slot.status.last_event = Some(event);
         slot.status.last_block_reason = None;
         if finished {
             slot.active = None;
+            if let Some(response) = completed_response {
+                slot.last_response_v3 = Some(response.clone());
+                if slot.response_history_v3.len() >= 8 {
+                    slot.response_history_v3.pop_front();
+                }
+                slot.response_history_v3.push_back(response);
+            }
         }
         Self::refresh_shadow_influence_status(&mut slot);
         slot.status.clone()
+    }
+
+    /// Read the most recent v3 closed-loop response, if any. Used by
+    /// Astrid's `SHADOW_RESPONSE` typed action.
+    pub fn last_shadow_influence_response_v3(
+        &self,
+    ) -> Option<crate::ising_shadow::ShadowInfluenceResponseV3> {
+        self.shadow_influence.lock().last_response_v3.clone()
+    }
+
+    /// Read the v3 response history (last 8 completed influences).
+    pub fn shadow_influence_response_history_v3(
+        &self,
+    ) -> Vec<crate::ising_shadow::ShadowInfluenceResponseV3> {
+        self.shadow_influence
+            .lock()
+            .response_history_v3
+            .iter()
+            .cloned()
+            .collect()
     }
 
     pub fn shadow_influence_status(&self) -> ShadowInfluenceStatus {
@@ -1545,11 +1668,17 @@ impl SensoryBus {
 
     #[inline]
     fn should_admit_live_audio(&self) -> bool {
+        if !self.live_audio_enabled() {
+            return false;
+        }
         Self::should_admit_by_divisor(&self.live_audio_divisor, &self.live_audio_counter)
     }
 
     #[inline]
     fn should_admit_live_video(&self) -> bool {
+        if !self.live_video_enabled() {
+            return false;
+        }
         Self::should_admit_by_divisor(&self.live_video_divisor, &self.live_video_counter)
     }
 
@@ -1735,6 +1864,22 @@ mod tests {
 
         bus.push_audio_synthetic(vec![1.0; AUDIO_DIM], NowMs::now());
         assert_eq!(bus.backlog_size(), 1);
+    }
+
+    #[test]
+    fn live_sensory_gates_drop_one_modality_without_killing_the_other_or_synthetic() {
+        let bus = SensoryBus::new(8, 4, 42);
+        bus.set_live_video_enabled(false);
+        bus.push_video(vec![1.0; VIDEO_DIM], NowMs::now());
+        bus.push_audio(vec![1.0; AUDIO_DIM], NowMs::now());
+        assert_eq!(bus.backlog_size(), 1);
+
+        bus.set_live_audio_enabled(false);
+        bus.push_audio(vec![1.0; AUDIO_DIM], NowMs::now());
+        assert_eq!(bus.backlog_size(), 1);
+
+        bus.push_video_synthetic(vec![1.0; VIDEO_DIM], NowMs::now());
+        assert_eq!(bus.backlog_size(), 2);
     }
 
     #[test]
@@ -1941,12 +2086,12 @@ mod tests {
         assert_eq!(status.max_abs, SHADOW_INFLUENCE_MAX_ABS_CAP);
 
         let mut z = [0.0f32; Z_DIM];
-        let first = bus.apply_shadow_influence_to_z(&mut z, 68.0, false, false, false);
+        let first = bus.apply_shadow_influence_to_z(&mut z, 68.0, false, false, false, None);
         assert!(first.active);
         assert!(z.iter().all(|value| *value <= SHADOW_INFLUENCE_MAX_ABS_CAP));
         assert!(first.applied_rms > 0.0);
 
-        let second = bus.apply_shadow_influence_to_z(&mut z, 68.0, false, false, false);
+        let second = bus.apply_shadow_influence_to_z(&mut z, 68.0, false, false, false, None);
         assert!(!second.active);
         assert_eq!(second.last_event.as_deref(), Some("influence_completed"));
     }
@@ -1970,7 +2115,7 @@ mod tests {
             false,
         );
         let mut z = [0.0f32; Z_DIM];
-        let blocked = bus.apply_shadow_influence_to_z(&mut z, 50.0, false, false, false);
+        let blocked = bus.apply_shadow_influence_to_z(&mut z, 50.0, false, false, false, None);
         assert!(blocked.active);
         assert_eq!(blocked.last_block_reason.as_deref(), Some("low_fill"));
         assert!(z.iter().all(|value| value.abs() <= 1.0e-6));
@@ -1990,7 +2135,7 @@ mod tests {
             true,
             true,
         );
-        let released = bus.apply_shadow_influence_to_z(&mut z, 50.0, false, true, true);
+        let released = bus.apply_shadow_influence_to_z(&mut z, 50.0, false, true, true, None);
         assert!(!released.active);
         assert_eq!(released.last_event.as_deref(), Some("release_completed"));
     }

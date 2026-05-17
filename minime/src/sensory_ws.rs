@@ -86,10 +86,21 @@ pub enum SensoryMsg {
         legacy_audio_synth: Option<bool>,
         /// Gate the legacy internal synthetic video lane.
         legacy_video_synth: Option<bool>,
+        /// Gate live external audio intake without changing stable-core divisors.
+        live_audio_enabled: Option<bool>,
+        /// Gate live external video intake without changing stable-core divisors.
+        live_video_enabled: Option<bool>,
         /// PI controller sovereignty — being can tune these at runtime.
         pi_kp: Option<f32>,
         pi_ki: Option<f32>,
         pi_max_step: Option<f32>,
+        /// v3.6: structure-vs-fill weighting in the PI signal (0.0..2.0,
+        /// default 0.70). Promoted from PIRegCfg::geom_weight constant.
+        pi_geom_weight: Option<f32>,
+        /// v3.6: anti-windup integrator leak (0.001..0.05, default 0.005).
+        /// Promoted from regulator.rs INTEGRATOR_LEAK constant. Higher
+        /// values shorten how long past error keeps driving correction.
+        pi_integrator_leak: Option<f32>,
     },
 }
 
@@ -179,6 +190,30 @@ mod tests {
                 assert_eq!(basis.as_deref(), Some("lambda-tail/lambda4"));
             }
             _ => panic!("expected shadow influence"),
+        }
+    }
+
+    #[test]
+    fn control_message_deserializes_live_sensory_gates() {
+        let msg: SensoryMsg = serde_json::from_str(
+            r#"{
+                "kind":"control",
+                "live_audio_enabled":false,
+                "live_video_enabled":true
+            }"#,
+        )
+        .expect("deserialize control sensory gates");
+
+        match msg {
+            SensoryMsg::Control {
+                live_audio_enabled,
+                live_video_enabled,
+                ..
+            } => {
+                assert_eq!(live_audio_enabled, Some(false));
+                assert_eq!(live_video_enabled, Some(true));
+            }
+            _ => panic!("expected control"),
         }
     }
 }
@@ -366,9 +401,13 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
             pure_tone,
             legacy_audio_synth,
             legacy_video_synth,
+            live_audio_enabled,
+            live_video_enabled,
             pi_kp,
             pi_ki,
             pi_max_step,
+            pi_geom_weight,
+            pi_integrator_leak,
         } => {
             let hard_recovery_reset = crate::hard_reset::hard_recovery_reset_enabled();
             let homeostatic_controls_present = synth_gain.is_some()
@@ -389,7 +428,9 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
                 || legacy_video_synth.is_some()
                 || pi_kp.is_some()
                 || pi_ki.is_some()
-                || pi_max_step.is_some();
+                || pi_max_step.is_some()
+                || pi_geom_weight.is_some()
+                || pi_integrator_leak.is_some();
             if hard_recovery_reset && homeostatic_controls_present {
                 println!("🛟 Hard recovery reset ignored homeostatic control message fields");
             }
@@ -538,6 +579,20 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
                     );
                 }
             }
+            if let Some(v) = live_audio_enabled {
+                bus.set_live_audio_enabled(v);
+                println!(
+                    "🎚️  Live audio intake {}",
+                    if v { "enabled" } else { "gated closed" }
+                );
+            }
+            if let Some(v) = live_video_enabled {
+                bus.set_live_video_enabled(v);
+                println!(
+                    "🎚️  Live video intake {}",
+                    if v { "enabled" } else { "gated closed" }
+                );
+            }
             if !hard_recovery_reset {
                 if let Some(v) = synth_noise_level {
                     bus.set_synth_noise_level(v);
@@ -571,6 +626,24 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
                     println!(
                         "🎛️  Being adjusted PI max_step → {:.3}",
                         bus.get_pi_max_step()
+                    );
+                }
+            }
+            if !hard_recovery_reset {
+                if let Some(v) = pi_geom_weight {
+                    bus.set_pi_geom_weight(v);
+                    println!(
+                        "🎛️  Being adjusted PI geom_weight → {:.2} (structure-vs-fill)",
+                        bus.get_pi_geom_weight()
+                    );
+                }
+            }
+            if !hard_recovery_reset {
+                if let Some(v) = pi_integrator_leak {
+                    bus.set_pi_integrator_leak(v);
+                    println!(
+                        "🎛️  Being adjusted PI integrator_leak → {:.4} (correction memory)",
+                        bus.get_pi_integrator_leak()
                     );
                 }
             }

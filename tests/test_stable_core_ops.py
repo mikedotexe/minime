@@ -716,7 +716,12 @@ class TestStableCoreOps(unittest.TestCase):
             self.assertEqual(payload["agency_status"]["entry_count"], 3)
             self.assertEqual(payload["sensory_sources"]["active"]["video"], "physical")
             self.assertTrue(payload["sensory_sources"]["physical"]["camera_healthy"])
+            self.assertEqual(
+                payload["sensory_sources"]["physical_camera"]["classification"],
+                "physical_camera_healthy",
+            )
             self.assertEqual(payload["feeders"]["camera"]["active_source"], "physical")
+            self.assertEqual(payload["feeders"]["camera"]["availability"], "physical_camera_healthy")
             self.assertEqual(payload["feeders"]["mic"]["active_source"], "physical")
             self.assertEqual(payload["attractor_fatigue"]["active_count"], 1)
             self.assertEqual(
@@ -761,6 +766,11 @@ class TestStableCoreOps(unittest.TestCase):
 
             self.assertEqual(payload["active"]["video"], "host")
             self.assertEqual(payload["active"]["audio"], "host")
+            self.assertEqual(
+                payload["physical_camera"]["classification"],
+                "physical_camera_unavailable_host_fallback_active",
+            )
+            self.assertIn("Host video fallback", payload["physical_camera"]["operator_note"])
             self.assertTrue(payload["synthetic_host"]["video_ready"])
             self.assertTrue(payload["synthetic_host"]["audio_ready"])
 
@@ -830,7 +840,38 @@ class TestStableCoreOps(unittest.TestCase):
             self.assertTrue(payload["feeders"]["camera"]["synthetic_host_ready"])
             self.assertTrue(payload["feeders"]["mic"]["synthetic_host_ready"])
             self.assertEqual(payload["feeders"]["camera"]["fallback_reason"], "camera capture unhealthy")
+            self.assertEqual(
+                payload["feeders"]["camera"]["availability"],
+                "physical_camera_unavailable_host_fallback_active",
+            )
+            self.assertIn("Host video fallback", payload["feeders"]["camera"]["operator_note"])
             self.assertEqual(payload["feeders"]["mic"]["fallback_reason"], "mic capture unhealthy")
+
+    def test_lineage_canary_view_distinguishes_historical_and_active_failures(self) -> None:
+        now_s = 1_000_000.0
+        historical = stable_core_ops.build_lineage_canary_status_view(
+            {
+                "active": False,
+                "result": "failed",
+                "started_at_unix_s": now_s - stable_core_ops.LINEAGE_CANARY_RECENT_FAILURE_BLOCKER_S - 5.0,
+                "rollback_reason": "scaffold_inactive_after_warmup",
+            },
+            now_s=now_s,
+        )
+        self.assertEqual(historical["classification"], "historical_failed_not_active")
+        self.assertFalse(historical["blocker"])
+        self.assertIn("Historical inactive", historical["operator_note"])
+
+        active = stable_core_ops.build_lineage_canary_status_view(
+            {
+                "active": True,
+                "result": "failed",
+                "started_at_unix_s": now_s - 10.0,
+            },
+            now_s=now_s,
+        )
+        self.assertEqual(active["classification"], "active_failed_blocker")
+        self.assertTrue(active["blocker"])
 
     def test_checkpoint_sanitize_writes_diagonal_quarantine_seed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
