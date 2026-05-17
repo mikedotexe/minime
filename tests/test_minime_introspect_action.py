@@ -207,6 +207,8 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
             write_lines(base_dir / "minime" / "src" / "esn.rs", 20)
             inbox_note = workspace / "inbox" / "read" / "astrid_self_study_1.txt"
             write_lines(inbox_note, 12)
+            generated_note = workspace / "notes" / "btsp_ep_2026_04_16_phase_note_transition_recovery_01_proposal_1778959982.txt"
+            write_lines(generated_note, 12)
             agent = self._agent(base_dir, workspace, db_path)
 
             with (
@@ -234,6 +236,10 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
                 workspace_hit, error = agent._resolve_introspect_target(str(inbox_note))
                 self.assertIsNone(error)
                 self.assertEqual(Path(workspace_hit["path"]), inbox_note)
+
+                notes_hit, error = agent._resolve_introspect_target(str(generated_note))
+                self.assertIsNone(error)
+                self.assertEqual(Path(notes_hit["path"]), generated_note)
 
     def test_blocks_out_of_scope_and_non_text_targets(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -635,7 +641,15 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
                 patch.object(agent, "_send_live_sensory_gate_control") as send_gate,
                 patch.object(agent, "_write_journal_entry"),
             ):
-                agent._close_eyes(dict(STATE))
+                with self.assertLogs(level="WARNING") as captured:
+                    agent._close_eyes(dict(STATE))
+
+            self.assertTrue(
+                any(
+                    "Reflection query failed while closing eyes: slow model" in message
+                    for message in captured.output
+                )
+            )
 
             gate = json.loads((workspace / "sensory_control" / "sensory_gate_state.json").read_text())
             self.assertFalse(gate["eyes_open"])
@@ -926,7 +940,15 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
             agent._agent_source_size_at_start = source.stat().st_size
 
             with patch.object(aa, "WORKSPACE_DIR", workspace):
-                reload_required = agent._check_source_reload_required("test")
+                with self.assertLogs(level="WARNING") as captured:
+                    reload_required = agent._check_source_reload_required("test")
+
+            self.assertTrue(
+                any(
+                    "Autonomous agent source changed after this process started" in message
+                    for message in captured.output
+                )
+            )
 
             status = json.loads((workspace / "runtime" / "autonomous_agent_source_status.json").read_text())
             self.assertEqual(status["system"], "minime")

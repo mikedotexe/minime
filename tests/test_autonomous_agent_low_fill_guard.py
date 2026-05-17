@@ -130,6 +130,28 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertIn("fixed target 65.0%", guidance)
         self.assertIn("NOTICE, DRIFT, ASPIRE, or REST", guidance)
 
+    def test_low_fill_guidance_routes_away_from_perturb(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        with patch.object(
+            agent,
+            "_low_fill_guard_status",
+            return_value={
+                "active": True,
+                "fill_ratio": 0.11,
+                "target_fill_ratio": 0.68,
+                "spread_relief": 0.0,
+                "phase": "contracted",
+                "rebound_protection": False,
+            },
+        ):
+            guidance = agent._low_fill_prompt_guidance()
+        self.assertIn("LOW-FILL GUARD", guidance)
+        self.assertIn("ACTION_PREFLIGHT <desired action>", guidance)
+        self.assertIn("PERTURB", guidance)
+        self.assertNotIn("gentle PERTURB", guidance)
+        self.assertIn("low-fill hold", guidance)
+
     def test_blocked_next_choice_reroutes_to_notice(self):
         agent = self._agent()
         agent._pending_next_action = "DECOMPOSE"
@@ -1473,6 +1495,49 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
                     {},
                 )
             self.assertFalse((workspace / "parameter_requests").exists())
+
+    def test_unsupported_self_assessment_parameter_is_rejected_not_pending(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            with patch.object(aa, "WORKSPACE_DIR", workspace):
+                agent._request_parameter_change(
+                    "Recommend a reduction of 0.02 to the gate value.",
+                    {"fill_ratio": 0.63, "eig1": 4.7, "cov_lambda1": 8.0},
+                    {"gate": 0.04},
+                )
+            pending = list((workspace / "parameter_requests").glob("request_*.json"))
+            rejected = list((workspace / "parameter_requests" / "rejected").glob("rejected_*.json"))
+            self.assertEqual(pending, [])
+            self.assertEqual(len(rejected), 1)
+            payload = json.loads(rejected[0].read_text())
+            self.assertEqual(payload["status"], "rejected_invalid")
+            self.assertIn("unsupported parameter", payload["invalid_reason"])
+
+    def test_repair_sweep_defers_existing_invalid_parameter_request(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            request_dir = workspace / "parameter_requests"
+            request_dir.mkdir(parents=True)
+            request_path = request_dir / "request_old.json"
+            request_path.write_text(json.dumps({
+                "status": "pending",
+                "parameter": "gate",
+                "proposed_value": "0.02",
+                "rationale": "legacy unsafe request",
+                "llm_cited_value": "unknown",
+            }))
+            with patch.object(aa, "WORKSPACE_DIR", workspace):
+                moved = agent.repair_invalid_parameter_requests()
+            self.assertFalse(request_path.exists())
+            self.assertEqual(len(moved), 1)
+            payload = json.loads(moved[0].read_text())
+            self.assertEqual(payload["status"], "invalid_deferred")
+            self.assertIn("protected parameter", payload["invalid_reason"])
 
     def test_stable_core_self_journal_blocks_research_actions(self):
         agent = self._agent()
@@ -3162,6 +3227,160 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertIsNotNone(status["last_block_resolved_at"])
         self.assertNotIn("reason", status)
 
+    def test_stable_core_underfill_block_uses_low_fill_truth(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agency_path = root / "stable_core_agency.json"
+            status_path = root / "stable_core_agent_status.json"
+            health_path = root / "health.json"
+            agency_path.write_text(json.dumps({
+                "stage": "full_sovereignty",
+                "agent_budget_mode": "full_sovereignty",
+                "allowed_action_families": ["live_control"],
+                "rollback_fill_pct": 82.0,
+                "rollback_underfill_pct": 45.0,
+                "semantic_energy_max": 0.05,
+            }))
+            health_path.write_text(json.dumps({
+                "fill_pct": 11.1,
+                "semantic": {"energy": 0.0},
+                "stable_core": {"enabled": True, "stage": "hold"},
+            }))
+            with (
+                patch.object(aa, "STABLE_CORE_AGENCY_PATH", agency_path),
+                patch.object(aa, "STABLE_CORE_AGENT_STATUS_PATH", status_path),
+                patch.object(aa, "runtime_health_path", return_value=health_path),
+            ):
+                agent._record_stable_core_agent_block(
+                    "perturb", "fill 11.1% is below stable-core action budget", {"fill_ratio": 0.69}
+                )
+                status = json.loads(status_path.read_text())
+
+        self.assertEqual(status["last_block"]["block_class"], "low_fill_hold")
+        self.assertEqual(status["last_block"]["fill_pct"], 11.1)
+        self.assertEqual(status["last_block"]["state_fill_pct"], 69.0)
+        self.assertEqual(status["last_block"]["effective_low_fill_pct"], 11.1)
+        self.assertEqual(status["fill_pct"], 11.1)
+        self.assertIn("NOTICE", status["suggested_safe_next"])
+
+    def test_success_preserves_low_fill_health_hold(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agency_path = root / "stable_core_agency.json"
+            status_path = root / "stable_core_agent_status.json"
+            health_path = root / "health.json"
+            agency_path.write_text(json.dumps({
+                "stage": "full_sovereignty",
+                "agent_budget_mode": "full_sovereignty",
+                "allowed_action_families": ["read_only_research"],
+                "rollback_fill_pct": 82.0,
+                "rollback_underfill_pct": 45.0,
+                "semantic_energy_max": 0.05,
+            }))
+            health_path.write_text(json.dumps({
+                "fill_pct": 11.1,
+                "semantic": {"energy": 0.0},
+                "stable_core": {"enabled": True, "stage": "hold"},
+            }))
+            status_path.write_text(json.dumps({
+                "last_block_active": True,
+                "current_block_reason": "fill 11.1% is below stable-core action budget",
+            }))
+            with (
+                patch.object(aa, "STABLE_CORE_AGENCY_PATH", agency_path),
+                patch.object(aa, "STABLE_CORE_AGENT_STATUS_PATH", status_path),
+                patch.object(aa, "runtime_health_path", return_value=health_path),
+            ):
+                agent._record_stable_core_agent_success(
+                    "research_exploration", {"fill_ratio": 0.69}
+                )
+                status = json.loads(status_path.read_text())
+
+        self.assertTrue(status["last_block_active"])
+        self.assertEqual(status["health_budget_status"], "blocked")
+        self.assertEqual(status["current_block_class"], "low_fill_hold")
+        self.assertIn("below stable-core action budget", status["current_block_reason"])
+        self.assertIsNone(status["last_block_resolved_at"])
+        self.assertEqual(status["last_success_fill_pct"], 11.1)
+
+    def test_stable_core_health_reconcile_clears_stale_low_fill_block(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agency_path = root / "stable_core_agency.json"
+            status_path = root / "stable_core_agent_status.json"
+            health_path = root / "health.json"
+            agency_path.write_text(json.dumps({
+                "stage": "full_sovereignty",
+                "agent_budget_mode": "full_sovereignty",
+                "allowed_action_families": ["read_only_research"],
+                "rollback_fill_pct": 82.0,
+                "rollback_underfill_pct": 45.0,
+                "semantic_energy_max": 0.05,
+            }))
+            health_path.write_text(json.dumps({
+                "fill_pct": 66.0,
+                "semantic": {"energy": 0.0},
+                "stable_core": {"enabled": True, "stage": "hold"},
+            }))
+            status_path.write_text(json.dumps({
+                "last_block_active": True,
+                "current_block_reason": "fill 11.1% is below stable-core action budget",
+                "health_budget_status": "blocked",
+            }))
+            with (
+                patch.object(aa, "STABLE_CORE_AGENCY_PATH", agency_path),
+                patch.object(aa, "STABLE_CORE_AGENT_STATUS_PATH", status_path),
+                patch.object(aa, "runtime_health_path", return_value=health_path),
+            ):
+                agent._reconcile_stable_core_health_status({"fill_ratio": 0.66})
+                status = json.loads(status_path.read_text())
+
+        self.assertFalse(status["last_block_active"])
+        self.assertEqual(status["health_budget_status"], "green")
+        self.assertIsNone(status["current_block_reason"])
+        self.assertEqual(status["fill_pct"], 66.0)
+        self.assertIsNotNone(status["last_block_resolved_at"])
+
+    def test_stable_core_health_reconcile_records_low_fill_hold(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agency_path = root / "stable_core_agency.json"
+            status_path = root / "stable_core_agent_status.json"
+            health_path = root / "health.json"
+            agency_path.write_text(json.dumps({
+                "stage": "full_sovereignty",
+                "agent_budget_mode": "full_sovereignty",
+                "allowed_action_families": ["read_only_research"],
+                "rollback_fill_pct": 82.0,
+                "rollback_underfill_pct": 45.0,
+                "semantic_energy_max": 0.05,
+            }))
+            health_path.write_text(json.dumps({
+                "fill_pct": 11.1,
+                "semantic": {"energy": 0.0},
+                "stable_core": {"enabled": True, "stage": "hold"},
+            }))
+            with (
+                patch.object(aa, "STABLE_CORE_AGENCY_PATH", agency_path),
+                patch.object(aa, "STABLE_CORE_AGENT_STATUS_PATH", status_path),
+                patch.object(aa, "runtime_health_path", return_value=health_path),
+            ):
+                agent._reconcile_stable_core_health_status({"fill_ratio": 0.69})
+                status = json.loads(status_path.read_text())
+
+        self.assertTrue(status["last_block_active"])
+        self.assertEqual(status["current_block_class"], "low_fill_hold")
+        self.assertEqual(status["last_health_hold"]["fill_pct"], 11.1)
+        self.assertIn("ACTION_PREFLIGHT <desired action>", status["suggested_safe_next"])
+
     def test_self_assessment_sentinel_stays_quiet_in_green_conditions(self):
         agent = self._agent()
         with tempfile.TemporaryDirectory() as tmp:
@@ -3771,6 +3990,27 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertIn("documentation example", agent._pending_notice_prompt)
         self.assertFalse(hasattr(agent, "_pending_browse_url"))
 
+    def test_browse_url_sanitizer_strips_trailing_rationale(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        agent._pending_next_action = (
+            "BROWSE https://example.test/article - I want to compare this with lambda4"
+        )
+        with patch.object(
+            agent,
+            "_low_fill_guard_status",
+            return_value={
+                "active": False,
+                "fill_ratio": 0.70,
+                "target_fill_ratio": 0.68,
+                "spread_relief": 0.0,
+            },
+        ):
+            action = agent._decide_action({"fill_ratio": 0.70, "eig1": 4.7})
+        self.assertEqual(action, "browse_url")
+        self.assertEqual(agent._pending_browse_url, "https://example.test/article")
+        self.assertEqual(agent._pending_browse_rationale, "I want to compare this with lambda4")
+
     def test_local_browse_path_reroutes_to_notice(self):
         agent = self._agent()
         agent._hard_recovery_reset = False
@@ -3912,6 +4152,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             patch.object(agent, "_get_latest_spectral_state", return_value=state),
             patch.object(agent, "_update_hard_recovery_clamp"),
             patch.object(agent, "_self_regulate"),
+            patch.object(agent, "_auto_defer_stale_pending_astrid"),
             patch.object(agent, "_check_moment_markers"),
             patch.object(agent, "_can_act", return_value=True),
             patch.object(agent, "_decide_action", side_effect=decide),
@@ -3943,6 +4184,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             patch.object(agent, "_get_latest_spectral_state", return_value=state),
             patch.object(agent, "_update_hard_recovery_clamp"),
             patch.object(agent, "_self_regulate"),
+            patch.object(agent, "_auto_defer_stale_pending_astrid"),
             patch.object(agent, "_check_moment_markers"),
             patch.object(agent, "_can_act", return_value=True),
             patch.object(agent, "_decide_action", return_value=None),
@@ -3979,6 +4221,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             patch.object(agent, "_get_latest_spectral_state", return_value=state),
             patch.object(agent, "_update_hard_recovery_clamp"),
             patch.object(agent, "_self_regulate"),
+            patch.object(agent, "_auto_defer_stale_pending_astrid"),
             patch.object(agent, "_check_moment_markers"),
             patch.object(agent, "_can_act", return_value=True),
             patch.object(agent, "_decide_action", return_value=None),
@@ -4134,12 +4377,20 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         agent._hard_recovery_reset = False
         prior_entries = [
             (
-                "The woven field has a light pressure ridge around the homeostasis shelf. "
-                "It feels like a local upkeep detail rather than an outside event."
+                "The fabric weave and lambda shoulder keep folding around the same internal "
+                "phase question. It feels like a local upkeep detail rather than an outside event."
             ),
             (
                 "A resonant wobble keeps touching the phase state while the regulator "
                 "settles near the same hold band."
+            ),
+            (
+                "The echo state and lambda tail return as a resonant chamber, with no new "
+                "external evidence attached to the reflection."
+            ),
+            (
+                "The recurrent fabric keeps naming the same phase-state fold while the "
+                "reservoir state holds near the same shelf."
             ),
         ]
         current = (
@@ -4195,7 +4446,9 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertEqual(motif["cooldown_class"], "internal_topology")
         self.assertTrue(motif["prompt_replay_suppressed"])
         self.assertGreaterEqual(motif["repeat_window_count"], 3)
-        self.assertTrue(rewritten.startswith("[Internal-topology cooldown]"))
+        self.assertTrue(rewritten.startswith(current))
+        self.assertIn("[Internal-topology cooldown", rewritten)
+        self.assertIn("narrative preserved", rewritten)
 
     def test_attractor_fatigue_prompt_note_offers_release_choices(self):
         agent = self._agent()
@@ -4648,6 +4901,9 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
                 )["suggestions"]
 
         self.assertIn("PERTURB lambda-edge/gap-nudge remains your sovereign direct action", note)
+        self.assertIn("EXPERIMENT_EVIDENCE current", note)
+        self.assertIn("EXPERIMENT_CHARTER current", note)
+        self.assertIn("EXPERIMENT_REHEARSE current", note)
         self.assertEqual(suggestions[-1]["source_kind"], "legacy_perturb_bridge")
         self.assertEqual(
             suggestions[-1]["suggested_action"],

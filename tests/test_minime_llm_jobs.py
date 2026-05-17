@@ -155,6 +155,49 @@ class TestMinimeLlmJobs(unittest.TestCase):
             result_path = workspace / "llm_jobs" / "jobs" / job["job_id"] / "result.txt"
             self.assertFalse(result_path.exists())
 
+    def test_llm_job_finishes_blocked_when_action_budget_blocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "minime"
+            workspace = base_dir / "workspace"
+            db_path = root / "minime.db"
+            agent = self._agent(base_dir, workspace, db_path)
+            jobs = aa.LlmJobStore(workspace)
+            job = jobs.submit(
+                action_id="act_minime_blocked_perturb",
+                thread_id="th_minime_blocked",
+                action_text="PERTURB lambda-tail",
+                call_kind="perturb",
+            )
+
+            def block_action(*args, **kwargs):
+                agent._last_action_continuity_event = {
+                    "status": "blocked",
+                    "outcome_summary": "Stable-core agency budget blocked `perturb`: fill 11.1% is below stable-core action budget",
+                    "artifacts": [],
+                }
+
+            with (
+                patch.object(aa, "BASE_DIR", base_dir),
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+                patch.object(agent, "_llm_job_store", return_value=jobs),
+                patch.object(agent, "_execute_action", side_effect=block_action),
+            ):
+                agent._run_llm_action_job(
+                    job["job_id"],
+                    "perturb",
+                    dict(STATE),
+                    {},
+                    {"action_id": "act_minime_blocked_perturb"},
+                )
+
+            finished = jobs.read_job(job["job_id"])
+            self.assertEqual(finished["status"], "blocked")
+            self.assertIn("below stable-core action budget", finished["summary"])
+            status = json.loads((workspace / "runtime" / "llm_jobs_status.json").read_text())
+            self.assertEqual(status["recent_jobs"][0]["status"], "blocked")
+
     def test_active_worker_defers_llm_action_instead_of_inline_blocking(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

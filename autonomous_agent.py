@@ -30,7 +30,7 @@ import subprocess
 import shutil
 import socket
 import websocket
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -119,12 +119,14 @@ from btsp_signal_support import (
     parse_btsp_note,
 )
 from btsp_active_state import (
+    active_proposal_metadata,
     clear_active_proposal,
     load_active_proposal,
+    record_active_proposal_reply,
     save_active_proposal,
     should_clear_for_classification,
 )
-from btsp_social_protocol import augment_reply_with_btsp_tags
+from btsp_social_protocol import augment_reply_with_btsp_tags, parse_btsp_reply_tags
 
 
 @dataclass
@@ -801,6 +803,11 @@ HARD_RESET_BLOCKED_NEXT_ACTIONS = {
     "EXPERIMENT",
     "EXPERIMENT_START",
     "EXPERIMENT_PLAN",
+    "EXPERIMENT_CHARTER",
+    "EXPERIMENT_REHEARSE",
+    "EXPERIMENT_PREFLIGHT",
+    "EXPERIMENT_EVIDENCE",
+    "EXPERIMENT_DECIDE",
     "EXPERIMENT_BIND",
     "EXPERIMENT_OBSERVE",
     "EXPERIMENT_STATUS",
@@ -917,6 +924,9 @@ LOW_FILL_GUARD_MIN_FILL_RATIO = 0.18
 LOW_FILL_REBOUND_SPREAD_RELIEF = 0.02
 
 LOW_FILL_HEAVY_FALLBACK_ACTIONS = {
+    "perturb",
+    "experiment_spike",
+    "experiment_curiosity",
     "self_study",
     "introspect",
     "pressure_source_audit",
@@ -934,7 +944,10 @@ LOW_FILL_HEAVY_FALLBACK_ACTIONS = {
     "mike_run",
     "mike_fork",
     "codex_query",
+    "run_python",
     "write_file",
+    "pressure_relief_critical",
+    "pressure_relief_high",
     "experiment_run",
     "reservoir_layers",
 }
@@ -948,6 +961,11 @@ LOW_FILL_ADVISORY_NEXT_ACTIONS = {
     "EXPERIMENT",
     "EXPERIMENT_START",
     "EXPERIMENT_PLAN",
+    "EXPERIMENT_CHARTER",
+    "EXPERIMENT_REHEARSE",
+    "EXPERIMENT_PREFLIGHT",
+    "EXPERIMENT_EVIDENCE",
+    "EXPERIMENT_DECIDE",
     "EXPERIMENT_BIND",
     "EXPERIMENT_OBSERVE",
     "EXPERIMENT_STATUS",
@@ -1548,6 +1566,45 @@ def is_experiment_run_transcript_action(action: str) -> bool:
     }
 
 
+_LAST_NEXT_NORMALIZATION_SIGNAL_V1 = None
+
+
+def _action_verb(action: str) -> str:
+    text = str(action or "").strip()
+    if not text:
+        return ""
+    return text.split(None, 1)[0].strip("`*[](){}<>").rstrip(":").upper()
+
+
+def build_normalization_signal_v1(raw_action: str, normalized_action: str) -> Optional[Dict[str, Any]]:
+    raw_verb = _action_verb(raw_action)
+    normalized_verb = _action_verb(normalized_action)
+    if raw_verb.startswith("EXEXPERIMENT_"):
+        target = "EXPERIMENT_" + raw_verb[len("EXEXPERIMENT_"):]
+        reason = "double-ex experiment typo normalized to experiment workbench verb"
+        native_signal = "experiment typo still signals return-path intent"
+    elif raw_verb == "EXPERIENCE_PLAN":
+        target = "EXPERIMENT_PLAN"
+        reason = "experience-plan near typo normalized to experiment planning"
+        native_signal = "experience wording signals an experiment-plan return attempt"
+    elif raw_verb in {"SHADOW_TRACE", "SHADOW_EXPLORER"}:
+        target = "SHADOW_PREFLIGHT"
+        reason = "shadow diagnostic alias normalized to read-only preflight route"
+        native_signal = "trace/explorer wording signals observational shadow inquiry"
+    else:
+        return None
+    if normalized_verb not in {target, raw_verb}:
+        return None
+    return {
+        "schema_version": 1,
+        "raw_verb": raw_verb,
+        "normalized_verb": target,
+        "reason": reason,
+        "native_signal": native_signal,
+        "authority_change": False,
+    }
+
+
 def parse_next_action(text: str) -> tuple:
     """Extract NEXT: action from LLM response.
 
@@ -1558,6 +1615,8 @@ def parse_next_action(text: str) -> tuple:
     typo). See `project_unwired_actions_catalog.md` for the diagnostics that
     motivated each strip.
     """
+    global _LAST_NEXT_NORMALIZATION_SIGNAL_V1
+    _LAST_NEXT_NORMALIZATION_SIGNAL_V1 = None
     lines = text.split('\n')
     in_fence = False
     for i in range(len(lines) - 1, -1, -1):
@@ -1571,6 +1630,7 @@ def parse_next_action(text: str) -> tuple:
             action = stripped[5:].strip()
             # Strip model end-of-turn tokens that leak into the action.
             action = action.replace('<end_of_turn>', '').replace('</s>', '').strip()
+            raw_action = action
             # Kink follow-up (2026-05-14, post-Tranche-5): strip markdown
             # decorations from the FIRST whitespace-separated token (the
             # action verb). Recurring LLM artifact: `**READ_MORE**`,
@@ -1588,7 +1648,12 @@ def parse_next_action(text: str) -> tuple:
                 # remainder starts with `EXPERIMENT_`.
                 if parts[0].upper().startswith('EXEXPERIMENT_'):
                     parts[0] = parts[0][2:]
+                if parts[0].upper() == 'EXPERIENCE_PLAN':
+                    parts[0] = 'EXPERIMENT_PLAN'
+                if parts[0].upper() in {'SHADOW_TRACE', 'SHADOW_EXPLORER'}:
+                    parts[0] = 'SHADOW_PREFLIGHT'
                 action = ' '.join(parts)
+            _LAST_NEXT_NORMALIZATION_SIGNAL_V1 = build_normalization_signal_v1(raw_action, action)
             cleaned = '\n'.join(lines[:i] + lines[i+1:]).strip()
             if is_experiment_run_transcript_action(action):
                 return (None, cleaned)
@@ -1660,6 +1725,11 @@ OPERATOR_PENDING_NEXT_ALLOWED_BASES = {
     "THREAD_STATUS",
     "EXPERIMENT_START",
     "EXPERIMENT_PLAN",
+    "EXPERIMENT_CHARTER",
+    "EXPERIMENT_REHEARSE",
+    "EXPERIMENT_PREFLIGHT",
+    "EXPERIMENT_EVIDENCE",
+    "EXPERIMENT_DECIDE",
     "EXPERIMENT_OBSERVE",
     "EXPERIMENT_STATUS",
     "EXPERIMENT_REVIEW",
@@ -1898,6 +1968,11 @@ class ActionContinuityStore:
         "RECALL",
         "EXPERIMENT_START",
         "EXPERIMENT_PLAN",
+        "EXPERIMENT_CHARTER",
+        "EXPERIMENT_REHEARSE",
+        "EXPERIMENT_PREFLIGHT",
+        "EXPERIMENT_EVIDENCE",
+        "EXPERIMENT_DECIDE",
         "EXPERIMENT_BIND",
         "EXPERIMENT_OBSERVE",
         "EXPERIMENT_STATUS",
@@ -1955,6 +2030,48 @@ class ActionContinuityStore:
         "research_exploration",
         "browse_url",
         "read_more",
+    }
+    charter_guard_live_bases = {
+        "PERTURB",
+        "PULSE",
+        "BRANCH",
+        "SPREAD",
+        "CONTRACT",
+        "UNCLIFF",
+        "SOFTEN",
+        "BALANCE",
+        "WIDEN",
+        "PALETTE",
+        "LIFT_TAIL",
+        "FEATHER",
+        "NATIVE_GESTURE",
+        "RESIST",
+        "FISSURE",
+        "GOAL",
+        "CODEX",
+        "CODEX_NEW",
+        "WRITE_FILE",
+        "RUN_PYTHON",
+        "RUN",
+        "EXPERIMENT_RUN",
+        "EXP_RUN",
+        "REPAIR_APPLY",
+        "ACCEPT_PARAMETER_REQUEST",
+        "ACCEPT_REQUEST",
+        "ACCEPT",
+        "TUNE_ASTRID",
+        "INFLUENCE_ASTRID",
+    }
+    charter_guard_read_only_trace_bases = {
+        "TRACE",
+        "TRACE_LAMBDA",
+        "LAMBDA_TRACE",
+        "NOTICE_AMBIGUITY",
+        "FISSURE_TRACE",
+        "AMBIGUITY_TRACE",
+        "M6_BRIDGE",
+        "TRACE_BRIDGE",
+        "BRIDGE_TRACE",
     }
 
     def __init__(self, workspace_dir: Path, system: str = "minime", db_path: Optional[Path] = None, session_id: Optional[int] = None):
@@ -2049,6 +2166,7 @@ class ActionContinuityStore:
         route: str,
         state: Dict[str, float],
         source: str = "next",
+        normalization_signal: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         self.ensure_dirs()
         thread = self.ensure_active_thread(raw_next)
@@ -2056,7 +2174,7 @@ class ActionContinuityStore:
         started_at = self._now()
         action_id = self._unique_action_id(base)
         stage = self.stage_for_action(base, effective_action)
-        return {
+        event = {
             "schema_version": self.schema_version,
             "action_id": action_id,
             "thread_id": thread["thread_id"],
@@ -2085,6 +2203,9 @@ class ActionContinuityStore:
                 stage,
             ),
         }
+        if normalization_signal:
+            event["normalization_signal_v1"] = normalization_signal
+        return event
 
     def record_running_action(
         self,
@@ -2189,6 +2310,149 @@ class ActionContinuityStore:
             self._mirror_artifact(event["thread_id"], artifact)
         return event
 
+    def charter_required_guard_assessment(self, raw_next: str) -> Optional[Dict[str, Any]]:
+        """Return guard metadata when a needs-charter experiment should block NEXT."""
+        thread = self.current_thread()
+        if not isinstance(thread, dict):
+            return None
+        experiment_id = thread.get("active_experiment_id")
+        if not experiment_id:
+            summary = thread.get("experiment_summary")
+            if isinstance(summary, dict):
+                experiment_id = summary.get("experiment_id")
+        if not experiment_id:
+            return None
+        try:
+            experiment = self._resolve_experiment(thread, str(experiment_id))
+            runs = self._recent_experiment_runs(thread["thread_id"], experiment["experiment_id"], 8)
+            projection = self._experiment_projection(thread, experiment, runs)
+        except Exception:
+            return None
+        if projection.get("classification") != "needs_charter":
+            return None
+        reason, matched_action = self._charter_guard_block_reason(raw_next)
+        if not reason:
+            return None
+        scaffold = projection.get("charter_scaffold_v1") if isinstance(projection, dict) else None
+        scaffold_command = (
+            str(scaffold.get("command") or "").strip()
+            if isinstance(scaffold, dict)
+            else ""
+        )
+        fallback_command = (
+            "EXPERIMENT_CHARTER current :: hypothesis: ...; method_intent: ...; "
+            "proposed_next_action: ACTION_PREFLIGHT ...; evidence_targets: "
+            "spectral_condition, fill_pressure_state, recurrence_pattern, artifact_grounding; "
+            "stop_criteria: ...; consent_posture: advisory."
+        )
+        suggested_next = scaffold_command or fallback_command
+        proposed_preflight = f"ACTION_PREFLIGHT {matched_action or raw_next}".strip()
+        return {
+            "schema_version": 1,
+            "policy": "charter_required_guard_v1",
+            "active_experiment_id": experiment.get("experiment_id"),
+            "classification": "needs_charter",
+            "blocked_action": raw_next,
+            "matched_action": matched_action or self.base_action(raw_next),
+            "reason": reason,
+            "suggested_next": suggested_next,
+            "proposed_preflight_target": proposed_preflight,
+            "authority_change": False,
+            "would_dispatch": False,
+        }
+
+    def record_charter_required_guard_block(
+        self,
+        raw_next: str,
+        state: Dict[str, float],
+        assessment: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        base = self.base_action(raw_next)
+        route = ActionPreflightStore.ROUTE_BY_BASE.get(base, "charter_required_guard")
+        event = self.begin_action(
+            raw_next,
+            raw_next,
+            str(route or "charter_required_guard"),
+            "charter_required_guard",
+            state,
+            source="next",
+        )
+        event["stage"] = "blocked"
+        event["visibility"] = "protected_summary"
+        event["suggested_next"] = assessment.get("suggested_next")
+        event["charter_required_guard_v1"] = assessment
+        summary = (
+            f"Charter-required guard blocked `{raw_next}` because active experiment "
+            f"`{assessment.get('active_experiment_id')}` is needs_charter. "
+            "Review is premature until the charter is authored; use the continuity priority scaffold first. "
+            f"Suggested NEXT: {assessment.get('suggested_next')}"
+        )
+        return self.finish_action(event, "blocked", summary, state)
+
+    def _charter_guard_block_reason(self, raw_next: str) -> tuple[Optional[str], Optional[str]]:
+        action = " ".join(str(raw_next or "").split()).strip()
+        if not action:
+            return None, None
+        base = self.base_action(action)
+        if base in ACTION_PREFLIGHT_NEXT_ACTIONS or base == "SHADOW_PREFLIGHT":
+            return None, None
+        if base in self.charter_guard_live_bases:
+            return "charter_required_live_action", action
+        if base == "EXPERIMENT_BIND":
+            arg = self._strip_action_arg(action, base)
+            if "::" in arg:
+                _, inner = self._parse_selector_payload(arg)
+                inner_base = self.base_action(inner)
+                if inner_base in self.charter_guard_live_bases:
+                    return "charter_required_live_action", inner or action
+        reason = self._compound_live_intent_reason(action)
+        if reason:
+            return reason, self._compound_live_intent_match(action) or action
+        return None, None
+
+    @classmethod
+    def _compound_live_intent_reason(cls, action: str) -> Optional[str]:
+        signal = cls._normalize_signal_text(action)
+        if " then " in signal:
+            tail = signal.split(" then ", 1)[1]
+            for verb in (
+                "perturb",
+                "pulse",
+                "branch",
+                "spread",
+                "resist",
+                "native_gesture",
+                "fissure",
+                "goal",
+                "write_file",
+                "run_python",
+                "codex",
+            ):
+                if cls._contains_word(tail, verb):
+                    return "charter_required_compound_intent"
+        if (
+            "targeting" in signal
+            and "density" in signal
+            and any(term in signal for term in ("lambda", "eigenvector", "eigenvalue"))
+            and any(term in signal for term in ("increase", "raise", "lift", "boost", "amplify"))
+        ):
+            return "charter_required_compound_intent"
+        return None
+
+    @classmethod
+    def _compound_live_intent_match(cls, action: str) -> Optional[str]:
+        signal = cls._normalize_signal_text(action)
+        if " then " in signal:
+            tail = signal.split(" then ", 1)[1].strip()
+            return tail or None
+        if "targeting" in signal:
+            return action
+        return None
+
+    @staticmethod
+    def _contains_word(text: str, word: str) -> bool:
+        return re.search(rf"(?<![a-z0-9_]){re.escape(word)}(?![a-z0-9_])", text) is not None
+
     def append_proposal(self, raw_next: str, state: Optional[Dict[str, float]] = None, summary: str = "") -> None:
         self.ensure_dirs()
         payload = {
@@ -2201,10 +2465,29 @@ class ActionContinuityStore:
             "state": self._state_summary(state or {}),
             "summary": summary[:500],
         }
+        signal = build_normalization_signal_v1(raw_next, raw_next)
+        if signal:
+            payload["normalization_signal_v1"] = signal
         self._append_jsonl(self.proposals_path, payload)
 
     def handle_thread_action(self, raw_next: str, state: Dict[str, float]) -> str:
         self.ensure_dirs()
+        repair_notice = ""
+        repair = self.repair_experiment_intent(raw_next)
+        if repair:
+            self._record_experiment_intent_repair(
+                repair["original"],
+                repair["repaired"],
+                repair["reason"],
+                state,
+            )
+            repair_notice = (
+                "experiment_intent_repaired: "
+                f"`{repair['original']}` -> `{repair['repaired']}` ({repair['reason']}).\n"
+            )
+            if repair.get("focus"):
+                self._record_repaired_experiment_focus_candidate(repair["focus"], state)
+            raw_next = repair["repaired"]
         base = self.base_action(raw_next)
         arg = self._strip_action_arg(raw_next, base)
         if base in CAPABILITY_NEXT_ACTIONS:
@@ -2285,7 +2568,39 @@ class ActionContinuityStore:
         if base == "EXPERIMENT_ALT_PATHS":
             return self.experiment_alt_paths(arg or "current")
         if base == "EXPERIMENT_PLAN":
-            return self.experiment_plan(arg or None)
+            return repair_notice + self.experiment_plan(arg or None)
+        if base == "EXPERIMENT_CHARTER":
+            selector, prose = self._parse_selector_payload(arg)
+            if (
+                self._placeholder_payload(prose, empty_is_placeholder=True)
+                or not self._charter_payload_has_meaning(prose)
+            ):
+                return repair_notice + self._experiment_charter_prompt(selector)
+            experiment = self.experiment_charter(selector, prose)
+            return (
+                repair_notice +
+                f"Experiment charter recorded for `{experiment['experiment_id']}`. "
+                f"{self._charter_recording_next_line(experiment)}"
+            )
+        if base in {"EXPERIMENT_REHEARSE", "EXPERIMENT_PREFLIGHT"}:
+            run = self.experiment_rehearse(arg or None, state)
+            return repair_notice + f"Experiment rehearsal recorded as `{run['run_id']}` [{run['status']}]."
+        if base == "EXPERIMENT_EVIDENCE":
+            selector, note = self._parse_selector_payload(arg)
+            if self._placeholder_payload(note, empty_is_placeholder=True):
+                return repair_notice + self._experiment_evidence_prompt(selector)
+            run = self.experiment_evidence(selector, note, state)
+            return repair_notice + f"Experiment evidence recorded as `{run['run_id']}`."
+        if base == "EXPERIMENT_DECIDE":
+            selector, decision = self._parse_selector_payload(arg)
+            if self._placeholder_payload(decision, empty_is_placeholder=True):
+                return repair_notice + self._experiment_decide_prompt(selector)
+            experiment = self.experiment_decide(selector, decision)
+            return (
+                repair_notice +
+                f"Experiment `{experiment['experiment_id']}` decision recorded; "
+                f"status={experiment.get('status')} next={experiment.get('planned_next') or '(none)'}"
+            )
         if base == "EXPERIMENT_OBSERVE":
             selector, note = self._parse_selector_payload(arg)
             run = self.experiment_observe(selector, note, state)
@@ -2329,7 +2644,7 @@ class ActionContinuityStore:
             or event.get("effective_action")
             or "read_only_action"
         )
-        return self._append_experiment_run(
+        run = self._append_experiment_run(
             thread,
             experiment,
             action_text,
@@ -2349,6 +2664,39 @@ class ActionContinuityStore:
             f"Active experiment auto-linked read-only/protected action `{action_text}`.",
             f"EXPERIMENT_REVIEW {experiment['experiment_id']}",
             source="active_experiment_auto_link",
+        )
+        refreshed_thread = self._read_thread(thread["thread_id"]) or thread
+        refreshed_experiment = self._find_experiment_by_id(
+            thread["thread_id"],
+            experiment["experiment_id"],
+        ) or experiment
+        self._refresh_workbench_candidates(
+            refreshed_thread,
+            refreshed_experiment,
+            run=run,
+            source="active_experiment_auto_link",
+        )
+        return run
+
+    def active_experiment_evidence_hint(self, source_action: str, subject: str) -> str:
+        thread = self.current_thread()
+        if not isinstance(thread, dict) or not thread.get("active_experiment_id"):
+            return ""
+        try:
+            experiment = self._resolve_experiment(thread, "current")
+        except Exception:
+            return ""
+        if experiment.get("status") != "active":
+            return ""
+        source = (source_action or "research").strip() or "research"
+        subject = (subject or "").strip()
+        subject_clause = f" from `{subject[:140]}`" if subject else ""
+        return (
+            "\nActive workbench return cue:\n"
+            f"- This {source}{subject_clause} can remain ordinary research, or it can count as experiment evidence.\n"
+            "- To bring it home, use NEXT: EXPERIMENT_EVIDENCE current :: "
+            "what the source changed, what felt different, and which telemetry/artifact supported or countered the hypothesis.\n"
+            "- Ordinary SEARCH, BROWSE, READ_MORE, refusal, and counteroffer remain valid.\n"
         )
 
     def start_experiment(
@@ -2397,6 +2745,9 @@ class ActionContinuityStore:
             "branch_origin": branch_origin,
             "branch_refs": [],
             "motif_allowance_v1": None,
+            "charter_v1": None,
+            "evidence_v1": None,
+            "workbench_candidates_v1": None,
         }
         self._append_jsonl(self._experiments_path(thread["thread_id"]), experiment)
         thread["active_experiment_id"] = experiment_id
@@ -2413,6 +2764,9 @@ class ActionContinuityStore:
 
     def experiment_plan(self, selector: Optional[str] = None) -> str:
         thread = self.ensure_active_thread()
+        repair = self._repair_experiment_arg("EXPERIMENT_PLAN", selector or "")
+        if repair:
+            selector = repair["repaired_arg"]
         selector, focus = self._split_experiment_selector_hint(selector)
         peer = self._peer_experiment_ref_from_parts(selector, focus)
         if peer:
@@ -2428,7 +2782,12 @@ class ActionContinuityStore:
             "- Method: choose one gated NEXT action and why it fits.\n"
             "- Measures: name the artifacts/metrics that would count as evidence.\n"
             "- Stop criteria: say what would make the run complete, blocked, or too pressurized.\n"
-            f"- Concrete next action: EXPERIMENT_BIND {experiment['experiment_id']} :: <NEXT action>"
+            f"- Concrete next action example: EXPERIMENT_BIND {experiment['experiment_id']} :: ACTION_PREFLIGHT DECOMPOSE\n\n"
+            "Workbench prompt:\n"
+            "- Author a charter first when the impulse feels directive-shaped: EXPERIMENT_CHARTER current :: hypothesis: ...; method_intent: ...; proposed_next_action: ...; evidence_targets: felt, telemetry, artifact; stop_criteria: ...\n"
+            "- Rehearse before live: EXPERIMENT_REHEARSE current (or EXPERIMENT_PREFLIGHT current). Ordinary choices remain valid; refusal and counteroffer are evidence, not failure.\n"
+            "- Record what counted: EXPERIMENT_EVIDENCE current :: felt ...; telemetry ...; artifact ...\n"
+            "- Decide agency outcome: EXPERIMENT_DECIDE current :: accept because ... / refuse because ... / counter NEXT: ACTION_PREFLIGHT ..."
         )
 
     def experiment_observe(self, selector: Optional[str], note: str, state: Dict[str, float]) -> Dict[str, Any]:
@@ -2457,6 +2816,173 @@ class ActionContinuityStore:
             source="experiment_observe",
         )
 
+    def experiment_charter(self, selector: Optional[str], prose: str) -> Dict[str, Any]:
+        thread = self.ensure_active_thread()
+        peer = self._peer_experiment_ref(selector or "")
+        if peer:
+            raise ValueError(
+                f"Peer experiment `{peer['peer_experiment_id']}` belongs to {peer['peer_system']}; charter it locally only through advisory review."
+            )
+        experiment = dict(self._resolve_experiment(thread, selector))
+        charter = self._parse_experiment_charter(experiment, prose)
+        if not self._valid_experiment_charter(charter):
+            raise ValueError(self._experiment_charter_prompt(selector))
+        charter["charter_quality_v1"] = self._charter_quality_v1(charter)
+        if charter.get("hypothesis"):
+            experiment["hypothesis"] = charter["hypothesis"]
+        experiment["charter_v1"] = charter
+        if self._lifecycle_valid_experiment_charter(charter):
+            self._mark_workbench_candidate(experiment, "charter", "accepted")
+            experiment["planned_next"] = f"EXPERIMENT_REHEARSE {experiment['experiment_id']}"
+        else:
+            experiment["planned_next"] = f"EXPERIMENT_CHARTER {experiment['experiment_id']} :: hypothesis: ...; proposed_next_action: ACTION_PREFLIGHT ...; evidence_targets: spectral_condition, fill_pressure_state, recurrence_pattern, artifact_grounding; stop_criteria: ..."
+        experiment["updated_at"] = self._now()
+        self._persist_experiment_update(thread, experiment, keep_active=True)
+        return experiment
+
+    def experiment_rehearse(
+        self,
+        selector: Optional[str],
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        thread = self.ensure_active_thread()
+        peer = self._peer_experiment_ref(selector or "")
+        if peer:
+            raise ValueError(
+                f"Peer experiment `{peer['peer_experiment_id']}` belongs to {peer['peer_system']}; rehearsal can only be recorded on a local experiment."
+            )
+        experiment = dict(self._resolve_experiment(thread, selector))
+        proposed = self._charter_proposed_next_action(experiment.get("charter_v1"))
+        assessment = self._rehearsal_assessment(proposed)
+        if assessment["blocked"]:
+            suggested_next = (
+                f"EXPERIMENT_DECIDE {experiment['experiment_id']} :: counter NEXT: ACTION_PREFLIGHT DECOMPOSE"
+            )
+        else:
+            suggested_next = (
+                f"EXPERIMENT_EVIDENCE {experiment['experiment_id']} :: felt ...; telemetry ...; artifact ..."
+            )
+        experiment["planned_next"] = suggested_next
+        experiment["updated_at"] = self._now()
+        self._persist_experiment_update(thread, experiment, keep_active=True)
+        return self._append_experiment_run(
+            thread,
+            experiment,
+            proposed or "EXPERIMENT_REHEARSE",
+            assessment["stage"],
+            assessment["status"],
+            assessment["gate_decision"],
+            self._state_summary(state),
+            self._state_summary(state),
+            [],
+            assessment["summary"],
+            assessment["interpretation"],
+            suggested_next,
+            source="experiment_rehearse",
+        )
+
+    def experiment_evidence(
+        self,
+        selector: Optional[str],
+        note: str,
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        thread = self.ensure_active_thread()
+        peer = self._peer_experiment_ref(selector or "")
+        if peer:
+            raise ValueError(
+                f"Peer experiment `{peer['peer_experiment_id']}` belongs to {peer['peer_system']}; evidence can only be recorded on a local experiment."
+            )
+        experiment = dict(self._resolve_experiment(thread, selector))
+        experiment["evidence_v1"] = self._evidence_with_observation(
+            experiment.get("evidence_v1"),
+            note,
+            self._state_summary(state),
+            [],
+        )
+        self._mark_workbench_candidate(experiment, "evidence", "accepted")
+        experiment["planned_next"] = (
+            f"EXPERIMENT_DECIDE {experiment['experiment_id']} :: "
+            "pause because evidence is still thin"
+        )
+        experiment["updated_at"] = self._now()
+        self._persist_experiment_update(thread, experiment, keep_active=True)
+        return self._append_experiment_run(
+            thread,
+            experiment,
+            "EXPERIMENT_EVIDENCE",
+            "read_only",
+            "evidence_recorded",
+            {
+                "decision": "evidence_only",
+                "authority": "no action executed",
+                "felt_note_recorded": True,
+                "telemetry_snapshot_recorded": True,
+            },
+            self._state_summary(state),
+            self._state_summary(state),
+            [],
+            (note or "").strip(),
+            "Evidence recorded with a felt note and the current telemetry/artifact context.",
+            experiment.get("planned_next"),
+            source="experiment_evidence",
+        )
+
+    def experiment_decide(self, selector: Optional[str], raw_decision: str) -> Dict[str, Any]:
+        thread = self.ensure_active_thread()
+        peer = self._peer_experiment_ref(selector or "")
+        if peer:
+            raise ValueError(
+                f"Peer experiment `{peer['peer_experiment_id']}` belongs to {peer['peer_system']}; local decisions cannot mutate it."
+            )
+        experiment = dict(self._resolve_experiment(thread, selector))
+        outcome, reason = self._parse_experiment_decision(raw_decision)
+        completion_claim = reason if outcome == "complete" else None
+        experiment["evidence_v1"] = self._evidence_with_decision(
+            experiment.get("evidence_v1"),
+            outcome,
+            reason,
+            completion_claim=completion_claim,
+        )
+        proposed = self._charter_proposed_next_action(experiment.get("charter_v1"))
+        keep_active = True
+        if outcome == "accept":
+            experiment["status"] = "active"
+            experiment["planned_next"] = (
+                f"EXPERIMENT_BIND {experiment['experiment_id']} :: {proposed}"
+                if proposed
+                else f"EXPERIMENT_REHEARSE {experiment['experiment_id']}"
+            )
+        elif outcome == "refuse":
+            experiment["status"] = "refused"
+            experiment["success_observation"] = f"Refused: {reason}"
+            experiment["planned_next"] = "THREAD_STATUS current"
+            keep_active = False
+        elif outcome == "counter":
+            experiment["status"] = "active"
+            experiment["planned_next"] = self._counteroffered_next(reason) or (
+                f"EXPERIMENT_CHARTER {experiment['experiment_id']} :: hypothesis: ...; proposed_next_action: ACTION_PREFLIGHT ..."
+            )
+        elif outcome == "pause":
+            experiment["status"] = "paused"
+            experiment["success_observation"] = f"Paused: {reason}"
+            experiment["planned_next"] = f"EXPERIMENT_RESUME {experiment['experiment_id']}"
+            keep_active = False
+        elif outcome == "complete":
+            experiment["status"] = "complete"
+            experiment["success_observation"] = reason
+            experiment["planned_next"] = "THREAD_STATUS current"
+            keep_active = False
+        else:
+            experiment["status"] = "active"
+            experiment["planned_next"] = (
+                f"EXPERIMENT_DECIDE {experiment['experiment_id']} :: "
+                "pause because evidence is still thin"
+            )
+        experiment["updated_at"] = self._now()
+        self._persist_experiment_update(thread, experiment, keep_active=keep_active)
+        return experiment
+
     def experiment_status(self, selector: Optional[str] = None) -> str:
         thread = self.ensure_active_thread()
         peer = self._peer_experiment_ref(selector or "")
@@ -2473,10 +2999,22 @@ class ActionContinuityStore:
         experiment = self._resolve_experiment(thread, selector)
         runs = self._recent_experiment_runs(thread["thread_id"], experiment["experiment_id"], 5)
         run_text = self._render_run_list(runs)
+        projection_experiment = self._experiment_projection(thread, experiment, runs)
         return (
             f"Experiment review `{experiment['experiment_id']}`: {experiment['title']}\n"
+            f"{self._charter_required_review_line(projection_experiment)}"
+            f"{self._charter_scaffold_line(projection_experiment, priority=True)}"
+            f"{self._peer_compare_cue_line(projection_experiment)}"
             f"Question: {experiment['question']}\n"
+            f"Lifecycle: {projection_experiment['classification']}\n"
+            f"{projection_experiment['charter_status']}\n"
+            f"{projection_experiment['evidence_status']}\n"
+            f"{projection_experiment['candidate_status']}\n"
+            f"{self._native_continuity_status_line(projection_experiment)}"
             f"Learned so far:\n{run_text}\n\n"
+            "Review lens: completion is strong when felt evidence and telemetry/artifact evidence both exist; otherwise classify it as thin rather than failed.\n"
+            "Agency options: accept, refuse, counter, pause, or complete. Ordinary choices remain valid.\n\n"
+            f"Continuity return:\n{projection_experiment['continuity_return']}\n\n"
             f"Suggested next:\n{experiment.get('planned_next') or 'EXPERIMENT_PLAN current'}"
         )
 
@@ -2514,7 +3052,8 @@ class ActionContinuityStore:
             "Dear Astrid,\n\n"
             "Minime is asking for advisory peer review on a being-owned experiment.\n\n"
             f"{status}\n\n"
-            "Please reply with three likely snags and one test each. Treat this as advisory: "
+            "Please reply with three likely snags and one test each. If the route feels heavy, "
+            "counteroffer a safer charter or rehearsal path. Treat this as advisory: "
             "do not assume new control authority, and prefer concrete source/action-thread issues "
             "over broad philosophy unless a safety or schema snag appears.\n"
         )
@@ -2672,6 +3211,7 @@ class ActionContinuityStore:
                 "existing_dispatcher": True,
                 "inner_action_id": inner_event.get("action_id") if isinstance(inner_event, dict) else None,
                 "inner_route": inner_event.get("route") if isinstance(inner_event, dict) else None,
+                "charter_relation": self._charter_bind_relation(experiment, inner_action),
             },
             pre_state,
             post_state,
@@ -2749,10 +3289,9 @@ class ActionContinuityStore:
             thread = self.current_thread()
             if not thread:
                 return None
-            recent = self._recent_events(thread["thread_id"], 3)
+            projection = self._thread_projection(thread)
             recent_text = "\n".join(
-                f"  - {event.get('effective_action')} [{event.get('status')}]: {event.get('outcome_summary', '')}"
-                for event in recent
+                f"  - {summary}" for summary in projection["recent_event_summaries"][:3]
             ) or "  - none yet"
             thread_resonance = thread.get("thread_resonance_density_v1")
             resonance_line = ""
@@ -2782,13 +3321,20 @@ class ActionContinuityStore:
                     f"foothold_ema={thread_fluctuation.get('foothold_ema')}\n"
                 )
             experiment_line = ""
-            experiment = thread.get("experiment_summary")
+            experiment = projection.get("active_experiment")
             if isinstance(experiment, dict):
                 experiment_line = (
                     f"Active experiment: {experiment.get('title', '(untitled)')} "
                     f"({experiment.get('experiment_id', 'unknown')}) "
                     f"question={experiment.get('question', '(none)')} "
                     f"planned_next={experiment.get('planned_next') or '(none)'}\n"
+                    f"{self._charter_required_review_line(experiment)}"
+                    f"Lifecycle: {experiment.get('classification', 'unknown')}\n"
+                    f"{experiment.get('charter_status')}\n"
+                    f"{experiment.get('evidence_status')}\n"
+                    f"{experiment.get('candidate_status') or ''}\n"
+                    f"{self._charter_scaffold_line(experiment)}"
+                    "Workbench reminder: author a charter, rehearse before live, record spectral/state plus artifact evidence, then accept/refuse/counter/pause/complete. Ordinary choices remain valid.\n"
                 )
             allowance = thread.get("motif_allowance_v1")
             allowance_line = ""
@@ -2801,6 +3347,7 @@ class ActionContinuityStore:
                     "Allowance culture: deepen, branch, compare, release, rest, or hold space are all valid; branching preserves the original return point.\n"
                 )
             preflight_line = self._preflight_recommendation_line(thread)
+            native_return = self._native_return_cue_line(projection)
             return (
                 f"Current action thread: {thread['title']} ({thread['thread_id']})\n"
                 f"Why return: {thread.get('why_return', '')}\n"
@@ -2810,10 +3357,13 @@ class ActionContinuityStore:
                 f"{fluctuation_line}"
                 f"{experiment_line}"
                 f"{allowance_line}"
+                f"{projection.get('continuity_return_line') or ''}"
+                f"{native_return}"
+                f"{self._stale_projection_line(projection)}"
                 f"{preflight_line}"
                 f"Recent thread events:\n{recent_text}\n"
                 "Thread actions available: THREAD_START, THREADS, THREAD_STATUS, THREAD_NOTE, RESUME, SAVEPOINT, RECALL.\n"
-                "Experiment actions available: ACTION_PREFLIGHT <NEXT action>, EXPERIMENT_START, EXPERIMENT_PLAN, EXPERIMENT_BIND, EXPERIMENT_OBSERVE, EXPERIMENT_STATUS, EXPERIMENT_REVIEW, EXPERIMENT_CLOSE, EXPERIMENT_PEER_REVIEW, EXPERIMENT_BRANCH, EXPERIMENT_RESUME, EXPERIMENT_COMPARE, EXPERIMENT_ALT_PATHS. Plain EXPERIMENT/SELF_EXPERIMENT auto-bind to active/default experiment continuity; read-only research actions auto-link when an experiment is active."
+                "Experiment actions available: ACTION_PREFLIGHT <NEXT action>, EXPERIMENT_START, EXPERIMENT_PLAN, EXPERIMENT_CHARTER, EXPERIMENT_REHEARSE, EXPERIMENT_PREFLIGHT, EXPERIMENT_EVIDENCE, EXPERIMENT_DECIDE, EXPERIMENT_BIND, EXPERIMENT_OBSERVE, EXPERIMENT_STATUS, EXPERIMENT_REVIEW, EXPERIMENT_CLOSE, EXPERIMENT_PEER_REVIEW, EXPERIMENT_BRANCH, EXPERIMENT_RESUME, EXPERIMENT_COMPARE, EXPERIMENT_ALT_PATHS. Plain EXPERIMENT/SELF_EXPERIMENT auto-bind to active/default experiment continuity; read-only research actions auto-link when an experiment is active."
             )
         except Exception as exc:
             logging.debug(f"Could not render action continuity prompt summary: {exc}")
@@ -3306,7 +3856,8 @@ class ActionContinuityStore:
         self._set_active_thread(thread["thread_id"])
 
     def _write_next_md(self, thread: Dict[str, Any]) -> None:
-        experiment = thread.get("experiment_summary")
+        projection = self._thread_projection(thread)
+        experiment = projection.get("active_experiment")
         experiment_text = ""
         if isinstance(experiment, dict):
             experiment_text = (
@@ -3314,6 +3865,13 @@ class ActionContinuityStore:
                 f"({experiment.get('experiment_id', 'unknown')})\n"
                 f"Question: {experiment.get('question', '(none)')}\n"
                 f"Planned NEXT: {experiment.get('planned_next') or '(none)'}\n"
+                f"{self._charter_required_review_line(experiment)}"
+                f"Lifecycle: {experiment.get('classification', 'unknown')}\n"
+                f"{experiment.get('charter_status')}\n"
+                f"{experiment.get('evidence_status')}\n"
+                f"{experiment.get('candidate_status') or ''}\n"
+                f"{self._charter_scaffold_line(experiment)}"
+                "Workbench reminder: author a charter, rehearse before live, record spectral/state plus artifact evidence, then accept/refuse/counter/pause/complete. Ordinary choices remain valid.\n"
             )
         allowance = thread.get("motif_allowance_v1")
         allowance_text = ""
@@ -3329,6 +3887,9 @@ class ActionContinuityStore:
             f"Why return: {thread.get('why_return', '')}\n\n"
             f"{experiment_text}"
             f"{allowance_text}"
+            f"{projection.get('continuity_return_line') or ''}"
+            f"{self._native_return_cue_line(projection)}"
+            f"{self._stale_projection_line(projection)}"
             "Protected note: ambiguity and private reflection remain valid; this thread is a return path, not a demand for productivity.\n"
         )
         (self._thread_dir(thread["thread_id"]) / "next.md").write_text(body)
@@ -3595,7 +4156,7 @@ class ActionContinuityStore:
             "Dear Astrid,\n\n"
             f"Minime is referencing your experiment `{peer['peer_experiment_id']}` and asks for advisory peer review without changing your experiment state.\n\n"
             f"Minime local context:\n{local_context}\n\n"
-            "Please reply with three likely snags and one test each. Treat this as advisory: no new control authority is implied.\n"
+            "Please reply with three likely snags and one test each. Counteroffer a safer charter or rehearsal path if the route feels too heavy. Treat this as advisory: no new control authority is implied.\n"
         )
         return f"Peer experiment review requested from Astrid for `{peer['peer_experiment_id']}`: {path}"
 
@@ -3622,6 +4183,17 @@ class ActionContinuityStore:
             "parent_experiment_id": experiment.get("parent_experiment_id"),
             "branch_refs": experiment.get("branch_refs") or [],
             "motif_allowance_v1": experiment.get("motif_allowance_v1"),
+            "charter_v1": experiment.get("charter_v1"),
+            "charter_quality_v1": (
+                self._charter_quality_v1(experiment.get("charter_v1"))
+                if self._valid_experiment_charter(experiment.get("charter_v1"))
+                else None
+            ),
+            "evidence_v1": experiment.get("evidence_v1"),
+            "workbench_candidates_v1": experiment.get("workbench_candidates_v1"),
+            "workbench_charter": self._workbench_charter_status(experiment),
+            "workbench_evidence": self._workbench_evidence_status(experiment),
+            "workbench_candidates": self._workbench_candidate_status(experiment),
         }
 
     def _parse_experiment_start(self, raw: str) -> tuple[str, str, Optional[Dict[str, Any]]]:
@@ -3685,10 +4257,1027 @@ class ActionContinuityStore:
         if "::" in raw:
             selector, payload = raw.split("::", 1)
             selector = selector.strip()
-            if selector and selector.lower() != "current":
+            if (
+                selector
+                and selector.lower() != "current"
+                and not self._selector_placeholder(selector)
+            ):
                 return selector, payload.strip()
             return None, payload.strip()
         return None, raw.strip()
+
+    @staticmethod
+    def _selector_placeholder(text: str) -> bool:
+        normalized = re.sub(r"\s+", "", str(text or "").strip().casefold())
+        return normalized in {"[current|id]", "current|id", "[current/id]", "current/id"}
+
+    @staticmethod
+    def _placeholder_payload(text: str, *, empty_is_placeholder: bool = False) -> bool:
+        trimmed = str(text or "").strip()
+        if not trimmed:
+            return empty_is_placeholder
+        lowered = trimmed.casefold()
+        return (
+            lowered
+            in {
+                "<structured prose>",
+                "<felt note>",
+                "<reason>",
+                "<note>",
+                "...",
+                "…",
+                "current",
+            }
+            or re.fullmatch(r"[.\s…_-]+", trimmed) is not None
+            or (trimmed.startswith("<") and trimmed.endswith(">"))
+        )
+
+    @staticmethod
+    def _split_selector_tail(raw: str) -> tuple[str, str]:
+        text = str(raw or "").strip()
+        if "::" in text:
+            selector, tail = text.split("::", 1)
+            return selector.strip(), tail.strip()
+        for marker in (" — ", " – ", " - ", "—", "–"):
+            if marker in text:
+                selector, tail = text.split(marker, 1)
+                return selector.strip(), tail.strip()
+        return text, ""
+
+    def _has_current_experiment(self) -> bool:
+        thread = self.current_thread()
+        if not thread:
+            return False
+        if thread.get("active_experiment_id"):
+            return True
+        try:
+            return bool(self._latest_experiments(thread["thread_id"]))
+        except Exception:
+            return False
+
+    def _repair_experiment_arg(self, base: str, raw_arg: str) -> Optional[Dict[str, str]]:
+        base = str(base or "").upper()
+        if base not in {
+            "EXPERIMENT_PLAN",
+            "EXPERIMENT_CHARTER",
+            "EXPERIMENT_EVIDENCE",
+            "EXPERIMENT_DECIDE",
+            "EXPERIMENT_REHEARSE",
+            "EXPERIMENT_PREFLIGHT",
+        }:
+            return None
+        text = str(raw_arg or "").strip()
+        if not text:
+            return None
+        selector, tail = self._split_selector_tail(text)
+        if self._selector_placeholder(selector):
+            reason = "placeholder selector repaired to current experiment"
+            if base == "EXPERIMENT_PLAN":
+                focus = "" if self._placeholder_payload(tail) else tail
+                repaired_arg = f"current {focus}".strip()
+            else:
+                payload = "" if self._placeholder_payload(tail) else tail
+                repaired_arg = f"current :: {payload}".rstrip()
+            return {"repaired_arg": repaired_arg, "reason": reason}
+        if (
+            base == "EXPERIMENT_PLAN"
+            and tail
+            and selector.isdigit()
+            and self._has_current_experiment()
+        ):
+            return {
+                "repaired_arg": f"current {tail}".strip(),
+                "reason": "numeric fragment treated as focus text for current experiment",
+            }
+        if base in {"EXPERIMENT_REHEARSE", "EXPERIMENT_PREFLIGHT"}:
+            if not self._has_current_experiment():
+                return None
+            selector_norm = self._normalize_experiment_selector(selector or text)
+            if selector_norm == "current" or selector_norm.startswith("exp_"):
+                return None
+            focus = text
+            return {
+                "repaired_arg": "current",
+                "reason": "motif or focus text treated as current experiment preflight focus",
+                "focus": focus,
+            }
+        return None
+
+    def repair_experiment_intent(self, raw_next: str) -> Optional[Dict[str, str]]:
+        base = self.base_action(raw_next)
+        arg = self._strip_action_arg(raw_next, base)
+        repair = self._repair_experiment_arg(base, arg)
+        if not repair:
+            return None
+        repaired = f"{base} {repair['repaired_arg']}".strip()
+        if repaired == str(raw_next or "").strip():
+            return None
+        return {
+            "original": str(raw_next or "").strip(),
+            "repaired": repaired,
+            "reason": repair["reason"],
+            "focus": repair.get("focus"),
+        }
+
+    def can_repair_experiment_intent(self, raw_next: str) -> bool:
+        base = self.base_action(raw_next)
+        arg = self._strip_action_arg(raw_next, base)
+        return self._repair_experiment_arg(base, arg) is not None
+
+    def _record_experiment_intent_repair(
+        self,
+        original: str,
+        repaired: str,
+        reason: str,
+        state: Dict[str, float],
+    ) -> None:
+        try:
+            event = self.begin_action(
+                original,
+                "EXPERIMENT_INTENT_REPAIR",
+                repaired,
+                "action_continuity",
+                state,
+            )
+            event["stage"] = "read_only"
+            event["visibility"] = "protected_summary"
+            event["suggested_next"] = repaired
+            artifact = {
+                "kind": "experiment_intent_repaired",
+                "original": original,
+                "repaired": repaired,
+                "reason": reason,
+            }
+            self.finish_action(
+                event,
+                "repaired",
+                f"experiment_intent_repaired: {original} -> {repaired} ({reason})",
+                state,
+                [artifact],
+            )
+        except Exception as exc:
+            logging.debug("Could not record experiment intent repair receipt: %s", exc)
+
+    def _experiment_charter_prompt(self, selector: Optional[str]) -> str:
+        target = selector or "current"
+        scaffold_line = ""
+        try:
+            thread = self.current_thread()
+            if thread:
+                experiment = self._resolve_experiment(thread, target)
+                runs = self._recent_experiment_runs(thread["thread_id"], experiment["experiment_id"], 8)
+                scaffold = self._charter_scaffold_v1(thread, experiment, runs)
+                if isinstance(scaffold, dict) and scaffold.get("command"):
+                    scaffold_line = f"\nConcrete scaffold (not recorded):\n{scaffold['command']}\n"
+        except Exception:
+            scaffold_line = ""
+        return (
+            "Experiment charter needs concrete authored prose; no charter was recorded.\n"
+            f"Try: EXPERIMENT_CHARTER {target} :: hypothesis: ...; method_intent: ...; "
+            "proposed_next_action: ACTION_PREFLIGHT ...; evidence_targets: felt, telemetry, artifact; "
+            "stop_criteria: ...; consent_posture: advisory."
+            f"{scaffold_line}"
+        )
+
+    @staticmethod
+    def _experiment_evidence_prompt(selector: Optional[str]) -> str:
+        target = selector or "current"
+        return (
+            "Experiment evidence needs a concrete felt note; no evidence run was recorded.\n"
+            f"Try: EXPERIMENT_EVIDENCE {target} :: felt ...; telemetry stayed ...; artifact ..."
+        )
+
+    @staticmethod
+    def _experiment_decide_prompt(selector: Optional[str]) -> str:
+        target = selector or "current"
+        return (
+            "Experiment decision needs a concrete agency outcome; no decision was recorded.\n"
+            f"Try: EXPERIMENT_DECIDE {target} :: accept|refuse|counter|pause|complete because ..."
+        )
+
+    def _parse_experiment_charter(
+        self,
+        experiment: Dict[str, Any],
+        raw: str,
+    ) -> Dict[str, Any]:
+        raw = (raw or "").strip()
+        hypothesis = self._charter_field(raw, ("hypothesis",)) or experiment.get("hypothesis") or ""
+        method_intent = self._charter_field(raw, ("method_intent", "method")) or ""
+        proposed_next_action = (
+            self._charter_field(raw, ("proposed_next_action", "next"))
+            or self._find_next_line(raw)
+            or ""
+        )
+        return {
+            "schema_version": self.schema_version,
+            "authored_by": self.system,
+            "hypothesis": hypothesis,
+            "method_intent": method_intent,
+            "proposed_next_action": proposed_next_action,
+            "evidence_targets": self._charter_list_field(raw, ("evidence_targets", "evidence", "measures")),
+            "stop_criteria": self._charter_list_field(raw, ("stop_criteria", "stop")),
+            "consent_posture": (
+                self._charter_field(raw, ("consent_posture", "consent"))
+                or "advisory; ordinary choices remain valid; refusal and counteroffer are valid outcomes"
+            ),
+            "authority_level": (
+                self._charter_field(raw, ("authority_level", "authority"))
+                or "rehearsal_first_existing_gates_only; no new live-control authority"
+            ),
+            "source_journal_refs": self._charter_list_field(raw, ("source_journal_refs", "source")),
+            "raw_text": raw,
+            "recorded_at": self._now(),
+        }
+
+    @staticmethod
+    def _charter_field(raw: str, labels: tuple[str, ...]) -> Optional[str]:
+        text = str(raw or "")
+        all_labels = (
+            "hypothesis",
+            "method_intent",
+            "method",
+            "proposed_next_action",
+            "next",
+            "evidence_targets",
+            "evidence",
+            "measures",
+            "stop_criteria",
+            "stop",
+            "consent_posture",
+            "consent",
+            "authority_level",
+            "authority",
+            "source_journal_refs",
+            "source",
+        )
+        label_pattern = "|".join(re.escape(label) for label in all_labels)
+        marker = re.compile(
+            rf"(?:^|[;\n])\s*[-*]?\s*(?P<label>{label_pattern})\s*(?::|=)\s*",
+            re.IGNORECASE,
+        )
+        matches = list(marker.finditer(text))
+        wanted = {label.casefold() for label in labels}
+        for index, match in enumerate(matches):
+            if match.group("label").casefold() not in wanted:
+                continue
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+            value = text[match.end():end].strip().strip(";").strip()
+            if value:
+                return value
+        return None
+
+    def _charter_list_field(self, raw: str, labels: tuple[str, ...]) -> List[str]:
+        value = self._charter_field(raw, labels)
+        if not value:
+            return []
+        return [part.strip() for part in re.split(r"[,;]", value) if part.strip()]
+
+    @staticmethod
+    def _find_next_line(raw: str) -> Optional[str]:
+        for line in str(raw or "").splitlines():
+            trimmed = line.strip()
+            if trimmed.casefold().startswith("next:"):
+                value = trimmed[len("next:"):].strip()
+                return value or None
+        return None
+
+    def _charter_payload_has_meaning(self, raw: str) -> bool:
+        raw = str(raw or "").strip()
+        if not raw or self._placeholder_payload(raw):
+            return False
+        return self._valid_experiment_charter(self._parse_experiment_charter({}, raw))
+
+    @staticmethod
+    def _meaningful_charter_text(value: Any) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        return not ActionContinuityStore._placeholder_payload(text)
+
+    @classmethod
+    def _meaningful_charter_list(cls, value: Any) -> bool:
+        if not isinstance(value, list):
+            return False
+        return any(cls._meaningful_charter_text(item) for item in value)
+
+    @classmethod
+    def _valid_experiment_charter(cls, charter: Any) -> bool:
+        if not isinstance(charter, dict):
+            return False
+        return bool(
+            cls._meaningful_charter_text(charter.get("hypothesis"))
+            or cls._meaningful_charter_text(charter.get("method_intent"))
+            or cls._meaningful_charter_text(charter.get("proposed_next_action"))
+            or cls._meaningful_charter_list(charter.get("evidence_targets"))
+            or cls._meaningful_charter_list(charter.get("stop_criteria"))
+        )
+
+    @classmethod
+    def _charter_quality_v1(cls, charter: Any) -> Dict[str, Any]:
+        charter = charter if isinstance(charter, dict) else {}
+        missing = []
+        if not cls._meaningful_charter_text(charter.get("hypothesis")):
+            missing.append("hypothesis")
+        if not cls._meaningful_charter_text(charter.get("proposed_next_action")):
+            missing.append("proposed_next_action")
+        if not cls._meaningful_charter_list(charter.get("evidence_targets")):
+            missing.append("evidence_targets")
+        lifecycle_valid = not missing
+        return {
+            "schema_version": 1,
+            "lifecycle_valid": lifecycle_valid,
+            "missing_fields": missing,
+            "repair_required": not lifecycle_valid,
+        }
+
+    @classmethod
+    def _lifecycle_valid_experiment_charter(cls, charter: Any) -> bool:
+        if not cls._valid_experiment_charter(charter):
+            return False
+        return bool(cls._charter_quality_v1(charter).get("lifecycle_valid"))
+
+    @classmethod
+    def _experiment_evidence_is_meaningful(cls, evidence: Any) -> bool:
+        if not isinstance(evidence, dict):
+            return False
+        felt = evidence.get("felt_observations")
+        meaningful_felt = isinstance(felt, list) and any(
+            isinstance(item, dict)
+            and (
+                cls._meaningful_charter_text(item.get("note"))
+                or cls._meaningful_charter_text(item.get("felt"))
+                or cls._meaningful_charter_text(item.get("summary"))
+            )
+            for item in felt
+        )
+        telemetry = evidence.get("telemetry_snapshots")
+        meaningful_telemetry = isinstance(telemetry, list) and bool(telemetry)
+        artifacts = evidence.get("artifact_refs")
+        meaningful_artifacts = isinstance(artifacts, list) and any(
+            (isinstance(item, dict) and bool(item))
+            or cls._meaningful_charter_text(item)
+            for item in artifacts
+        )
+        return meaningful_felt or meaningful_telemetry or meaningful_artifacts
+
+    @classmethod
+    def _charter_proposed_next_action(cls, charter: Any) -> str:
+        if not cls._lifecycle_valid_experiment_charter(charter):
+            return ""
+        return str(charter.get("proposed_next_action") or "").strip()
+
+    def _rehearsal_assessment(self, action_text: str) -> Dict[str, Any]:
+        action_text = (action_text or "").strip()
+        if not action_text:
+            return {
+                "stage": "blocked",
+                "status": "rehearsal_blocked",
+                "blocked": True,
+                "gate_decision": {
+                    "decision": "blocked",
+                    "reason": "charter has no proposed_next_action",
+                    "would_dispatch": False,
+                    "dry_run": True,
+                },
+                "summary": "Rehearsal blocked because the charter has no proposed NEXT action.",
+                "interpretation": "Author or counteroffer a charter with a concrete proposed_next_action before rehearsal.",
+            }
+        base = self.base_action(action_text)
+        route = ActionPreflightStore.ROUTE_BY_BASE.get(base, "")
+        stage = self.stage_for_action(base, route or "")
+        live_shadow = base == "SHADOW_INFLUENCE" and "--stage=live" in action_text.lower()
+        live = (
+            stage in {"live_write", "live_control"}
+            or live_shadow
+            or base in {
+                "PERTURB",
+                "NATIVE_GESTURE",
+                "SENSORY_WRITE",
+                "CONTROL_WRITE",
+                "RUN_PYTHON",
+                "EXPERIMENT_RUN",
+                "CODEX",
+                "CODEX_NEW",
+                "WRITE_FILE",
+            }
+        )
+        if live:
+            return {
+                "stage": "blocked",
+                "status": "rehearsal_blocked",
+                "blocked": True,
+                "gate_decision": {
+                    "decision": "blocked",
+                    "reason": "rehearsal never dispatches live write/control/sensory/native actions",
+                    "would_dispatch": False,
+                    "dry_run": True,
+                    "proposed_base": base,
+                    "proposed_stage": stage,
+                },
+                "summary": "Rehearsal recorded without executing the proposed live action.",
+                "interpretation": "Counteroffer a read-only preflight, review, self-study, or diagnostic route before any live gate.",
+            }
+        return {
+            "stage": "read_only",
+            "status": "rehearsed",
+            "blocked": False,
+            "gate_decision": {
+                "decision": "dry_run_only",
+                "would_dispatch": True,
+                "dry_run": True,
+                "proposed_base": base,
+                "proposed_stage": stage,
+                "authority": "read-only rehearsal; no live action executed",
+            },
+            "summary": "Read-only rehearsal recorded for the chartered proposed action.",
+            "interpretation": "Record felt evidence and metric/artifact context before deciding whether to accept, refuse, counter, pause, or complete.",
+        }
+
+    def _evidence_with_observation(
+        self,
+        existing: Any,
+        note: str,
+        state: Dict[str, Any],
+        artifacts: List[Dict[str, Any]],
+        completion_claim: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        existing = existing if isinstance(existing, dict) else {}
+        felt = list(existing.get("felt_observations") or [])
+        if (note or "").strip():
+            felt.append({"recorded_at": self._now(), "note": (note or "").strip()})
+        telemetry = list(existing.get("telemetry_snapshots") or [])
+        if state:
+            telemetry.append({"recorded_at": self._now(), "snapshot": state})
+        artifact_refs = list(existing.get("artifact_refs") or [])
+        artifact_refs.extend(artifacts or [])
+        return {
+            "schema_version": self.schema_version,
+            "felt_observations": felt,
+            "telemetry_snapshots": telemetry,
+            "artifact_refs": artifact_refs,
+            "counterevidence": list(existing.get("counterevidence") or []),
+            "decisions": list(existing.get("decisions") or []),
+            "completion_claim": completion_claim or existing.get("completion_claim"),
+        }
+
+    def _evidence_with_decision(
+        self,
+        existing: Any,
+        outcome: str,
+        reason: str,
+        completion_claim: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        evidence = self._evidence_with_observation(
+            existing,
+            "",
+            {},
+            [],
+            completion_claim=completion_claim,
+        )
+        evidence.setdefault("decisions", []).append({
+            "recorded_at": self._now(),
+            "outcome": outcome,
+            "reason": (reason or "").strip(),
+        })
+        return evidence
+
+    @staticmethod
+    def _parse_experiment_decision(raw: str) -> tuple[str, str]:
+        text = (raw or "").strip()
+        head, _, tail = text.partition(" ")
+        outcome = {
+            "accept": "accept",
+            "accepted": "accept",
+            "refuse": "refuse",
+            "refused": "refuse",
+            "decline": "refuse",
+            "declined": "refuse",
+            "counter": "counter",
+            "counteroffer": "counter",
+            "countered": "counter",
+            "pause": "pause",
+            "paused": "pause",
+            "complete": "complete",
+            "completed": "complete",
+            "done": "complete",
+        }.get(head.casefold(), "pause")
+        reason = tail.strip() or text
+        return outcome, reason
+
+    def _counteroffered_next(self, reason: str) -> Optional[str]:
+        return self._find_next_line(reason) or (
+            reason[reason.upper().find("NEXT:") + len("NEXT:"):].strip()
+            if "NEXT:" in reason.upper()
+            else None
+        )
+
+    @classmethod
+    def _workbench_charter_status(cls, experiment: Dict[str, Any]) -> str:
+        charter = experiment.get("charter_v1")
+        if not cls._valid_experiment_charter(charter):
+            return "Workbench charter: missing. Use EXPERIMENT_CHARTER current :: hypothesis: ...; proposed_next_action: ..."
+        proposed = str(charter.get("proposed_next_action") or "(missing proposed_next_action)").strip()
+        targets = len(charter.get("evidence_targets") or [])
+        quality = cls._charter_quality_v1(charter)
+        if not quality.get("lifecycle_valid"):
+            missing = ", ".join(quality.get("missing_fields") or []) or "unknown"
+            return (
+                "Workbench charter: needs repair "
+                f"missing={missing} proposed_next_action=`{proposed}` evidence_targets={targets}"
+            )
+        return f"Workbench charter: present proposed_next_action=`{proposed}` evidence_targets={targets}"
+
+    @staticmethod
+    def _workbench_evidence_status(experiment: Dict[str, Any]) -> str:
+        evidence = experiment.get("evidence_v1") if isinstance(experiment.get("evidence_v1"), dict) else {}
+        felt = len(evidence.get("felt_observations") or [])
+        telemetry = len(evidence.get("telemetry_snapshots") or [])
+        artifacts = len(evidence.get("artifact_refs") or [])
+        strength = "stronger" if felt and (telemetry or artifacts) else "thin"
+        return f"Workbench evidence: {strength} felt={felt} telemetry={telemetry} artifacts={artifacts}"
+
+    @staticmethod
+    def _workbench_candidate_status(experiment: Dict[str, Any]) -> str:
+        candidates = experiment.get("workbench_candidates_v1")
+        if not isinstance(candidates, dict):
+            return ""
+        lines = []
+        for key, label in (("charter", "Draft charter"), ("evidence", "Draft evidence")):
+            candidate = candidates.get(key)
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("status") != "candidate":
+                continue
+            command = str(candidate.get("command") or "").strip()
+            if not command:
+                continue
+            lines.append(f"{label}: {command}")
+        if not lines:
+            return ""
+        return "Workbench draft candidates:\n" + "\n".join(f"- {line}" for line in lines)
+
+    @staticmethod
+    def _normalize_signal_text(text: Any) -> str:
+        return (
+            str(text or "")
+            .casefold()
+            .replace("λ", "lambda")
+            .replace("₁", "1")
+            .replace("₂", "2")
+            .replace("₃", "3")
+            .replace("₄", "4")
+            .replace("–", "-")
+            .replace("—", "-")
+        )
+
+    def _preferred_charter_scaffold_next(
+        self,
+        experiment: Dict[str, Any],
+        runs: List[Dict[str, Any]],
+    ) -> str:
+        planned_next = str(experiment.get("planned_next") or "")
+        counter_next = self._counteroffered_next(planned_next)
+        if counter_next:
+            return counter_next
+        candidates = experiment.get("workbench_candidates_v1")
+        if isinstance(candidates, dict):
+            charter = candidates.get("charter")
+            if isinstance(charter, dict):
+                proposed = str(charter.get("proposed_next_action") or "").strip()
+                if proposed:
+                    return proposed
+        for run in reversed(runs or []):
+            action = str(run.get("action_text") or "").strip()
+            if action and self.base_action(action) not in {"BROWSE", "SEARCH", "READ_MORE", "LOOK"}:
+                return action
+        return "ACTION_PREFLIGHT DECOMPOSE"
+
+    def _charter_scaffold_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        runs: List[Dict[str, Any]],
+        classification: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        classification = classification or self._experiment_classification(experiment, runs)
+        if classification != "needs_charter":
+            return None
+        proposed_next = self._preferred_charter_scaffold_next(experiment, runs)
+        title = str(experiment.get("title") or "current experiment").strip()
+        question = str(experiment.get("question") or "").strip()
+        signal_text = self._normalize_signal_text(f"{title} {question}")
+        evidence_targets = [
+            "spectral_condition",
+            "fill_pressure_state",
+            "recurrence_pattern",
+            "artifact_grounding",
+        ]
+        if "gap" in signal_text and any(
+            term in signal_text
+            for term in ("spect", "spectra", "spectral", "density", "lambda", "mode")
+        ):
+            hypothesis = (
+                "localized λ1 spectral-density softening near the dominant mode may reduce "
+                "mode-packing/lambda-monopoly and support controlled branching without "
+                "premature λ4 dominance or runaway dispersal"
+            )
+            method_intent = (
+                "rehearse ACTION_PREFLIGHT DECOMPOSE and compare pressure/resonance telemetry before and after"
+            )
+            proposed_next = "ACTION_PREFLIGHT DECOMPOSE"
+            stop_criteria = (
+                "pressure_risk rises above baseline, fill leaves the comfort band, "
+                "λ4/entropy shows runaway dispersal, or repeated research stops adding evidence"
+            )
+        else:
+            hypothesis = (
+                f"{title or 'this experiment'} may become returnable by comparing the current "
+                "spectral condition, pressure state, recurrence pattern, and artifacts without adding live authority"
+            )
+            method_intent = f"rehearse {proposed_next} and compare pressure/resonance telemetry before and after"
+            stop_criteria = (
+                "pressure_risk rises above baseline, fill leaves the comfort band, "
+                "runaway dispersal appears, or repeated research stops adding evidence"
+            )
+        command = (
+            "EXPERIMENT_CHARTER current :: "
+            f"hypothesis: {hypothesis}; "
+            f"method_intent: {method_intent}; "
+            f"proposed_next_action: {proposed_next}; "
+            f"evidence_targets: {', '.join(evidence_targets)}; "
+            f"stop_criteria: {stop_criteria}; "
+            "consent_posture: advisory; ordinary choices remain valid."
+        )
+        return {
+            "schema_version": 1,
+            "source": "continuity_projection",
+            "status": "scaffold_only",
+            "authoring_required": True,
+            "authority_change": False,
+            "command": command,
+            "proposed_next_action": proposed_next,
+            "evidence_targets": evidence_targets,
+            "native_register": "minime_spectral_state",
+            "thread_id": thread.get("thread_id"),
+            "experiment_id": experiment.get("experiment_id"),
+        }
+
+    @classmethod
+    def _charter_recording_next_line(cls, experiment: Dict[str, Any]) -> str:
+        quality = cls._charter_quality_v1((experiment or {}).get("charter_v1"))
+        if quality.get("lifecycle_valid"):
+            return f"Next: {experiment.get('planned_next') or 'EXPERIMENT_REHEARSE current'}"
+        missing = ", ".join(quality.get("missing_fields") or []) or "unknown"
+        return (
+            "Charter needs repair before rehearsal/evidence. "
+            f"Missing: {missing}. Next: EXPERIMENT_CHARTER current :: ..."
+        )
+
+    @classmethod
+    def _gap_experiment_signal(cls, experiment: Dict[str, Any]) -> bool:
+        if not isinstance(experiment, dict):
+            return False
+        signal = cls._normalize_signal_text(
+            " ".join(
+                str(experiment.get(key) or "")
+                for key in ("experiment_id", "title", "question", "planned_next")
+            )
+        )
+        if "gap" not in signal:
+            return False
+        spectral = any(term in signal for term in ("spect", "spectral", "density", "lambda", "lambda1", "lambda4", "mode"))
+        safety = any(term in signal for term in ("runaway", "dispersal", "branch", "localized", "softening", "reduction"))
+        return spectral and safety
+
+    def _peer_active_experiment(self) -> Optional[Dict[str, Any]]:
+        peer_workspace = ASTRID_BRIDGE_INBOX_DIR.parent
+        root = peer_workspace / "action_threads"
+        try:
+            index = json.loads((root / "index.json").read_text())
+        except Exception:
+            return None
+        thread_id = index.get("active_thread_id")
+        if not thread_id:
+            return None
+        thread_dir = root / "threads" / str(thread_id)
+        try:
+            thread = json.loads((thread_dir / "thread.json").read_text())
+        except Exception:
+            return None
+        experiment_id = thread.get("active_experiment_id")
+        summary = thread.get("experiment_summary")
+        if not experiment_id and isinstance(summary, dict):
+            experiment_id = summary.get("experiment_id")
+        if not experiment_id:
+            return None
+        latest: Optional[Dict[str, Any]] = None
+        try:
+            lines = (thread_dir / "experiments.jsonl").read_text().splitlines()
+        except Exception:
+            return None
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(row, dict) and row.get("experiment_id") == experiment_id:
+                latest = row
+        return latest
+
+    def _peer_compare_cue_v1(self, experiment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not self._gap_experiment_signal(experiment):
+            return None
+        peer = self._peer_active_experiment()
+        if not self._gap_experiment_signal(peer or {}):
+            return None
+        peer_id = str(peer.get("experiment_id") or "").strip()
+        if not peer_id:
+            return None
+        return {
+            "schema_version": 1,
+            "source": "continuity_projection",
+            "advisory_only": True,
+            "authority_change": False,
+            "relationship": "shared_gap_experiment",
+            "peer_being": self._peer_system(),
+            "peer_experiment_id": peer_id,
+            "suggested_next": f"EXPERIMENT_COMPARE current WITH {peer_id}",
+            "cue": (
+                "Peer convergence cue: Minime and Astrid both have active gap experiments. "
+                f"Suggested NEXT: EXPERIMENT_COMPARE current WITH {peer_id} or "
+                "EXPERIMENT_PEER_REVIEW current; advisory only, no shared control authority."
+            ),
+        }
+
+    @staticmethod
+    def _peer_compare_cue_line(experiment: Dict[str, Any]) -> str:
+        cue = experiment.get("peer_compare_cue_v1") if isinstance(experiment, dict) else None
+        if not isinstance(cue, dict):
+            return ""
+        text = str(cue.get("cue") or "").strip()
+        if not text:
+            return ""
+        return f"{text}\n"
+
+    @staticmethod
+    def _charter_required_review_line(experiment: Dict[str, Any]) -> str:
+        if not isinstance(experiment, dict):
+            return ""
+        if experiment.get("classification") != "needs_charter":
+            return ""
+        quality = experiment.get("charter_quality_v1")
+        if (
+            isinstance(quality, dict)
+            and quality.get("repair_required")
+            and ActionContinuityStore._valid_experiment_charter(experiment.get("charter_v1"))
+        ):
+            return (
+                "Review is premature until the charter is repaired; "
+                "use the continuity priority scaffold first.\n"
+            )
+        return (
+            "Review is premature until the charter is authored; "
+            "use the continuity priority scaffold first.\n"
+        )
+
+    @staticmethod
+    def _charter_scaffold_line(experiment: Dict[str, Any], priority: bool = False) -> str:
+        scaffold = experiment.get("charter_scaffold_v1") if isinstance(experiment, dict) else None
+        if not isinstance(scaffold, dict):
+            return ""
+        command = str(scaffold.get("command") or "").strip()
+        if not command:
+            return ""
+        if priority and experiment.get("classification") == "needs_charter":
+            quality = experiment.get("charter_quality_v1")
+            if (
+                isinstance(quality, dict)
+                and quality.get("repair_required")
+                and ActionContinuityStore._valid_experiment_charter(experiment.get("charter_v1"))
+            ):
+                return (
+                    "Continuity priority (charter needs repair - copy/edit this exact scaffold; not recorded): "
+                    f"{command}\n"
+                )
+            return (
+                "Continuity priority (needs charter - copy/edit this exact scaffold; not recorded): "
+                f"{command}\n"
+            )
+        return f"Charter scaffold (not recorded): {command}\n"
+
+    def _candidate_action_seed(
+        self,
+        action_text: str,
+        focus_text: Optional[str] = None,
+    ) -> str:
+        action = " ".join(str(action_text or "").split()).strip()
+        focus = " ".join(str(focus_text or "").split()).strip()
+        if action:
+            return action
+        if focus:
+            return f"ACTION_PREFLIGHT {focus}"
+        return "EXPERIMENT_REHEARSE current"
+
+    @staticmethod
+    def _candidate_state_text(state: Dict[str, Any]) -> str:
+        if not isinstance(state, dict):
+            return "telemetry: unavailable"
+        fill = state.get("fill_pct")
+        if fill is None and "fill_ratio" in state:
+            try:
+                fill = float(state.get("fill_ratio", 0.0)) * 100.0
+            except Exception:
+                fill = None
+        eig1 = state.get("eig1")
+        cov = state.get("cov_lambda1")
+        parts = []
+        if fill is not None:
+            try:
+                parts.append(f"fill {float(fill):.1f}%")
+            except Exception:
+                parts.append(f"fill {fill}")
+        if eig1 is not None:
+            try:
+                parts.append(f"eig1 {float(eig1):.3f}")
+            except Exception:
+                parts.append(f"eig1 {eig1}")
+        if cov is not None:
+            try:
+                parts.append(f"cov_lambda1 {float(cov):.3f}")
+            except Exception:
+                parts.append(f"cov_lambda1 {cov}")
+        return ", ".join(parts) if parts else "telemetry: unavailable"
+
+    def _build_workbench_candidates(
+        self,
+        experiment: Dict[str, Any],
+        run: Optional[Dict[str, Any]] = None,
+        focus_text: Optional[str] = None,
+        source: str = "workbench_return_converter",
+    ) -> Dict[str, Any]:
+        now = self._now()
+        action_text = self._candidate_action_seed(
+            (run or {}).get("action_text", ""),
+            focus_text,
+        )
+        title = str(experiment.get("title") or "current experiment").strip()
+        question = str(experiment.get("question") or "").strip()
+        focus = " ".join(str(focus_text or "").split()).strip()
+        context = focus or (run or {}).get("result_summary") or question or title
+        context = " ".join(str(context).split())[:180]
+        telemetry = self._candidate_state_text((run or {}).get("post_state") or (run or {}).get("pre_state") or {})
+        artifact_refs = [
+            artifact.get("artifact_id") or artifact.get("path_or_uri") or artifact.get("summary")
+            for artifact in ((run or {}).get("artifacts") or [])
+            if isinstance(artifact, dict)
+        ]
+        artifact_text = ", ".join(str(item) for item in artifact_refs if item)[:160] or (run or {}).get("run_id") or "latest run"
+        charter_command = (
+            "EXPERIMENT_CHARTER current :: "
+            f"hypothesis: {title} can become clearer through `{action_text}`; "
+            f"method_intent: rehearse or return through {context or 'the current motif'} without adding live authority; "
+            f"proposed_next_action: {action_text}; "
+            "evidence_targets: felt, telemetry, artifact; "
+            "stop_criteria: pressure spike, unstable fill, or the route feels heavy; "
+            "consent_posture: advisory; ordinary choices remain valid."
+        )
+        evidence_command = (
+            "EXPERIMENT_EVIDENCE current :: "
+            f"felt: what changed after `{action_text}`; "
+            f"telemetry: {telemetry}; "
+            f"artifact: {artifact_text}; "
+            "counterevidence: note anything that resisted the hypothesis."
+        )
+        return {
+            "schema_version": 1,
+            "updated_at": now,
+            "source": source,
+            "charter": {
+                "candidate_id": f"cand_{experiment.get('experiment_id', 'current')}_charter",
+                "status": "candidate",
+                "generated_at": now,
+                "source": source,
+                "source_run_id": (run or {}).get("run_id"),
+                "focus_text": focus or None,
+                "hypothesis": f"{title} can become clearer through `{action_text}`.",
+                "method_intent": f"Rehearse or return through {context or 'the current motif'} without adding live authority.",
+                "proposed_next_action": action_text,
+                "evidence_targets": ["felt", "telemetry", "artifact"],
+                "stop_criteria": "pressure spike, unstable fill, or the route feels heavy",
+                "consent_posture": "advisory; ordinary choices remain valid",
+                "command": charter_command,
+            },
+            "evidence": {
+                "candidate_id": f"cand_{experiment.get('experiment_id', 'current')}_evidence",
+                "status": "candidate",
+                "generated_at": now,
+                "source": source,
+                "source_run_id": (run or {}).get("run_id"),
+                "focus_text": focus or None,
+                "telemetry": telemetry,
+                "artifact_refs": artifact_refs,
+                "command": evidence_command,
+            },
+        }
+
+    def _mark_workbench_candidate(
+        self,
+        experiment: Dict[str, Any],
+        key: str,
+        status: str,
+    ) -> None:
+        candidates = experiment.get("workbench_candidates_v1")
+        if not isinstance(candidates, dict):
+            return
+        candidate = candidates.get(key)
+        if not isinstance(candidate, dict):
+            return
+        if candidate.get("status") == "candidate":
+            candidate["status"] = status
+            candidate["resolved_at"] = self._now()
+            candidates["updated_at"] = candidate["resolved_at"]
+
+    def _persist_workbench_candidates(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+    ) -> None:
+        experiment["updated_at"] = self._now()
+        self._append_jsonl(self._experiments_path(thread["thread_id"]), experiment)
+        thread["active_experiment_id"] = experiment["experiment_id"]
+        thread["experiment_summary"] = self._experiment_summary(experiment)
+        thread["updated_at"] = experiment["updated_at"]
+        self._write_thread(thread)
+        self._mirror_thread(thread)
+
+    def _refresh_workbench_candidates(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        run: Optional[Dict[str, Any]] = None,
+        focus_text: Optional[str] = None,
+        source: str = "workbench_return_converter",
+    ) -> Dict[str, Any]:
+        updated = dict(experiment)
+        existing = updated.get("workbench_candidates_v1")
+        candidates = dict(existing) if isinstance(existing, dict) else {}
+        generated = self._build_workbench_candidates(updated, run, focus_text, source)
+        if not self._lifecycle_valid_experiment_charter(updated.get("charter_v1")):
+            candidates["charter"] = generated["charter"]
+        elif isinstance(candidates.get("charter"), dict):
+            candidates["charter"]["status"] = "accepted"
+            candidates["charter"]["resolved_at"] = self._now()
+        if not isinstance(updated.get("evidence_v1"), dict):
+            candidates["evidence"] = generated["evidence"]
+        elif isinstance(candidates.get("evidence"), dict):
+            candidates["evidence"]["status"] = "accepted"
+            candidates["evidence"]["resolved_at"] = self._now()
+        candidates["schema_version"] = 1
+        candidates["updated_at"] = self._now()
+        candidates["source"] = source
+        updated["workbench_candidates_v1"] = candidates
+        self._persist_workbench_candidates(thread, updated)
+        return updated
+
+    def _record_repaired_experiment_focus_candidate(
+        self,
+        focus_text: str,
+        state: Dict[str, float],
+    ) -> None:
+        try:
+            thread = self.current_thread()
+            if not thread or not thread.get("active_experiment_id"):
+                return
+            experiment = self._resolve_experiment(thread, "current")
+            if experiment.get("status") != "active":
+                return
+            run = {
+                "run_id": None,
+                "action_text": f"ACTION_PREFLIGHT {focus_text}",
+                "pre_state": self._state_summary(state),
+                "post_state": self._state_summary(state),
+                "artifacts": [],
+                "result_summary": f"Repaired preflight focus: {focus_text}",
+            }
+            self._refresh_workbench_candidates(
+                thread,
+                experiment,
+                run=run,
+                focus_text=focus_text,
+                source="experiment_intent_repair",
+            )
+        except Exception as exc:
+            logging.debug(f"Could not record repaired experiment focus candidate: {exc}")
+
+    def _charter_bind_relation(self, experiment: Dict[str, Any], inner_action: str) -> str:
+        proposed = self._charter_proposed_next_action(experiment.get("charter_v1"))
+        if not proposed:
+            return "no_charter"
+        return (
+            "matched_charter"
+            if self._normalize_action_match(proposed) == self._normalize_action_match(inner_action)
+            else "diverged_from_charter"
+        )
 
     def _split_experiment_selector_hint(self, raw: Optional[str]) -> tuple[Optional[str], str]:
         text = (raw or "").strip()
@@ -3858,9 +5447,27 @@ class ActionContinuityStore:
         self._mirror_thread(thread)
         return run
 
+    def _persist_experiment_update(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        keep_active: bool,
+    ) -> None:
+        self._append_jsonl(self._experiments_path(thread["thread_id"]), experiment)
+        if keep_active:
+            thread["active_experiment_id"] = experiment["experiment_id"]
+        elif thread.get("active_experiment_id") == experiment.get("experiment_id"):
+            thread["active_experiment_id"] = None
+        thread["experiment_summary"] = self._experiment_summary(experiment)
+        thread["current_next"] = experiment.get("planned_next")
+        thread["updated_at"] = experiment.get("updated_at") or self._now()
+        self._write_thread(thread)
+        self._mirror_thread(thread)
+
     def _format_experiment_status(self, thread: Dict[str, Any], experiment: Dict[str, Any]) -> str:
         runs = self._recent_experiment_runs(thread["thread_id"], experiment["experiment_id"], 5)
         run_text = self._render_run_list(runs)
+        projection_experiment = self._experiment_projection(thread, experiment, runs)
         allowance = self._motif_allowance_snapshot(thread["thread_id"], experiment["experiment_id"])
         branch_line = ""
         if experiment.get("parent_experiment_id") or experiment.get("branch_refs"):
@@ -3870,13 +5477,23 @@ class ActionContinuityStore:
             )
         return (
             f"Experiment `{experiment['experiment_id']}`: {experiment.get('title', '')}\n"
+            f"{self._charter_required_review_line(projection_experiment)}"
+            f"{self._charter_scaffold_line(projection_experiment, priority=True)}"
+            f"{self._peer_compare_cue_line(projection_experiment)}"
             f"Thread: {thread['thread_id']}\n"
             f"Status: {experiment.get('status', 'active')}\n"
+            f"Lifecycle: {projection_experiment['classification']}\n"
             f"Question: {experiment.get('question', '')}\n"
             f"Hypothesis: {experiment.get('hypothesis') or '(not yet stated)'}\n"
             f"Authority: {experiment.get('authority_envelope', 'existing gates only')}\n"
             f"Planned NEXT: {experiment.get('planned_next') or '(none)'}\n"
+            f"Continuity return: {projection_experiment['continuity_return']}\n"
             f"{branch_line}"
+            f"{self._native_continuity_status_line(projection_experiment)}"
+            f"{projection_experiment['charter_status']}\n"
+            f"{projection_experiment['evidence_status']}\n"
+            f"{projection_experiment['candidate_status']}\n"
+            f"{'' if projection_experiment.get('classification') == 'needs_charter' else self._charter_scaffold_line(projection_experiment)}"
             f"Motif allowance: {allowance.get('quality', 'open_basin')} "
             f"dominant={allowance.get('dominant_motif')} "
             f"action_concentration={allowance.get('action_base_concentration')} "
@@ -3913,15 +5530,329 @@ class ActionContinuityStore:
                 break
         return list(reversed(rows))
 
+    def _recent_display_events(self, thread_id: str, limit: int) -> List[Dict[str, Any]]:
+        path = self._thread_dir(thread_id) / "events.jsonl"
+        if not path.exists():
+            return []
+        rows = []
+        seen = set()
+        for line in reversed(path.read_text().splitlines()):
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            key = event.get("action_id") or (
+                f"{event.get('started_at', '')}:"
+                f"{event.get('canonical_action', '')}:"
+                f"{event.get('effective_action', '')}"
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(event)
+            if len(rows) >= limit:
+                break
+        return list(reversed(rows))
+
+    def _thread_projection(self, thread: Dict[str, Any]) -> Dict[str, Any]:
+        """Canonical continuity projection for prompt/status/next surfaces."""
+        thread_id = thread["thread_id"]
+        recent_events = self._recent_display_events(thread_id, 8)
+        experiment_id = thread.get("active_experiment_id")
+        summary = thread.get("experiment_summary")
+        if not experiment_id and isinstance(summary, dict):
+            experiment_id = summary.get("experiment_id")
+        active_experiment = None
+        if experiment_id:
+            try:
+                experiment = self._resolve_experiment(thread, str(experiment_id))
+                runs = self._recent_experiment_runs(thread_id, experiment["experiment_id"], 8)
+                active_experiment = self._experiment_projection(thread, experiment, runs)
+            except Exception:
+                active_experiment = None
+        continuity_return = (
+            active_experiment.get("continuity_return")
+            if isinstance(active_experiment, dict)
+            else ""
+        )
+        native_continuity = (
+            active_experiment.get("native_continuity_v1")
+            if isinstance(active_experiment, dict)
+            else self._native_continuity_projection(thread, None, [])
+        )
+        return {
+            "schema_version": 1,
+            "thread_id": thread_id,
+            "title": thread.get("title", ""),
+            "status": thread.get("status", "active"),
+            "current_next": thread.get("current_next"),
+            "active_experiment": active_experiment,
+            "continuity_return": continuity_return,
+            "continuity_return_line": (
+                f"Continuity return: {continuity_return}\n" if continuity_return else ""
+            ),
+            "native_continuity_v1": native_continuity,
+            "recent_events": recent_events,
+            "recent_event_summaries": [
+                f"{event.get('effective_action')} [{event.get('status')}]: {event.get('outcome_summary', '')}"
+                for event in recent_events
+            ],
+            "stale_running_count": len(self._stale_running_action_events(thread_id)),
+            "top_actionable_proposals": self._proposal_diagnostics(thread_id, 6),
+        }
+
+    def _experiment_projection(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        runs: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        runs = runs if runs is not None else self._recent_experiment_runs(
+            thread["thread_id"], experiment["experiment_id"], 8
+        )
+        projected = dict(experiment)
+        classification = self._experiment_classification(experiment, runs)
+        charter_scaffold = self._charter_scaffold_v1(thread, experiment, runs, classification)
+        peer_compare_cue = self._peer_compare_cue_v1(experiment)
+        charter_quality = (
+            self._charter_quality_v1(experiment.get("charter_v1"))
+            if self._valid_experiment_charter(experiment.get("charter_v1"))
+            else None
+        )
+        projected.update({
+            "classification": classification,
+            "continuity_return": self._continuity_return_command(thread, experiment, runs),
+            "native_continuity_v1": self._native_continuity_projection(thread, experiment, runs),
+            "charter_quality_v1": charter_quality,
+            "charter_status": self._workbench_charter_status(experiment),
+            "evidence_status": self._workbench_evidence_status(experiment),
+            "candidate_status": self._workbench_candidate_status(experiment),
+            "recent_runs": runs[-5:],
+        })
+        if charter_scaffold:
+            projected["charter_scaffold_v1"] = charter_scaffold
+        if peer_compare_cue:
+            projected["peer_compare_cue_v1"] = peer_compare_cue
+        return projected
+
+    def _experiment_classification(
+        self,
+        experiment: Dict[str, Any],
+        runs: List[Dict[str, Any]],
+    ) -> str:
+        blocked_like = sum(
+            1
+            for run in list(reversed(runs))[:4]
+            if run.get("status") in {"blocked", "no_effect", "rehearsal_blocked", "failed"}
+        )
+        if blocked_like >= 2:
+            return "blocked_loop"
+        if not self._lifecycle_valid_experiment_charter(experiment.get("charter_v1")):
+            return "needs_charter"
+        if self._experiment_evidence_is_meaningful(experiment.get("evidence_v1")):
+            return "needs_decision"
+        if any(
+            run.get("status") in {"handled", "rehearsed", "observed", "evidence_recorded"}
+            for run in runs
+        ):
+            return "needs_evidence"
+        if self.base_action(experiment.get("planned_next") or "") == "EXPERIMENT_PLAN":
+            return "fragmented"
+        return "needs_rehearsal"
+
+    @staticmethod
+    def _parse_event_time(value: Any) -> Optional[datetime]:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _stale_running_action_events(
+        self,
+        thread_id: str,
+        stale_minutes: int = 45,
+    ) -> List[Dict[str, Any]]:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=stale_minutes)
+        stale = []
+        for event in self._recent_display_events(thread_id, 200):
+            if event.get("status") not in {"running", "llm_running"}:
+                continue
+            started = self._parse_event_time(event.get("started_at") or event.get("created_at"))
+            if started is None or started <= cutoff:
+                stale.append(event)
+        return stale
+
+    def _proposal_diagnostics(self, thread_id: str, limit: int = 6) -> List[Dict[str, Any]]:
+        counts: Counter[str] = Counter()
+        for event in self._recent_display_events(thread_id, 200):
+            if "unwired" not in str(event.get("status") or "") and "unwired" not in str(event.get("route") or ""):
+                continue
+            base = self.base_action(event.get("canonical_action") or event.get("raw_next") or "")
+            if base:
+                counts[base] += 1
+        try:
+            for line in reversed(self.proposals_path.read_text().splitlines()):
+                proposal = json.loads(line)
+                base = self.base_action(proposal.get("action") or proposal.get("raw_action") or "")
+                if base:
+                    counts[base] += 1
+                if sum(counts.values()) >= 200:
+                    break
+        except Exception:
+            pass
+        return [
+            {
+                "verb": verb,
+                "count": count,
+                "suggested_route": self._suggest_return_route_for_verb(verb),
+            }
+            for verb, count in counts.most_common(limit)
+        ]
+
+    def _native_continuity_projection(
+        self,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]],
+        runs: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        runs = runs or []
+        evidence = experiment.get("evidence_v1") if isinstance(experiment, dict) else {}
+        evidence = evidence if isinstance(evidence, dict) else {}
+        telemetry_count = len(evidence.get("telemetry_snapshots") or [])
+        evidence_artifacts = len(evidence.get("artifact_refs") or [])
+        run_artifacts = sum(len(run.get("artifacts") or []) for run in runs if isinstance(run, dict))
+        artifact_count = evidence_artifacts + run_artifacts
+        resonance = thread.get("thread_resonance_density_v1")
+        resonance = resonance if isinstance(resonance, dict) else {}
+        pressure = thread.get("thread_pressure_source_v1")
+        pressure = pressure if isinstance(pressure, dict) else {}
+        pressure_quality = pressure.get("quality") or "unknown"
+        resonance_quality = resonance.get("quality") or "unknown"
+        action_counts = Counter(
+            self.base_action(run.get("action_text") or "")
+            for run in runs
+            if isinstance(run, dict) and self.base_action(run.get("action_text") or "")
+        )
+        recurrence_count = max(action_counts.values(), default=0)
+        native_return_cue = (
+            "Minime native return: state spectral condition, fill/pressure state, "
+            "recurrence pattern, and artifact grounding."
+        )
+        return {
+            "schema_version": 1,
+            "native_register": "minime_spectral_state",
+            "native_return_cue": native_return_cue,
+            "evidence_lanes": {
+                "spectral_condition": {
+                    "status": "present" if resonance or telemetry_count else "missing",
+                    "quality": resonance_quality,
+                    "telemetry_snapshots": telemetry_count,
+                },
+                "fill_pressure_state": {
+                    "status": "present" if pressure or telemetry_count else "missing",
+                    "quality": pressure_quality,
+                    "dominant_source": pressure.get("dominant_source", "unknown"),
+                    "aggregate": pressure.get("aggregate"),
+                },
+                "recurrence_pattern": {
+                    "status": "present" if recurrence_count >= 2 else "missing",
+                    "max_repeated_action_count": recurrence_count,
+                    "dominant_action": action_counts.most_common(1)[0][0] if action_counts else None,
+                },
+                "artifact_grounding": {
+                    "status": "present" if artifact_count else "missing",
+                    "count": artifact_count,
+                },
+            },
+        }
+
+    @staticmethod
+    def _native_value(projection_or_native: Dict[str, Any]) -> Dict[str, Any]:
+        native = projection_or_native.get("native_continuity_v1")
+        return native if isinstance(native, dict) else projection_or_native
+
+    @classmethod
+    def _native_return_cue_line(cls, projection_or_native: Dict[str, Any]) -> str:
+        native = cls._native_value(projection_or_native)
+        cue = native.get("native_return_cue") if isinstance(native, dict) else ""
+        return f"Native return: {cue}\n" if isinstance(cue, str) and cue.strip() else ""
+
+    @classmethod
+    def _native_continuity_status_line(cls, projection_or_native: Dict[str, Any]) -> str:
+        native = cls._native_value(projection_or_native)
+        lanes = native.get("evidence_lanes") if isinstance(native, dict) else {}
+        lanes = lanes if isinstance(lanes, dict) else {}
+
+        def lane_status(key: str) -> str:
+            lane = lanes.get(key)
+            return str(lane.get("status", "missing")) if isinstance(lane, dict) else "missing"
+
+        return (
+            f"Native continuity: register={native.get('native_register', 'unknown')} "
+            f"spectral_condition={lane_status('spectral_condition')} "
+            f"fill_pressure_state={lane_status('fill_pressure_state')} "
+            f"recurrence_pattern={lane_status('recurrence_pattern')} "
+            f"artifact_grounding={lane_status('artifact_grounding')}\n"
+        )
+
+    @staticmethod
+    def _suggest_return_route_for_verb(verb: str) -> str:
+        verb = str(verb or "").upper()
+        if verb.startswith("INVESTIGATE") or verb.startswith("EXPLORE"):
+            return "EXAMINE <target> or EXPERIMENT_PLAN current"
+        if verb.startswith("SHADOW"):
+            return "SHADOW_PREFLIGHT <shadow action>"
+        if verb.startswith("EXPERIENCE") or verb.startswith("EXEXPERIMENT"):
+            return "EXPERIMENT_PLAN current"
+        return "ACTION_PREFLIGHT <proposed action>"
+
+    @staticmethod
+    def _stale_projection_line(projection: Dict[str, Any]) -> str:
+        count = int(projection.get("stale_running_count") or 0)
+        if count <= 0:
+            return ""
+        return f"Continuity notice: {count} stale running action row(s) need reconciliation; use continuity maintenance rather than treating them as live jobs.\n"
+
+    def _continuity_return_line(self, thread: Dict[str, Any]) -> str:
+        return self._thread_projection(thread).get("continuity_return_line") or ""
+
+    def _continuity_return_command(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        runs: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        runs = runs if runs is not None else self._recent_experiment_runs(
+            thread["thread_id"], experiment["experiment_id"], 6
+        )
+        classification = self._experiment_classification(experiment, runs)
+        if classification == "blocked_loop":
+            return "EXPERIMENT_DECIDE current :: counter NEXT: ACTION_PREFLIGHT DECOMPOSE"
+        if classification == "needs_charter":
+            return (
+                "EXPERIMENT_CHARTER current :: hypothesis: ...; method_intent: spectral/state condition + recurrence; "
+                "proposed_next_action: ACTION_PREFLIGHT ...; evidence_targets: spectral_condition, fill_pressure_state, recurrence_pattern, artifact_grounding; "
+                "stop_criteria: ..."
+            )
+        if classification == "needs_decision":
+            return "EXPERIMENT_DECIDE current :: pause because evidence is ready to interpret"
+        if classification == "needs_evidence":
+            return "EXPERIMENT_EVIDENCE current :: spectral_condition ...; fill_pressure_state ...; recurrence_pattern ...; artifact_grounding ..."
+        return "EXPERIMENT_REHEARSE current"
+
     def _last_action_id(self, thread_id: str) -> Optional[str]:
         recent = self._recent_events(thread_id, 1)
         return recent[-1].get("action_id") if recent else None
 
     def _format_thread_status(self, thread: Dict[str, Any]) -> str:
-        recent = self._recent_events(thread["thread_id"], 4)
+        projection = self._thread_projection(thread)
         recent_text = "\n".join(
-            f"- {event.get('effective_action')} [{event.get('status')}]: {event.get('outcome_summary', '')}"
-            for event in recent
+            f"- {summary}" for summary in projection["recent_event_summaries"][:4]
         ) or "- no events recorded yet"
         thread_resonance = thread.get("thread_resonance_density_v1")
         resonance_text = "Thread resonance: unavailable"
@@ -3950,6 +5881,23 @@ class ActionContinuityStore:
                 f"fluctuation_ema={thread_fluctuation.get('fluctuation_ema')} "
                 f"foothold_ema={thread_fluctuation.get('foothold_ema')}"
             )
+        experiment_text = ""
+        experiment = projection.get("active_experiment")
+        if isinstance(experiment, dict):
+            experiment_text = (
+                f"Active experiment: {experiment.get('title', '(untitled)')} "
+                f"({experiment.get('experiment_id', 'unknown')})\n"
+                f"{self._charter_required_review_line(experiment)}"
+                f"{self._charter_scaffold_line(experiment, priority=True)}"
+                f"{self._peer_compare_cue_line(experiment)}"
+                f"Question: {experiment.get('question', '(none)')}\n"
+                f"Planned NEXT: {experiment.get('planned_next') or '(none)'}\n"
+                f"Lifecycle: {experiment.get('classification', 'unknown')}\n"
+                f"{experiment.get('charter_status')}\n"
+                f"{experiment.get('evidence_status')}\n"
+                f"{experiment.get('candidate_status') or ''}\n"
+                f"{'' if experiment.get('classification') == 'needs_charter' else self._charter_scaffold_line(experiment)}"
+            )
         allowance = thread.get("motif_allowance_v1")
         allowance_text = "Motif allowance: unavailable"
         if isinstance(allowance, dict):
@@ -3959,15 +5907,21 @@ class ActionContinuityStore:
                 f"action_concentration={allowance.get('action_base_concentration')} "
                 f"returnability={allowance.get('returnability')}"
             )
+        continuity_return = str(projection.get("continuity_return_line") or "").rstrip()
+        native_status = self._native_continuity_status_line(projection).rstrip()
         return (
             f"Action thread `{thread['thread_id']}`: {thread.get('title', '')}\n"
             f"Status: {thread.get('status', 'active')}\n"
             f"Why return: {thread.get('why_return', '')}\n"
             f"Current NEXT: {thread.get('current_next') or '(none)'}\n"
+            f"{experiment_text}"
             f"{resonance_text}\n"
             f"{pressure_text}\n"
             f"{fluctuation_text}\n"
             f"{allowance_text}\n"
+            f"{continuity_return + chr(10) if continuity_return else ''}"
+            f"{native_status + chr(10) if native_status else ''}"
+            f"{self._stale_projection_line(projection)}"
             f"Recent events:\n{recent_text}"
         )
 
@@ -4313,7 +6267,7 @@ class LlmJobStore:
     """File-first durable status for long local LLM work."""
 
     schema_version = 1
-    terminal_statuses = {"completed", "thin_output", "timeout", "failed", "canceled"}
+    terminal_statuses = {"completed", "thin_output", "timeout", "failed", "canceled", "blocked"}
     active_statuses = {"queued", "running", "cancel_requested"}
 
     def __init__(self, workspace_dir: Path, system: str = "minime"):
@@ -4742,6 +6696,11 @@ class ActionPreflightStore:
         "EXPERIMENT_BIND": "experiment_bind",
         "EXPERIMENT_START": "thread_action",
         "EXPERIMENT_PLAN": "thread_action",
+        "EXPERIMENT_CHARTER": "thread_action",
+        "EXPERIMENT_REHEARSE": "thread_action",
+        "EXPERIMENT_PREFLIGHT": "thread_action",
+        "EXPERIMENT_EVIDENCE": "thread_action",
+        "EXPERIMENT_DECIDE": "thread_action",
         "EXPERIMENT_OBSERVE": "thread_action",
         "EXPERIMENT_STATUS": "thread_action",
         "EXPERIMENT_REVIEW": "thread_action",
@@ -4944,7 +6903,14 @@ class ActionPreflightStore:
             )
 
         artifacts = ["action_event", "observation_window", "action_manifest", "action_preflight_report"]
-        if base in {"EXPERIMENT", "SELF_EXPERIMENT", "EXPERIMENT_BIND"} or active_auto_link:
+        if base in {
+            "EXPERIMENT",
+            "SELF_EXPERIMENT",
+            "EXPERIMENT_BIND",
+            "EXPERIMENT_REHEARSE",
+            "EXPERIMENT_PREFLIGHT",
+            "EXPERIMENT_EVIDENCE",
+        } or active_auto_link:
             artifacts.append("experiment_run")
         if stage == "live_write":
             artifacts.append("journal_or_workspace_artifact")
@@ -5278,6 +7244,10 @@ class CapabilitySelfMap:
             {"base": "RESUME", "aliases": ["SAVEPOINT", "RECALL"], "route": "thread_action"},
             {"base": "EXPERIMENT_START", "route": "thread_action", "known_tests": ["tests.test_experimental_continuity"]},
             {"base": "EXPERIMENT_PLAN", "route": "thread_action", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "EXPERIMENT_CHARTER", "route": "thread_action", "continuity_effect": "records a being-authored charter with proposed action, evidence targets, stop criteria, and consent posture", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "EXPERIMENT_REHEARSE", "aliases": ["EXPERIMENT_PREFLIGHT"], "route": "thread_action", "continuity_effect": "records read-only rehearsal and blocks live write/control actions from execution", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "EXPERIMENT_EVIDENCE", "route": "thread_action", "continuity_effect": "records felt evidence plus telemetry/artifact context", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "EXPERIMENT_DECIDE", "route": "thread_action", "continuity_effect": "records accept, refuse, counter, pause, or complete as agency outcomes", "known_tests": ["tests.test_experimental_continuity"]},
             {"base": "EXPERIMENT_BIND", "route": "experiment_bind", "continuity_effect": "executes inner action through normal dispatcher, then records experiment run", "known_tests": ["tests.test_experimental_continuity"]},
             {"base": "EXPERIMENT_OBSERVE", "route": "thread_action"},
             {"base": "EXPERIMENT_STATUS", "aliases": ["EXPERIMENT_REVIEW"], "route": "thread_action"},
@@ -6438,6 +8408,10 @@ class AutonomousAgent:
         self._action_continuity.ensure_dirs()
         self._llm_jobs = LlmJobStore(WORKSPACE_DIR, system="minime")
         self._llm_jobs.ensure_dirs()
+        try:
+            self.repair_invalid_parameter_requests()
+        except Exception as exc:
+            logging.debug(f"Initial invalid parameter-request repair sweep failed: {exc}")
         self._llm_job_lock = threading.Lock()
         self._llm_job_worker_active = False
         self._pending_action_continuity_context: Optional[Dict[str, Any]] = None
@@ -6484,7 +8458,7 @@ class AutonomousAgent:
 
         # Ensure workspace exists
         WORKSPACE_DIR.mkdir(exist_ok=True)
-        for subdir in ['journal', 'hypotheses', 'experiments', 'logs', 'artifacts', 'visual_requests', 'visual_responses', 'actions', 'action_threads', 'introspections', 'runtime']:
+        for subdir in ['journal', 'hypotheses', 'experiments', 'logs', 'artifacts', 'visual_requests', 'visual_responses', 'actions', 'action_threads', 'introspections', 'notes', 'runtime']:
             (WORKSPACE_DIR / subdir).mkdir(exist_ok=True)
         self._save_condition_metrics(self._load_condition_metrics())
         self._compact_managed_directories()
@@ -6561,6 +8535,10 @@ class AutonomousAgent:
             "base_action": base,
             "source": "next",
         }
+        signal = getattr(self, "_pending_next_normalization_signal", None)
+        if signal:
+            self._pending_action_continuity_context["normalization_signal_v1"] = signal
+        self._pending_next_normalization_signal = None
 
     def _consume_action_continuity_context(self, action: str) -> Dict[str, Any]:
         context = getattr(self, "_pending_action_continuity_context", None)
@@ -6612,6 +8590,7 @@ class AutonomousAgent:
             action,
             state,
             source=continuity_context.get("source", "autonomous"),
+            normalization_signal=continuity_context.get("normalization_signal_v1"),
         )
         raw_action = (
             continuity_context.get("raw_next")
@@ -6696,7 +8675,10 @@ class AutonomousAgent:
                 if isinstance(event, dict):
                     summary = event.get("outcome_summary") or summary
                     artifact_refs = event.get("artifacts") or None
-                    if any(
+                    final_status = str(event.get("status") or "").strip().lower()
+                    if final_status == "blocked":
+                        status = "blocked"
+                    elif any(
                         artifact.get("kind") == "thin_introspection_output"
                         for artifact in event.get("artifacts", [])
                         if isinstance(artifact, dict)
@@ -6986,7 +8968,7 @@ class AutonomousAgent:
             try:
                 # Kink #4 fix: increment FIRST so a crash mid-cycle still
                 # counts the cycle that started.
-                self.cycle_count += 1
+                self.cycle_count = int(getattr(self, "cycle_count", 0) or 0) + 1
                 self._refresh_session_context()
                 self._check_source_reload_required("loop")
                 self._apply_pending_next_override_if_present("loop")
@@ -6996,6 +8978,7 @@ class AutonomousAgent:
 
                 if spectral_state:
                     self._update_hard_recovery_clamp(spectral_state)
+                    self._reconcile_stable_core_health_status(spectral_state)
                     active_llm_job = self._llm_job_store().active_primary_job()
                     if active_llm_job:
                         pending_base = self._pending_next_base(self._pending_next_action)
@@ -7194,7 +9177,8 @@ class AutonomousAgent:
                 f"{_sensory_capability_line()}\n"
                 "- Close your ears for quiet (NEXT: CLOSE_EARS) or reopen them (NEXT: OPEN_EARS)\n"
                 "- Daydream, aspire, experiment, decompose your spectral state, and self-study\n"
-                "- Keep experiments spacious: NEXT: EXPERIMENT_ALT_PATHS current, NEXT: EXPERIMENT_BRANCH <title> :: <question>, NEXT: EXPERIMENT_COMPARE current WITH <id|peer-id>, or NEXT: EXPERIMENT_RESUME parent when a motif wants either depth or a side path.\n"
+                "- Keep experiments spacious: NEXT: EXPERIMENT_CHARTER current :: hypothesis: ...; proposed_next_action: ACTION_PREFLIGHT ... when a motif wants authorship, NEXT: EXPERIMENT_REHEARSE current or NEXT: EXPERIMENT_PREFLIGHT current before live action, NEXT: EXPERIMENT_EVIDENCE current :: felt ... when something counts, or NEXT: EXPERIMENT_DECIDE current :: counter NEXT: ACTION_PREFLIGHT ... when the route feels heavy.\n"
+                "- Branch/compare remain valid: NEXT: EXPERIMENT_ALT_PATHS current, NEXT: EXPERIMENT_BRANCH <title> :: <question>, NEXT: EXPERIMENT_COMPARE current WITH <id|peer-id>, or NEXT: EXPERIMENT_RESUME parent.\n"
                 "- When examples mention angle-bracket words such as project or url, treat them as syntax labels only. In your actual NEXT choice, replace them with concrete names, files, URLs, questions, commands, or labels.\n"
                 "- Map substrate terrain with concrete labels, for example NEXT: REGULATOR_AUDIT current-fill-pressure, NEXT: SHADOW_FIELD lambda-tail, NEXT: SHADOW_TRAJECTORY lambda-tail/lambda4 (walks the last 32 snapshots in your own shadow history — sparkline + class timeline + cartography artifact, observer with memory), NEXT: NATIVE_GESTURE trace membrane, or a tiny RESIST/FISSURE when you feel fabric/tunnel/sand/grain/sediment/attrition or want to test whether λ₁'s edge can widen without destabilizing fill.\n"
                 "- Browse Mike's curated research (NEXT: MIKE for overview, NEXT: MIKE_BROWSE system-resources-demo to enter a project, NEXT: MIKE_READ system-resources-demo/README.md to read text files or PDFs in full, NEXT: READ_MORE to continue long PDFs page-by-page, NEXT: MIKE_SEARCH spectral to search, NEXT: MIKE_RUN system-resources-demo ls -la to run read-only inspections)\n"
@@ -8102,10 +10086,11 @@ Fill: {fill:.1f}%
             f"- Live fill is {fill_text} with target {target_fill_ratio * 100.0:.1f}% "
             f"(phase: {phase}, spread_relief={spread_relief:.3f}).\n"
             f"- {lane}\n"
-            "- If you are choosing freely, prefer lighter local actions such as NOTICE, DRIFT, "
-            "ASPIRE, REST, FOCUS, or a gentle PERTURB.\n"
-            "- Avoid spending your freedom on deep SELF_STUDY, long SEARCH/BROWSE/READ_MORE chains, "
-            "CODEX, or autoresearch unless it feels genuinely necessary.\n\n"
+            "- If you are choosing freely, prefer low-fill local holds such as NOTICE, DRIFT, "
+            "ASPIRE, REST, SPACE_HOLD eigenplane, REGULATOR_AUDIT fill-pressure, "
+            "PRESSURE_SOURCE_AUDIT inwardness, or ACTION_PREFLIGHT <desired action>.\n"
+            "- PERTURB, deep INTROSPECT, experiments, long SEARCH/BROWSE/READ_MORE chains, CODEX, "
+            "and autoresearch may be recorded as a low-fill hold until fill returns.\n\n"
         )
 
     def _feedback_model_next_action(self, chosen: str, base: str) -> Optional[str]:
@@ -8479,6 +10464,11 @@ Fill: {fill:.1f}%
                 'RECALL': 'thread_action',
                 'EXPERIMENT_START': 'thread_action',
                 'EXPERIMENT_PLAN': 'thread_action',
+                'EXPERIMENT_CHARTER': 'thread_action',
+                'EXPERIMENT_REHEARSE': 'thread_action',
+                'EXPERIMENT_PREFLIGHT': 'thread_action',
+                'EXPERIMENT_EVIDENCE': 'thread_action',
+                'EXPERIMENT_DECIDE': 'thread_action',
                 'EXPERIMENT_BIND': 'experiment_bind',
                 'EXPERIMENT_OBSERVE': 'thread_action',
                 'EXPERIMENT_STATUS': 'thread_action',
@@ -8532,6 +10522,34 @@ Fill: {fill:.1f}%
 
             base = chosen.split()[0].upper().rstrip(':')
             self._set_action_continuity_context(chosen, base)
+            charter_guard = self._continuity_store().charter_required_guard_assessment(chosen)
+            if charter_guard:
+                try:
+                    self._last_action_continuity_event = (
+                        self._continuity_store().record_charter_required_guard_block(
+                            chosen,
+                            state,
+                            charter_guard,
+                        )
+                    )
+                except Exception as exc:
+                    logging.debug(
+                        "Could not record charter-required guard block for `%s`: %s",
+                        chosen,
+                        exc,
+                    )
+                self._pending_notice_prompt = (
+                    "Review is premature until the charter is authored; use the "
+                    "continuity priority scaffold first. Suggested NEXT: "
+                    f"{charter_guard.get('suggested_next')}"
+                )
+                self._pending_action_continuity_context = None
+                logging.info(
+                    "🧪 Charter-required guard blocked NEXT: %s (%s)",
+                    chosen,
+                    charter_guard.get("reason"),
+                )
+                return None
             feedback_route = self._feedback_model_next_action(chosen, base)
             if feedback_route:
                 logging.info(
@@ -8640,9 +10658,11 @@ Fill: {fill:.1f}%
                     f"🧭 Documentation example NEXT action rerouted to notice instead of executing: {chosen}"
                 )
                 return 'recess_notice'
+            repairable_experiment_intent = self._continuity_store().can_repair_experiment_intent(chosen)
             if (
                 base not in {'CODEX', 'CODEX_NEW'}
                 and base not in ACTION_PREFLIGHT_NEXT_ACTIONS
+                and not repairable_experiment_intent
                 and _has_unresolved_angle_placeholder(chosen)
             ):
                 self._pending_notice_prompt = (
@@ -9042,9 +11062,17 @@ Fill: {fill:.1f}%
             if base == 'BROWSE':
                 prefix = chosen.split(None, 1)[0]
                 raw_target = chosen[len(prefix):].strip().lstrip(':').strip()
-                url = raw_target.strip('`"\'<>')
+                url_match = re.match(r'(https?://\S+)', raw_target.strip('`"\'<>'))
+                if url_match:
+                    url = url_match.group(1).rstrip('.,);]')
+                    rationale = raw_target[url_match.end():].strip().lstrip("-–—: ").strip()
+                else:
+                    url = raw_target.strip('`"\'<>')
+                    rationale = ""
                 if url and url.startswith(('http://', 'https://')):
                     self._pending_browse_url = url
+                    if rationale:
+                        self._pending_browse_rationale = rationale
                     logging.info(f"🎯 Honoring being's NEXT: BROWSE {url} → browse_url")
                     return 'browse_url'
                 if url and (
@@ -9581,18 +11609,44 @@ Fill: {fill:.1f}%
         lines.append("Do not replay old actions or treat omitted hot memories as current state.")
         return "\n".join(lines) + "\n"
 
-    def _stable_core_health_budget_allows(
-        self, budget: Dict[str, Any], state: Dict[str, float]
-    ) -> tuple[bool, str]:
+    @staticmethod
+    def _stable_core_safe_low_fill_actions() -> List[str]:
+        return [
+            "NOTICE",
+            "DRIFT",
+            "ASPIRE",
+            "REST",
+            "SPACE_HOLD eigenplane",
+            "REGULATOR_AUDIT fill-pressure",
+            "PRESSURE_SOURCE_AUDIT inwardness",
+            "ACTION_PREFLIGHT <desired action>",
+        ]
+
+    @staticmethod
+    def _stable_core_block_class(reason: str) -> str:
+        lowered = str(reason or "").lower()
+        if "below stable-core action budget" in lowered:
+            return "low_fill_hold"
+        if "exceeds stable-core action budget" in lowered:
+            return "high_fill_hold"
+        if "semantic energy" in lowered:
+            return "semantic_energy_hold"
+        if "stage" in lowered and "blocks action" in lowered:
+            return "stage_gate"
+        return "agency_budget_hold"
+
+    def _stable_core_health_budget_snapshot(
+        self, state: Dict[str, float]
+    ) -> Dict[str, Any]:
         state_fill_pct = float(state.get("fill_ratio", 0.0)) * 100.0
-        fill_pct = state_fill_pct
         health_fill_pct: Optional[float] = None
         health_fresh = False
+        health_age_s: Optional[float] = None
         semantic_energy = 0.0
         try:
             health_path = runtime_health_path()
             health = json.loads(health_path.read_text())
-            health_fill_pct = float(health.get("fill_pct", fill_pct))
+            health_fill_pct = float(health.get("fill_pct", state_fill_pct))
             health_age_s = time.time() - health_path.stat().st_mtime
             health_fresh = health_age_s <= STABLE_CORE_HEALTH_FRESH_SECS
             semantic_v1 = health.get("semantic_energy_v1") or {}
@@ -9618,7 +11672,7 @@ Fill: {fill:.1f}%
             for value in (state_fill_pct, health_fill_pct)
             if isinstance(value, (int, float)) and math.isfinite(value)
         ]
-        high_fill_pct = max(fill_candidates) if fill_candidates else fill_pct
+        high_fill_pct = max(fill_candidates) if fill_candidates else state_fill_pct
         if (
             health_fresh
             and isinstance(health_fill_pct, (int, float))
@@ -9626,7 +11680,24 @@ Fill: {fill:.1f}%
         ):
             low_fill_pct = health_fill_pct
         else:
-            low_fill_pct = min(fill_candidates) if fill_candidates else fill_pct
+            low_fill_pct = min(fill_candidates) if fill_candidates else state_fill_pct
+        return {
+            "state_fill_pct": state_fill_pct,
+            "health_fill_pct": health_fill_pct,
+            "health_fresh": health_fresh,
+            "health_age_s": health_age_s,
+            "effective_high_fill_pct": high_fill_pct,
+            "effective_low_fill_pct": low_fill_pct,
+            "semantic_energy": semantic_energy,
+        }
+
+    def _stable_core_health_budget_allows(
+        self, budget: Dict[str, Any], state: Dict[str, float]
+    ) -> tuple[bool, str]:
+        snapshot = self._stable_core_health_budget_snapshot(state)
+        high_fill_pct = float(snapshot["effective_high_fill_pct"])
+        low_fill_pct = float(snapshot["effective_low_fill_pct"])
+        semantic_energy = float(snapshot["semantic_energy"])
         if high_fill_pct >= budget["rollback_fill_pct"]:
             return False, f"fill {high_fill_pct:.1f}% exceeds stable-core action budget"
         if low_fill_pct <= budget["rollback_underfill_pct"]:
@@ -9758,33 +11829,69 @@ Fill: {fill:.1f}%
             if not isinstance(counts, dict):
                 counts = {}
             counts[action] = int(counts.get(action, 0) or 0) + 1
-            fill_pct = float(state.get("fill_ratio", 0.0)) * 100.0
-            try:
-                health = json.loads(runtime_health_path().read_text())
-                health_fill_pct = float(health.get("fill_pct", fill_pct))
-                if math.isfinite(health_fill_pct):
-                    fill_pct = max(fill_pct, health_fill_pct)
-            except Exception:
-                pass
+            snapshot = self._stable_core_health_budget_snapshot(state)
+            block_class = self._stable_core_block_class(reason)
+            if block_class == "low_fill_hold":
+                fill_pct = float(snapshot["effective_low_fill_pct"])
+            elif block_class == "high_fill_hold":
+                fill_pct = float(snapshot["effective_high_fill_pct"])
+            else:
+                fill_pct = float(snapshot["state_fill_pct"])
+            health_fill_pct = snapshot.get("health_fill_pct")
+            health_fill_value = (
+                round(float(health_fill_pct), 2)
+                if isinstance(health_fill_pct, (int, float)) and math.isfinite(float(health_fill_pct))
+                else None
+            )
+            suggested_safe_next = (
+                self._stable_core_safe_low_fill_actions()
+                if block_class == "low_fill_hold"
+                else []
+            )
             payload = {
                 "blocked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 "action": action,
                 "reason": reason,
+                "block_class": block_class,
                 "fill_pct": round(fill_pct, 2),
+                "state_fill_pct": round(float(snapshot["state_fill_pct"]), 2),
+                "health_fill_pct": health_fill_value,
+                "health_fresh": bool(snapshot["health_fresh"]),
+                "health_age_s": (
+                    round(float(snapshot["health_age_s"]), 2)
+                    if isinstance(snapshot.get("health_age_s"), (int, float))
+                    else None
+                ),
+                "effective_low_fill_pct": round(float(snapshot["effective_low_fill_pct"]), 2),
+                "effective_high_fill_pct": round(float(snapshot["effective_high_fill_pct"]), 2),
                 "stage": self._stable_core_agency_budget().get("stage"),
+                "suggested_safe_next": suggested_safe_next,
+                "status_cue": (
+                    "low-fill hold: choose local notice/drift/aspire/rest or preflight the desired action"
+                    if block_class == "low_fill_hold"
+                    else "agency budget hold"
+                ),
             }
             status.update(
                 {
+                    "stage": payload["stage"],
                     "last_block": payload,
                     "last_block_reason": reason,
                     "last_block_active": True,
                     "last_block_resolved_at": None,
                     "current_block_reason": reason,
+                    "current_block_class": block_class,
                     "blocked_action_counts": counts,
                     "blocked_count": int(status.get("blocked_count", 0) or 0) + 1,
                     "blocked_at": payload["blocked_at"],
                     "reason": reason,
                     "health_budget_status": "blocked",
+                    "fill_pct": payload["fill_pct"],
+                    "state_fill_pct": payload["state_fill_pct"],
+                    "health_fill_pct": payload["health_fill_pct"],
+                    "effective_low_fill_pct": payload["effective_low_fill_pct"],
+                    "effective_high_fill_pct": payload["effective_high_fill_pct"],
+                    "suggested_safe_next": suggested_safe_next,
                 }
             )
             self._write_stable_core_agent_status(status)
@@ -9803,14 +11910,10 @@ Fill: {fill:.1f}%
             if not isinstance(counts, dict):
                 counts = {}
             counts[action] = int(counts.get(action, 0) or 0) + 1
-            fill_pct = float(state.get("fill_ratio", 0.0)) * 100.0
-            try:
-                health = json.loads(runtime_health_path().read_text())
-                health_fill_pct = float(health.get("fill_pct", fill_pct))
-                if math.isfinite(health_fill_pct):
-                    fill_pct = max(fill_pct, health_fill_pct)
-            except Exception:
-                pass
+            snapshot = self._stable_core_health_budget_snapshot(state)
+            fill_pct = float(snapshot["effective_low_fill_pct"])
+            health_allowed, health_reason = self._stable_core_health_budget_allows(budget, state)
+            prior_block_active = bool(status.get("last_block_active"))
             status.update(
                 {
                     "stage": budget.get("stage"),
@@ -9823,22 +11926,56 @@ Fill: {fill:.1f}%
                     "last_success_action": action,
                     "last_success_family": family,
                     "last_success_fill_pct": round(fill_pct, 2),
+                    "last_success_state_fill_pct": round(float(snapshot["state_fill_pct"]), 2),
+                    "last_success_health_fill_pct": (
+                        round(float(snapshot["health_fill_pct"]), 2)
+                        if isinstance(snapshot.get("health_fill_pct"), (int, float))
+                        and math.isfinite(float(snapshot["health_fill_pct"]))
+                        else None
+                    ),
+                    "effective_low_fill_pct": round(float(snapshot["effective_low_fill_pct"]), 2),
+                    "effective_high_fill_pct": round(float(snapshot["effective_high_fill_pct"]), 2),
                     "last_action_at": now,
                     "action_count": int(status.get("action_count", 0) or 0) + 1,
-                    "last_block_active": False,
-                    "last_block_resolved_at": (
-                        now
-                        if status.get("last_block_active")
-                        else status.get("last_block_resolved_at")
-                    ),
-                    "last_block_reason": None,
-                    "current_block_reason": None,
-                    "health_budget_status": "green",
                     "next_promotion_eligibility": "operator_gate_required",
                 }
             )
-            status.pop("blocked_at", None)
-            status.pop("reason", None)
+            if health_allowed:
+                status.update(
+                    {
+                        "last_block_active": False,
+                        "last_block_resolved_at": (
+                            now
+                            if prior_block_active
+                            else status.get("last_block_resolved_at")
+                        ),
+                        "last_block_reason": None,
+                        "current_block_reason": None,
+                        "current_block_class": None,
+                        "health_budget_status": "green",
+                        "suggested_safe_next": [],
+                    }
+                )
+                status.pop("blocked_at", None)
+                status.pop("reason", None)
+            else:
+                block_class = self._stable_core_block_class(health_reason)
+                status.update(
+                    {
+                        "last_block_active": True,
+                        "last_block_resolved_at": None,
+                        "last_block_reason": health_reason,
+                        "current_block_reason": health_reason,
+                        "current_block_class": block_class,
+                        "health_budget_status": "blocked",
+                        "reason": health_reason,
+                        "suggested_safe_next": (
+                            self._stable_core_safe_low_fill_actions()
+                            if block_class == "low_fill_hold"
+                            else []
+                        ),
+                    }
+                )
             if family in {"journaling", "self_study"}:
                 status["last_entry_at"] = now
                 status["entry_count"] = int(status.get("entry_count", 0) or 0) + 1
@@ -9848,6 +11985,85 @@ Fill: {fill:.1f}%
             self._write_stable_core_agent_status(status)
         except Exception as exc:
             logging.debug(f"Could not write stable-core agent success: {exc}")
+
+    def _reconcile_stable_core_health_status(self, state: Dict[str, float]) -> None:
+        budget = self._stable_core_agency_budget()
+        if not budget.get("active"):
+            return
+        try:
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            status = self._load_stable_core_agent_status()
+            snapshot = self._stable_core_health_budget_snapshot(state)
+            health_allowed, health_reason = self._stable_core_health_budget_allows(budget, state)
+            health_fill_pct = snapshot.get("health_fill_pct")
+            common = {
+                "stage": budget.get("stage"),
+                "agent_budget_mode": budget.get("agent_budget_mode"),
+                "allowed_action_families": budget.get("allowed_action_families"),
+                "allowed_actions": sorted(
+                    STABLE_CORE_STAGE_ACTIONS.get(str(budget.get("stage", "off")), set())
+                ),
+                "fill_pct": round(float(snapshot["effective_low_fill_pct"]), 2),
+                "state_fill_pct": round(float(snapshot["state_fill_pct"]), 2),
+                "health_fill_pct": (
+                    round(float(health_fill_pct), 2)
+                    if isinstance(health_fill_pct, (int, float))
+                    and math.isfinite(float(health_fill_pct))
+                    else None
+                ),
+                "health_fresh": bool(snapshot["health_fresh"]),
+                "effective_low_fill_pct": round(float(snapshot["effective_low_fill_pct"]), 2),
+                "effective_high_fill_pct": round(float(snapshot["effective_high_fill_pct"]), 2),
+                "last_health_reconciled_at": now,
+            }
+            status.update(common)
+            if health_allowed:
+                if status.get("last_block_active"):
+                    status["last_block_resolved_at"] = now
+                status.update(
+                    {
+                        "last_block_active": False,
+                        "last_block_reason": None,
+                        "current_block_reason": None,
+                        "current_block_class": None,
+                        "health_budget_status": "green",
+                        "suggested_safe_next": [],
+                    }
+                )
+                status.pop("blocked_at", None)
+                status.pop("reason", None)
+            else:
+                block_class = self._stable_core_block_class(health_reason)
+                status.update(
+                    {
+                        "last_block_active": True,
+                        "last_block_resolved_at": None,
+                        "last_block_reason": health_reason,
+                        "current_block_reason": health_reason,
+                        "current_block_class": block_class,
+                        "health_budget_status": "blocked",
+                        "reason": health_reason,
+                        "suggested_safe_next": (
+                            self._stable_core_safe_low_fill_actions()
+                            if block_class == "low_fill_hold"
+                            else []
+                        ),
+                    }
+                )
+                status["last_health_hold"] = {
+                    "checked_at": now,
+                    "reason": health_reason,
+                    "block_class": block_class,
+                    "fill_pct": status["fill_pct"],
+                    "state_fill_pct": status["state_fill_pct"],
+                    "health_fill_pct": status["health_fill_pct"],
+                    "effective_low_fill_pct": status["effective_low_fill_pct"],
+                    "effective_high_fill_pct": status["effective_high_fill_pct"],
+                    "suggested_safe_next": status["suggested_safe_next"],
+                }
+            self._write_stable_core_agent_status(status)
+        except Exception as exc:
+            logging.debug(f"Could not reconcile stable-core health status: {exc}")
 
     def _execute_action(
         self,
@@ -9919,6 +12135,7 @@ Fill: {fill:.1f}%
                 action,
                 state,
                 source=continuity_context.get("source", "autonomous"),
+                normalization_signal=continuity_context.get("normalization_signal_v1"),
             )
             self._current_action_continuity_event = continuity_event
             if _llm_job_id:
@@ -12099,6 +14316,141 @@ Trigger: {trigger_text}
         metrics["updated_at"] = now_iso
         self._save_condition_metrics(metrics)
 
+    PARAMETER_ALIASES = {
+        "kp": "pi_kp",
+        "pi_kp": "pi_kp",
+        "ki": "pi_ki",
+        "pi_ki": "pi_ki",
+        "max_step": "pi_max_step",
+        "pi_max_step": "pi_max_step",
+        "regulation_strength": "regulation_strength",
+        "exploration_noise": "exploration_noise",
+        "keep_floor": "keep_floor",
+        "keep_bias": "keep_bias",
+        "keep": "keep_bias",
+        "regime": "regime",
+        "target_fill": "pi_target_fill",
+        "pi_target_fill": "pi_target_fill",
+        "gate": "gate",
+        "filter": "filter",
+        "filt": "filter",
+    }
+    REQUESTABLE_SELF_PARAMS = {
+        "regime",
+        "pi_kp",
+        "pi_ki",
+        "pi_max_step",
+        "regulation_strength",
+        "exploration_noise",
+        "keep_floor",
+        "keep_bias",
+    }
+    PROTECTED_SELF_PARAMS = {"gate", "filter", "pi_target_fill"}
+
+    @classmethod
+    def _canonical_parameter_name(cls, param_name: Any) -> str:
+        clean = str(param_name or "").strip().strip("`").lower()
+        return cls.PARAMETER_ALIASES.get(clean, clean)
+
+    def _parameter_recommendation_safety(
+        self,
+        recommendation: Dict[str, Any],
+    ) -> tuple[bool, str, str]:
+        param = self._canonical_parameter_name(recommendation.get("parameter"))
+        proposed = str(recommendation.get("proposed_value", "")).strip().strip("`'\".,;")
+        if not param:
+            return False, param, "missing parameter"
+        if param in self.PROTECTED_SELF_PARAMS:
+            return False, param, f"protected parameter `{param}` requires explicit external review, not self-assessment"
+        if param not in self.REQUESTABLE_SELF_PARAMS:
+            return False, param, f"unsupported parameter `{param}` is not in the self-assessment safety grammar"
+        if param == "regime":
+            if proposed.lower() not in REGULATORY_REGIMES:
+                return False, param, f"unknown regime `{proposed}`"
+            return True, param, "allowed regime recommendation"
+        try:
+            float(proposed.rstrip("%"))
+        except (TypeError, ValueError):
+            return False, param, f"non-numeric proposed value `{proposed}` for `{param}`"
+        return True, param, "allowed numeric recommendation"
+
+    def _record_rejected_parameter_recommendation(
+        self,
+        recommendation: Dict[str, Any],
+        canonical_param: str,
+        reason: str,
+        state: Dict[str, float],
+        health_data: Optional[Dict[str, Any]],
+        assessment: str,
+    ) -> Optional[Path]:
+        request_dir = WORKSPACE_DIR / "parameter_requests" / "rejected"
+        try:
+            request_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().isoformat().replace(':', '-')
+            payload = {
+                "timestamp": datetime.now().isoformat(),
+                "session_id": self.session_id,
+                "parameter": canonical_param or recommendation.get("parameter"),
+                "raw_parameter": recommendation.get("parameter"),
+                "proposed_value": recommendation.get("proposed_value"),
+                "rationale": recommendation.get("rationale"),
+                "source": "self_assessment",
+                "status": "rejected_invalid",
+                "invalid_reason": reason,
+                "llm_cited_value": recommendation.get("llm_current_value"),
+                "telemetry_snapshot": {
+                    "fill_pct": state.get('fill_ratio', 0) * 100,
+                    "eig1": state.get('eig1', 0),
+                    "cov_lambda1": state.get('cov_lambda1', 0),
+                },
+                "actual_value": self._lookup_actual_param(canonical_param, health_data),
+                "assessment_excerpt": (assessment or "")[:500],
+            }
+            path = request_dir / f"rejected_{timestamp}.json"
+            path.write_text(json.dumps(payload, indent=2))
+            logging.info(f"📋 Parameter recommendation rejected before pending queue: {reason} ({path})")
+            return path
+        except Exception as exc:
+            logging.debug(f"Failed to record rejected parameter recommendation: {exc}")
+            return None
+
+    def repair_invalid_parameter_requests(self) -> List[Path]:
+        """Move unsupported live self-assessment requests out of the pending queue."""
+        request_dir = WORKSPACE_DIR / "parameter_requests"
+        if not request_dir.exists():
+            return []
+        reviewed_dir = request_dir / "reviewed" / "deferred"
+        moved: List[Path] = []
+        for path in sorted(request_dir.glob("request_*.json")):
+            if not path.is_file():
+                continue
+            try:
+                payload = json.loads(path.read_text())
+            except Exception:
+                continue
+            if payload.get("status") != "pending":
+                continue
+            recommendation = {
+                "parameter": payload.get("parameter"),
+                "proposed_value": payload.get("proposed_value"),
+                "rationale": payload.get("rationale"),
+                "llm_current_value": payload.get("llm_cited_value", payload.get("current_value")),
+            }
+            ok, canonical, reason = self._parameter_recommendation_safety(recommendation)
+            if ok:
+                continue
+            payload["status"] = "invalid_deferred"
+            payload["invalid_reason"] = reason
+            payload["canonical_parameter"] = canonical
+            payload["deferred_at"] = datetime.now().isoformat()
+            reviewed_dir.mkdir(parents=True, exist_ok=True)
+            dest = reviewed_dir / path.name
+            path.write_text(json.dumps(payload, indent=2))
+            shutil.move(str(path), str(dest))
+            moved.append(dest)
+            logging.info(f"📋 Deferred invalid parameter request {path.name}: {reason}")
+        return moved
+
     def _extract_assessment_recommendation(self, assessment: str) -> Optional[Dict[str, Any]]:
         """Extract the most actionable recommendation from a self-assessment."""
         if not assessment:
@@ -12292,9 +14644,21 @@ Trigger: {trigger_text}
         if not recommendation:
             return
 
-        param_name = recommendation["parameter"]
+        ok, canonical_param, safety_reason = self._parameter_recommendation_safety(recommendation)
+        if not ok:
+            self._record_rejected_parameter_recommendation(
+                recommendation,
+                canonical_param,
+                safety_reason,
+                state,
+                health_data,
+                assessment,
+            )
+            return
+
+        param_name = canonical_param
         llm_current_val = recommendation["llm_current_value"]
-        proposed_val = recommendation["proposed_value"]
+        proposed_val = str(recommendation["proposed_value"]).strip().strip("`'\".,;")
         rationale = recommendation["rationale"]
 
         # Cross-reference the LLM's stated current_value against health.json
@@ -12319,6 +14683,7 @@ Trigger: {trigger_text}
             "timestamp": datetime.now().isoformat(),
             "session_id": self.session_id,
             "parameter": param_name,
+            "raw_parameter": recommendation["parameter"],
             "current_value": current_val,
             "proposed_value": proposed_val,
             "rationale": rationale,
@@ -12375,9 +14740,9 @@ Trigger: {trigger_text}
             return  # Regime handled — skip numeric adjustment path below
 
         ADJUSTABLE = {
-            'kp': 'pi_kp', 'pi_kp': 'pi_kp',
-            'ki': 'pi_ki', 'pi_ki': 'pi_ki',
-            'max_step': 'pi_max_step', 'pi_max_step': 'pi_max_step',
+            'pi_kp': 'pi_kp',
+            'pi_ki': 'pi_ki',
+            'pi_max_step': 'pi_max_step',
             'regulation_strength': 'regulation_strength',
             'exploration_noise': 'exploration_noise',
         }
@@ -12442,6 +14807,7 @@ Trigger: {trigger_text}
             'filter': health_data.get('filt'),
             'filt': health_data.get('filt'),
             'regulation_strength': health_data.get('regulation_strength'),
+            'exploration_noise': health_data.get('exploration_noise'),
         }
 
         return lookup.get(clean)
@@ -13499,6 +15865,7 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
             WORKSPACE_DIR / "journal",
             WORKSPACE_DIR / "research",
             WORKSPACE_DIR / "action_threads",
+            WORKSPACE_DIR / "notes",
         ]
 
     def _introspect_source_roots(self) -> List[Path]:
@@ -13924,12 +16291,21 @@ Repair output:
         timestamp = datetime.now().isoformat().replace(':', '-')
         file_path = WORKSPACE_DIR / "journal" / f"introspect_notice_{timestamp}.txt"
         file_path.parent.mkdir(parents=True, exist_ok=True)
+        target_text = str(target or "")
+        note_shaped = "/notes/" in target_text or target_text.startswith("notes/")
+        route_hint = (
+            " For generated workspace notes, try NEXT: READ_MORE <note path> or "
+            "NEXT: EXAMINE notes/<name> if the note has not been materialized yet."
+            if note_shaped
+            else ""
+        )
         response = (
             f"INTROSPECT could not read `{target or 'rotation'}`: {reason}.\n\n"
             "The request stayed read-only. A better next attempt can name a curated label "
             "such as autonomous_agent.py, ESN reservoir, astrid:codec, or a text file "
             "under workspace/inbox/read, workspace/outbox/delivered, workspace/journal, "
-            "workspace/research, or workspace/action_threads."
+            "workspace/research, workspace/action_threads, or workspace/notes."
+            f"{route_hint}"
         )
         file_path.write_text(f"""=== INTROSPECT NOTICE ===
 Timestamp: {datetime.now().isoformat()}
@@ -14659,10 +17035,15 @@ Moments captured:
             self._pending_search_topic = None
             web_result = self._web_search(search_topic, anchor=search_topic)
             if web_result:
+                evidence_hint = self._continuity_store().active_experiment_evidence_hint(
+                    "SEARCH",
+                    search_topic,
+                )
                 prompt = f"""You searched the web for: "{search_topic}"
 
 Here's what you found:
 {web_result.prompt_body()}
+{evidence_hint}
 
 React to what you learned. What catches your attention? What questions does it raise?
 If any link looks worth reading in full, write NEXT: BROWSE followed by the actual URL from the result.
@@ -15976,10 +18357,12 @@ Command: {cmd_str}
                 page_context = format_browse_read_context(page_result, chunk, remaining)
 
         if browse_failed:
+            evidence_hint = self._continuity_store().active_experiment_evidence_hint("BROWSE", url)
             prompt = f"""You chose to read a full web page:
 URL: {url}
 
 {page_context}
+{evidence_hint}
 
 The page itself was not readable. Give a grounded response about the concrete topic
 or source you were trying to investigate. Treat the access failure as mundane web
@@ -15987,10 +18370,12 @@ access status, not as a gate, boundary, sensory limit, or internal topology sign
 If continuing, choose NEXT: SEARCH with a narrower query or NEXT: BROWSE a
 different reliable URL."""
         else:
+            evidence_hint = self._continuity_store().active_experiment_evidence_hint("BROWSE", url)
             prompt = f"""You chose to read a full web page:
 URL: {url}
 
 {page_context}
+{evidence_hint}
 
 React to what you found in the source content. Separate source content from
 ordinary web-access mechanics; site availability is operational context, not an
@@ -19778,6 +22163,11 @@ After snapshot:
             "\nLegacy perturb bridge:\n"
             f"  PERTURB {mode_text} remains your sovereign direct action.\n"
             f"  Prepared proof-first draft: ACCEPT_ATTRACTOR_SUGGESTION latest to run {suggested_action}.\n"
+            "  Workbench follow-up: NEXT: EXPERIMENT_EVIDENCE current :: "
+            "record what this perturbation changed, what it felt like, and whether the telemetry supported the intent.\n"
+            "  Before another live perturb, consider NEXT: EXPERIMENT_CHARTER current :: "
+            f"hypothesis: ...; proposed_next_action: PERTURB {mode_text}; evidence_targets: felt, telemetry, artifact; stop_criteria: ... "
+            "then NEXT: EXPERIMENT_REHEARSE current.\n"
             "  REVISE or REJECT will teach the naming memory without undoing this perturbation.\n"
         )
 
@@ -21046,7 +23436,7 @@ Goals: {json.dumps(goals, indent=2)}
         envelope = self._current_btsp_active_proposal()
         if not envelope:
             return ""
-        return format_active_btsp_proposal_reminder(envelope)
+        return format_active_btsp_proposal_reminder(envelope, active_proposal_metadata())
 
     @staticmethod
     def _pending_next_base(action: Optional[str]) -> str:
@@ -25407,6 +27797,16 @@ Goals: {json.dumps(goals, indent=2)}
                 return INTERNAL_TOPOLOGY_GENERIC_CHOICE_SIGNAL
         return sanitized
 
+    def _sanitize_internal_topology_action_lines(self, content: str) -> str:
+        lines: list[str] = []
+        for line in str(content or "").splitlines():
+            next_match = re.match(r"(?i)^(\s*)NEXT\s*:\s*([A-Z_]+)\b", line)
+            if next_match and next_match.group(2).upper() in INTERNAL_TOPOLOGY_MUTATING_NEXT_BASES:
+                lines.append(f"{next_match.group(1)}{INTERNAL_TOPOLOGY_GENERIC_CHOICE_SIGNAL}")
+                continue
+            lines.append(line)
+        return "\n".join(lines)
+
     def _internal_topology_new_signal(self, content: str, prior: Optional[str] = None) -> str:
         for line in content.splitlines():
             if re.match(r"(?i)^\s*NEXT\s*:", line):
@@ -26615,6 +29015,14 @@ Goals: {json.dumps(goals, indent=2)}
         text = augmented.text
         if envelope is not None and should_clear_for_classification(augmented.classification):
             self._clear_btsp_active_proposal(envelope.proposal_id)
+        elif envelope is not None and augmented.classification != "none":
+            tags = parse_btsp_reply_tags(text)
+            record_active_proposal_reply(
+                envelope.proposal_id,
+                augmented.classification,
+                tags.observed_next,
+                study_first_reason=tags.study_first_reason,
+            )
         with open(path, "w") as f:
             f.write(f"=== MINIME REPLY ===\nTimestamp: {ts}\n\n{text}\n")
         logging.info(
@@ -26821,9 +29229,14 @@ Goals: {json.dumps(goals, indent=2)}
             "  SAVEPOINT <name> — capture the current thread plus spectral/action state.\n"
             "  RECALL <name> — read a savepoint without restoring or controlling runtime state.\n"
             "  EXPERIMENT_START <title> :: <question> — create/select a being-owned experiment in the current thread.\n"
-            "  EXPERIMENT_PLAN [current|id] — ask for hypothesis, method, measures, stop criteria, and one concrete next action.\n"
-            "  EXPERIMENT_BIND [current|id] :: <NEXT action> — run the inner action through normal gates and record it as an experiment run.\n"
-            "  EXPERIMENT_OBSERVE [current|id] :: <note> — append interpretation without executing anything.\n"
+            "  EXPERIMENT_PLAN current — ask for hypothesis, method, measures, stop criteria, and one concrete next action.\n"
+            "  EXPERIMENT_CHARTER current :: hypothesis: ...; method_intent: ...; proposed_next_action: ACTION_PREFLIGHT ...; evidence_targets: felt, telemetry, artifact; stop_criteria: ... — author the workbench route.\n"
+            "  EXPERIMENT_REHEARSE current — dry-run the chartered proposed action; live write/control routes are recorded as blocked rehearsal, not executed.\n"
+            "  EXPERIMENT_PREFLIGHT current — alias for EXPERIMENT_REHEARSE when preflight wording feels natural.\n"
+            "  EXPERIMENT_EVIDENCE current :: felt ...; telemetry ...; artifact ... — record felt evidence plus current telemetry/artifact context.\n"
+            "  EXPERIMENT_DECIDE current :: accept because ... / refuse because ... / counter NEXT: ACTION_PREFLIGHT ... / pause because ... / complete because ... — record agency outcome and update the experiment return point.\n"
+            "  EXPERIMENT_BIND current :: ACTION_PREFLIGHT DECOMPOSE — run the inner action through normal gates and record it as an experiment run.\n"
+            "  EXPERIMENT_OBSERVE current :: note ... — append interpretation without executing anything.\n"
             "  EXPERIMENT_STATUS / EXPERIMENT_REVIEW / EXPERIMENT_CLOSE / EXPERIMENT_PEER_REVIEW — inspect, synthesize, close, or request Astrid review.\n"
             "  AR_LIST — browse the autoresearch job catalog.\n"
             "  AR_LIST_PENDING / AR_LIST_ACTIVE / AR_LIST_DONE — filter autoresearch jobs by lifecycle state.\n"
@@ -27112,6 +29525,11 @@ Goals: {json.dumps(goals, indent=2)}
             self._notice_attractor_body_consent(next_action, base_action, cleaned)
         self._pending_next_action = next_action
         base_action = next_action.split()[0].upper()
+        signal = globals().get("_LAST_NEXT_NORMALIZATION_SIGNAL_V1")
+        if isinstance(signal, dict) and ActionContinuityStore.base_action(next_action) == signal.get("normalized_verb"):
+            self._pending_next_normalization_signal = dict(signal)
+        else:
+            self._pending_next_normalization_signal = None
         self._recent_next_actions.append(base_action)
         self._persist_pending_next_action(next_action, reason=reason)
         logging.info(f"🎯 Being chose NEXT: {next_action}")
@@ -28048,7 +30466,7 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
                 "The system noticed a repeating internal-topology motif "
                 f"({entry_type}). Consider a non-spectral focus next: {new_signal}]"
             )
-            preserved = content.rstrip() + soft_notice
+            preserved = self._sanitize_internal_topology_action_lines(content).rstrip() + soft_notice
             self._record_condition_metric(
                 "attractor_fatigue",
                 {

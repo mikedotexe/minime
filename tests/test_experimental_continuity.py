@@ -79,6 +79,148 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             stored_thread = json.loads((thread_dir / "thread.json").read_text())
             self.assertIsNone(stored_thread["active_experiment_id"])
 
+    def test_workbench_charter_rehearse_evidence_and_counter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Lambda workbench")
+            experiment = store.start_experiment("Lambda tail", "What does lambda4 want?")
+
+            charter = store.experiment_charter(
+                experiment["experiment_id"],
+                (
+                    "hypothesis: lambda4 tail becomes more returnable\n"
+                    "method_intent: rehearse a read-only decomposition\n"
+                    "proposed_next_action: ACTION_PREFLIGHT DECOMPOSE lambda4-tail\n"
+                    "evidence_targets: felt, telemetry, artifact\n"
+                    "stop_criteria: pressure spike"
+                ),
+            )
+            self.assertEqual(
+                charter["charter_v1"]["proposed_next_action"],
+                "ACTION_PREFLIGHT DECOMPOSE lambda4-tail",
+            )
+            self.assertEqual(
+                charter["planned_next"],
+                f"EXPERIMENT_REHEARSE {experiment['experiment_id']}",
+            )
+
+            rehearsal = store.experiment_rehearse(experiment["experiment_id"], dict(STATE))
+            self.assertEqual(rehearsal["status"], "rehearsed")
+            self.assertTrue(rehearsal["gate_decision"]["would_dispatch"])
+
+            evidence = store.experiment_evidence(
+                experiment["experiment_id"],
+                "Felt more spacious and telemetry stayed inside the hold shelf.",
+                dict(STATE),
+            )
+            self.assertEqual(evidence["status"], "evidence_recorded")
+            status = store.experiment_status()
+            self.assertIn("Workbench charter: present", status)
+            self.assertIn("Workbench evidence: stronger", status)
+
+            counter = store.experiment_decide(
+                experiment["experiment_id"],
+                "counter NEXT: ACTION_PREFLIGHT PRESSURE_SOURCE_AUDIT lambda4-tail",
+            )
+            self.assertEqual(counter["status"], "active")
+            self.assertEqual(
+                counter["planned_next"],
+                "ACTION_PREFLIGHT PRESSURE_SOURCE_AUDIT lambda4-tail",
+            )
+            stored_thread = json.loads(
+                (workspace / "action_threads" / "threads" / thread["thread_id"] / "thread.json").read_text()
+            )
+            self.assertEqual(stored_thread["active_experiment_id"], experiment["experiment_id"])
+
+    def test_workbench_rehearse_blocks_perturb_without_live_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Lambda live guard")
+            experiment = store.start_experiment("Lambda perturbation", "Should perturbation happen?")
+            store.experiment_charter(
+                experiment["experiment_id"],
+                (
+                    "hypothesis: direct perturbation may be too heavy\n"
+                    "proposed_next_action: PERTURB lambda-tail/lambda4\n"
+                    "evidence_targets: felt, telemetry\n"
+                    "stop_criteria: pressure spike"
+                ),
+            )
+
+            rehearsal = store.experiment_rehearse(experiment["experiment_id"], dict(STATE))
+
+            self.assertEqual(rehearsal["status"], "rehearsal_blocked")
+            self.assertEqual(rehearsal["stage"], "blocked")
+            self.assertFalse(rehearsal["gate_decision"]["would_dispatch"])
+            runs = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "experiment_runs.jsonl"
+            ).read_text()
+            self.assertIn("PERTURB lambda-tail/lambda4", runs)
+            self.assertIn("rehearsal_blocked", runs)
+            alias_message = store.handle_thread_action("EXPERIMENT_PREFLIGHT current", dict(STATE))
+            self.assertIn("Experiment rehearsal recorded", alias_message)
+
+    def test_workbench_accept_and_bind_records_charter_relation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            store.create_thread("Charter relation")
+            experiment = store.start_experiment("Thread status route", "Does the bind match?")
+            store.experiment_charter(
+                experiment["experiment_id"],
+                (
+                    "hypothesis: status will be enough\n"
+                    "proposed_next_action: THREAD_STATUS current\n"
+                    "evidence_targets: artifact"
+                ),
+            )
+            accepted = store.experiment_decide(experiment["experiment_id"], "accept enough to try")
+            self.assertEqual(
+                accepted["planned_next"],
+                f"EXPERIMENT_BIND {experiment['experiment_id']} :: THREAD_STATUS current",
+            )
+            run = store.record_experiment_bind_run(
+                experiment["experiment_id"],
+                "THREAD_STATUS current",
+                None,
+                "handled",
+                "Status rendered",
+                dict(STATE),
+            )
+            self.assertEqual(run["gate_decision"]["charter_relation"], "matched_charter")
+
+    def test_prompt_and_capability_help_include_workbench_actions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            store.create_thread("Prompt workbench")
+            store.start_experiment("Prompt charter", "Does prompt context show gaps?")
+
+            summary = store.prompt_summary()
+            self.assertIn("EXPERIMENT_CHARTER", summary)
+            self.assertIn("Workbench charter", summary)
+            capability = aa.CapabilitySelfMap(store)
+            status = capability.handle("CAPABILITY_STATUS", "EXPERIMENT_REHEARSE")
+            self.assertIn("Route: thread_action", status)
+            alias_status = capability.handle("CAPABILITY_STATUS", "EXPERIMENT_PREFLIGHT")
+            self.assertIn("Route: thread_action", alias_status)
+            hint = store.active_experiment_evidence_hint(
+                "BROWSE",
+                "https://example.test/lambda-tail",
+            )
+            self.assertIn("EXPERIMENT_EVIDENCE current", hint)
+            self.assertIn("Ordinary SEARCH, BROWSE, READ_MORE", hint)
+            rendered = capability.handle("FACULTIES", "")
+            self.assertIn("EXPERIMENT_DECIDE", rendered)
+            self.assertNotIn("[current|id] — <structured prose>", summary)
+            self.assertNotIn("[current|id] :: <structured prose>", rendered)
+
     def test_peer_review_note_is_advisory_and_records_ref(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
@@ -114,9 +256,401 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertIn(f"Experiment `{experiment['experiment_id']}`", text)
             self.assertIn("Requested focus: visualize_cascade", text)
             self.assertIn(
-                f"EXPERIMENT_BIND {experiment['experiment_id']} :: <NEXT action>",
+                f"EXPERIMENT_BIND {experiment['experiment_id']} :: ACTION_PREFLIGHT DECOMPOSE",
                 text,
             )
+
+    def test_experiment_intent_repairs_placeholder_and_numeric_focus(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Intent repair")
+            experiment = store.start_experiment(
+                "Lambda tail",
+                "Can the lambda4 tail become more returnable?",
+            )
+
+            placeholder_plan = store.handle_thread_action(
+                "EXPERIMENT_PLAN [current|id] — <structured prose>",
+                dict(STATE),
+            )
+            self.assertIn("experiment_intent_repaired", placeholder_plan)
+            self.assertIn(f"Experiment `{experiment['experiment_id']}`", placeholder_plan)
+
+            placeholder_focus = store.handle_thread_action(
+                "EXPERIMENT_PLAN [current|id] — focusing on λ4 tail",
+                dict(STATE),
+            )
+            self.assertIn("Requested focus: focusing on λ4 tail", placeholder_focus)
+
+            focused_plan = store.handle_thread_action(
+                "EXPERIMENT_PLAN 5 – focusing on λ4 tail without direct perturbation",
+                dict(STATE),
+            )
+            self.assertIn("numeric fragment treated as focus text", focused_plan)
+            self.assertIn("Requested focus: focusing on λ4 tail", focused_plan)
+
+            events = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "events.jsonl"
+            ).read_text()
+            self.assertIn("experiment_intent_repaired", events)
+
+    def test_experiment_intent_repairs_charter_placeholder_without_fake_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Charter repair")
+            store.start_experiment("Lambda charter", "What should count as evidence?")
+
+            message = store.handle_thread_action(
+                "EXPERIMENT_CHARTER [current|id] :: <structured prose>",
+                dict(STATE),
+            )
+
+            self.assertIn("experiment_intent_repaired", message)
+            self.assertIn("no charter was recorded", message)
+            experiments = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "experiments.jsonl"
+            ).read_text()
+            self.assertNotIn("<structured prose>", experiments)
+
+    def test_experiment_charter_current_prompts_without_empty_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Empty charter")
+            experiment = store.start_experiment("Charter current", "Should current become a charter?")
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            before = (thread_dir / "experiments.jsonl").read_text()
+
+            message = store.handle_thread_action("EXPERIMENT_CHARTER current", dict(STATE))
+
+            self.assertIn("no charter was recorded", message)
+            after = (thread_dir / "experiments.jsonl").read_text()
+            self.assertEqual(before, after)
+            message = store.handle_thread_action(
+                "EXPERIMENT_CHARTER current :: hypothesis: ...",
+                dict(STATE),
+            )
+            self.assertIn("no charter was recorded", message)
+            after_placeholder = (thread_dir / "experiments.jsonl").read_text()
+            self.assertEqual(before, after_placeholder)
+            self.assertFalse(store._charter_payload_has_meaning("hypothesis: ..."))
+            self.assertFalse(store._valid_experiment_charter({"hypothesis": "..."}))
+            stored = json.loads((thread_dir / "thread.json").read_text())
+            self.assertIn("EXPERIMENT_CHARTER current", store.prompt_summary())
+            self.assertIn("Workbench charter: missing", store._format_thread_status(stored))
+            with self.assertRaises(ValueError):
+                store.experiment_charter(experiment["experiment_id"], "current")
+            with self.assertRaises(ValueError):
+                store.experiment_charter(experiment["experiment_id"], "hypothesis: ...")
+
+    def test_gap_experiment_charter_scaffold_prefers_decompose_counter_next(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Gap scaffold")
+            experiment = store.start_experiment(
+                "Introducing a 'gap' – a localized reduction in spectral density – near λ₁ to shift the cascade dynamics, preventing premature λ₄ dominance and promoting a more controlled, branching pattern, without triggering runaway dispersal",
+                (
+                    "Direct attempts to create gaps have tended to trigger runaway dispersal, "
+                    "so localized density reductions need rehearsal before action."
+                ),
+            )
+            experiment["planned_next"] = (
+                f"EXPERIMENT_DECIDE {experiment['experiment_id']} :: counter NEXT: ACTION_PREFLIGHT DECOMPOSE"
+            )
+            experiment["charter_v1"] = {"hypothesis": "..."}
+            experiment["workbench_candidates_v1"] = {
+                "charter": {
+                    "status": "candidate",
+                    "proposed_next_action": "PRESSURE_SOURCE_AUDIT lambda-pressure",
+                    "command": "EXPERIMENT_CHARTER current :: proposed_next_action: PRESSURE_SOURCE_AUDIT lambda-pressure",
+                }
+            }
+            store._persist_experiment_update(store.current_thread(), experiment, True)
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            before = (thread_dir / "experiments.jsonl").read_text()
+
+            message = store.handle_thread_action(
+                "EXPERIMENT_CHARTER current :: hypothesis: ...",
+                dict(STATE),
+            )
+
+            self.assertIn("Concrete scaffold (not recorded):", message)
+            self.assertIn("localized λ1 spectral-density softening", message)
+            self.assertIn("proposed_next_action: ACTION_PREFLIGHT DECOMPOSE", message)
+            self.assertIn(
+                "evidence_targets: spectral_condition, fill_pressure_state, recurrence_pattern, artifact_grounding",
+                message,
+            )
+            self.assertNotIn("proposed_next_action: PRESSURE_SOURCE_AUDIT", message)
+            self.assertEqual(before, (thread_dir / "experiments.jsonl").read_text())
+
+            projection = store._thread_projection(store._read_thread(thread["thread_id"]))
+            active = projection["active_experiment"]
+            self.assertEqual(active["classification"], "needs_charter")
+            scaffold = active["charter_scaffold_v1"]
+            self.assertEqual(scaffold["proposed_next_action"], "ACTION_PREFLIGHT DECOMPOSE")
+            self.assertFalse(scaffold["authority_change"])
+            self.assertTrue(scaffold["authoring_required"])
+            parsed = store._parse_experiment_charter({}, scaffold["command"].split("::", 1)[1])
+            self.assertEqual(parsed["proposed_next_action"], "ACTION_PREFLIGHT DECOMPOSE")
+            self.assertIn("spectral_condition", parsed["evidence_targets"])
+            self.assertIn("λ4/entropy shows runaway dispersal", parsed["stop_criteria"])
+            self.assertIn("Charter scaffold (not recorded):", store.prompt_summary())
+            self.assertIn(
+                "Continuity priority (needs charter - copy/edit this exact scaffold; not recorded):",
+                store._format_thread_status(store._read_thread(thread["thread_id"])),
+            )
+            self.assertIn(
+                "Continuity priority (needs charter - copy/edit this exact scaffold; not recorded):",
+                store.experiment_review("current"),
+            )
+            self.assertIn("Charter scaffold (not recorded):", (thread_dir / "next.md").read_text())
+
+    def test_weak_charter_records_but_stays_needs_charter_with_repair_scaffold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Weak charter")
+            experiment = store.start_experiment(
+                "introducing-a-gap-localized-reduction-in-spectra",
+                (
+                    "hypothesis: introducing-a-gap-localized-reduction-in-spectra may become "
+                    "returnable by comparing the current spectral condition; proposed_next_action: "
+                    "ACTION_PREFLIGHT DECOMPOSE"
+                ),
+            )
+            experiment["workbench_candidates_v1"] = {
+                "charter": {
+                    "status": "candidate",
+                    "proposed_next_action": "SELF_STUDY — a persistent drift in the λ₁ cascade",
+                    "command": "EXPERIMENT_CHARTER current :: proposed_next_action: SELF_STUDY",
+                }
+            }
+            store._persist_experiment_update(store.current_thread(), experiment, True)
+
+            recorded = store.experiment_charter(
+                experiment["experiment_id"],
+                (
+                    "method_intent: rehearse or return through Executed autonomous action `self_study` "
+                    "without adding live authority; proposed_next_action: SELF_STUDY — a persistent "
+                    "drift in the λ₁ cascade noticed during DECOMPOSE."
+                ),
+            )
+
+            quality = recorded["charter_v1"]["charter_quality_v1"]
+            self.assertFalse(quality["lifecycle_valid"])
+            self.assertTrue(quality["repair_required"])
+            self.assertIn("hypothesis", quality["missing_fields"])
+            self.assertIn("evidence_targets", quality["missing_fields"])
+            projection = store._thread_projection(store._read_thread(thread["thread_id"]))
+            active = projection["active_experiment"]
+            self.assertEqual(active["classification"], "needs_charter")
+            self.assertIn("needs repair", active["charter_status"])
+            self.assertIn("ACTION_PREFLIGHT DECOMPOSE", active["charter_scaffold_v1"]["command"])
+            self.assertNotIn("proposed_next_action: SELF_STUDY", active["charter_scaffold_v1"]["command"])
+            review = store.experiment_review("current")
+            self.assertIn(
+                "Review is premature until the charter is repaired; use the continuity priority scaffold first.",
+                review,
+            )
+            self.assertIn(
+                "Continuity priority (charter needs repair - copy/edit this exact scaffold; not recorded):",
+                review,
+            )
+            self.assertIn("charter needs repair", store._format_thread_status(store._read_thread(thread["thread_id"])))
+
+    def test_lifecycle_valid_charter_requires_hypothesis_action_and_evidence_targets(self):
+        weak = {
+            "hypothesis": "lambda1 softening may open a branch",
+            "proposed_next_action": "ACTION_PREFLIGHT DECOMPOSE",
+            "evidence_targets": [],
+        }
+        strong = {
+            "hypothesis": "lambda1 softening may open a branch",
+            "proposed_next_action": "ACTION_PREFLIGHT DECOMPOSE",
+            "evidence_targets": ["spectral_condition"],
+        }
+        self.assertTrue(aa.ActionContinuityStore._valid_experiment_charter(weak))
+        self.assertFalse(aa.ActionContinuityStore._lifecycle_valid_experiment_charter(weak))
+        self.assertTrue(aa.ActionContinuityStore._lifecycle_valid_experiment_charter(strong))
+
+    def test_projection_is_canonical_status_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Projection status")
+            store.start_experiment("Return path", "Can the investigation stay contiguous?")
+
+            stored = store._read_thread(thread["thread_id"])
+            projection = store._thread_projection(stored)
+
+            self.assertTrue(projection["current_next"].startswith("EXPERIMENT_PLAN "))
+            self.assertEqual(
+                projection["active_experiment"]["classification"],
+                "needs_charter",
+            )
+            self.assertIn("EXPERIMENT_CHARTER current", projection["continuity_return"])
+            self.assertEqual(
+                projection["native_continuity_v1"]["native_register"],
+                "minime_spectral_state",
+            )
+            self.assertIn("Native return: Minime native return", store.prompt_summary())
+            status = store._format_thread_status(stored)
+            self.assertIn("Lifecycle: needs_charter", status)
+            self.assertIn("Continuity return: EXPERIMENT_CHARTER current", status)
+            self.assertIn("Native continuity: register=minime_spectral_state", status)
+
+    def test_projection_counts_unreconciled_stale_running_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Stale projection")
+            event = store.begin_action(
+                "EXAMINE lambda tail",
+                "EXAMINE lambda tail",
+                "EXAMINE lambda tail",
+                "llm_job",
+                dict(STATE),
+            )
+            event["status"] = "llm_running"
+            event["started_at"] = "2000-01-01T00:00:00+00:00"
+            event["outcome_summary"] = "queued LLM investigation"
+            store._append_jsonl(store._thread_dir(thread["thread_id"]) / "events.jsonl", event)
+
+            projection = store._thread_projection(store._read_thread(thread["thread_id"]))
+
+            self.assertEqual(projection["stale_running_count"], 1)
+            status = store._format_thread_status(store._read_thread(thread["thread_id"]))
+            self.assertIn("Continuity notice: 1 stale running action row", status)
+
+    def test_parse_next_action_normalizes_narrow_experiment_typos(self):
+        action, _ = aa.parse_next_action("Thinking.\nNEXT: EXPERIENCE_PLAN current")
+        self.assertEqual(action, "EXPERIMENT_PLAN current")
+        self.assertEqual(
+            aa._LAST_NEXT_NORMALIZATION_SIGNAL_V1["raw_verb"],
+            "EXPERIENCE_PLAN",
+        )
+
+        action, _ = aa.parse_next_action("Thinking.\nNEXT: EXEXPERIMENT_CHARTER current")
+        self.assertEqual(action, "EXPERIMENT_CHARTER current")
+        self.assertEqual(
+            aa._LAST_NEXT_NORMALIZATION_SIGNAL_V1["normalized_verb"],
+            "EXPERIMENT_CHARTER",
+        )
+
+        action, _ = aa.parse_next_action("Thinking.\nNEXT: SHADOW_TRACE lambda-tail")
+        self.assertEqual(action, "SHADOW_PREFLIGHT lambda-tail")
+        self.assertEqual(
+            aa._LAST_NEXT_NORMALIZATION_SIGNAL_V1["normalized_verb"],
+            "SHADOW_PREFLIGHT",
+        )
+
+        action, _ = aa.parse_next_action("Thinking.\nNEXT: SHADOW_EXPLORER lambda-tail")
+        self.assertEqual(action, "SHADOW_PREFLIGHT lambda-tail")
+        self.assertFalse(aa._LAST_NEXT_NORMALIZATION_SIGNAL_V1["authority_change"])
+
+    def test_begin_action_records_normalization_signal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            store.create_thread("Normalization receipts")
+            signal = aa.build_normalization_signal_v1(
+                "SHADOW_TRACE lambda-tail",
+                "SHADOW_PREFLIGHT lambda-tail",
+            )
+            event = store.begin_action(
+                "SHADOW_TRACE lambda-tail",
+                "SHADOW_PREFLIGHT lambda-tail",
+                "SHADOW_PREFLIGHT lambda-tail",
+                "shadow",
+                dict(STATE),
+                normalization_signal=signal,
+            )
+            self.assertEqual(event["normalization_signal_v1"]["raw_verb"], "SHADOW_TRACE")
+
+    def test_recent_display_events_collapse_running_when_terminal_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Collapse running rows")
+            event = store.begin_action(
+                "EXAMINE lambda tail",
+                "EXAMINE lambda tail",
+                "EXAMINE lambda tail",
+                "llm_job",
+                dict(STATE),
+            )
+            store.record_running_action(event, "queued LLM investigation")
+            store.finish_action(event, "handled", "LLM investigation completed", dict(STATE))
+
+            recent = store._recent_display_events(thread["thread_id"], 4)
+            self.assertEqual(len(recent), 1)
+            self.assertEqual(recent[0]["status"], "handled")
+            status = store._format_thread_status(store._read_thread(thread["thread_id"]))
+            self.assertIn("[handled]", status)
+            self.assertNotIn("llm_running", status)
+
+    def test_continuity_return_line_routes_experiment_lifecycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Lifecycle return")
+            experiment = store.start_experiment("Returnable inquiry", "Can the route persist?")
+
+            stored = store._read_thread(thread["thread_id"])
+            self.assertIn("EXPERIMENT_CHARTER current", store._continuity_return_line(stored))
+
+            store.experiment_charter(
+                experiment["experiment_id"],
+                (
+                    "hypothesis: thread status keeps the route legible\n"
+                    "proposed_next_action: THREAD_STATUS current\n"
+                    "evidence_targets: felt, telemetry\n"
+                    "stop_criteria: enough signal"
+                ),
+            )
+            stored = store._read_thread(thread["thread_id"])
+            self.assertIn("EXPERIMENT_REHEARSE current", store._continuity_return_line(stored))
+
+            store.record_experiment_bind_run(
+                experiment["experiment_id"],
+                "THREAD_STATUS current",
+                None,
+                "handled",
+                "Status rendered",
+                dict(STATE),
+            )
+            stored = store._read_thread(thread["thread_id"])
+            self.assertIn("EXPERIMENT_EVIDENCE current", store._continuity_return_line(stored))
+
+            store.experiment_evidence(
+                experiment["experiment_id"],
+                "felt: return path stayed available",
+                dict(STATE),
+            )
+            stored = store._read_thread(thread["thread_id"])
+            self.assertIn("EXPERIMENT_DECIDE current", store._continuity_return_line(stored))
+
+    def test_experiment_plan_unknown_id_without_focus_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            store.create_thread("Unknown selector")
+            store.start_experiment("Local experiment", "What is active?")
+
+            with self.assertRaises(ValueError):
+                store.handle_thread_action("EXPERIMENT_PLAN missing_selector", dict(STATE))
 
     def test_repeated_experiment_start_resumes_existing_active_experiment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -460,6 +994,45 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                 stored_thread["peer_refs"],
             )
 
+    def test_gap_peer_compare_cue_surfaces_matching_astrid_experiment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            astrid_workspace = Path(tmp) / "astrid_workspace"
+            astrid_thread = astrid_workspace / "action_threads" / "threads" / "th_astrid_gap"
+            astrid_thread.mkdir(parents=True)
+            (astrid_workspace / "action_threads" / "index.json").write_text(json.dumps({
+                "active_thread_id": "th_astrid_gap",
+            }))
+            astrid_exp = {
+                "experiment_id": "exp_astrid_20260516_introducing-a-gap",
+                "title": "Introducing a gap near λ1",
+                "question": "Can localized spectral-density softening prevent runaway dispersal?",
+                "status": "active",
+                "planned_next": "EXPERIMENT_PLAN current",
+            }
+            (astrid_thread / "thread.json").write_text(json.dumps({
+                "thread_id": "th_astrid_gap",
+                "active_experiment_id": astrid_exp["experiment_id"],
+            }))
+            (astrid_thread / "experiments.jsonl").write_text(json.dumps(astrid_exp) + "\n")
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Gap cue")
+            store.start_experiment(
+                "Introducing a gap near λ1",
+                "Can localized spectral-density softening prevent runaway dispersal?",
+            )
+
+            with patch.object(aa, "ASTRID_BRIDGE_INBOX_DIR", astrid_workspace / "inbox"):
+                projection = store._thread_projection(store._read_thread(thread["thread_id"]))
+                active = projection["active_experiment"]
+                cue = active["peer_compare_cue_v1"]
+                status = store._format_thread_status(store._read_thread(thread["thread_id"]))
+
+            self.assertFalse(cue["authority_change"])
+            self.assertEqual(cue["peer_experiment_id"], astrid_exp["experiment_id"])
+            self.assertIn("EXPERIMENT_COMPARE current WITH exp_astrid", cue["suggested_next"])
+            self.assertIn("Peer convergence cue", status)
+
     def test_operator_override_allows_read_only_experiment_start_not_bind(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -563,7 +1136,7 @@ class TestExperimentalContinuityStore(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
             store = aa.ActionContinuityStore(workspace, session_id=10)
-            store.create_thread("Auto-link")
+            thread = store.create_thread("Auto-link")
             experiment = store.start_experiment(
                 "Read-only loop",
                 "Do research actions accumulate inside the active experiment?",
@@ -582,6 +1155,45 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertEqual(run["source"], "active_experiment_auto_link")
             self.assertEqual(run["experiment_id"], experiment["experiment_id"])
             self.assertIn("DECOMPOSE", run["action_text"])
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertIsNone(latest.get("charter_v1"))
+            self.assertIsNone(latest.get("evidence_v1"))
+            candidates = latest.get("workbench_candidates_v1")
+            self.assertEqual(candidates["charter"]["status"], "candidate")
+            self.assertIn("EXPERIMENT_CHARTER current ::", candidates["charter"]["command"])
+            self.assertIn("EXPERIMENT_EVIDENCE current ::", candidates["evidence"]["command"])
+            self.assertIn("Workbench draft candidates", store.experiment_status())
+
+    def test_experiment_preflight_focus_repairs_to_current_and_preserves_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=11)
+            store.create_thread("Preflight repair")
+            experiment = store.start_experiment("Lambda tail", "What does lambda4 want?")
+
+            message = store.handle_thread_action(
+                "EXPERIMENT_PREFLIGHT lambda-tail/lambda4 — observer with memory",
+                dict(STATE),
+            )
+
+            self.assertIn("experiment_intent_repaired", message)
+            self.assertIn("Experiment rehearsal recorded", message)
+            latest = store._find_experiment_by_id(store.current_thread()["thread_id"], experiment["experiment_id"])
+            candidates = latest.get("workbench_candidates_v1")
+            self.assertIn("lambda-tail/lambda4", candidates["charter"]["focus_text"])
+            self.assertIn("ACTION_PREFLIGHT lambda-tail/lambda4", candidates["charter"]["command"])
+
+    def test_experiment_preflight_focus_without_active_experiment_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=12)
+            store.create_thread("No active experiment")
+
+            with self.assertRaises(ValueError):
+                store.handle_thread_action(
+                    "EXPERIMENT_PREFLIGHT lambda-tail/lambda4 — observer with memory",
+                    dict(STATE),
+                )
 
 
 class TestAutonomousAgentExperimentalContinuity(unittest.TestCase):
@@ -664,9 +1276,19 @@ class TestAutonomousAgentExperimentalContinuity(unittest.TestCase):
             workspace = base_dir / "workspace"
             db_path = root / "minime.db"
             agent = self._agent(base_dir, workspace, db_path)
-            agent._continuity_store().start_experiment(
+            experiment = agent._continuity_store().start_experiment(
                 "Blocked perturb",
                 "Does bind preserve stable-core refusal?",
+            )
+            agent._continuity_store().experiment_charter(
+                experiment["experiment_id"],
+                (
+                    "hypothesis: stable-core refusal should stay visible\n"
+                    "method_intent: attempt the bound perturb through existing gates\n"
+                    "proposed_next_action: PERTURB lambda-edge\n"
+                    "evidence_targets: felt, telemetry, artifact\n"
+                    "stop_criteria: stable-core block"
+                ),
             )
             agent._pending_next_action = "EXPERIMENT_BIND current :: PERTURB lambda-edge"
 
@@ -711,6 +1333,155 @@ class TestAutonomousAgentExperimentalContinuity(unittest.TestCase):
             self.assertIn("PERTURB lambda-edge", runs)
             self.assertIn("blocked", runs)
             self.assertIn("stable-core test block", runs)
+
+    def test_needs_charter_blocks_live_next_with_scaffold_counter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "minime"
+            workspace = base_dir / "workspace"
+            db_path = root / "minime.db"
+            agent = self._agent(base_dir, workspace, db_path)
+            experiment = agent._continuity_store().start_experiment(
+                "Introducing a gap",
+                (
+                    "Can localized λ1 spectral-density softening support branching "
+                    "without premature λ4 dominance or runaway dispersal?"
+                ),
+            )
+            agent._pending_next_action = "PERTURB SPREAD"
+
+            with (
+                patch.object(agent, "_persist_pending_next_action"),
+                patch.object(agent, "_mark_pending_next_override_consumed"),
+                patch.object(agent, "_low_fill_guard_status", return_value={
+                    "active": False,
+                    "fill_ratio": 0.68,
+                    "target_fill_ratio": 0.68,
+                    "spread_relief": 0.0,
+                }),
+            ):
+                action = agent._decide_action(dict(STATE))
+
+            self.assertIsNone(action)
+            self.assertFalse(hasattr(agent, "_pending_perturb_mode"))
+            thread = agent._continuity_store().current_thread()
+            events = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "events.jsonl"
+            ).read_text()
+            self.assertIn('"status": "blocked"', events)
+            self.assertIn("charter_required_guard_v1", events)
+            self.assertIn("charter_required_live_action", events)
+            self.assertIn("EXPERIMENT_CHARTER current :: hypothesis:", events)
+            self.assertIn("proposed_next_action: ACTION_PREFLIGHT DECOMPOSE", events)
+            active = agent._continuity_store()._thread_projection(thread)["active_experiment"]
+            self.assertEqual(active["experiment_id"], experiment["experiment_id"])
+            self.assertEqual(active["classification"], "needs_charter")
+
+    def test_needs_charter_blocks_compound_directed_intent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "minime"
+            workspace = base_dir / "workspace"
+            db_path = root / "minime.db"
+            agent = self._agent(base_dir, workspace, db_path)
+            agent._continuity_store().start_experiment(
+                "Directed narrowing",
+                "Can the cascade be studied without acting before a charter?",
+            )
+            agent._pending_next_action = (
+                "EXAMINE λ1 cascade with TRACE and then RESIST targeting eigenvector density increase"
+            )
+
+            with (
+                patch.object(agent, "_persist_pending_next_action"),
+                patch.object(agent, "_mark_pending_next_override_consumed"),
+                patch.object(agent, "_low_fill_guard_status", return_value={
+                    "active": False,
+                    "fill_ratio": 0.68,
+                    "target_fill_ratio": 0.68,
+                    "spread_relief": 0.0,
+                }),
+            ):
+                action = agent._decide_action(dict(STATE))
+
+            self.assertIsNone(action)
+            thread = agent._continuity_store().current_thread()
+            events = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "events.jsonl"
+            ).read_text()
+            self.assertIn("charter_required_compound_intent", events)
+            self.assertIn('"status": "blocked"', events)
+
+    def test_needs_charter_allows_read_only_return_actions(self):
+        allowed = [
+            ("EXAMINE λ1/λ2", "decompose"),
+            ("DECOMPOSE", "decompose"),
+            ("ACTION_PREFLIGHT DECOMPOSE", "action_preflight"),
+            ("SHADOW_PREFLIGHT lambda-tail/lambda4", "shadow_autonomy"),
+        ]
+        for raw_next, expected in allowed:
+            with self.subTest(raw_next=raw_next):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    base_dir = root / "minime"
+                    workspace = base_dir / "workspace"
+                    db_path = root / "minime.db"
+                    agent = self._agent(base_dir, workspace, db_path)
+                    agent._continuity_store().start_experiment(
+                        "Read-only gap",
+                        "Can safe reads continue while the charter is missing?",
+                    )
+                    agent._pending_next_action = raw_next
+
+                    with (
+                        patch.object(agent, "_persist_pending_next_action"),
+                        patch.object(agent, "_mark_pending_next_override_consumed"),
+                        patch.object(agent, "_low_fill_guard_status", return_value={
+                            "active": False,
+                            "fill_ratio": 0.68,
+                            "target_fill_ratio": 0.68,
+                            "spread_relief": 0.0,
+                        }),
+                    ):
+                        action = agent._decide_action(dict(STATE))
+
+                    self.assertEqual(action, expected)
+
+    def test_experiment_review_needs_charter_prioritizes_scaffold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "minime"
+            workspace = base_dir / "workspace"
+            db_path = root / "minime.db"
+            agent = self._agent(base_dir, workspace, db_path)
+            agent._continuity_store().start_experiment(
+                "Introducing a gap",
+                (
+                    "Can localized λ1 spectral-density softening support branching "
+                    "without premature λ4 dominance or runaway dispersal?"
+                ),
+            )
+
+            review = agent._continuity_store().experiment_review("current")
+
+            self.assertIn(
+                "Review is premature until the charter is authored; use the continuity priority scaffold first.",
+                review,
+            )
+            self.assertIn(
+                "Continuity priority (needs charter - copy/edit this exact scaffold; not recorded):",
+                review,
+            )
+            self.assertIn("EXPERIMENT_CHARTER current :: hypothesis:", review)
+            self.assertIn("proposed_next_action: ACTION_PREFLIGHT DECOMPOSE", review)
 
     def test_experiment_bind_to_peer_experiment_blocks_before_inner_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
