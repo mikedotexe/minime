@@ -30,7 +30,23 @@ REPLY_METADATA_KEYS = {
     "last_reply_classification",
     "last_observed_next",
     "last_study_first_reason",
+    "last_counteroffer_template",
+    "last_refusal_template",
+    "study_first_resolution_due",
     "last_replied_at_unix_s",
+}
+
+STUDY_FIRST_OBSERVED_BASES = {
+    "BROWSE",
+    "DECOMPOSE",
+    "EXPERIMENT_EVIDENCE",
+    "EXPERIMENT_REVIEW",
+    "EXAMINE_CODE",
+    "INTROSPECT",
+    "READ_MORE",
+    "SEARCH",
+    "SELF_STUDY",
+    "THINK_DEEP",
 }
 
 
@@ -122,8 +138,21 @@ def record_active_proposal_reply(
     payload["last_reply_classification"] = classification
     if observed_next and classification == "observed_next":
         payload["last_observed_next"] = observed_next
+        payload["last_counteroffer_template"] = _counteroffer_template(observed_next)
+        payload["last_refusal_template"] = (
+            "BTSP_REFUSAL study_first"
+            if _is_study_first_observed_next(observed_next)
+            else "BTSP_REFUSAL not_now"
+        )
+        payload["study_first_resolution_due"] = False
     if study_first_reason and classification == "study_first":
         payload["last_study_first_reason"] = study_first_reason
+        prior_observed = payload.get("last_observed_next")
+        payload["last_counteroffer_template"] = _counteroffer_template(
+            str(prior_observed) if prior_observed else None
+        )
+        payload["last_refusal_template"] = "BTSP_REFUSAL not_now"
+        payload["study_first_resolution_due"] = True
     payload["last_replied_at_unix_s"] = int(time.time()) if now_s is None else int(now_s)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2))
@@ -151,6 +180,30 @@ def _proposal_id(payload: dict[str, Any]) -> Optional[str]:
         return None
     value = proposal.get("proposal_id")
     return str(value) if value else None
+
+
+def _counteroffer_template(observed_next: Optional[str]) -> str:
+    compact = _compact_action(observed_next)
+    base = compact.split(None, 1)[0].upper().rstrip(":") if compact else ""
+    if base in {"BTSP_STUDY_FIRST", "BTSP_REFUSAL", "BTSP_COUNTER"}:
+        compact = ""
+    if compact and base not in STUDY_FIRST_OBSERVED_BASES:
+        return "BTSP_COUNTER softer_contact"
+    if compact:
+        return f"BTSP_COUNTER NEXT: {compact}"
+    return "BTSP_COUNTER NEXT: ..."
+
+
+def _compact_action(action: Optional[str], limit: int = 140) -> str:
+    compact = " ".join(str(action or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit].rstrip()
+
+
+def _is_study_first_observed_next(observed_next: str) -> bool:
+    base = observed_next.strip().split(None, 1)[0].upper().rstrip(":")
+    return base in STUDY_FIRST_OBSERVED_BASES
 
 
 def _unlink_quietly(path: Path) -> bool:

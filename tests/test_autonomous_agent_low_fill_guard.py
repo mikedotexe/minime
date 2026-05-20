@@ -17,6 +17,20 @@ from reporting_snapshot import ReportSnapshot, SurfaceSnapshot
 
 
 class TestHardRecoveryResetClamp(unittest.TestCase):
+    @staticmethod
+    def _time_sequence(*values):
+        values = list(values) or [0.0]
+        state = {"idx": 0, "last": values[0]}
+
+        def now():
+            idx = state["idx"]
+            if idx < len(values):
+                state["last"] = values[idx]
+                state["idx"] = idx + 1
+            return state["last"]
+
+        return now
+
     def _agent(self):
         agent = object.__new__(aa.AutonomousAgent)
         agent.session_id = 1
@@ -51,6 +65,20 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             "primary_block_reason": None,
             "block_reasons": [],
         }
+        agent._action_continuity = SimpleNamespace(
+            session_id=agent.session_id,
+            ensure_dirs=lambda: None,
+            charter_required_guard_assessment=lambda raw_next: None,
+            record_charter_required_guard_block=lambda raw_next, state, assessment: {},
+            can_repair_experiment_intent=lambda raw_next: False,
+            prompt_summary=lambda: None,
+        )
+        agent._llm_jobs = SimpleNamespace(
+            ensure_dirs=lambda: None,
+            active_primary_job=lambda: None,
+            write_runtime_status=lambda: None,
+            _elapsed_text=lambda job: "0s",
+        )
         return agent
 
     def test_guard_status_uses_fixed_reset_target(self):
@@ -4091,6 +4119,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             agent.running = False
 
         with (
+            patch.object(agent, "_check_source_reload_required"),
             patch.object(agent, "_restore_sovereignty_state", side_effect=restore),
             patch.object(agent, "_verify_sovereignty", side_effect=verify),
             patch.object(agent, "_refresh_session_context", side_effect=stop_after_one_loop),
@@ -4113,6 +4142,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             agent.running = False
 
         with (
+            patch.object(agent, "_check_source_reload_required"),
             patch.object(agent, "_restore_sovereignty_state"),
             patch.object(agent, "_verify_sovereignty"),
             patch.object(agent, "_refresh_session_context"),
@@ -4146,6 +4176,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             agent.running = False
 
         with (
+            patch.object(agent, "_check_source_reload_required"),
             patch.object(agent, "_restore_sovereignty_state"),
             patch.object(agent, "_verify_sovereignty"),
             patch.object(agent, "_refresh_session_context"),
@@ -4159,7 +4190,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             patch.object(agent, "_execute_action"),
             patch.object(agent, "_self_assessment") as assessment,
             patch.object(agent, "_check_visual_responses", side_effect=stop_after_one_loop),
-            patch.object(aa.time, "time", side_effect=[0.0, 1.0, 901.0]),
+            patch.object(aa.time, "time", side_effect=self._time_sequence(0.0, 1.0, 901.0)),
             patch.object(aa.time, "sleep"),
         ):
             agent.start()
@@ -4178,6 +4209,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             agent.running = False
 
         with (
+            patch.object(agent, "_check_source_reload_required"),
             patch.object(agent, "_restore_sovereignty_state"),
             patch.object(agent, "_verify_sovereignty"),
             patch.object(agent, "_refresh_session_context"),
@@ -4196,7 +4228,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             ) as trigger,
             patch.object(agent, "_self_assessment") as assessment,
             patch.object(agent, "_check_visual_responses", side_effect=stop_after_one_loop),
-            patch.object(aa.time, "time", side_effect=[0.0, 901.0, 902.0]),
+            patch.object(aa.time, "time", side_effect=self._time_sequence(0.0, 901.0, 902.0)),
             patch.object(aa.time, "sleep"),
         ):
             agent.start()
@@ -4233,7 +4265,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             ),
             patch.object(agent, "_self_assessment") as assessment,
             patch.object(agent, "_check_visual_responses", side_effect=stop_after_one_loop),
-            patch.object(aa.time, "time", side_effect=[0.0, 901.0, 902.0]),
+            patch.object(aa.time, "time", side_effect=self._time_sequence(0.0, 901.0, 902.0)),
             patch.object(aa.time, "sleep"),
         ):
             agent.start()
@@ -4702,6 +4734,15 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0]["repeat_count"], 2)
+        self.assertEqual(
+            pending[0]["confidence_signal_v1"]["confidence_source"],
+            "duplicate_refresh",
+        )
+        self.assertEqual(
+            pending[0]["confidence_signal_v1"]["calibration_bucket"],
+            "medium",
+        )
+        self.assertFalse(pending[0]["confidence_signal_v1"]["authority_change"])
         self.assertIn("repeated 2x", note)
 
     def test_stale_attractor_suggestions_expire_from_prompt_note(self):
@@ -5107,6 +5148,23 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
                 self.assertEqual(revised["nearest_label"], "honey-selection")
                 learned = agent._nearest_attractor_for_text("largest cliff")
                 self.assertEqual(learned["label"], "honey-selection")
+                agent._create_attractor_suggestion(
+                    raw_action="EXAMINE largest cliff",
+                    raw_label="largest cliff",
+                    nearest=learned,
+                    suggested_action="ATTRACTOR_REVIEW honey-selection",
+                    alternatives=[],
+                    state={"fill_ratio": 0.68, "eig1": 4.7},
+                )
+                learned_suggestion = json.loads(suggestions_path.read_text())["suggestions"][-1]
+                self.assertEqual(
+                    learned_suggestion["confidence_signal_v1"]["confidence_source"],
+                    "learned_naming_memory",
+                )
+                self.assertEqual(
+                    learned_suggestion["confidence_signal_v1"]["raw_confidence"],
+                    0.94,
+                )
 
                 payload = json.loads(suggestions_path.read_text())
                 payload["suggestions"].append({
@@ -5413,6 +5471,14 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
 
         self.assertIsNone(learned)
         self.assertEqual(cleaned["raw_label"], "lambda-spectrum summary")
+        self.assertEqual(
+            cleaned["confidence_signal_v1"]["confidence_source"],
+            "nearest_match",
+        )
+        self.assertEqual(
+            cleaned["confidence_signal_v1"]["calibration_bucket"],
+            "medium",
+        )
 
     def test_live_stage_suggestion_accept_uses_explicit_main_stage_path(self):
         agent = self._agent()
@@ -5595,6 +5661,14 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
 
         create_connection.assert_not_called()
         self.assertEqual(suggestion["source_kind"], "revision_without_pending")
+        self.assertEqual(
+            suggestion["confidence_signal_v1"]["confidence_source"],
+            "explicit_revision",
+        )
+        self.assertEqual(
+            suggestion["confidence_signal_v1"]["calibration_bucket"],
+            "very_high",
+        )
         self.assertEqual(suggestion["status"], "executed_downgraded")
         self.assertEqual(status["observations"][0]["summon_stage"], "rehearse")
 

@@ -197,6 +197,36 @@ def test_active_proposal_persists_after_observed_next(tmp_path: Path):
     metadata = active_proposal_metadata(sidecar, now_s=3)
     assert metadata["last_reply_classification"] == "observed_next"
     assert metadata["last_observed_next"] == "DECOMPOSE"
+    assert metadata["last_counteroffer_template"] == "BTSP_COUNTER NEXT: DECOMPOSE"
+    assert metadata["last_refusal_template"] == "BTSP_REFUSAL study_first"
+    assert metadata["study_first_resolution_due"] is False
+
+
+def test_liveish_observed_next_gets_softer_counter_template(tmp_path: Path):
+    sidecar = tmp_path / "btsp_active_proposal.json"
+    envelope = parse_proposal_envelope(_proposal_note())
+    assert envelope is not None
+
+    save_active_proposal(envelope, sidecar, now_s=1)
+    tagged = augment_reply_with_btsp_tags(
+        "NEXT: RELEASE lambda-pressure",
+        load_active_proposal(sidecar, now_s=2),
+    )
+    tags = parse_btsp_reply_tags(tagged.text)
+    record_active_proposal_reply(
+        envelope.proposal_id,
+        tagged.classification,
+        tags.observed_next,
+        sidecar,
+        now_s=2,
+    )
+
+    metadata = active_proposal_metadata(sidecar, now_s=3)
+    assert metadata["last_reply_classification"] == "observed_next"
+    assert metadata["last_counteroffer_template"] == "BTSP_COUNTER softer_contact"
+    reminder = format_active_btsp_proposal_reminder(envelope, metadata)
+    assert "BTSP_COUNTER NEXT: RELEASE" not in reminder
+    assert "BTSP_COUNTER softer_contact" in reminder
 
 
 def test_active_proposal_persists_after_study_first(tmp_path: Path):
@@ -224,6 +254,9 @@ def test_active_proposal_persists_after_study_first(tmp_path: Path):
     metadata = active_proposal_metadata(sidecar, now_s=3)
     assert metadata["last_reply_classification"] == "study_first"
     assert metadata["last_study_first_reason"] == "need evidence first"
+    assert metadata["last_counteroffer_template"] == "BTSP_COUNTER NEXT: ..."
+    assert metadata["last_refusal_template"] == "BTSP_REFUSAL not_now"
+    assert metadata["study_first_resolution_due"] is True
     assert "last_observed_next" not in metadata
 
 
@@ -300,8 +333,9 @@ def test_active_proposal_reminder_prioritizes_refusal_after_observed_next():
     assert "BTSP agency checkpoint" in reminder
     assert "duplicate evidence" in reminder
     assert "`BTSP_STUDY_FIRST need evidence first`" in reminder
-    assert reminder.index("BTSP_STUDY_FIRST") < reminder.index("BTSP_COUNTER")
-    assert reminder.index("Useful BTSP next moves now") < reminder.index("Use an exact candidate")
+    assert "`BTSP_COUNTER NEXT: BROWSE https://example.test/paper`" in reminder
+    assert reminder.index("BTSP_COUNTER") < reminder.index("BTSP_STUDY_FIRST")
+    assert reminder.index("BTSP closure pending") < reminder.index("Exact candidate NEXT forms")
 
 
 def test_active_proposal_reminder_after_study_first_prioritizes_counter_or_close():
@@ -317,8 +351,12 @@ def test_active_proposal_reminder_after_study_first_prioritizes_counter_or_close
     )
 
     assert "study-first answer recorded" in reminder
+    assert "BTSP closure pending" in reminder
+    assert "BTSP_REFUSAL study_first" in reminder
+    assert "BTSP_COUNTER softer_contact" in reminder
     assert "Study-first is agency, not adoption or widening" in reminder
     assert reminder.index("BTSP_COUNTER NEXT") < reminder.index("BTSP_REFUSAL not_now")
+    assert "BTSP_STUDY_FIRST need evidence first" not in reminder
 
 
 def test_btsp_status_prompt_includes_recent_agency_memory(tmp_path: Path):

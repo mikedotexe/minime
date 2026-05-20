@@ -167,6 +167,103 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
         with patch.object(aa, "WORKSPACE_DIR", workspace), patch.object(aa, "DB_PATH", db_path):
             return aa.AutonomousAgent(1, check_interval=999.0, recess_mode=True)
 
+    def _journal_db(self, db_path: Path) -> None:
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS sovereignty_journal (
+               session_id INTEGER,
+               timestamp REAL,
+               entry_type TEXT,
+               content TEXT,
+               spectral_context TEXT,
+               file_path TEXT
+            )"""
+        )
+        conn.commit()
+        conn.close()
+
+    def test_journal_continuity_contract_reaches_neutral_prompt_with_prior(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            db_path = Path(tmp) / "minime.db"
+            (workspace / "journal").mkdir(parents=True)
+            self._journal_db(db_path)
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "INSERT INTO sovereignty_journal VALUES (?, ?, ?, ?, ?, ?)",
+                (1, 1.0, "notice", "Earlier claim: fill pressure softened near lambda4.", "{}", "prior.txt"),
+            )
+            conn.commit()
+            conn.close()
+            store = aa.ActionContinuityStore(workspace, db_path=db_path, session_id=1)
+            store.create_thread("Returnable journal")
+            agent = self._agent(workspace, db_path)
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+                patch("autonomous_agent.random.random", return_value=0.8),
+                patch("autonomous_agent.random.choice", side_effect=lambda values: values[0]),
+            ):
+                prompt = agent._neutral_checkin(dict(STATE))
+
+            self.assertIn("Journal continuity contract v1", prompt)
+            self.assertIn("Continuity posture: resuming|branching|closing|new", prompt)
+            self.assertIn("Delta:", prompt)
+            self.assertIn("Next evidence:", prompt)
+            self.assertIn("Hold:", prompt)
+            self.assertIn("Current continuity projection:", prompt)
+            self.assertIn("Returnable journal", prompt)
+            self.assertIn("Earlier claim: fill pressure softened near lambda4", prompt)
+
+    def test_direct_pressure_and_rest_prompts_include_journal_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            db_path = Path(tmp) / "minime.db"
+            (workspace / "journal").mkdir(parents=True)
+            self._journal_db(db_path)
+            agent = self._agent(workspace, db_path)
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+                patch.object(agent, "_query_llm_with_next", return_value=("inside", None)) as query,
+                patch.object(agent, "_write_journal_entry"),
+            ):
+                agent._journal_spectral_pressure(dict(STATE))
+                pressure_prompt = query.call_args_list[-1].args[0]
+                agent._journal_rest_reflection(dict(STATE))
+                rest_prompt = query.call_args_list[-1].args[0]
+
+            self.assertIn("Journal continuity contract v1", pressure_prompt)
+            self.assertIn("spectral condition, fill/pressure, recurrence", pressure_prompt)
+            self.assertIn("Journal continuity contract v1", rest_prompt)
+            self.assertIn("Decision:", rest_prompt)
+
+    def test_write_journal_entry_remains_non_gating_and_preserves_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            db_path = Path(tmp) / "minime.db"
+            journal = workspace / "journal"
+            journal.mkdir(parents=True)
+            self._journal_db(db_path)
+            agent = self._agent(workspace, db_path)
+            path = journal / "current.txt"
+            path.write_text("original file body")
+            content = "Free prose without any contract labels."
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+            ):
+                agent._write_journal_entry("notice", content, dict(STATE), str(path))
+
+            self.assertEqual(path.read_text(), "original file body")
+            conn = sqlite3.connect(db_path)
+            row = conn.execute("SELECT content FROM sovereignty_journal").fetchone()
+            conn.close()
+            self.assertEqual(row[0], content)
+
     def test_pending_next_context_survives_decide_into_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
@@ -278,6 +375,59 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
             self.assertTrue(
                 any(
                     artifact["kind"] == "pressure_source_audit"
+                    for artifact in manifest["action_continuity"].get("artifacts", [])
+                )
+            )
+
+    def test_constraint_audit_is_read_only_artifact_and_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            db_path = Path(tmp) / "minime.db"
+            agent = self._agent(workspace, db_path)
+            agent._pending_next_action = "CONSTRAINT_AUDIT lambda-tail/lambda4"
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+                patch.object(agent, "_persist_pending_next_action"),
+                patch.object(agent, "_low_fill_guard_status", return_value={
+                    "active": False,
+                    "fill_ratio": 0.68,
+                    "target_fill_ratio": 0.68,
+                    "spread_relief": 0.0,
+                }),
+            ):
+                action = agent._decide_action(dict(STATE))
+            self.assertEqual(action, "constraint_audit")
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+                patch.object(agent, "_low_fill_guard_status", return_value={
+                    "active": False,
+                    "fill_ratio": 0.68,
+                    "target_fill_ratio": 0.68,
+                    "spread_relief": 0.0,
+                }),
+                patch.object(agent, "_stable_core_action_allowed", return_value=(True, "test")),
+                patch.object(agent, "_write_journal_entry"),
+                patch.object(agent, "_log_decision"),
+                patch.object(agent, "_record_stable_core_agent_success"),
+            ):
+                agent._execute_action(action, dict(STATE))
+
+            journals = list((workspace / "journal").glob("constraint_audit_*.txt"))
+            self.assertEqual(len(journals), 1)
+            text = journals[0].read_text()
+            self.assertIn("CONSTRAINT COUNTERFACTUAL AUDIT V1", text)
+            self.assertIn("read-only counterfactual", text)
+            self.assertIn("does not remove scaffold/drain", text)
+            manifests = list((workspace / "actions").glob("*_constraint_audit.json"))
+            self.assertEqual(len(manifests), 1)
+            manifest = json.loads(manifests[0].read_text())
+            self.assertEqual(manifest["action_continuity"]["stage"], "read_only")
+            self.assertTrue(
+                any(
+                    artifact["kind"] == "constraint_audit"
                     for artifact in manifest["action_continuity"].get("artifacts", [])
                 )
             )

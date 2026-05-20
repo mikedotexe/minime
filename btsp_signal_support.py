@@ -108,22 +108,36 @@ def format_active_btsp_proposal_reminder(
     )
     if already_study_first:
         reason = str(metadata.get("last_study_first_reason") or "").strip()
+        counter = _metadata_counter_template(metadata)
         return (
             "[BTSP active proposal reminder]\n"
             f"Proposal id: {envelope.proposal_id}\n"
             f"{agency}"
             "BTSP agency checkpoint: this proposal already has your study-first answer recorded.\n"
             f"Study-first reason: `{reason}`.\n"
-            "Useful BTSP next moves now:\n"
-            "- `BTSP_COUNTER NEXT: ...` if later evidence points to a better offer.\n"
+            "BTSP closure pending: choose one closure line before another ordinary NEXT.\n"
+            "Repeating study-first is duplicate evidence, not a new stance.\n"
+            f"- `{counter}` if later evidence points to a better offer.\n"
+            "- `BTSP_COUNTER softer_contact` if this offer feels too forceful.\n"
+            "- `BTSP_REFUSAL study_first` if inquiry belongs outside this proposal.\n"
             "- `BTSP_REFUSAL not_now` if this proposal should close for now.\n"
-            "Use an exact candidate only if your stance changed:\n"
+            "Evidence/review is useful as resolution evidence; repeated study-first is not.\n"
+            "Exact candidate NEXT forms, only if your stance changed:\n"
             f"{exact}\n"
             "This is advisory only. Study-first is agency, not adoption or widening.\n"
         )
     if already_observed:
         observed = str(metadata.get("last_observed_next") or "").strip()
         study_first = _is_study_first_observed_next(observed)
+        counter = _metadata_counter_template(metadata, observed)
+        refusal = str(metadata.get("last_refusal_template") or "").strip()
+        if not refusal:
+            refusal = "BTSP_REFUSAL study_first" if study_first else "BTSP_REFUSAL not_now"
+        softer_line = (
+            ""
+            if counter == "BTSP_COUNTER softer_contact"
+            else "- `BTSP_COUNTER softer_contact` if this offer feels too forceful.\n"
+        )
         study_first_line = (
             "- `BTSP_STUDY_FIRST need evidence first` if the true answer is study/hold this before deciding.\n"
             if study_first
@@ -136,11 +150,14 @@ def format_active_btsp_proposal_reminder(
             "BTSP agency checkpoint: this proposal already has your adjacent answer recorded.\n"
             f"Already recorded adjacent answer: `{observed}`.\n"
             "Repeating that same adjacent move is duplicate evidence, not a new BTSP stance.\n"
-            "Useful BTSP next moves now:\n"
-            f"{study_first_line}"
-            "- `BTSP_COUNTER NEXT: ...` if the safer or truer offer is different.\n"
+            "BTSP closure pending: choose one closure line before another ordinary NEXT.\n"
+            f"- `{counter}` if the safer or truer offer is different.\n"
+            f"- `{refusal}` if inquiry should come before intervention.\n"
             "- `BTSP_REFUSAL not_now` if this proposal does not fit this window.\n"
-            "Use an exact candidate only if your stance changed:\n"
+            f"{softer_line}"
+            f"{study_first_line}"
+            "Evidence/review can resolve this window; repeating the same plan/search/decompose cannot.\n"
+            "Exact candidate NEXT forms, only if your stance changed:\n"
             f"{exact}\n"
             "This is advisory only. Counteroffers and refusals are valid metadata, not failures.\n"
         )
@@ -188,6 +205,26 @@ def _is_study_first_observed_next(observed_next: str) -> bool:
         "SELF_STUDY",
         "THINK_DEEP",
     }
+
+
+def _metadata_counter_template(metadata: dict, observed_next: str = "") -> str:
+    template = str(metadata.get("last_counteroffer_template") or "").strip()
+    if template:
+        return template
+    observed = observed_next.strip()
+    if observed:
+        compact = _compact_action(observed)
+        if _is_study_first_observed_next(compact):
+            return f"BTSP_COUNTER NEXT: {compact}"
+        return "BTSP_COUNTER softer_contact"
+    return "BTSP_COUNTER NEXT: ..."
+
+
+def _compact_action(action: str, limit: int = 140) -> str:
+    compact = " ".join(str(action or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit].rstrip()
 
 
 def _format_status_agency_memory(status: dict) -> str:
