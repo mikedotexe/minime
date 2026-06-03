@@ -28,6 +28,7 @@ PROJECT_DIR = Path("/Users/v/other/minime")
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
+from journal_hygiene import classify_journal_entry, compact_excerpt as compact_journal_excerpt
 from native_comm import (
     build_atlas_status,
     build_controller_gradient_audit,
@@ -2575,7 +2576,7 @@ def _journal_preview(path: Path, *, max_chars: int = 240) -> str:
         text = path.read_text(errors="replace")
     except OSError:
         return ""
-    return " ".join(text.strip().split())[:max_chars]
+    return compact_journal_excerpt(text, max_chars=max_chars)
 
 
 def build_journal_continuity_index(*, limit: int = DEFAULT_CONTINUITY_JOURNAL_LIMIT) -> dict[str, Any]:
@@ -2589,7 +2590,25 @@ def build_journal_continuity_index(*, limit: int = DEFAULT_CONTINUITY_JOURNAL_LI
 
     candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
     entries: list[dict[str, Any]] = []
-    for path in candidates[: max(0, limit)]:
+    skipped_machine_detail = 0
+    skipped_operational_cap = 0
+    operational_included = 0
+    for path in candidates:
+        if len(entries) >= max(0, limit):
+            break
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        hygiene = classify_journal_entry(text, path)
+        if hygiene.get("lane") == "machine_detail":
+            skipped_machine_detail += 1
+            continue
+        if hygiene.get("lane") == "operational":
+            if operational_included >= 1:
+                skipped_operational_cap += 1
+                continue
+            operational_included += 1
         kind = "astrid_self_study" if path.name.startswith("astrid_self_study_") else "minime_journal"
         entries.append(
             {
@@ -2598,14 +2617,17 @@ def build_journal_continuity_index(*, limit: int = DEFAULT_CONTINUITY_JOURNAL_LI
                 "name": path.name,
                 "mtime_unix_s": path.stat().st_mtime,
                 "size_bytes": path.stat().st_size,
+                "journal_hygiene_v1": hygiene,
                 "preview": _journal_preview(path),
             }
         )
     return {
         "version": 1,
-        "policy": "path_preview_index_only_no_action_replay",
+        "policy": "path_preview_index_only_no_action_replay_hygiene_v1",
         "entry_count": len(entries),
         "entries": entries,
+        "skipped_machine_detail": skipped_machine_detail,
+        "skipped_operational_cap": skipped_operational_cap,
         "created_at_unix_s": now_unix_s(),
     }
 

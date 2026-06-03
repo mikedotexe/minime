@@ -101,6 +101,11 @@ pub enum SensoryMsg {
         /// Promoted from regulator.rs INTEGRATOR_LEAK constant. Higher
         /// values shorten how long past error keeps driving correction.
         pi_integrator_leak: Option<f32>,
+        /// One-shot, gated direct ESN leak override. This is not PI leak.
+        /// It requires an authority request id and is consumed by the ESN loop.
+        esn_leak_override: Option<f32>,
+        esn_leak_override_ticks: Option<u32>,
+        esn_leak_authority_request_id: Option<String>,
     },
 }
 
@@ -408,6 +413,9 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
             pi_max_step,
             pi_geom_weight,
             pi_integrator_leak,
+            esn_leak_override,
+            esn_leak_override_ticks,
+            esn_leak_authority_request_id,
         } => {
             let hard_recovery_reset = crate::hard_reset::hard_recovery_reset_enabled();
             let homeostatic_controls_present = synth_gain.is_some()
@@ -430,7 +438,8 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
                 || pi_ki.is_some()
                 || pi_max_step.is_some()
                 || pi_geom_weight.is_some()
-                || pi_integrator_leak.is_some();
+                || pi_integrator_leak.is_some()
+                || esn_leak_override.is_some();
             if hard_recovery_reset && homeostatic_controls_present {
                 println!("🛟 Hard recovery reset ignored homeostatic control message fields");
             }
@@ -644,6 +653,28 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
                     println!(
                         "🎛️  Being adjusted PI integrator_leak → {:.4} (correction memory)",
                         bus.get_pi_integrator_leak()
+                    );
+                }
+            }
+            if !hard_recovery_reset {
+                if let Some(v) = esn_leak_override {
+                    let Some(request_id) = esn_leak_authority_request_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    else {
+                        println!(
+                            "🛡️  Ignored ESN leak override without authority request id"
+                        );
+                        return;
+                    };
+                    let ticks = esn_leak_override_ticks.unwrap_or(1).clamp(1, 12);
+                    bus.request_esn_leak_override(request_id.to_string(), v, ticks);
+                    println!(
+                        "🎛️  Queued gated ESN leak override → {:.3} for {} tick(s) request={}",
+                        v.clamp(0.20, 0.90),
+                        ticks,
+                        request_id
                     );
                 }
             }

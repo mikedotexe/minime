@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import struct
 import tempfile
 import unittest
@@ -970,6 +971,36 @@ class TestStableCoreOps(unittest.TestCase):
             self.assertEqual(continuity_seed["policy"], "stable_core_quarantined_continuity_package")
             self.assertEqual(len(continuity_seed["journal_entries"]), 2)
             self.assertEqual(continuity_status["memory_entries_kept"], 1)
+
+    def test_journal_continuity_index_filters_machine_detail_and_caps_operational(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            journal = workspace / "journal"
+            inbox = workspace / "inbox" / "read"
+            journal.mkdir(parents=True)
+            inbox.mkdir(parents=True)
+            (journal / "action_thread_1.txt").write_text(
+                "=== ACTION THREAD ===\nExperiment conveyor compact summary.\n"
+            )
+            (journal / "action_thread_2.txt").write_text(
+                "Experiment conveyor `x`\nconveyor_v1:\n"
+                + json.dumps({"policy": "experiment_conveyor_v1", "experiment_id": "x"})
+            )
+            (journal / "rest_1.txt").write_text(
+                "=== REST PHASE REFLECTION ===\nContinuity posture: new\nDelta: calmer.\nHold: rest."
+            )
+            (journal / "notice_1.txt").write_text("Minime notices a small stable-core breath.")
+            (inbox / "astrid_self_study_1.txt").write_text("Astrid studies process consciousness.")
+
+            with mock.patch.object(stable_core_ops, "WORKSPACE_DIR", workspace):
+                payload = stable_core_ops.build_journal_continuity_index(limit=4)
+
+            names = [entry["name"] for entry in payload["entries"]]
+            lanes = [entry["journal_hygiene_v1"]["lane"] for entry in payload["entries"]]
+            self.assertNotIn("action_thread_2.txt", names)
+            self.assertLessEqual(lanes.count("operational"), 1)
+            self.assertGreaterEqual(lanes.count("reflective"), 2)
+            self.assertEqual(payload["skipped_machine_detail"], 1)
 
     def test_continuity_status_reports_availability_and_counts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

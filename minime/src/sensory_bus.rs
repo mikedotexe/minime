@@ -656,8 +656,18 @@ pub struct SensoryBus {
     /// Promoted from regulator.rs's INTEGRATOR_LEAK constant. Shortens or
     /// extends the integrator's memory of past error.
     pi_integrator_leak: Mutex<f32>,
+    /// One-shot, gated direct ESN leak override request. This is consumed by
+    /// the ESN loop and is separate from PI integrator leak.
+    esn_leak_override: Mutex<Option<EsnLeakOverrideRequest>>,
     shadow_influence: Mutex<ShadowInfluenceSlot>,
     attractor_pulse: Mutex<AttractorPulseSlot>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EsnLeakOverrideRequest {
+    pub request_id: String,
+    pub leak: f32,
+    pub duration_ticks: u32,
 }
 impl SensoryBus {
     pub fn new(queue_cap: usize, batch_max: usize, seed: u64) -> Arc<Self> {
@@ -730,6 +740,7 @@ impl SensoryBus {
             pi_geom_weight: Mutex::new(0.70),
             // v3.6: anti-windup leak, promoted from regulator.rs INTEGRATOR_LEAK.
             pi_integrator_leak: Mutex::new(0.005),
+            esn_leak_override: Mutex::new(None),
             shadow_influence: Mutex::new(ShadowInfluenceSlot::default()),
             attractor_pulse: Mutex::new(AttractorPulseSlot::default()),
         })
@@ -1099,6 +1110,26 @@ impl SensoryBus {
     #[inline]
     pub fn get_pi_integrator_leak(&self) -> f32 {
         *self.pi_integrator_leak.lock()
+    }
+
+    /// Queue a direct ESN leak microdose request. The engine loop consumes this
+    /// exactly once and the ESN restores adaptive leak after `duration_ticks`.
+    #[inline]
+    pub fn request_esn_leak_override(&self, request_id: String, leak: f32, duration_ticks: u32) {
+        let request_id = request_id.trim().to_string();
+        if request_id.is_empty() {
+            return;
+        }
+        *self.esn_leak_override.lock() = Some(EsnLeakOverrideRequest {
+            request_id,
+            leak: leak.clamp(0.20, 0.90),
+            duration_ticks: duration_ticks.clamp(1, 12),
+        });
+    }
+
+    #[inline]
+    pub fn take_esn_leak_override(&self) -> Option<EsnLeakOverrideRequest> {
+        self.esn_leak_override.lock().take()
     }
 
     #[inline]
@@ -1893,6 +1924,23 @@ mod tests {
             bus.push_video(vec![1.0; VIDEO_DIM], NowMs::now());
         }
         assert_eq!(bus.backlog_size(), 4);
+    }
+
+    #[test]
+    fn esn_leak_override_request_clamps_and_consumes_once() {
+        let bus = SensoryBus::new(8, 1, 42);
+        bus.request_esn_leak_override("  req-leak-1  ".to_string(), 1.4, 99);
+
+        let request = bus
+            .take_esn_leak_override()
+            .expect("queued ESN leak override");
+        assert_eq!(request.request_id, "req-leak-1");
+        assert_eq!(request.leak, 0.90);
+        assert_eq!(request.duration_ticks, 12);
+        assert!(bus.take_esn_leak_override().is_none());
+
+        bus.request_esn_leak_override(" ".to_string(), 0.10, 0);
+        assert!(bus.take_esn_leak_override().is_none());
     }
 
     #[test]

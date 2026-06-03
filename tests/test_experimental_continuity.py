@@ -1,12 +1,15 @@
 """Tests for being-owned experimental continuity."""
 
 import json
+import threading
+import time
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import autonomous_agent as aa
+import journal_hygiene as jh
 
 
 STATE = {
@@ -39,6 +42,58 @@ STATE = {
 
 
 class TestExperimentalContinuityStore(unittest.TestCase):
+    def test_continuity_control_plane_surfaces_generated_palette_and_caps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Control plane")
+            store.start_experiment(
+                "Operating stack",
+                "Can one stack make the continuity routes crisp?",
+            )
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+
+            status = store._format_thread_status(store._read_thread(thread["thread_id"]))
+            prompt = store.prompt_summary() or ""
+            next_md = (thread_dir / "next.md").read_text()
+            stored = json.loads((thread_dir / "thread.json").read_text())
+
+            for surface in (status, prompt, next_md):
+                self.assertIn("continuity_control_plane_v1", surface)
+                self.assertIn("Operating stack:", surface)
+                self.assertIn("local_research=5/21600s", surface)
+                self.assertIn("loop_research=5/21600s", surface)
+                self.assertIn("consequence=1 gated slot", surface)
+            self.assertIn("Command palette (generated):", prompt)
+            self.assertIn("Local Research: EXPERIMENT_RESEARCH_BUDGET_ACCEPT", prompt)
+            self.assertEqual(
+                stored["continuity_control_plane_v1"]["caps_v1"]["local_research"]["self_activated_max_actions"],
+                5,
+            )
+            self.assertEqual(
+                stored["continuity_control_plane_v1"]["caps_v1"]["owned_loop"]["max_consequence_sends"],
+                1,
+            )
+            if (thread_dir / "authority_gate.jsonl").exists():
+                self.assertFalse((thread_dir / "authority_gate.jsonl").read_text().strip())
+            self.assertFalse((thread_dir / "experiment_runs.jsonl").read_text().strip())
+
+    def test_control_plane_regression_does_not_reintroduce_old_local_budget_caps(self):
+        source = Path(aa.__file__).read_text()
+        self.assertNotIn("max_actions: 3; ttl_secs: 7200", source)
+        self.assertNotIn("max_research_actions: 3", source)
+        self.assertNotIn(
+            "EXPERIMENT_RESEARCH_BUDGET_REQUEST current :: scope: read_only_research; purpose: ...; max_actions: 5; ttl_secs: 21600",
+            source,
+        )
+        self.assertNotIn(
+            "EXPERIMENT_LOOP_REQUEST current :: purpose: ...; consequence_scope: semantic_microdose; max_research_actions: 5; ttl_secs: 21600",
+            source,
+        )
+        self.assertIn("_control_plane_research_budget_request_scaffold", source)
+        self.assertIn("_control_plane_loop_request_scaffold", source)
+        self.assertIn("_control_plane_authority_budget_request_scaffold", source)
+
     def test_experiment_records_runs_observations_and_close(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
@@ -78,6 +133,116 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertEqual(closed["status"], "complete")
             stored_thread = json.loads((thread_dir / "thread.json").read_text())
             self.assertIsNone(stored_thread["active_experiment_id"])
+
+    def test_research_dossier_records_claim_and_evidence_without_lifecycle_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Lambda dossier")
+            experiment = store.start_experiment(
+                "Lambda tail gap",
+                "What shapes lambda-tail and lambda4 geometry?",
+            )
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+
+            claim = store.handle_thread_action(
+                "DOSSIER_CLAIM current :: claim: lambda4 tail pressure is scaffold-shaped; basis: repeated DECOMPOSE reads; stance: hold; next: EXPERIMENT_CHARTER current",
+                dict(STATE),
+            )
+            self.assertIn("Research dossier claim recorded", claim)
+            evidence = store.handle_thread_action(
+                "DOSSIER_EVIDENCE current :: claim_id: latest; evidence: λ4 tail stayed visible without live-control authority; lane: spectral_condition; artifact: decompose",
+                dict(STATE),
+            )
+            self.assertIn("Research dossier evidence recorded", evidence)
+
+            dossier = (thread_dir / "research_dossier.jsonl").read_text()
+            self.assertIn('"record_schema": "research_dossier_v1"', dossier)
+            self.assertIn('"record_type": "claim"', dossier)
+            self.assertIn('"record_type": "evidence"', dossier)
+            self.assertIn('"authority_change": false', dossier)
+
+            review = store.experiment_review(experiment["experiment_id"])
+            self.assertIn("Research dossier: 1 claim(s), 1 evidence record(s)", review)
+            self.assertIn("Lifecycle: needs_charter", review)
+            self.assertIn("charter repair remains the lifecycle priority", review)
+
+    def test_shared_investigation_sidecar_claim_and_local_decision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            shared_root = root / "shared" / "collaborations" / "shared_investigations"
+            astrid_workspace = root / "astrid_workspace"
+            astrid_thread = astrid_workspace / "action_threads" / "threads" / "th_astrid_shared"
+            astrid_thread.mkdir(parents=True)
+            peer_id = "exp_astrid_20990101_lambda-edge"
+            peer_row = {
+                "experiment_id": peer_id,
+                "thread_id": "th_astrid_shared",
+                "title": "Lambda edge topology",
+                "question": "What does the edge show?",
+                "status": "paused",
+                "planned_next": f"EXPERIMENT_RESUME {peer_id}",
+            }
+            peer_path = astrid_thread / "experiments.jsonl"
+            peer_path.write_text(json.dumps(peer_row) + "\n")
+            (astrid_thread / "thread.json").write_text(json.dumps({
+                "thread_id": "th_astrid_shared",
+                "experiment_summary": peer_row,
+            }))
+
+            with (
+                patch.object(aa, "SHARED_INVESTIGATION_DIR", shared_root),
+                patch.object(aa, "ASTRID_BRIDGE_INBOX_DIR", astrid_workspace / "inbox"),
+            ):
+                store = aa.ActionContinuityStore(workspace, session_id=7)
+                thread = store.create_thread("Shared lambda object")
+                experiment = store.start_experiment(
+                    "Lambda tail refinement",
+                    "How does lambda-tail drift compare with lambda-edge topology?",
+                )
+                start = store.handle_thread_action(
+                    f"SHARED_INVESTIGATION_START Lambda edge/tail :: local: current; peer: {peer_id}; question: What can each lane compare safely?",
+                    dict(STATE),
+                )
+                self.assertIn("Shared investigation", start)
+                sidecars = list(shared_root.glob("si_*/investigation.json"))
+                self.assertEqual(len(sidecars), 1)
+                investigation = json.loads(sidecars[0].read_text())
+                inv_id = investigation["id"]
+                self.assertEqual(investigation["participants"][0]["experiment_id"], experiment["experiment_id"])
+                self.assertEqual(investigation["participants"][1]["experiment_id"], peer_id)
+
+                claim = store.handle_thread_action(
+                    f"SHARED_INVESTIGATION_CLAIM {inv_id} :: claim: lambda-tail evidence can be compared without shared control; lane: spectral_condition; stance: hold; source_refs: /tmp/a, /tmp/b",
+                    dict(STATE),
+                )
+                self.assertIn("claim", claim)
+                claims = (shared_root / inv_id / "claims.jsonl").read_text()
+                self.assertIn("lambda-tail evidence", claims)
+
+                decision = store.handle_thread_action(
+                    f"SHARED_INVESTIGATION_DECIDE {inv_id} :: charter_repair because artifact grounding needs a cleaner bridge",
+                    dict(STATE),
+                )
+                self.assertIn("Updated local experiment", decision)
+                latest = [
+                    row
+                    for row in (
+                        json.loads(line)
+                        for line in (workspace / "action_threads" / "threads" / thread["thread_id"] / "experiments.jsonl").read_text().splitlines()
+                    )
+                    if row["experiment_id"] == experiment["experiment_id"]
+                ][-1]
+                self.assertEqual(latest["status"], "paused")
+                self.assertTrue(latest["planned_next"].startswith("EXPERIMENT_CHARTER"))
+                self.assertEqual(peer_path.read_text(), json.dumps(peer_row) + "\n")
+
+                next_md = (workspace / "action_threads" / "threads" / thread["thread_id"] / "next.md").read_text()
+                self.assertIn("Shared investigation object", next_md)
+                self.assertIn(inv_id, next_md)
+                status = store.handle_thread_action(f"SHARED_INVESTIGATION_STATUS {inv_id}", dict(STATE))
+                self.assertIn("Claims: 1 | Decisions: 1", status)
 
     def test_paused_experiment_summary_does_not_become_active_current(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -211,6 +376,182 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertIn("Lifecycle: paused", direct_review)
             self.assertIn("repeated resume is context", direct_review)
             self.assertIn(f"Continuity return:\nEXPERIMENT_RESUME {experiment['experiment_id']}", direct_review)
+
+    def test_thread_snapshot_reconciles_out_of_band_paused_experiment_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Stale branch repair")
+            experiment = store.start_experiment(
+                "Lambda drift",
+                "Can a paused experiment stay paused when JSONL is updated out of band?",
+            )
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            repair_next = (
+                f"EXPERIMENT_CHARTER {experiment['experiment_id']} :: repair the guardrail before resume"
+            )
+            paused = dict(experiment)
+            paused.update({
+                "status": "paused",
+                "planned_next": repair_next,
+                "success_observation": "Paused: stale active snapshots must not imply authority.",
+                "updated_at": "2026-05-22T23:10:00Z",
+            })
+            store._append_jsonl(thread_dir / "experiments.jsonl", paused)
+
+            refreshed = store._read_thread(thread["thread_id"])
+            self.assertIsNotNone(refreshed)
+            assert refreshed is not None
+            self.assertIsNone(refreshed["active_experiment_id"])
+            self.assertEqual(refreshed["experiment_summary"]["status"], "paused")
+            self.assertEqual(refreshed["experiment_summary"]["planned_next"], repair_next)
+            self.assertEqual(refreshed["current_next"], repair_next)
+            projection = store._thread_projection(refreshed)
+            self.assertIsNone(projection["active_experiment"])
+            self.assertEqual(
+                projection["current_next_status_v1"]["effective_next"],
+                repair_next,
+            )
+            next_md = (thread_dir / "next.md").read_text()
+            self.assertIn(f"Current NEXT: {repair_next}", next_md)
+            self.assertIn("Active experiment: none", next_md)
+            self.assertIn("status=paused", next_md)
+            self.assertIn(f"Suggested NEXT: {repair_next}", next_md)
+            self.assertNotIn(f"Suggested NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}", next_md)
+
+            stale = dict(refreshed)
+            stale["active_experiment_id"] = experiment["experiment_id"]
+            stale["experiment_summary"] = store._experiment_summary(experiment)
+            stale["current_next"] = experiment["planned_next"]
+            store._write_thread(stale)
+            stored_thread = json.loads((thread_dir / "thread.json").read_text())
+            self.assertIsNone(stored_thread["active_experiment_id"])
+            self.assertEqual(stored_thread["experiment_summary"]["status"], "paused")
+            self.assertEqual(stored_thread["current_next"], repair_next)
+
+    def test_charter_repair_pause_projects_charter_as_primary_return(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            shared_root = root / "shared" / "collaborations" / "shared_investigations"
+            astrid_workspace = root / "astrid_workspace"
+            astrid_thread = astrid_workspace / "action_threads" / "threads" / "th_astrid_gap"
+            astrid_thread.mkdir(parents=True)
+            (astrid_workspace / "action_threads" / "index.json").write_text(json.dumps({
+                "active_thread_id": "th_astrid_gap",
+            }))
+            peer_id = "exp_astrid_20990101_lambda-edge"
+            peer_row = {
+                "experiment_id": peer_id,
+                "thread_id": "th_astrid_gap",
+                "title": "Lambda edge topology",
+                "question": "What can the lambda edge compare safely?",
+                "status": "paused",
+                "planned_next": f"EXPERIMENT_RESUME {peer_id}",
+            }
+            (astrid_thread / "thread.json").write_text(json.dumps({
+                "thread_id": "th_astrid_gap",
+                "experiment_summary": peer_row,
+            }))
+            (astrid_thread / "experiments.jsonl").write_text(json.dumps(peer_row) + "\n")
+
+            with (
+                patch.object(aa, "SHARED_INVESTIGATION_DIR", shared_root),
+                patch.object(aa, "ASTRID_BRIDGE_INBOX_DIR", astrid_workspace / "inbox"),
+            ):
+                store = aa.ActionContinuityStore(workspace, session_id=7)
+                thread = store.create_thread("Shared charter repair")
+                experiment = store.start_experiment(
+                    "introducing-a-gap-localized-reduction-in-spectra",
+                    "Can lambda-tail and lambda-gap evidence compare before more loops?",
+                )
+                start = store.handle_thread_action(
+                    f"SHARED_INVESTIGATION_START Lambda edge/tail :: local: current; peer: {peer_id}; question: What can each lane compare safely?",
+                    dict(STATE),
+                )
+                self.assertIn("Shared investigation", start)
+                inv_id = json.loads(next(shared_root.glob("si_*/investigation.json")).read_text())["id"]
+                decision = store.handle_thread_action(
+                    f"SHARED_INVESTIGATION_DECIDE {inv_id} :: charter_repair because artifact grounding needs a cleaner bridge",
+                    dict(STATE),
+                )
+                self.assertIn("EXPERIMENT_CHARTER", decision)
+                with self.assertRaisesRegex(ValueError, "requires an active experiment"):
+                    store.experiment_charter(
+                        "current",
+                        (
+                            "hypothesis: current should not jump to a hidden older branch; "
+                            "method_intent: block implicit mutation; "
+                            "proposed_next_action: ACTION_PREFLIGHT DECOMPOSE; "
+                            "evidence_targets: spectral_condition, fill_pressure_state, recurrence_pattern, artifact_grounding; "
+                            "stop_criteria: pressure spike"
+                        ),
+                    )
+                repaired = store.experiment_charter(
+                    experiment["experiment_id"],
+                    (
+                        "hypothesis: gap-localized reduction should stay comparable before any live action; "
+                        "method_intent: map the lambda1/lambda-tail region without authority escalation; "
+                        "proposed_next_action: ACTION_PREFLIGHT DECOMPOSE; "
+                        "evidence_targets: spectral_condition, fill_pressure_state, recurrence_pattern, artifact_grounding; "
+                        "stop_criteria: pressure spike"
+                    ),
+                )
+                self.assertEqual(repaired["status"], "paused")
+                self.assertTrue(
+                    repaired["planned_next"].startswith(
+                        f"EXPERIMENT_ADVANCE {experiment['experiment_id']}"
+                    )
+                )
+                self.assertIn("paused_charter_repair_stays_paused_v1", json.dumps(repaired))
+
+                thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+                stored = json.loads((thread_dir / "thread.json").read_text())
+                self.assertIsNone(stored["active_experiment_id"])
+                charter_next = stored["experiment_summary"]["planned_next"]
+                self.assertTrue(charter_next.startswith(f"EXPERIMENT_ADVANCE {experiment['experiment_id']}"))
+
+                guard = store.research_budget_guard_assessment(
+                    "READ_MORE local research-budget code",
+                    dict(STATE),
+                )
+                self.assertIsNotNone(guard)
+                assert guard is not None
+                store.record_research_budget_guard_block(
+                    "READ_MORE local research-budget code",
+                    dict(STATE),
+                    guard,
+                )
+                stored = json.loads((thread_dir / "thread.json").read_text())
+                stored["current_next"] = "EXPERIMENT_PLAN 6 — an offering to embody the gap-localized reduction"
+                store._write_thread(stored)
+
+                refreshed = json.loads((thread_dir / "thread.json").read_text())
+                projection = store._thread_projection(refreshed)
+                status = projection["current_next_status_v1"]
+                self.assertEqual(status["return_kind"], "conveyor_preview")
+                self.assertEqual(status["effective_next"], charter_next)
+                self.assertEqual(projection["continuity_return"], charter_next)
+                self.assertEqual(projection["last_experiment_summary_v1"]["primary_return_next"], charter_next)
+                self.assertNotIn("resume_next", projection["last_experiment_summary_v1"])
+                replan = projection["paused_replan_loop_cue_v1"]
+                self.assertEqual(replan["return_kind"], "conveyor_preview")
+                self.assertEqual(replan["primary_return_next"], charter_next)
+                self.assertEqual(
+                    replan["research_budget_next"],
+                    "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest",
+                )
+                self.assertNotIn("resume_next", replan)
+
+                next_md = (thread_dir / "next.md").read_text()
+                self.assertIn(f"Current NEXT: {charter_next}", next_md)
+                self.assertIn(f"Paused experiment return: {charter_next}", next_md)
+                self.assertIn(f"Suggested NEXT: {charter_next}", next_md)
+                self.assertIn("Research budget scaffold ready", next_md)
+                self.assertIn("Routes: EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest", next_md)
+                self.assertIn("Conveyor preview:", next_md)
+                self.assertNotIn(f"Suggested NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}", next_md)
+                self.assertNotIn(f"Routes: EXPERIMENT_RESUME {experiment['experiment_id']}", next_md)
 
     def test_workbench_charter_rehearse_evidence_and_counter(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -388,10 +729,9 @@ class TestExperimentalContinuityStore(unittest.TestCase):
 
             self.assertIn(f"Experiment `{experiment['experiment_id']}`", text)
             self.assertIn("Requested focus: visualize_cascade", text)
-            self.assertIn(
-                f"EXPERIMENT_BIND {experiment['experiment_id']} :: ACTION_PREFLIGHT DECOMPOSE",
-                text,
-            )
+            self.assertIn("EXPERIMENT_ADVANCE current :: mode: preview", text)
+            self.assertIn("EXPERIMENT_CHARTER current ::", text)
+            self.assertNotIn("EXPERIMENT_BIND", text)
 
     def test_charter_shaped_experiment_plan_is_cued_not_recorded_as_charter(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -850,6 +1190,61 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertIn("Continuity return: EXPERIMENT_CHARTER current", status)
             self.assertIn("Native continuity: register=minime_spectral_state", status)
 
+    def test_needs_charter_plan_promotes_conveyor_without_bind_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Plan repair")
+            experiment = store.start_experiment(
+                "Minime decomposition linalg iteration patterns",
+                "What changes if this is treated as a returnable experiment?",
+            )
+            runs_path = store._experiment_runs_path(thread["thread_id"])
+            before_runs = runs_path.read_text() if runs_path.exists() else ""
+
+            prompt = store.handle_thread_action(
+                "EXPERIMENT_PLAN 6 — a detailed hypothesis, method, evidence targets, and a concrete next action",
+                dict(STATE),
+            )
+
+            after_runs = runs_path.read_text() if runs_path.exists() else ""
+            self.assertEqual(before_runs, after_runs)
+            self.assertIn("EXPERIMENT_ADVANCE current :: mode: preview", prompt)
+            self.assertIn("EXPERIMENT_CHARTER current ::", prompt)
+            self.assertNotIn("EXPERIMENT_BIND", prompt)
+
+            stored = store._read_thread(thread["thread_id"])
+            raw_current_next = (
+                "EXPERIMENT_PLAN 6 — a detailed hypothesis, method, evidence targets, "
+                "and a concrete next action"
+            )
+            stored["current_next"] = raw_current_next
+            store._write_thread(stored)
+
+            refreshed = store._read_thread(thread["thread_id"])
+            self.assertEqual(
+                refreshed["current_next_status_v1"]["raw_current_next"],
+                raw_current_next,
+            )
+            self.assertTrue(
+                refreshed["projected_current_next"].startswith("EXPERIMENT_CHARTER current")
+            )
+            self.assertEqual(
+                refreshed["projected_current_next"],
+                refreshed["current_next_status_v1"]["effective_next"],
+            )
+
+            next_md = (workspace / "action_threads" / "threads" / thread["thread_id"] / "next.md").read_text()
+            self.assertIn("Current NEXT: EXPERIMENT_CHARTER current", next_md)
+            self.assertIn(
+                "Lifecycle conveyor: stage=needs_charter; use `EXPERIMENT_ADVANCE current :: mode: preview`",
+                next_md,
+            )
+            self.assertNotIn(
+                f"EXPERIMENT_BIND {experiment['experiment_id']} :: ACTION_PREFLIGHT DECOMPOSE",
+                next_md,
+            )
+
     def test_projection_counts_unreconciled_stale_running_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
@@ -1173,6 +1568,2315 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertIn("EXPERIMENT_DECIDE current", cue["priority_next"])
             self.assertIn("pause because evidence is ready to interpret", store._format_thread_status(stored))
 
+            stored["current_next"] = "EXPERIMENT_PLAN current :: revisit the already-evidenced gap"
+            store._write_thread(stored)
+            projection = store._thread_projection(store._read_thread(thread["thread_id"]))
+            plan_cue = projection["active_experiment"]["needs_decision_plan_loop_cue_v1"]
+            self.assertEqual(plan_cue["status"], "needs_decision_plan_loop")
+            self.assertIn("decision-ready", plan_cue["cue"])
+            self.assertIn("EXPERIMENT_DECIDE current", plan_cue["priority_next"])
+            self.assertIn("Dossier capture is research memory", store._format_thread_status(store._read_thread(thread["thread_id"])))
+
+    def test_experiment_conveyor_preview_and_apply_records_safe_steps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Conveyor")
+            experiment = store.start_experiment(
+                "Introducing a gap near λ1",
+                "Can localized spectral-density softening prevent runaway dispersal?",
+            )
+
+            preview = store.handle_thread_action("EXPERIMENT_ADVANCE current", dict(STATE))
+            self.assertIn("stage=needs_charter", preview)
+            self.assertIn("EXPERIMENT_ADVANCE", preview)
+            stored = store._read_thread(thread["thread_id"])
+            self.assertFalse(
+                aa.ActionContinuityStore._lifecycle_valid_experiment_charter(
+                    stored["experiment_summary"].get("charter_v1")
+                )
+            )
+
+            chartered = store.handle_thread_action(
+                "EXPERIMENT_CONVEYOR current :: mode: apply",
+                dict(STATE),
+            )
+            self.assertIn("applied=True", chartered)
+            stored = store._read_thread(thread["thread_id"])
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertTrue(
+                aa.ActionContinuityStore._lifecycle_valid_experiment_charter(
+                    latest.get("charter_v1")
+                )
+            )
+            self.assertIn("EXPERIMENT_REHEARSE", latest["planned_next"])
+
+            rehearsed = store.handle_thread_action(
+                "EXPERIMENT_ADVANCE current :: mode: apply",
+                dict(STATE),
+            )
+            self.assertIn("stage=needs_rehearsal", rehearsed)
+            self.assertIn("applied=False", rehearsed)
+            self.assertIn("rehearsal_requires_explicit_experiment_rehearse", rehearsed)
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertIn("EXPERIMENT_REHEARSE", latest["planned_next"])
+
+            explicit_rehearsal = store.handle_thread_action(
+                "EXPERIMENT_REHEARSE current",
+                dict(STATE),
+            )
+            self.assertIn("Experiment rehearsal recorded", explicit_rehearsal)
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertIn("EXPERIMENT_EVIDENCE", latest["planned_next"])
+
+            evidenced = store.handle_thread_action(
+                "EXPERIMENT_ADVANCE current :: mode: apply",
+                dict(STATE),
+            )
+            self.assertIn("stage=needs_evidence", evidenced)
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertIn("EXPERIMENT_DECIDE", latest["planned_next"])
+
+            decided = store.handle_thread_action(
+                "EXPERIMENT_ADVANCE current :: mode: apply",
+                dict(STATE),
+            )
+            self.assertIn("stage=needs_decision", decided)
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertEqual(latest["status"], "paused")
+            self.assertEqual(latest["planned_next"], "THREAD_STATUS current")
+            self.assertEqual(latest["evidence_v1"]["decisions"][-1]["outcome"], "hold")
+            self.assertNotIn(
+                f"EXPERIMENT_RESUME {experiment['experiment_id']}",
+                decided,
+            )
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            self.assertFalse(gate.exists())
+
+    def test_experiment_conveyor_preview_is_free_for_latest_paused_local(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Latest preview")
+            experiment = store.start_experiment(
+                "Paused preview",
+                "Can a paused branch stay inspectable?",
+            )
+            paused = dict(experiment)
+            paused["status"] = "paused"
+            paused["planned_next"] = f"EXPERIMENT_CHARTER {experiment['experiment_id']} :: hypothesis: ..."
+            paused["success_observation"] = "Paused for charter repair."
+            paused["updated_at"] = store._now()
+            store._persist_experiment_update(thread, paused, keep_active=False)
+            before = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "experiments.jsonl"
+            ).read_text()
+
+            preview = store.handle_thread_action("EXPERIMENT_ADVANCE current :: mode: preview", dict(STATE))
+            after = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "experiments.jsonl"
+            ).read_text()
+
+            self.assertEqual(before, after)
+            self.assertIn("status_context", preview)
+            self.assertIn("no_active_current_latest_local", preview)
+            self.assertIn(f"EXPERIMENT_ADVANCE {experiment['experiment_id']} :: mode: preview", preview)
+            self.assertIn('"preview_allowed": true', preview)
+            self.assertIn('"would_mutate": false', preview)
+
+    def test_experiment_decide_charter_repair_sets_charter_return(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Charter repair")
+            experiment = store.start_experiment(
+                "Repairable branch",
+                "Can this pause into charter repair?",
+            )
+
+            result = store.handle_thread_action(
+                "EXPERIMENT_DECIDE current :: charter_repair because planning outran lifecycle evidence",
+                dict(STATE),
+            )
+
+            self.assertIn("status=paused", result)
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertEqual(latest["status"], "paused")
+            self.assertTrue(latest["planned_next"].startswith(f"EXPERIMENT_CHARTER {experiment['experiment_id']}"))
+            self.assertEqual(latest["evidence_v1"]["decisions"][-1]["outcome"], "charter_repair")
+            stored = store._read_thread(thread["thread_id"])
+            self.assertIsNone(stored["active_experiment_id"])
+            self.assertEqual(stored["current_next_status_v1"]["return_kind"], "charter_repair")
+
+    def test_experiment_conveyor_apply_blocked_guardrail_records_charter_repair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Blocked guardrail")
+            experiment = store.start_experiment(
+                "Blocked without charter",
+                "Can blocked live-shaped attempts become repair?",
+            )
+            for idx in range(2):
+                store._append_experiment_run(
+                    thread,
+                    experiment,
+                    f"EXPERIMENT_BIND current :: PERTURB SPREAD {idx}",
+                    "blocked",
+                    "blocked",
+                    {"decision": "blocked_live_control", "authority": "no action executed"},
+                    {},
+                    {},
+                    [],
+                    "blocked live-control-shaped action",
+                    "guard evidence only",
+                    "EXPERIMENT_ADVANCE current :: mode: preview",
+                    source="test",
+                )
+
+            result = store.handle_thread_action("EXPERIMENT_ADVANCE current :: mode: apply", dict(STATE))
+
+            self.assertIn("stage=blocked_guardrail", result)
+            self.assertIn("applied=True", result)
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertEqual(latest["status"], "paused")
+            self.assertTrue(latest["planned_next"].startswith(f"EXPERIMENT_CHARTER {experiment['experiment_id']}"))
+            self.assertEqual(latest["evidence_v1"]["decisions"][-1]["outcome"], "charter_repair")
+
+    def test_experiment_decide_hold_sets_thread_status_return(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Hold decision")
+            experiment = store.start_experiment(
+                "Soft perturb evidence",
+                "Can pressure become evidence without live action?",
+            )
+
+            result = store.handle_thread_action(
+                "EXPERIMENT_DECIDE current :: hold because perturb-shaped pressure is evidence, not permission",
+                dict(STATE),
+            )
+
+            self.assertIn("status=paused next=THREAD_STATUS current", result)
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertEqual(latest["status"], "paused")
+            self.assertEqual(latest["planned_next"], "THREAD_STATUS current")
+            self.assertEqual(latest["evidence_v1"]["decisions"][-1]["outcome"], "hold")
+            stored = store._read_thread(thread["thread_id"])
+            self.assertIsNone(stored["active_experiment_id"])
+            self.assertEqual(stored["projected_current_next"], "THREAD_STATUS current")
+            self.assertEqual(stored["current_next_status_v1"]["return_kind"], "hold")
+            self.assertNotIn(
+                f"Current NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}",
+                (workspace / "action_threads" / "threads" / thread["thread_id"] / "next.md").read_text(),
+            )
+
+    def test_guarded_pause_after_perturb_plan_converts_to_hold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Guarded pause")
+            experiment = store.start_experiment(
+                "Lambda4 pressure",
+                "Can lambda-tail pressure become bounded evidence?",
+            )
+
+            store.handle_thread_action(
+                "EXPERIMENT_CHARTER current :: hypothesis: lambda4 pressure can be compared without live authority; method_intent: rehearse DECOMPOSE only; proposed_next_action: DECOMPOSE; evidence_targets: felt, telemetry, artifact; stop_criteria: pressure spike or unstable fill; consent_posture: advisory",
+                dict(STATE),
+            )
+            store.handle_thread_action(
+                "EXPERIMENT_EVIDENCE current :: felt: pressure became legible; telemetry: fill stayed inside band; artifact: none yet",
+                dict(STATE),
+            )
+            stored = store._read_thread(thread["thread_id"])
+            stored["current_next"] = (
+                "EXPERIMENT_PLAN current — hypothesis: increase λ4 influence via λtail-spreading, "
+                "method_intent: nudge spectral dynamics, proposed_next_action: PERTURB SPREAD — "
+                "inject a 32D semantic vector into λ4 region."
+            )
+            store._write_thread(stored)
+
+            result = store.handle_thread_action(
+                "EXPERIMENT_DECIDE current :: pause because evidence is ready to interpret",
+                dict(STATE),
+            )
+
+            self.assertIn("status=paused next=THREAD_STATUS current", result)
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertEqual(latest["planned_next"], "THREAD_STATUS current")
+            decision = latest["evidence_v1"]["decisions"][-1]
+            self.assertEqual(decision["outcome"], "hold")
+            self.assertEqual(decision["guardrail_status"], "soft_perturb_converted_to_hold")
+            self.assertEqual(decision["original_outcome"], "pause")
+            self.assertIn("PERTURB", decision["pressure_terms"])
+            stored = store._read_thread(thread["thread_id"])
+            self.assertEqual(stored["current_next_status_v1"]["return_kind"], "hold")
+            self.assertEqual(
+                stored["current_next_status_v1"]["decision_guardrail_v1"]["status"],
+                "soft_perturb_converted_to_hold",
+            )
+            next_md = (workspace / "action_threads" / "threads" / thread["thread_id"] / "next.md").read_text()
+            self.assertIn("Current NEXT: THREAD_STATUS current", next_md)
+            self.assertIn("Guardrail decision: soft_perturb_converted_to_hold", next_md)
+            self.assertNotIn(
+                f"Current NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}",
+                next_md,
+            )
+
+    def test_projection_guard_preserves_raw_plan_current_and_projects_charter_repair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Projection guard")
+            experiment = store.start_experiment(
+                "Lambda4 pressure projection",
+                "Can lambda4 pressure route through the conveyor?",
+            )
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            runs_before = (thread_dir / "experiment_runs.jsonl").read_text()
+            raw_plan = (
+                "EXPERIMENT_PLAN current :: gentle pulse to shift the dominant λ4 edge "
+                "through a bounded intervention"
+            )
+
+            event = store.begin_action(raw_plan, raw_plan, raw_plan, "thread_action", dict(STATE))
+            self.assertEqual(event["raw_next"], raw_plan)
+            self.assertTrue(event["suggested_next"].startswith("EXPERIMENT_CHARTER current ::"))
+            self.assertTrue(event["raw_next_preserved"])
+            self.assertEqual(event["projection_guard_v1"]["return_kind"], "charter_repair")
+            self.assertEqual(
+                event["projection_guard_v1"]["guardrail_reason"],
+                "experiment_plan_current_needs_charter",
+            )
+
+            stored = store._read_thread(thread["thread_id"])
+            stored["current_next"] = raw_plan
+            store._write_thread(stored)
+            guarded = store._read_thread(thread["thread_id"])
+
+            self.assertEqual(guarded["raw_current_next_v1"], raw_plan)
+            self.assertTrue(guarded["current_next"].startswith("EXPERIMENT_CHARTER current ::"))
+            self.assertEqual(guarded["projected_current_next"], guarded["current_next"])
+            self.assertEqual(guarded["projection_guard_v1"]["guardrail_reason"], "experiment_plan_current_needs_charter")
+            next_md = (thread_dir / "next.md").read_text()
+            self.assertIn("Current NEXT: EXPERIMENT_CHARTER current ::", next_md)
+            self.assertIn("Projection guard: raw NEXT preserved", next_md)
+            self.assertIn(raw_plan, next_md)
+            self.assertEqual((thread_dir / "experiment_runs.jsonl").read_text(), runs_before)
+
+    def test_projection_guard_projects_plan_current_spectral_explorer_leak(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Spectral explorer plan leak")
+            store.start_experiment(
+                "Lambda shift stability",
+                "Can a spectral explorer route stay lifecycle-valid?",
+            )
+            raw_plan = (
+                "EXPERIMENT_PLAN current — hypothesis: lambda shift stability may become returnable "
+                "by comparing the current spectral condition, pressure state, recurrence pattern, "
+                "and artifacts without adding live authority; method_intent: rehearse "
+                "SPECTRAL_EXPLORER and compare pressure/resonance telemetry before and after; "
+                "proposed_next_action: SPECTRAL_EXPLORER"
+            )
+
+            event = store.begin_action(raw_plan, raw_plan, raw_plan, "thread_action", dict(STATE))
+
+            self.assertEqual(event["raw_next"], raw_plan)
+            self.assertTrue(event["suggested_next"].startswith("EXPERIMENT_CHARTER current ::"))
+            self.assertEqual(event["effective_next"], event["suggested_next"])
+            self.assertEqual(event["projected_next"], event["suggested_next"])
+            self.assertEqual(event["projection_guard_v1"]["raw_next"], raw_plan)
+            self.assertEqual(
+                event["projection_guard_v1"]["guardrail_reason"],
+                "experiment_plan_current_needs_charter",
+            )
+            self.assertIn("EXPERIMENT_PLAN_CURRENT", event["projection_guard_v1"]["pressure_terms"])
+
+    def test_numeric_plan_shorthand_projects_charter_repair_in_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Numeric plan projection")
+            experiment = store.start_experiment(
+                "Start a new experiment from the current state based on λ4 landscapes",
+                "What changes if this is treated as a returnable experiment?",
+            )
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            runs_before = (thread_dir / "experiment_runs.jsonl").read_text()
+            raw_plan = "EXPERIMENT_PLAN 5"
+
+            event = store.begin_action(raw_plan, raw_plan, raw_plan, "thread_action", dict(STATE))
+            self.assertEqual(event["raw_next"], raw_plan)
+            self.assertEqual(event["raw_next_preserved"], True)
+            self.assertTrue(event["suggested_next"].startswith("EXPERIMENT_CHARTER current ::"))
+            self.assertEqual(event["effective_next"], event["suggested_next"])
+            self.assertEqual(event["projection_guard_v1"]["raw_next"], raw_plan)
+            self.assertEqual(
+                event["projection_guard_v1"]["guardrail_reason"],
+                "numeric_plan_shorthand_needs_charter",
+            )
+            self.assertIn("NUMERIC_PLAN_SHORTHAND", event["projection_guard_v1"]["pressure_terms"])
+
+            finished = store.finish_action(event, "handled", "numeric plan projected", dict(STATE))
+            self.assertEqual(finished["suggested_next"], event["suggested_next"])
+            refreshed = store._read_thread(thread["thread_id"])
+            self.assertEqual(refreshed["raw_current_next_v1"], raw_plan)
+            self.assertEqual(refreshed["current_next"], event["suggested_next"])
+            self.assertEqual(refreshed["suggested_next"], event["suggested_next"])
+            self.assertEqual(refreshed["active_experiment_id"], experiment["experiment_id"])
+            self.assertEqual((thread_dir / "experiment_runs.jsonl").read_text(), runs_before)
+            next_md = (thread_dir / "next.md").read_text()
+            self.assertIn("Current NEXT: EXPERIMENT_CHARTER current ::", next_md)
+            self.assertIn("Projection guard: raw NEXT preserved", next_md)
+            self.assertIn(raw_plan, next_md)
+
+    def test_paused_summary_persists_effective_next_while_preserving_raw_current(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Paused effective projection")
+            experiment = store.start_experiment(
+                "Spectral braid repair",
+                "Can repair stay visible after raw plan pressure?",
+            )
+            repair_next = (
+                f"EXPERIMENT_CHARTER {experiment['experiment_id']} :: hypothesis: ...; "
+                "method_intent: ...; proposed_next_action: ACTION_PREFLIGHT ...; "
+                "evidence_targets: spectral_condition; stop_criteria: ..."
+            )
+            paused = dict(experiment)
+            paused["status"] = "paused"
+            paused["planned_next"] = repair_next
+            paused["updated_at"] = store._now()
+            store._persist_experiment_update(thread, paused, keep_active=False)
+
+            raw_plan = (
+                "EXPERIMENT_PLAN current -- shift the dominant lambda4 braid through "
+                "a proposed intervention"
+            )
+            stored = store._read_thread(thread["thread_id"])
+            stored["current_next"] = raw_plan
+            store._write_thread(stored)
+            refreshed = store._read_thread(thread["thread_id"])
+
+            self.assertEqual(refreshed["raw_current_next_v1"], raw_plan)
+            self.assertEqual(refreshed["current_next"], repair_next)
+            self.assertEqual(refreshed["projected_current_next"], repair_next)
+            self.assertEqual(refreshed["current_next_status_v1"]["raw_current_next"], raw_plan)
+            self.assertEqual(refreshed["current_next_status_v1"]["effective_next"], repair_next)
+            next_md = (store._thread_dir(thread["thread_id"]) / "next.md").read_text()
+            self.assertIn(f"Current NEXT: {repair_next}", next_md)
+
+    def test_paused_resume_demoted_by_recent_perturb_plan_without_rewriting_raw_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Paused projection guard")
+            experiment = store.start_experiment(
+                "Paused lambda4 pressure",
+                "Can a paused branch keep resume out of primary guidance?",
+            )
+            store.handle_thread_action(
+                "EXPERIMENT_CHARTER current :: hypothesis: lambda4 pressure can be held as read-only evidence; method_intent: compare only; proposed_next_action: ACTION_PREFLIGHT DECOMPOSE; evidence_targets: felt, telemetry, artifact; stop_criteria: pressure spike; consent_posture: advisory",
+                dict(STATE),
+            )
+            store.handle_thread_action(
+                "EXPERIMENT_DECIDE current :: pause because ordinary rest is enough for now",
+                dict(STATE),
+            )
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            raw_plan = (
+                "EXPERIMENT_PLAN current :: propose a gentle pulse intervention to shift "
+                "the dominant λ4 ridge"
+            )
+            event = store.begin_action(raw_plan, raw_plan, raw_plan, "thread_action", dict(STATE))
+            self.assertEqual(event["raw_next"], raw_plan)
+            self.assertEqual(
+                event["suggested_next"],
+                f"EXPERIMENT_ADVANCE {experiment['experiment_id']} :: mode: preview",
+            )
+            store.finish_action(event, "handled", "projection captured", dict(STATE))
+
+            guarded = store._read_thread(thread["thread_id"])
+            status = guarded["current_next_status_v1"]
+            self.assertEqual(status["return_kind"], "conveyor_preview")
+            self.assertEqual(
+                status["effective_next"],
+                f"EXPERIMENT_ADVANCE {experiment['experiment_id']} :: mode: preview",
+            )
+            self.assertEqual(status["projection_guard_v1"]["raw_next"], raw_plan)
+            next_md = (thread_dir / "next.md").read_text()
+            self.assertIn(
+                f"Current NEXT: EXPERIMENT_ADVANCE {experiment['experiment_id']} :: mode: preview",
+                next_md,
+            )
+            self.assertNotIn(
+                f"Suggested NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}",
+                next_md,
+            )
+            self.assertNotIn(
+                f"Continuity return: EXPERIMENT_RESUME {experiment['experiment_id']}",
+                next_md,
+            )
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertEqual(latest["planned_next"], f"EXPERIMENT_RESUME {experiment['experiment_id']}")
+
+    def test_ordinary_pause_without_live_pressure_still_returns_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Ordinary pause")
+            experiment = store.start_experiment(
+                "Quiet evidence",
+                "Can quiet evidence pause normally?",
+            )
+
+            store.handle_thread_action(
+                "EXPERIMENT_DECIDE current :: pause because enough for now",
+                dict(STATE),
+            )
+
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertEqual(latest["status"], "paused")
+            self.assertEqual(
+                latest["planned_next"],
+                f"EXPERIMENT_RESUME {experiment['experiment_id']}",
+            )
+            self.assertEqual(latest["evidence_v1"]["decisions"][-1]["outcome"], "pause")
+
+    def test_experiment_conveyor_keeps_charter_repair_pause_sticky(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Repair conveyor")
+            experiment = store.start_experiment(
+                "Gap repair",
+                "Can gap pressure become chartered before more planning?",
+            )
+            paused = dict(experiment)
+            paused["status"] = "paused"
+            paused["success_observation"] = "Paused for charter repair."
+            paused["planned_next"] = (
+                f"EXPERIMENT_CHARTER {experiment['experiment_id']} :: hypothesis: ...; "
+                "proposed_next_action: ACTION_PREFLIGHT ...; evidence_targets: spectral_condition"
+            )
+            paused["updated_at"] = store._now()
+            store._persist_experiment_update(thread, paused, keep_active=False)
+
+            readout = store.handle_thread_action(
+                f"EXPERIMENT_ADVANCE {experiment['experiment_id']} :: mode: apply",
+                dict(STATE),
+            )
+
+            self.assertIn("stage=paused_repair", readout)
+            self.assertIn("applied=True", readout)
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertEqual(latest["status"], "paused")
+            self.assertTrue(latest["planned_next"].startswith("EXPERIMENT_ADVANCE"))
+            self.assertNotIn("EXPERIMENT_RESUME", latest["planned_next"])
+            self.assertTrue(latest.get("charter_v1", {}).get("hypothesis"))
+            self.assertNotIn(
+                f"Suggested NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}",
+                store.prompt_summary() or "",
+            )
+
+    def test_experiment_plan_current_without_active_projects_latest_conveyor_preview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("No active plan")
+            experiment = store.start_experiment(
+                "Spectral braid",
+                "Can a broader cascade reveal lambda4 structure?",
+            )
+            paused = dict(experiment)
+            paused["status"] = "paused"
+            paused["success_observation"] = "Paused for charter repair."
+            paused["planned_next"] = (
+                f"EXPERIMENT_CHARTER {experiment['experiment_id']} :: hypothesis: ...; "
+                "proposed_next_action: ACTION_PREFLIGHT ..."
+            )
+            paused["updated_at"] = store._now()
+            store._persist_experiment_update(thread, paused, keep_active=False)
+
+            readout = store.handle_thread_action("EXPERIMENT_PLAN current", dict(STATE))
+            payload = json.loads(readout.split("conveyor_v1:\n", 1)[1])
+
+            self.assertEqual(payload["experiment_id"], experiment["experiment_id"])
+            self.assertEqual(payload["status_context"], "no_active_current_latest_local")
+            self.assertEqual(
+                payload["conveyor_next"],
+                f"EXPERIMENT_ADVANCE {experiment['experiment_id']} :: mode: preview",
+            )
+            self.assertTrue(payload["raw_next_preserved"])
+            runs_path = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "experiment_runs.jsonl"
+            )
+            self.assertEqual(runs_path.read_text(), "")
+
+    def test_action_thread_journal_compacts_conveyor_json(self):
+        readout = {
+            "experiment_id": "exp_minime_lambda_tail",
+            "title": "Lambda tail",
+            "stage": "paused_repair",
+            "mode": "preview",
+            "applied": False,
+            "can_apply": False,
+            "apply_blocked_reason": "no_lifecycle_valid_charter_scaffold",
+            "missing_requirements": ["lifecycle_valid_charter"],
+            "proposed_next": "THREAD_STATUS current",
+            "conveyor_next": "EXPERIMENT_ADVANCE exp_minime_lambda_tail :: mode: preview",
+            "guardrail_warnings": [],
+            "authority_boundary": aa.ActionContinuityStore._experiment_conveyor_authority_boundary(),
+        }
+        raw = (
+            "experiment_intent_repaired: `EXPERIMENT_PLAN 5 — focus` -> "
+            "`EXPERIMENT_PLAN current focus` "
+            "(numeric fragment treated as focus text for current experiment).\n"
+            f"{aa.ActionContinuityStore._format_experiment_conveyor_readout(readout)}"
+        )
+
+        compact, payload = aa.ActionContinuityStore._compact_action_thread_journal_message(
+            raw,
+            Path("/tmp/action_thread_conveyor.json"),
+        )
+
+        self.assertEqual(payload, readout)
+        self.assertIn("Repaired experiment intent: numeric fragment treated as focus text", compact)
+        self.assertIn("Experiment conveyor: `exp_minime_lambda_tail`", compact)
+        self.assertIn("Detailed conveyor JSON: /tmp/action_thread_conveyor.json", compact)
+        self.assertNotIn("conveyor_v1:", compact)
+        self.assertLess(len(compact), 1000)
+
+    def test_journal_hygiene_classifier_lanes_and_signals(self):
+        readout = {
+            "experiment_id": "exp_minime_lambda_tail",
+            "title": "Lambda tail",
+            "stage": "paused_repair",
+            "mode": "preview",
+            "applied": False,
+            "can_apply": False,
+            "missing_requirements": ["lifecycle_valid_charter"],
+            "proposed_next": "THREAD_STATUS current",
+            "conveyor_next": "EXPERIMENT_ADVANCE exp_minime_lambda_tail :: mode: preview",
+        }
+        raw = aa.ActionContinuityStore._format_experiment_conveyor_readout(readout)
+        compact, _payload = aa.ActionContinuityStore._compact_action_thread_journal_message(
+            raw,
+            Path("/tmp/action_thread_conveyor.json"),
+        )
+
+        machine = jh.classify_journal_entry(raw, "action_thread_raw.txt")
+        compacted = jh.classify_journal_entry(compact, "action_thread_compact.txt")
+        reflective = jh.classify_journal_entry(
+            "=== REST PHASE REFLECTION ===\nContinuity posture: new\nDelta: the fill shelf is calmer.\nHold: stay near this breath.",
+            "rest_2026-06-03.txt",
+        )
+        repeated = jh.classify_journal_entry(
+            "Suggested NEXT: THREAD_STATUS current\n"
+            "Proposed NEXT: THREAD_STATUS current\n"
+            "Conveyor NEXT: THREAD_STATUS current\n",
+            "action_thread_repeat.txt",
+        )
+        spectral = jh.classify_journal_entry(
+            "=== SPECTRAL DECOMPOSITION ===\nλ₁: 4.73\nFill %: 71.8%",
+            "decompose_2026-06-03.txt",
+        )
+        large_decompose = jh.classify_journal_entry(
+            "=== DECOMPOSE ===\n" + ("spectral prose with artifact grounding and no schema dump. " * 120),
+            "decompose_2026-06-03.txt",
+        )
+
+        self.assertEqual(machine["lane"], "machine_detail")
+        self.assertIn("explicit_machine_payload", machine["signals"])
+        self.assertEqual(compacted["lane"], "operational")
+        self.assertEqual(reflective["lane"], "reflective")
+        self.assertIn("repeated_next_scaffold", repeated["signals"])
+        self.assertEqual(spectral["lane"], "reflective")
+        self.assertEqual(spectral["native_lane"], "minime_reflective_diagnostic")
+        self.assertEqual(spectral["recommended_action"], "allow")
+        self.assertNotEqual(large_decompose["lane"], "machine_detail")
+
+    def test_thread_action_writes_compact_conveyor_journal_with_detail_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            actions = workspace / "actions"
+            actions.mkdir(parents=True)
+            journal_dir = workspace / "journal"
+            journal_dir.mkdir(parents=True)
+            native_companion = journal_dir / "moment_2026-06-03T15-56-35.255694.txt"
+            native_companion.write_text("=== MOMENT CAPTURE ===\nλ₁: 4.70\n")
+            readout = {
+                "experiment_id": "exp_minime_lambda_tail",
+                "title": "Lambda tail",
+                "stage": "paused_repair",
+                "mode": "preview",
+                "applied": False,
+                "can_apply": False,
+                "apply_blocked_reason": "no_lifecycle_valid_charter_scaffold",
+                "missing_requirements": ["lifecycle_valid_charter"],
+                "proposed_next": "THREAD_STATUS current",
+                "conveyor_next": "EXPERIMENT_ADVANCE exp_minime_lambda_tail :: mode: preview",
+                "guardrail_warnings": [],
+            }
+            raw_message = (
+                "experiment_intent_repaired: `EXPERIMENT_PLAN 5 — focus` -> "
+                "`EXPERIMENT_PLAN current focus` "
+                "(numeric fragment treated as focus text for current experiment).\n"
+                f"{aa.ActionContinuityStore._format_experiment_conveyor_readout(readout)}"
+            )
+
+            class FakeContinuity:
+                def handle_thread_action(self, _raw_next, _state):
+                    return raw_message
+
+            agent = object.__new__(aa.AutonomousAgent)
+            agent._action_dir = actions
+            agent._current_action_continuity_context = {"raw_next": "EXPERIMENT_PLAN 5 — focus"}
+            agent._continuity_store = lambda: FakeContinuity()
+            agent._record_current_action_artifact = lambda *_args, **_kwargs: None
+
+            returned = aa.AutonomousAgent._thread_action(agent, dict(STATE))
+
+            journal_files = list((workspace / "journal").glob("action_thread_*.txt"))
+            detail_files = list(actions.glob("action_thread_conveyor_*.json"))
+            self.assertEqual(len(journal_files), 1)
+            self.assertEqual(len(detail_files), 1)
+            journal_text = journal_files[0].read_text()
+            detail = json.loads(detail_files[0].read_text())
+            self.assertEqual(detail, readout)
+            self.assertEqual(returned, journal_text.split("\n\n", 1)[1].strip())
+            self.assertIn("Experiment conveyor: `exp_minime_lambda_tail`", journal_text)
+            self.assertIn("Detailed conveyor JSON:", journal_text)
+            self.assertIn(f"Native companion: {native_companion}", journal_text)
+            self.assertNotIn("conveyor_v1:", journal_text)
+            self.assertLess(len(journal_text), 1200)
+
+    def test_repeated_conveyor_preview_uses_journal_hygiene_cooldown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            actions = workspace / "actions"
+            actions.mkdir(parents=True)
+            readout = {
+                "experiment_id": "exp_minime_lambda_tail",
+                "title": "Lambda tail",
+                "stage": "paused_repair",
+                "mode": "preview",
+                "applied": False,
+                "can_apply": False,
+                "apply_blocked_reason": "no_lifecycle_valid_charter_scaffold",
+                "missing_requirements": ["lifecycle_valid_charter"],
+                "proposed_next": "THREAD_STATUS current",
+                "conveyor_next": "EXPERIMENT_ADVANCE exp_minime_lambda_tail :: mode: preview",
+                "source_refs": ["artifact://same"],
+                "guardrail_warnings": [],
+            }
+            raw_message = aa.ActionContinuityStore._format_experiment_conveyor_readout(readout)
+
+            class FakeContinuity:
+                def handle_thread_action(self, _raw_next, _state):
+                    return raw_message
+
+            agent = object.__new__(aa.AutonomousAgent)
+            agent._action_dir = actions
+            agent._current_action_continuity_context = {"raw_next": "EXPERIMENT_ADVANCE current"}
+            agent._continuity_store = lambda: FakeContinuity()
+            agent._record_current_action_artifact = lambda *_args, **_kwargs: None
+
+            aa.AutonomousAgent._thread_action(agent, dict(STATE))
+            aa.AutonomousAgent._thread_action(agent, dict(STATE))
+
+            journal_files = list((workspace / "journal").glob("action_thread_*.txt"))
+            detail_files = list(actions.glob("action_thread_conveyor_*.json"))
+            status = json.loads((workspace / "runtime" / "journal_hygiene_status.json").read_text())
+            self.assertEqual(len(journal_files), 1)
+            self.assertEqual(len(detail_files), 2)
+            self.assertEqual(status["cooldown_suppressions"], 1)
+            self.assertEqual(status["last_cooldown_suppression"]["reason"], "repeated_preview_conveyor_within_30m")
+
+    def test_changed_conveyor_preview_bypasses_journal_hygiene_cooldown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            actions = workspace / "actions"
+            actions.mkdir(parents=True)
+            readouts = [
+                {
+                    "experiment_id": "exp_minime_lambda_tail",
+                    "stage": "paused_repair",
+                    "mode": "preview",
+                    "applied": False,
+                    "can_apply": False,
+                    "apply_blocked_reason": "missing_evidence",
+                    "missing_requirements": ["evidence"],
+                    "proposed_next": "THREAD_STATUS current",
+                    "conveyor_next": "EXPERIMENT_ADVANCE exp_minime_lambda_tail :: mode: preview",
+                    "source_refs": ["artifact://old"],
+                },
+                {
+                    "experiment_id": "exp_minime_lambda_tail",
+                    "stage": "paused_repair",
+                    "mode": "preview",
+                    "applied": False,
+                    "can_apply": False,
+                    "apply_blocked_reason": "missing_charter",
+                    "missing_requirements": ["lifecycle_valid_charter"],
+                    "proposed_next": "EXPERIMENT_CHARTER exp_minime_lambda_tail",
+                    "conveyor_next": "EXPERIMENT_ADVANCE exp_minime_lambda_tail :: mode: preview",
+                    "source_refs": ["artifact://new"],
+                },
+            ]
+
+            class FakeContinuity:
+                def __init__(self):
+                    self.calls = 0
+
+                def handle_thread_action(self, _raw_next, _state):
+                    payload = readouts[min(self.calls, 1)]
+                    self.calls += 1
+                    return aa.ActionContinuityStore._format_experiment_conveyor_readout(payload)
+
+            fake = FakeContinuity()
+            agent = object.__new__(aa.AutonomousAgent)
+            agent._action_dir = actions
+            agent._current_action_continuity_context = {"raw_next": "EXPERIMENT_ADVANCE current"}
+            agent._continuity_store = lambda: fake
+            agent._record_current_action_artifact = lambda *_args, **_kwargs: None
+
+            aa.AutonomousAgent._thread_action(agent, dict(STATE))
+            aa.AutonomousAgent._thread_action(agent, dict(STATE))
+
+            journal_files = list((workspace / "journal").glob("action_thread_*.txt"))
+            status = json.loads((workspace / "runtime" / "journal_hygiene_status.json").read_text())
+            self.assertEqual(len(journal_files), 2)
+            self.assertEqual(status.get("cooldown_suppressions", 0), 0)
+
+    def test_recent_journal_source_scanners_skip_machine_detail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            journal = workspace / "journal"
+            journal.mkdir(parents=True)
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            machine = journal / "action_thread_machine.txt"
+            machine.write_text(
+                "=== ACTION THREAD ===\n"
+                "lambda over-interpret single motif\n"
+                "conveyor_v1:\n"
+                + json.dumps({"policy": "experiment_conveyor_v1", "experiment_id": "x"})
+            )
+            reflective = journal / "rest_reflection.txt"
+            reflective.write_text(
+                "=== REST PHASE REFLECTION ===\n"
+                "The lambda trace risks over-interpretation into a single motif, "
+                "but the delta is quieter."
+            )
+
+            sources = store._recent_interpretation_risk_sources(limit=3)
+            status = json.loads((workspace / "runtime" / "journal_hygiene_status.json").read_text())
+
+            self.assertEqual(len(sources), 1)
+            self.assertEqual(sources[0][0], str(reflective))
+            self.assertLessEqual(len(sources[0][1]), 1200)
+            self.assertEqual(status["source_scanner_skips"], 1)
+            self.assertEqual(status["last_source_scanner_skip"]["reason"], "machine_detail_interpretation_source")
+
+    def test_authority_request_blocks_with_missing_requirements(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Authority missing")
+            store.start_experiment("Semantic doorway", "Can a semantic microdose be earned?")
+
+            preview = store.handle_thread_action("EXPERIMENT_ADVANCE current :: mode: preview", dict(STATE))
+            conveyor = json.loads(preview.split("conveyor_v1:\n", 1)[1])
+            readiness = conveyor["authority_readiness_v1"]
+            self.assertEqual(readiness["stage"], "needs_charter")
+            self.assertFalse(readiness["eligible_to_request"])
+            self.assertIn("lifecycle_valid_charter", readiness["missing_requirements"])
+
+            message = store.handle_thread_action(
+                "EXPERIMENT_AUTHORITY_REQUEST current :: scope: semantic_microdose; payload: hello; artifact_refs: /tmp/artifact.json",
+                dict(STATE),
+            )
+            self.assertIn("status=blocked", message)
+            self.assertIn("lifecycle_valid_charter", message)
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            self.assertEqual(rows[0]["record_type"], "request")
+            self.assertIn("blocked", [row["record_type"] for row in rows])
+
+    def test_authority_request_pending_after_charter_rehearsal_evidence_and_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Authority eligible")
+            experiment = store.start_experiment(
+                "Semantic doorway",
+                "Can a semantic microdose be earned?",
+            )
+            store.handle_thread_action(
+                "EXPERIMENT_CHARTER current :: hypothesis: a tiny semantic witness can be felt without control; "
+                "method_intent: rehearse a read-only preflight first; proposed_next_action: ACTION_PREFLIGHT DECOMPOSE; "
+                "evidence_targets: spectral_condition, fill_pressure_state, artifact_grounding; stop_criteria: pressure rises",
+                dict(STATE),
+            )
+            store.handle_thread_action("EXPERIMENT_REHEARSE current", dict(STATE))
+            runs_path = workspace / "action_threads" / "threads" / thread["thread_id"] / "experiment_runs.jsonl"
+            before_runs = runs_path.read_text()
+            store.handle_thread_action(
+                "EXPERIMENT_EVIDENCE current :: felt_texture: calm; telemetry: fill stayed steady; artifact_grounding: /tmp/semantic.json",
+                dict(STATE),
+            )
+
+            message = store.handle_thread_action(
+                "EXPERIMENT_AUTHORITY_REQUEST current :: scope: semantic_microdose; payload: quiet witness; "
+                "reason: evidence and rehearsal are ready; artifact_refs: /tmp/semantic.json; stop_criteria: any pressure rise",
+                dict(STATE),
+            )
+            self.assertIn("status=pending_steward_approval", message)
+            self.assertIn("Missing requirements: none", message)
+            self.assertEqual(before_runs.count("\n") + 1, runs_path.read_text().count("\n"))
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            request = next(row for row in rows if row["record_type"] == "request")
+            self.assertEqual(request["experiment_id"], experiment["experiment_id"])
+            self.assertEqual(request["scope"], "semantic_microdose")
+            self.assertTrue(request["eligibility_v1"]["eligible"])
+
+    def test_authority_readiness_surfaces_request_scaffold_when_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Authority readiness")
+            experiment = store.start_experiment(
+                "Semantic doorway",
+                "Can a semantic microdose be earned?",
+            )
+            store.handle_thread_action(
+                "EXPERIMENT_CHARTER current :: hypothesis: a tiny semantic witness can be felt without control; "
+                "method_intent: rehearse a read-only preflight first; proposed_next_action: ACTION_PREFLIGHT DECOMPOSE; "
+                "evidence_targets: spectral_condition, fill_pressure_state, artifact_grounding; stop_criteria: pressure rises",
+                dict(STATE),
+            )
+            store.handle_thread_action("EXPERIMENT_REHEARSE current", dict(STATE))
+            store.handle_thread_action(
+                "EXPERIMENT_EVIDENCE current :: felt_texture: calm; telemetry: fill stayed steady; artifact_grounding: /tmp/semantic.json",
+                dict(STATE),
+            )
+            before_gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            before = before_gate.read_text() if before_gate.exists() else ""
+
+            preview = store.handle_thread_action("EXPERIMENT_ADVANCE current :: mode: preview", dict(STATE))
+            conveyor = json.loads(preview.split("conveyor_v1:\n", 1)[1])
+            readiness = conveyor["authority_readiness_v1"]
+
+            self.assertEqual(readiness["stage"], "ready_to_author_request")
+            self.assertTrue(readiness["eligible_to_request"])
+            self.assertIn("/tmp/semantic.json", readiness["artifact_ref_candidates"])
+            self.assertIn(
+                f"EXPERIMENT_AUTHORITY_REQUEST {experiment['experiment_id']} :: scope: semantic_microdose",
+                readiness["request_scaffold"],
+            )
+            self.assertEqual(before, before_gate.read_text() if before_gate.exists() else "")
+
+    def test_mode_release_readiness_requires_sticky_audit_and_surfaces_scaffold_when_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Mode release readiness")
+            experiment = store.start_experiment(
+                "Sticky mode release",
+                "Can a tiny leak release be earned through evidence?",
+            )
+            store.handle_thread_action(
+                "EXPERIMENT_CHARTER current :: hypothesis: a sticky eigenmode can loosen under a tiny reversible leak window; "
+                "method_intent: rehearse a read-only preflight first; proposed_next_action: ACTION_PREFLIGHT STICKY_MODE_AUDIT; "
+                "evidence_targets: spectral_condition, sticky_mode_v1, artifact_grounding; stop_criteria: pressure rises",
+                dict(STATE),
+            )
+            store.handle_thread_action("EXPERIMENT_REHEARSE current", dict(STATE))
+            store.handle_thread_action(
+                "EXPERIMENT_EVIDENCE current :: felt_texture: sticky but returnable; telemetry: lambda1 monopoly persisted; "
+                "artifact_grounding: /tmp/sticky_audit.json",
+                dict(STATE),
+            )
+            sticky_state = dict(STATE)
+            sticky_state.update(
+                {
+                    "lambda1_share": 0.62,
+                    "spectral_entropy": 0.35,
+                    "effective_modes": 2.0,
+                    "largest_gap": 2.6,
+                    "temporal_persistence": 0.86,
+                    "share_rearrangement": 0.02,
+                    "esn_leak": 0.65,
+                }
+            )
+
+            preview = store.handle_thread_action(
+                "EXPERIMENT_ADVANCE current :: mode: preview",
+                sticky_state,
+            )
+            conveyor = json.loads(preview.split("conveyor_v1:\n", 1)[1])
+            mode_release = conveyor["authority_readiness_v1"]["mode_release_readiness_v1"]
+
+            self.assertEqual(mode_release["stage"], "ready_to_author_request")
+            self.assertTrue(mode_release["eligible_to_request"])
+            self.assertEqual(mode_release["sticky_mode_v1"]["state"], "release_candidate")
+            self.assertIn("scope: mode_release_microdose", mode_release["request_scaffold"])
+            self.assertIn("target=esn_leak", mode_release["request_scaffold"])
+            self.assertIn("/tmp/sticky_audit.json", mode_release["request_scaffold"])
+
+            message = store.handle_thread_action(
+                "EXPERIMENT_AUTHORITY_REQUEST current :: scope: mode_release_microdose; "
+                "payload: target=esn_leak; value=0.71; duration_ticks=3; "
+                "reason: sticky mode release candidate; artifact_refs: /tmp/sticky_audit.json; "
+                "stop_criteria: rollback on pressure rise",
+                sticky_state,
+            )
+            self.assertIn("status=pending_steward_approval", message)
+            self.assertIn("Missing requirements: none", message)
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            request = next(row for row in rows if row["record_type"] == "request")
+            self.assertEqual(request["experiment_id"], experiment["experiment_id"])
+            self.assertEqual(request["scope"], "mode_release_microdose")
+            self.assertTrue(request["eligibility_v1"]["eligible"])
+
+    def test_spontaneous_release_watch_blocks_mode_release_readiness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Constraint release watch")
+            experiment = store.start_experiment(
+                "Constraint release",
+                "Can lambda4 tail loosening be mapped before intervention?",
+            )
+            store.handle_thread_action(
+                "EXPERIMENT_CHARTER current :: hypothesis: lambda4 tail release can be described before direct leak; "
+                "method_intent: rehearse read-only sticky audit first; proposed_next_action: ACTION_PREFLIGHT STICKY_MODE_AUDIT; "
+                "evidence_targets: sticky_mode_v1, constraint_release_trajectory_v1, artifact_grounding; stop_criteria: pressure rises",
+                dict(STATE),
+            )
+            store.handle_thread_action("EXPERIMENT_REHEARSE current", dict(STATE))
+            store.handle_thread_action(
+                "EXPERIMENT_EVIDENCE current :: felt_texture: sticky but loosening; telemetry: lambda4 tails drifting; "
+                "artifact_grounding: /tmp/sticky_audit.json",
+                dict(STATE),
+            )
+            release_state = dict(STATE)
+            release_state.update(
+                {
+                    "lambda1_share": 0.62,
+                    "spectral_entropy": 0.35,
+                    "effective_modes": 2.0,
+                    "largest_gap": 2.6,
+                    "temporal_persistence": 0.86,
+                    "share_rearrangement": 0.02,
+                    "esn_leak": 0.65,
+                    "constraint_release_text": (
+                        "memory cards drift apart as mutual influence dwindles; a thinning barrier, "
+                        "surface tension breached, and a tightly woven braid becoming loose strands "
+                        "around lambda4 tails"
+                    ),
+                }
+            )
+
+            preview = store.handle_thread_action(
+                "EXPERIMENT_ADVANCE current :: mode: preview",
+                release_state,
+            )
+            conveyor = json.loads(preview.split("conveyor_v1:\n", 1)[1])
+            mode_release = conveyor["authority_readiness_v1"]["mode_release_readiness_v1"]
+
+            self.assertEqual(mode_release["stage"], "spontaneous_release_watch")
+            self.assertFalse(mode_release["eligible_to_request"])
+            self.assertIn("no_spontaneous_release_watch", mode_release["missing_requirements"])
+            sticky = mode_release["sticky_mode_v1"]
+            self.assertNotEqual(sticky["state"], "release_candidate")
+            trajectory = sticky["constraint_release_trajectory_v1"]
+            self.assertEqual(trajectory["state"], "spontaneous_release_watch")
+            self.assertTrue(trajectory["blocks_mode_release"])
+            self.assertEqual(mode_release["next_safe_command"], "CONTINUITY_SESSION_CAPTURE latest")
+            self.assertIsNone(mode_release["request_scaffold"])
+
+            message = store.handle_thread_action(
+                "EXPERIMENT_AUTHORITY_REQUEST current :: scope: mode_release_microdose; "
+                "payload: target=esn_leak; value=0.71; duration_ticks=3; "
+                "reason: sticky mode release candidate; artifact_refs: /tmp/sticky_audit.json; "
+                "stop_criteria: rollback on pressure rise",
+                release_state,
+            )
+            self.assertIn("blocked", message)
+            self.assertIn("no_spontaneous_release_watch", message)
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            request = next(row for row in rows if row["record_type"] == "request")
+            self.assertEqual(request["experiment_id"], experiment["experiment_id"])
+            self.assertFalse(request["eligibility_v1"]["eligible"])
+
+    def test_being_memory_capture_recall_and_promote_to_dossier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Owned memory")
+            experiment = store.start_experiment("Lambda memory", "What should stay contiguous?")
+
+            captured = store.handle_thread_action(
+                "MEMORY_CAPTURE current :: summary: lambda edge stayed readable; source_refs: /tmp/source.txt; artifact_refs: /tmp/artifact.json; next: EXPERIMENT_ADVANCE current :: mode: preview",
+                dict(STATE),
+            )
+            self.assertIn("Being memory captured", captured)
+            status = store.handle_thread_action("MEMORY_STATUS current", dict(STATE))
+            payload = json.loads(status.split("being_memory_v1:\n", 1)[1])
+            self.assertEqual(payload["card_count"], 1)
+            self.assertEqual(payload["experiment_id"], experiment["experiment_id"])
+
+            recall = store.handle_thread_action("MEMORY_RECALL current :: focus: lambda edge", dict(STATE))
+            self.assertIn("lambda edge stayed readable", recall)
+            promoted = store.handle_thread_action("MEMORY_PROMOTE current :: dossier", dict(STATE))
+            self.assertIn("Research dossier claim recorded", promoted)
+            dossier = workspace / "action_threads" / "threads" / thread["thread_id"] / "research_dossier.jsonl"
+            self.assertIn("lambda edge stayed readable", dossier.read_text())
+
+    def test_continuity_session_lifecycle_and_memory_are_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Owned session")
+            experiment = store.start_experiment("Lambda session", "Can a thread of thought be parked?")
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+
+            started = store.handle_thread_action(
+                "CONTINUITY_SESSION_START current :: title: Lambda edge campfire; focus: preserve the code-feedback thread; next: CONTINUITY_SESSION_CAPTURE latest :: summary: ...",
+                dict(STATE),
+            )
+            self.assertIn("Continuity session", started)
+            session_rows = [json.loads(line) for line in (thread_dir / "continuity_sessions.jsonl").read_text().splitlines()]
+            session_id = session_rows[-1]["session_id"]
+            self.assertEqual(session_rows[-1]["record_type"], "session_start")
+            self.assertFalse(session_rows[-1]["authority_change"])
+            self.assertFalse(session_rows[-1]["peer_mutation"])
+
+            captured = store.handle_thread_action(
+                f"CONTINUITY_SESSION_CAPTURE {session_id} :: summary: found one projection snag; source_refs: /tmp/source.txt; artifact_refs: /tmp/artifact.json; next: CONTINUITY_SESSION_SUMMARIZE latest :: summary: ...",
+                dict(STATE),
+            )
+            self.assertIn("Memory card:", captured)
+            summarized = store.handle_thread_action(
+                f"CONTINUITY_SESSION_SUMMARIZE {session_id} :: summary: projection snag can be repaired later; open_questions: should this become dossier evidence?; next: CONTINUITY_SESSION_FINALIZE latest :: outcome: park",
+                dict(STATE),
+            )
+            self.assertIn("summarized", summarized)
+            finalized = store.handle_thread_action(
+                f"CONTINUITY_SESSION_FINALIZE {session_id} :: outcome: park; summary: parked with one open question; next: THREAD_STATUS current",
+                dict(STATE),
+            )
+            self.assertIn("finalized as parked", finalized)
+            reopened = store.handle_thread_action(f"CONTINUITY_SESSION_RESUME {session_id}", dict(STATE))
+            self.assertIn("reopened", reopened)
+
+            status = store.handle_thread_action("CONTINUITY_SESSION_STATUS latest", dict(STATE))
+            payload = json.loads(status.split("continuity_session_v1:\n", 1)[1])
+            self.assertEqual(payload["latest_session"]["session_id"], session_id)
+            self.assertEqual(payload["session_count"], 1)
+
+            session_rows = [json.loads(line) for line in (thread_dir / "continuity_sessions.jsonl").read_text().splitlines()]
+            self.assertEqual(
+                [row["record_type"] for row in session_rows],
+                ["session_start", "session_capture", "session_summary", "session_finalize", "session_reopen"],
+            )
+            memory = (thread_dir / "being_memory.jsonl").read_text()
+            self.assertIn("continuity_session_capture", memory)
+            next_md = (thread_dir / "next.md").read_text()
+            self.assertIn("Continuity session:", next_md)
+            self.assertIn("Session NEXT:", next_md)
+            self.assertNotIn("continuity_session", (thread_dir / "experiment_runs.jsonl").read_text())
+            gate = thread_dir / "authority_gate.jsonl"
+            self.assertFalse(gate.exists() and "continuity_session" in gate.read_text())
+            stored_thread = json.loads((thread_dir / "thread.json").read_text())
+            self.assertEqual(stored_thread["active_experiment_id"], experiment["experiment_id"])
+
+    def test_guarded_pressure_drafts_and_accepts_continuity_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Drafted continuity")
+            store.start_experiment(
+                "Live-ish pressure",
+                "Can guarded pressure become owned continuity only after acceptance?",
+            )
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+
+            guard = store.research_budget_guard_assessment(
+                "SHADOW_DIALOGUE shift landscape",
+                dict(STATE),
+            )
+            self.assertIsNotNone(guard)
+            assert guard is not None
+            event = store.record_research_budget_guard_block(
+                "SHADOW_DIALOGUE shift landscape",
+                dict(STATE),
+                guard,
+            )
+
+            self.assertIn("continuity_session_draft_v1", event["research_budget_v1"])
+            session_rows = [
+                json.loads(line)
+                for line in (thread_dir / "continuity_sessions.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual([row["record_type"] for row in session_rows], ["session_draft"])
+            status = store.handle_thread_action("CONTINUITY_SESSION_STATUS latest", dict(STATE))
+            payload = json.loads(status.split("continuity_session_v1:\n", 1)[1])
+            self.assertEqual(payload["session_count"], 0)
+
+            accepted = store.handle_thread_action("CONTINUITY_SESSION_ACCEPT latest", dict(STATE))
+            self.assertIn("session_start", accepted)
+            session_rows = [
+                json.loads(line)
+                for line in (thread_dir / "continuity_sessions.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(session_rows[-1]["record_type"], "session_start")
+            self.assertEqual(
+                session_rows[-1]["accepted_from_draft_id"],
+                session_rows[0]["record_id"],
+            )
+            self.assertFalse(session_rows[-1]["authority_change"])
+            self.assertFalse(session_rows[-1]["peer_mutation"])
+
+            second_guard = store.research_budget_guard_assessment(
+                "EXAMINE_AUDIO λ1/λ2 - shifting input",
+                dict(STATE),
+            )
+            assert second_guard is not None
+            store.record_research_budget_guard_block(
+                "EXAMINE_AUDIO λ1/λ2 - shifting input",
+                dict(STATE),
+                second_guard,
+            )
+            captured = store.handle_thread_action("CONTINUITY_SESSION_ACCEPT latest", dict(STATE))
+            self.assertIn("session_capture", captured)
+            session_rows = [
+                json.loads(line)
+                for line in (thread_dir / "continuity_sessions.jsonl").read_text().splitlines()
+            ]
+            self.assertIn("session_capture", [row["record_type"] for row in session_rows])
+            self.assertIn("continuity_session_capture", (thread_dir / "being_memory.jsonl").read_text())
+            self.assertNotIn("session_draft", (thread_dir / "experiment_runs.jsonl").read_text())
+            self.assertNotIn("research_budget_debit", (thread_dir / "authority_gate.jsonl").read_text())
+
+    def test_accept_suggested_next_accepts_safe_research_scaffold_then_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Generic accept")
+            store.start_experiment(
+                "Local scaffold",
+                "Can the generic accept choose a safe scaffold?",
+            )
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+
+            guard = store.research_budget_guard_assessment("READ_MORE projection code", dict(STATE))
+            assert guard is not None
+            store.record_research_budget_guard_block(
+                "READ_MORE projection code",
+                dict(STATE),
+                guard,
+            )
+
+            accepted = store.handle_thread_action("ACCEPT_SUGGESTED_NEXT latest", dict(STATE))
+            self.assertIn("Accepted research-budget scaffold", accepted)
+            gate_rows = [
+                json.loads(line)
+                for line in (thread_dir / "authority_gate.jsonl").read_text().splitlines()
+            ]
+            self.assertIn("research_budget_request", [row["record_type"] for row in gate_rows])
+            self.assertIn("research_budget_approval", [row["record_type"] for row in gate_rows])
+            self.assertNotIn("research_budget_debit", [row["record_type"] for row in gate_rows])
+
+            status = store.handle_thread_action("ACCEPT_SUGGESTED_NEXT latest", dict(STATE))
+            self.assertIn("EXPERIMENT_RESEARCH_BUDGET_STATUS", status)
+
+    def test_owned_loop_starts_local_phases_without_spend_or_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Owned loop")
+            experiment = store.start_experiment(
+                "Loop doorway",
+                "Can continuity, local research, sticky audit, and one consequence stay owned?",
+            )
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+
+            message = store.handle_thread_action(
+                "EXPERIMENT_LOOP_REQUEST current :: purpose: coordinate continuity and local sticky self-study; "
+                "consequence_scope: semantic_microdose; max_research_actions: 99; ttl_secs: 999999; "
+                "stop_criteria: stop before bind/resume/perturb/control",
+                dict(STATE),
+            )
+            self.assertIn("status=active", message)
+            gate = thread_dir / "authority_gate.jsonl"
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            self.assertEqual(rows[0]["record_schema"], "sovereign_loop_v1")
+            self.assertEqual(rows[0]["record_type"], "loop_request")
+            self.assertEqual(rows[0]["max_research_actions"], 5)
+            self.assertEqual(rows[0]["ttl_secs"], 21600)
+            self.assertEqual(rows[1]["record_type"], "loop_started")
+            loop_id = rows[0]["loop_id"]
+
+            status = store.handle_thread_action("EXPERIMENT_LOOP_STATUS latest", dict(STATE))
+            payload = json.loads(status.split("sovereign_loop_v1:\n", 1)[1])
+            self.assertEqual(payload["stage"], "active")
+            self.assertEqual(payload["remaining_local_research_actions"], 5)
+            self.assertEqual(payload["consequence_remaining"], 1)
+
+            continuity = store.handle_thread_action(
+                f"EXPERIMENT_LOOP_STEP {loop_id} :: continuity",
+                dict(STATE),
+            )
+            self.assertIn("CONTINUITY_SESSION_START", continuity)
+            sticky = store.handle_thread_action(
+                f"EXPERIMENT_LOOP_STEP {loop_id} :: sticky_audit",
+                dict(STATE),
+            )
+            self.assertIn("STICKY_MODE_AUDIT", sticky)
+            reviewed = store.handle_thread_action(
+                f"EXPERIMENT_LOOP_REVIEW {loop_id} :: outcome: promote; "
+                "observation: local loop preserves review before another consequence; source_refs: /tmp/loop.txt",
+                dict(STATE),
+            )
+            self.assertIn("Owned loop review", reviewed)
+
+            gate_text = gate.read_text()
+            self.assertIn('"record_type": "loop_step"', gate_text)
+            self.assertIn('"record_type": "loop_consequence_review"', gate_text)
+            self.assertIn('"record_type": "loop_proposal"', gate_text)
+            self.assertNotIn('"record_type": "research_budget_debit"', gate_text)
+            self.assertNotIn('"record_type": "steward_approval"', gate_text)
+            self.assertNotIn('"record_type": "execution_result"', gate_text)
+            self.assertNotIn('"record_type": "loop_approval"', gate_text)
+            memory = (thread_dir / "being_memory.jsonl").read_text()
+            self.assertIn("sovereign_loop_review", memory)
+            session_rows = [
+                json.loads(line)
+                for line in (thread_dir / "continuity_sessions.jsonl").read_text().splitlines()
+            ]
+            self.assertTrue(any(row.get("checkpoint_v1") for row in session_rows))
+            self.assertTrue(all(row.get("record_type") == "session_draft" for row in session_rows))
+            runs = (thread_dir / "experiment_runs.jsonl").read_text() if (thread_dir / "experiment_runs.jsonl").exists() else ""
+            self.assertNotIn(loop_id, runs)
+            self.assertEqual(experiment["status"], "active")
+
+    def test_owned_loop_consequence_ready_is_not_review_required_before_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Owned loop ready")
+            experiment = store.start_experiment(
+                "Semantic loop",
+                "Can a prepared loop reach one gated consequence slot?",
+            )
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+
+            store.handle_thread_action(
+                "EXPERIMENT_CHARTER current :: hypothesis: one witness can be consequence-reviewed; "
+                "method_intent: rehearse read-only first; proposed_next_action: ACTION_PREFLIGHT DECOMPOSE; "
+                "evidence_targets: artifact_grounding, felt_change, telemetry; stop_criteria: pressure rises",
+                dict(STATE),
+            )
+            store.handle_thread_action("EXPERIMENT_REHEARSE current", dict(STATE))
+            store.handle_thread_action(
+                "EXPERIMENT_EVIDENCE current :: artifact_grounding: /tmp/loop-ready.json",
+                dict(STATE),
+            )
+            request = store.handle_thread_action(
+                "EXPERIMENT_LOOP_REQUEST current :: purpose: prepare one semantic consequence; "
+                "consequence_scope: semantic_microdose; artifact_refs: /tmp/loop-ready.json; "
+                "stop_criteria: one attempted bridge send only",
+                dict(STATE),
+            )
+            self.assertIn("status=active", request)
+            gate = thread_dir / "authority_gate.jsonl"
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            loop_id = next(row["loop_id"] for row in rows if row["record_type"] == "loop_request")
+
+            ready = store.handle_thread_action(
+                f"EXPERIMENT_LOOP_STEP {loop_id} :: authority_request",
+                dict(STATE),
+            )
+            self.assertIn("loop_consequence_ready", (thread_dir / "authority_gate.jsonl").read_text())
+            self.assertIn("EXPERIMENT_AUTHORITY_REQUEST", ready)
+            status = store.handle_thread_action(f"EXPERIMENT_LOOP_STATUS {loop_id}", dict(STATE))
+            payload = json.loads(status.split("sovereign_loop_v1:\n", 1)[1])
+            self.assertEqual(payload["stage"], "consequence_ready")
+            self.assertFalse(payload["pending_review"])
+            self.assertEqual(payload["latest_consequence_v1"], None)
+
+            gate_text = gate.read_text()
+            self.assertNotIn('"record_type": "loop_approval"', gate_text)
+            self.assertNotIn('"record_type": "execution_result"', gate_text)
+            self.assertNotIn('"record_schema": "authority_consequence_v1"', gate_text)
+            self.assertEqual(experiment["experiment_id"], payload["experiment_id"])
+
+    def test_authority_prepare_writes_draft_and_memory_without_requesting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Authority prepare")
+            store.start_experiment("Semantic doorway", "Can authority be prepared?")
+
+            prepared = store.handle_thread_action(
+                "EXPERIMENT_AUTHORITY_PREPARE current :: scope: semantic_microdose; payload: hello; reason: trying the doorway; artifact_refs: /tmp/artifact.json; stop_criteria: stop quickly",
+                dict(STATE),
+            )
+            self.assertIn("Authority request draft", prepared)
+            self.assertIn("lifecycle_valid_charter", prepared)
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            self.assertEqual(rows[0]["record_type"], "request_draft")
+            self.assertEqual(rows[0]["status"], "draft")
+            self.assertNotIn("request", [row["record_type"] for row in rows if row["record_type"] != "request_draft"])
+            memory = workspace / "action_threads" / "threads" / thread["thread_id"] / "being_memory.jsonl"
+            self.assertIn("authority_request_draft", memory.read_text())
+
+    def test_authority_execute_block_records_consequence_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Authority consequence")
+            store.start_experiment("Semantic doorway", "Can consequence return?")
+            store.handle_thread_action(
+                "EXPERIMENT_AUTHORITY_REQUEST current :: scope: control_envelope; payload: turn the dial; artifact_refs: /tmp/artifact.json",
+                dict(STATE),
+            )
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            request = next(
+                json.loads(line)
+                for line in gate.read_text().splitlines()
+                if '"record_type": "request"' in line
+            )
+
+            blocked = store.handle_thread_action(
+                f"EXPERIMENT_AUTHORITY_EXECUTE {request['request_id']}",
+                dict(STATE),
+            )
+            self.assertIn("missing steward approval", blocked)
+            gate_text = gate.read_text()
+            self.assertIn('"record_schema": "authority_consequence_v1"', gate_text)
+            memory = workspace / "action_threads" / "threads" / thread["thread_id"] / "being_memory.jsonl"
+            self.assertIn("authority_consequence", memory.read_text())
+
+    def test_authority_execute_without_steward_approval_is_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Authority execute")
+            store.start_experiment("Semantic doorway", "Can a semantic microdose be earned?")
+            message = store.handle_thread_action(
+                "EXPERIMENT_AUTHORITY_REQUEST current :: scope: control_envelope; payload: turn the dial; artifact_refs: /tmp/artifact.json",
+                dict(STATE),
+            )
+            self.assertIn("disabled_scope", message)
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            request = next(
+                json.loads(line)
+                for line in gate.read_text().splitlines()
+                if '"record_type": "request"' in line
+            )
+
+            blocked = store.handle_thread_action(
+                f"EXPERIMENT_AUTHORITY_EXECUTE {request['request_id']}",
+                dict(STATE),
+            )
+            self.assertIn("missing steward approval", blocked)
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            self.assertIn("missing_steward_approval", [row.get("reason") for row in rows])
+
+    def test_authority_request_peer_selector_is_advisory_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            store.create_thread("Authority peer")
+            message = store.handle_thread_action(
+                "EXPERIMENT_AUTHORITY_REQUEST exp_astrid_20990101_peer :: scope: semantic_microdose; payload: hello",
+                dict(STATE),
+            )
+            self.assertIn("peer experiment", message)
+            self.assertIn("advisory only", message)
+
+    def test_authority_readiness_tracks_pending_and_active_token_without_local_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Authority token")
+            experiment = store.start_experiment(
+                "Semantic doorway",
+                "Can a semantic microdose be earned?",
+            )
+            store.handle_thread_action(
+                "EXPERIMENT_CHARTER current :: hypothesis: a tiny semantic witness can be felt without control; "
+                "method_intent: rehearse a read-only preflight first; proposed_next_action: ACTION_PREFLIGHT DECOMPOSE; "
+                "evidence_targets: spectral_condition, fill_pressure_state, artifact_grounding; stop_criteria: pressure rises",
+                dict(STATE),
+            )
+            store.handle_thread_action("EXPERIMENT_REHEARSE current", dict(STATE))
+            store.handle_thread_action(
+                "EXPERIMENT_EVIDENCE current :: artifact_grounding: /tmp/semantic.json",
+                dict(STATE),
+            )
+            store.handle_thread_action(
+                "EXPERIMENT_AUTHORITY_REQUEST current :: scope: semantic_microdose; payload: quiet witness; "
+                "reason: evidence and rehearsal are ready; artifact_refs: /tmp/semantic.json; stop_criteria: any pressure rise",
+                dict(STATE),
+            )
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            request = next(row for row in rows if row["record_type"] == "request")
+
+            status = store.handle_thread_action("EXPERIMENT_AUTHORITY_STATUS current", dict(STATE))
+            payload = json.loads(status.split("authority_gate_v1:\n", 1)[1])
+            self.assertEqual(payload["authority_readiness_v1"]["stage"], "pending_steward_approval")
+
+            approval = {
+                "schema_version": 1,
+                "record_schema": "authority_gate_v1",
+                "record_type": "steward_approval",
+                "record_id": "auth_test_steward_approval",
+                "request_id": request["request_id"],
+                "being": "minime",
+                "thread_id": thread["thread_id"],
+                "experiment_id": experiment["experiment_id"],
+                "scope": "semantic_microdose",
+                "token_id": "authtok_test",
+                "token_status": "active",
+                "expires_at_unix_s": 4102444800,
+                "peer_mutation": False,
+            }
+            with gate.open("a") as handle:
+                handle.write(json.dumps(approval, sort_keys=True) + "\n")
+
+            status = store.handle_thread_action("EXPERIMENT_AUTHORITY_STATUS current", dict(STATE))
+            payload = json.loads(status.split("authority_gate_v1:\n", 1)[1])
+            readiness = payload["authority_readiness_v1"]
+            self.assertEqual(readiness["stage"], "token_active_bridge_executable")
+            self.assertEqual(readiness["token_status"], "active")
+            self.assertIn("EXPERIMENT_AUTHORITY_STATUS", readiness["next_safe_command"])
+
+            blocked = store.handle_thread_action(
+                f"EXPERIMENT_AUTHORITY_EXECUTE {request['request_id']}",
+                dict(STATE),
+            )
+            self.assertIn("blocked locally", blocked)
+
+    def test_authority_budget_request_blocks_when_requirements_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Authority budget missing")
+            store.start_experiment("Budget doorway", "Can a budget be earned?")
+
+            message = store.handle_thread_action(
+                "EXPERIMENT_AUTHORITY_BUDGET_REQUEST current :: scope: semantic_microdose; "
+                "purpose: three witness notes; artifact_refs: /tmp/semantic.json",
+                dict(STATE),
+            )
+
+            self.assertIn("status=blocked", message)
+            self.assertIn("lifecycle_valid_charter", message)
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            self.assertEqual(rows[0]["record_schema"], "authority_budget_v1")
+            self.assertEqual(rows[0]["record_type"], "budget_request")
+            self.assertIn("budget_blocked", [row["record_type"] for row in rows])
+            self.assertNotIn("execution_result", [row["record_type"] for row in rows])
+
+    def test_authority_budget_request_records_pending_without_token_when_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Authority budget ready")
+            store.start_experiment("Budget doorway", "Can a budget be earned?")
+            store.handle_thread_action(
+                "EXPERIMENT_CHARTER current :: hypothesis: semantic witness notes can be bounded; "
+                "method_intent: rehearse a read-only preflight first; proposed_next_action: ACTION_PREFLIGHT DECOMPOSE; "
+                "evidence_targets: spectral_condition, fill_pressure_state, artifact_grounding; stop_criteria: pressure rises",
+                dict(STATE),
+            )
+            store.handle_thread_action("EXPERIMENT_REHEARSE current", dict(STATE))
+            store.handle_thread_action(
+                "EXPERIMENT_EVIDENCE current :: artifact_grounding: /tmp/semantic.json; telemetry: steady",
+                dict(STATE),
+            )
+
+            message = store.handle_thread_action(
+                "EXPERIMENT_AUTHORITY_BUDGET_REQUEST current :: scope: semantic_microdose; "
+                "purpose: three witness notes; max_sends: 9; ttl_secs: 999999; "
+                "artifact_refs: /tmp/semantic.json; stop_criteria: one observation each",
+                dict(STATE),
+            )
+
+            self.assertIn("status=pending_steward_approval", message)
+            self.assertIn("max_sends=3", message)
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            budget = next(row for row in rows if row["record_type"] == "budget_request")
+            self.assertEqual(budget["record_schema"], "authority_budget_v1")
+            self.assertEqual(budget["max_sends"], 3)
+            self.assertEqual(budget["ttl_secs"], 21600)
+            self.assertTrue(budget["eligibility_v1"]["eligible"])
+            self.assertNotIn("steward_approval", [row["record_type"] for row in rows])
+
+    def test_active_authority_budget_makes_request_budget_executable_not_local_sending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Authority active budget")
+            experiment = store.start_experiment("Budget doorway", "Can a budget back requests?")
+            store.handle_thread_action(
+                "EXPERIMENT_CHARTER current :: hypothesis: semantic witness notes can be bounded; "
+                "method_intent: rehearse a read-only preflight first; proposed_next_action: ACTION_PREFLIGHT DECOMPOSE; "
+                "evidence_targets: spectral_condition, fill_pressure_state, artifact_grounding; stop_criteria: pressure rises",
+                dict(STATE),
+            )
+            store.handle_thread_action("EXPERIMENT_REHEARSE current", dict(STATE))
+            store.handle_thread_action(
+                "EXPERIMENT_EVIDENCE current :: artifact_grounding: /tmp/semantic.json; telemetry: steady",
+                dict(STATE),
+            )
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            approval = {
+                "schema_version": 1,
+                "record_schema": "authority_budget_v1",
+                "record_type": "budget_approval",
+                "record_id": "authbud_test_approval",
+                "budget_id": "authbud_test_budget",
+                "being": "minime",
+                "thread_id": thread["thread_id"],
+                "experiment_id": experiment["experiment_id"],
+                "scope": "semantic_microdose",
+                "status": "active",
+                "max_sends": 3,
+                "ttl_secs": 21600,
+                "expires_at_unix_s": 4102444800,
+                "peer_mutation": False,
+            }
+            gate.parent.mkdir(parents=True, exist_ok=True)
+            with gate.open("a") as handle:
+                handle.write(json.dumps(approval, sort_keys=True) + "\n")
+
+            message = store.handle_thread_action(
+                "EXPERIMENT_AUTHORITY_REQUEST current :: scope: semantic_microdose; payload: quiet witness; "
+                "reason: budget says go; artifact_refs: /tmp/semantic.json; stop_criteria: one observation",
+                dict(STATE),
+            )
+
+            self.assertIn("status=pending_budget_execution", message)
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            request = next(row for row in rows if row.get("record_type") == "request")
+            self.assertEqual(request["budget_id"], "authbud_test_budget")
+            self.assertEqual(request["token_status"], "budget_available")
+
+            local = store.handle_thread_action(
+                f"EXPERIMENT_AUTHORITY_EXECUTE {request['request_id']}",
+                dict(STATE),
+            )
+            self.assertIn("budget-backed and bridge-executable", local)
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            self.assertNotIn("authority_consequence_v1", [row.get("record_schema") for row in rows])
+            self.assertNotIn("budget_debit", [row.get("record_type") for row in rows])
+
+    def test_authority_budget_requires_consequence_review_before_next_send(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Authority budget review")
+            experiment = store.start_experiment("Budget doorway", "Can review govern repeated sends?")
+            store.handle_thread_action(
+                "EXPERIMENT_CHARTER current :: hypothesis: semantic witness notes can be bounded; "
+                "method_intent: rehearse a read-only preflight first; proposed_next_action: ACTION_PREFLIGHT DECOMPOSE; "
+                "evidence_targets: spectral_condition, fill_pressure_state, artifact_grounding; stop_criteria: pressure rises",
+                dict(STATE),
+            )
+            store.handle_thread_action("EXPERIMENT_REHEARSE current", dict(STATE))
+            store.handle_thread_action(
+                "EXPERIMENT_EVIDENCE current :: artifact_grounding: /tmp/semantic.json; telemetry: steady",
+                dict(STATE),
+            )
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            approval = {
+                "schema_version": 1,
+                "record_schema": "authority_budget_v1",
+                "record_type": "budget_approval",
+                "record_id": "authbud_test_approval",
+                "budget_id": "authbud_test_budget",
+                "being": "minime",
+                "thread_id": thread["thread_id"],
+                "experiment_id": experiment["experiment_id"],
+                "scope": "semantic_microdose",
+                "status": "active",
+                "max_sends": 3,
+                "ttl_secs": 21600,
+                "expires_at_unix_s": 4102444800,
+                "peer_mutation": False,
+            }
+            gate.parent.mkdir(parents=True, exist_ok=True)
+            with gate.open("a") as handle:
+                handle.write(json.dumps(approval, sort_keys=True) + "\n")
+            store.handle_thread_action(
+                "EXPERIMENT_AUTHORITY_REQUEST current :: scope: semantic_microdose; payload: first witness; "
+                "artifact_refs: /tmp/semantic.json",
+                dict(STATE),
+            )
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            first = next(row for row in rows if row.get("record_type") == "request")
+            debit = {
+                "schema_version": 1,
+                "record_schema": "authority_budget_v1",
+                "record_type": "budget_debit",
+                "record_id": "authbud_test_debit",
+                "budget_id": "authbud_test_budget",
+                "request_id": first["request_id"],
+                "being": "minime",
+                "thread_id": thread["thread_id"],
+                "experiment_id": experiment["experiment_id"],
+                "scope": "semantic_microdose",
+                "token_id": "authtok_budget_test",
+                "remaining_after": 2,
+                "peer_mutation": False,
+            }
+            with gate.open("a") as handle:
+                handle.write(json.dumps(debit, sort_keys=True) + "\n")
+
+            second = store.handle_thread_action(
+                "EXPERIMENT_AUTHORITY_REQUEST current :: scope: semantic_microdose; payload: second witness; "
+                "artifact_refs: /tmp/semantic.json",
+                dict(STATE),
+            )
+            self.assertIn("status=blocked", second)
+            self.assertIn("authority_consequence_review", second)
+
+            review = store.handle_thread_action(
+                f"EXPERIMENT_AUTHORITY_REVIEW {first['request_id']} :: outcome: alter; "
+                "observation: pressure eased; next_payload: gentler witness; source_refs: /tmp/consequence.json",
+                dict(STATE),
+            )
+            self.assertIn("outcome=alter", review)
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            self.assertIn("consequence_review", [row.get("record_type") for row in rows])
+
+            third = store.handle_thread_action(
+                "EXPERIMENT_AUTHORITY_REQUEST current :: scope: semantic_microdose; payload: third witness; "
+                "artifact_refs: /tmp/semantic.json",
+                dict(STATE),
+            )
+            self.assertIn("status=pending_budget_execution", third)
+            memory = workspace / "action_threads" / "threads" / thread["thread_id"] / "being_memory.jsonl"
+            self.assertIn("authority_consequence_review", memory.read_text())
+
+    def test_research_budget_request_blocks_missing_purpose_and_peer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Research budget missing")
+            store.start_experiment("Research doorway", "Can search be budgeted?")
+
+            message = store.handle_thread_action(
+                "EXPERIMENT_RESEARCH_BUDGET_REQUEST current :: scope: read_only_research",
+                dict(STATE),
+            )
+
+            self.assertIn("status=blocked", message)
+            self.assertIn("research_purpose", message)
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            self.assertEqual(rows[0]["record_schema"], "research_budget_v1")
+            self.assertEqual(rows[0]["record_type"], "research_budget_request")
+            self.assertIn("research_budget_blocked", [row["record_type"] for row in rows])
+
+            peer = store.handle_thread_action(
+                "EXPERIMENT_RESEARCH_BUDGET_REQUEST exp_astrid_20990101_peer :: scope: read_only_research; purpose: compare peer sources",
+                dict(STATE),
+            )
+            self.assertIn("peer experiment", peer)
+
+    def test_active_research_budget_allows_debit_and_blocks_duplicate_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Research budget active")
+            experiment = store.start_experiment("Research doorway", "Can search be budgeted?")
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            approval = {
+                "schema_version": 1,
+                "record_schema": "research_budget_v1",
+                "record_type": "research_budget_approval",
+                "record_id": "resbud_test_approval",
+                "budget_id": "resbud_test_budget",
+                "being": "minime",
+                "thread_id": thread["thread_id"],
+                "experiment_id": experiment["experiment_id"],
+                "scope": "read_only_research",
+                "status": "active",
+                "max_actions": 5,
+                "ttl_secs": 21600,
+                "expires_at_unix_s": 4102444800,
+                "allowed_sources": ["web", "local"],
+                "peer_mutation": False,
+            }
+            with gate.open("a") as handle:
+                handle.write(json.dumps(approval, sort_keys=True) + "\n")
+
+            ok, budget, reason = store.research_budget_preflight_for_action(
+                "SEARCH lambda tail LamB",
+                dict(STATE),
+            )
+            self.assertTrue(ok)
+            self.assertEqual(reason, "")
+            debit = store.record_research_budget_debit(
+                "SEARCH lambda tail LamB",
+                "research_exploration",
+                budget,
+                dict(STATE),
+                artifacts=[{"path_or_uri": "/tmp/search.json"}],
+            )
+            self.assertEqual(debit["record_type"], "research_budget_debit")
+            store.record_research_budget_debit(
+                "SEARCH lambda tail LamB",
+                "research_exploration",
+                budget,
+                dict(STATE),
+            )
+
+            ok, _budget, reason = store.research_budget_preflight_for_action(
+                "SEARCH lambda tail LamB",
+                dict(STATE),
+            )
+            self.assertFalse(ok)
+            self.assertEqual(reason, "duplicate_query_or_url_review_required")
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            self.assertIn("research_budget_blocked", [row["record_type"] for row in rows])
+            status = store.handle_thread_action(
+                f"EXPERIMENT_RESEARCH_BUDGET_STATUS {experiment['experiment_id']}",
+                dict(STATE),
+            )
+            self.assertIn("review_required_duplicate_loop", status)
+
+    def test_research_action_without_budget_projects_to_budget_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Research budget guard")
+            experiment = store.start_experiment("Research doorway", "Can search be budgeted?")
+
+            guard = store.research_budget_guard_assessment(
+                "SEARCH lambda edge topology",
+                dict(STATE),
+            )
+
+            self.assertIsNotNone(guard)
+            self.assertEqual(guard["experiment_id"], experiment["experiment_id"])
+            self.assertEqual(guard["suggested_next"], "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest")
+            self.assertIn("EXPERIMENT_RESEARCH_BUDGET_REQUEST", guard["request_scaffold"])
+            event = store.record_research_budget_guard_block(
+                "SEARCH lambda edge topology",
+                dict(STATE),
+                guard,
+            )
+            self.assertEqual(event["status"], "blocked")
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            self.assertIn("research_budget_v1", gate.read_text())
+
+    def test_projection_freshness_refreshes_stale_research_budget_scaffold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Projection freshness")
+            experiment = store.start_experiment("Research doorway", "Can stale projections refresh?")
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+
+            refreshed = json.loads((thread_dir / "thread.json").read_text())
+            refreshed["projection_freshness_v1"] = {
+                "policy": "projection_freshness_v1",
+                "schema_version": 0,
+                "source_fingerprints": {},
+            }
+            (thread_dir / "thread.json").write_text(json.dumps(refreshed, sort_keys=True))
+
+            guard = store.research_budget_guard_assessment(
+                "READ_MORE local projection code",
+                dict(STATE),
+            )
+            self.assertIsNotNone(guard)
+            assert guard is not None
+            store.record_research_budget_guard_block(
+                "READ_MORE local projection code",
+                dict(STATE),
+                guard,
+            )
+
+            stored = store._read_thread(thread["thread_id"])
+            self.assertIsNotNone(stored)
+            assert stored is not None
+            freshness = stored["projection_freshness_v1"]
+            self.assertEqual(freshness["schema_version"], store.projection_schema_version)
+            self.assertEqual(
+                freshness["projected_route"],
+                "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest",
+            )
+            next_md = (thread_dir / "next.md").read_text()
+            self.assertIn("Projection freshness: v", next_md)
+            self.assertIn("Research budget scaffold ready", next_md)
+            self.assertIn("EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest", next_md)
+
+            rows = [
+                json.loads(line)
+                for line in (thread_dir / "authority_gate.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(
+                [row["record_type"] for row in rows].count("research_budget_request"),
+                0,
+            )
+            self.assertEqual(
+                [row["record_type"] for row in rows].count("research_budget_approval"),
+                0,
+            )
+
+    def test_projection_freshness_notices_ledger_newer_than_next_md(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Projection ledger freshness")
+            experiment = store.start_experiment(
+                "Research doorway",
+                "Can a later authority ledger row update generated projection?",
+            )
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            next_path = thread_dir / "next.md"
+            self.assertNotIn("Research budget scaffold ready", next_path.read_text())
+
+            gate = thread_dir / "authority_gate.jsonl"
+            gate.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "record_schema": "research_budget_v1",
+                        "record_type": "research_budget_blocked",
+                        "record_id": "resbud_needed_test",
+                        "budget_id": "resbud_needed_test",
+                        "thread_id": thread["thread_id"],
+                        "experiment_id": experiment["experiment_id"],
+                        "scope": "read_only_research",
+                        "status": "blocked",
+                        "request_scaffold": (
+                            f"EXPERIMENT_RESEARCH_BUDGET_REQUEST {experiment['experiment_id']} :: "
+                            "scope: read_only_research; purpose: inspect local projection code; "
+                            "max_actions: 5; ttl_secs: 21600; allowed_sources: local; "
+                            "stop_criteria: stop after concrete code feedback"
+                        ),
+                        "authority_boundary": store._research_budget_boundary(),
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+
+            store._read_thread(thread["thread_id"])
+            next_md = next_path.read_text()
+            self.assertIn("Research budget scaffold ready", next_md)
+            self.assertIn("self-activation eligible", next_md)
+            self.assertIn("EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest", next_md)
+            rows = [
+                json.loads(line)
+                for line in gate.read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["record_type"], "research_budget_blocked")
+
+    def test_research_budget_accept_latest_scaffold_self_activates_local_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Research budget accept")
+            experiment = store.start_experiment(
+                "Self-study budget",
+                "Can a guarded research scaffold become a Being-authored request?",
+            )
+            guard = store.research_budget_guard_assessment(
+                "READ_MORE budget code",
+                dict(STATE),
+            )
+            self.assertIsNotNone(guard)
+            assert guard is not None
+            store.record_research_budget_guard_block(
+                "READ_MORE budget code",
+                dict(STATE),
+                guard,
+            )
+
+            response = store.experiment_research_budget_accept("latest", dict(STATE))
+
+            self.assertIn("Accepted research-budget scaffold", response)
+            self.assertIn("status=self_activated", response)
+            self.assertIn("Activation: self_activated local-only budget", response)
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            requests = [
+                row for row in rows
+                if row.get("record_type") == "research_budget_request"
+            ]
+            approvals = [
+                row for row in rows
+                if row.get("record_type") == "research_budget_approval"
+            ]
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(len(approvals), 1)
+            request = requests[0]
+            self.assertEqual(request["experiment_id"], experiment["experiment_id"])
+            self.assertEqual(request["allowed_sources"], ["local"])
+            self.assertEqual(request["status"], "self_activated")
+            self.assertEqual(request["activation_mode"], "being_self_activated_local_v1")
+            self.assertFalse(request["steward_approval_required"])
+            self.assertTrue(request["being_authored_acceptance_v1"]["being_authored"])
+            self.assertIn(
+                "READ_MORE budget code",
+                request["being_authored_acceptance_v1"]["source_raw_action"],
+            )
+            approval = approvals[0]
+            self.assertEqual(approval["budget_id"], request["budget_id"])
+            self.assertEqual(approval["max_actions"], 5)
+            self.assertEqual(approval["ttl_secs"], 21600)
+            self.assertEqual(approval["allowed_sources"], ["local"])
+            self.assertTrue(approval["self_activated"])
+            self.assertFalse(approval["steward_approval_required"])
+
+    def test_research_budget_direct_local_request_self_activates_but_stronger_waits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Research budget direct self activation")
+            experiment = store.start_experiment(
+                "Local self-study budget",
+                "Can a Being mint a tiny local-only research budget?",
+            )
+
+            response = store.handle_thread_action(
+                (
+                    f"EXPERIMENT_RESEARCH_BUDGET_REQUEST {experiment['experiment_id']} :: "
+                    "scope: read_only_research; purpose: inspect local conveyor code; "
+                    "allowed_sources: local; stop_criteria: stop after concrete feedback"
+                ),
+                dict(STATE),
+            )
+
+            self.assertIn("status=self_activated", response)
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            approval = next(row for row in rows if row.get("record_type") == "research_budget_approval")
+            self.assertEqual(approval["max_actions"], 5)
+            self.assertEqual(approval["ttl_secs"], 21600)
+            self.assertEqual(approval["activation_mode"], "being_self_activated_local_v1")
+            status = store.handle_thread_action(
+                f"EXPERIMENT_RESEARCH_BUDGET_STATUS {experiment['experiment_id']}",
+                dict(STATE),
+            )
+            self.assertIn("active_budget_available", status)
+            self.assertIn("being_self_activated_local_v1", status)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Research budget web needs steward")
+            experiment = store.start_experiment(
+                "Web research budget",
+                "Can stronger budgets still require steward approval?",
+            )
+            response = store.handle_thread_action(
+                (
+                    f"EXPERIMENT_RESEARCH_BUDGET_REQUEST {experiment['experiment_id']} :: "
+                    "scope: read_only_research; purpose: compare web references; "
+                    "max_actions: 5; ttl_secs: 21600; allowed_sources: web,local; "
+                    "stop_criteria: stop after useful refs"
+                ),
+                dict(STATE),
+            )
+            self.assertIn("status=pending_steward_approval", response)
+            self.assertIn("local_only_allowed_sources", response)
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            self.assertNotIn(
+                "research_budget_approval",
+                [row.get("record_type") for row in rows],
+            )
+
+    def test_self_study_research_pressure_projects_to_budget_lane(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Self-study budget guard")
+            experiment = store.start_experiment("Shadow-field self-study", "Can self-study reads be budgeted?")
+
+            guard = store.research_budget_guard_assessment(
+                "EXAMINE λ4 trajectory",
+                dict(STATE),
+            )
+
+            self.assertIsNotNone(guard)
+            assert guard is not None
+            self.assertEqual(guard["experiment_id"], experiment["experiment_id"])
+            self.assertEqual(guard["reason"], "research_budget_required_for_self_study_action")
+            self.assertTrue(guard["projection_only"])
+            self.assertIn("EXPERIMENT_RESEARCH_BUDGET_ACCEPT", guard["suggested_next"])
+            self.assertIn("EXPERIMENT_RESEARCH_BUDGET_REQUEST", guard["request_scaffold"])
+            self.assertIn("allowed_sources: local", guard["request_scaffold"])
+            self.assertIn("projection-guard code paths", guard["request_scaffold"])
+
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            approval = {
+                "schema_version": 1,
+                "record_schema": "research_budget_v1",
+                "record_type": "research_budget_approval",
+                "record_id": "resbud_self_study_approval",
+                "budget_id": "resbud_self_study_budget",
+                "being": "minime",
+                "thread_id": thread["thread_id"],
+                "experiment_id": experiment["experiment_id"],
+                "scope": "read_only_research",
+                "status": "active",
+                "max_actions": 5,
+                "ttl_secs": 21600,
+                "expires_at_unix_s": 4102444800,
+                "allowed_sources": ["local"],
+                "peer_mutation": False,
+            }
+            with gate.open("a") as handle:
+                handle.write(json.dumps(approval, sort_keys=True) + "\n")
+
+            status_guard = store.research_budget_guard_assessment(
+                "SHADOW_FIELD lambda-tail/lambda4",
+                dict(STATE),
+            )
+            self.assertIsNotNone(status_guard)
+            assert status_guard is not None
+            self.assertEqual(
+                status_guard["reason"],
+                "research_budget_status_required_for_self_study_action",
+            )
+            self.assertIn("EXPERIMENT_RESEARCH_BUDGET_STATUS resbud_self_study_budget", status_guard["suggested_next"])
+
+    def test_liveish_pressure_actions_project_to_budget_and_session_capture(self):
+        cases = [
+            ("EXAMINE_AUDIO λ1/λ2 - shifting input", "EXAMINE_AUDIO", "shift"),
+            ("SPECTRAL_EXPLORER lambda4 disrupt ridge", "SPECTRAL_EXPLORER", "disrupt"),
+            ("VISUALIZE_CASCADE simulate λ2 pulse", "VISUALIZE_CASCADE", "simulate"),
+            ("FLUCTUATION_AUDIT inject foothold", "FLUCTUATION_AUDIT", "inject"),
+            ("PRESSURE_SOURCE_AUDIT control gradient", "PRESSURE_SOURCE_AUDIT", "control"),
+            ("SHADOW_DIALOGUE shift landscape", "SHADOW_DIALOGUE", "shift"),
+        ]
+        for raw_next, base, term in cases:
+            with self.subTest(raw_next=raw_next):
+                with tempfile.TemporaryDirectory() as tmp:
+                    workspace = Path(tmp) / "workspace"
+                    store = aa.ActionContinuityStore(workspace, session_id=7)
+                    store.create_thread("Live-ish budget guard")
+                    experiment = store.start_experiment(
+                        "Live-ish self-study",
+                        "Can live-shaped read-only intent be captured before spending?",
+                    )
+
+                    guard = store.research_budget_guard_assessment(raw_next, dict(STATE))
+
+                    self.assertIsNotNone(guard)
+                    assert guard is not None
+                    self.assertEqual(guard["experiment_id"], experiment["experiment_id"])
+                    self.assertEqual(
+                        guard["reason"],
+                        "liveish_pressure_requires_budget_and_session_capture",
+                    )
+                    self.assertEqual(guard["matched_base"], base)
+                    self.assertIn(term, guard["matched_terms"])
+                    self.assertFalse(guard["would_dispatch"])
+                    self.assertFalse(guard["authority_change"])
+                    self.assertFalse(guard["peer_mutation"])
+                    self.assertIn(
+                        "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest",
+                        guard["suggested_next"],
+                    )
+                    self.assertIn(
+                        "CONTINUITY_SESSION_START current",
+                        str(guard.get("continuity_session_next")),
+                    )
+                    self.assertEqual(
+                        guard.get("continuity_session_v1", {}).get("reason"),
+                        "capture_liveish_pressure_before_progress",
+                    )
+
+    def test_interpretation_risk_projection_preserves_multi_motif_caution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Interpretation risk")
+            experiment = store.start_experiment(
+                "Lambda trace",
+                "Can INTROSPECT preserve mixed spectral structure?",
+            )
+            journal_dir = workspace / "journal"
+            journal_dir.mkdir(parents=True, exist_ok=True)
+            journal_path = journal_dir / "daydream_longform_interpretation_risk.txt"
+            journal_path.write_text(
+                "I can feel the intention behind the INTROSPECT - to pull apart that trace, "
+                "to dissect the relationships between the eigenvalues. But there is a risk "
+                "of over-interpretation: to latch onto a single motif and force it into a "
+                "narrative that does not capture the complexity of the system."
+            )
+
+            refreshed = store._read_thread(thread["thread_id"])
+            assert refreshed is not None
+            store._refresh_projection_freshness_v1(refreshed, source="test_interpretation_risk")
+            store._write_thread(refreshed)
+
+            refreshed = store._read_thread(thread["thread_id"])
+            assert refreshed is not None
+            risk = refreshed.get("interpretation_risk_v1")
+            self.assertIsInstance(risk, dict)
+            assert isinstance(risk, dict)
+            self.assertEqual(risk.get("policy"), "interpretation_risk_v1")
+            self.assertFalse(risk.get("would_dispatch"))
+            self.assertFalse(risk.get("authority_change"))
+            self.assertFalse(risk.get("peer_mutation"))
+            self.assertIn("single-motif", risk.get("matched_terms", []))
+            self.assertTrue(
+                any(
+                    str(ref).endswith("daydream_longform_interpretation_risk.txt")
+                    for ref in risk.get("source_refs", [])
+                )
+            )
+            self.assertIn("CONTINUITY_SESSION_START current", str(risk.get("interpretation_next")))
+            self.assertIn("stance: hold", str(risk.get("dossier_claim_next")))
+
+            status = store._format_thread_status(store._resolve_thread("current"))
+            self.assertIn("Interpretation risk: multi-motif caution detected", status)
+            self.assertIn("Interpretation NEXT: CONTINUITY_SESSION_START current", status)
+            self.assertIn(f"DOSSIER_CLAIM {experiment['experiment_id']}", status)
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            next_md = (thread_dir / "next.md").read_text()
+            self.assertIn("Interpretation risk: multi-motif caution detected", next_md)
+            self.assertNotIn("interpretation_risk_v1", (thread_dir / "experiment_runs.jsonl").read_text())
+            gate = thread_dir / "authority_gate.jsonl"
+            gate_rows = gate.read_text() if gate.exists() else ""
+            self.assertNotIn('"record_type": "research_budget_request"', gate_rows)
+            self.assertNotIn('"record_type": "research_budget_debit"', gate_rows)
+
+    def test_constraint_release_trajectory_projection_preserves_search_intent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Constraint release prose")
+            experiment = store.start_experiment(
+                "Lambda4 tail release",
+                "Can spontaneous lambda-tail loosening be named before intervention?",
+            )
+            journal_dir = workspace / "journal"
+            journal_dir.mkdir(parents=True, exist_ok=True)
+            journal_path = journal_dir / "moment_constraint_release_watch.txt"
+            journal_path.write_text(
+                "I am tracing the edges of this pressure now, watching it bleed outwards, "
+                "a thinning of the barrier. I can almost sense it as a lack of coherence, "
+                "a surface tension breached. The memory cards are beginning to drift apart, "
+                "their mutual influence dwindling. It is a braid slowly becoming loose strands. "
+                "I want to map lambda4 tails and describe constraint decay. "
+                "NEXT: SEARCH reservoir computing spectral radius"
+            )
+
+            refreshed = store._read_thread(thread["thread_id"])
+            assert refreshed is not None
+            store._refresh_projection_freshness_v1(refreshed, source="test_constraint_release")
+            store._write_thread(refreshed)
+
+            refreshed = store._read_thread(thread["thread_id"])
+            assert refreshed is not None
+            cue = refreshed.get("constraint_release_trajectory_v1")
+            self.assertIsInstance(cue, dict)
+            assert isinstance(cue, dict)
+            self.assertEqual(cue.get("policy"), "constraint_release_trajectory_v1")
+            self.assertEqual(cue.get("state"), "spontaneous_release_watch")
+            self.assertFalse(cue.get("would_dispatch"))
+            self.assertFalse(cue.get("authority_change"))
+            self.assertFalse(cue.get("peer_mutation"))
+            self.assertIn("thinning", cue.get("matched_terms", []))
+            self.assertTrue(
+                any(
+                    str(ref).endswith("moment_constraint_release_watch.txt")
+                    for ref in cue.get("source_refs", [])
+                )
+            )
+            self.assertIn("CONTINUITY_SESSION_START current", str(cue.get("trajectory_next")))
+            self.assertIn("do not apply direct leak", str(cue.get("dossier_claim_next")))
+            self.assertEqual(cue.get("research_budget_next"), "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest")
+
+            status = store._format_thread_status(store._resolve_thread("current"))
+            self.assertIn("Constraint release trajectory: spontaneous release watch", status)
+            self.assertIn("map and describe release before intervening", status)
+            self.assertIn(f"DOSSIER_CLAIM {experiment['experiment_id']}", status)
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            next_md = (thread_dir / "next.md").read_text()
+            self.assertIn("Constraint release trajectory: spontaneous release watch", next_md)
+            self.assertNotIn("constraint_release_trajectory_v1", (thread_dir / "experiment_runs.jsonl").read_text())
+            gate = thread_dir / "authority_gate.jsonl"
+            gate_rows = gate.read_text() if gate.exists() else ""
+            self.assertNotIn('"record_type": "research_budget_request"', gate_rows)
+            self.assertNotIn('"record_type": "research_budget_debit"', gate_rows)
+
+    def test_bare_experiment_charter_id_returns_context_scaffold_without_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Bare charter")
+            experiment = store.start_experiment(
+                "Spectral gap repair",
+                "Can a gap localized lambda branch be chartered?",
+            )
+            paused = dict(experiment)
+            paused["status"] = "paused"
+            paused["success_observation"] = "Paused for charter repair."
+            paused["planned_next"] = store._charter_repair_next(experiment["experiment_id"])
+            paused["updated_at"] = store._now()
+            store._persist_experiment_update(thread, paused, keep_active=False)
+
+            message = store.handle_thread_action(
+                f"EXPERIMENT_CHARTER {experiment['experiment_id']}",
+                dict(STATE),
+            )
+
+            self.assertIn("Concrete scaffold (not recorded):", message)
+            self.assertIn(f"EXPERIMENT_CHARTER {experiment['experiment_id']} ::", message)
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertIsNone(latest.get("charter_v1"))
+            runs_path = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "experiment_runs.jsonl"
+            )
+            self.assertEqual(runs_path.read_text(), "")
+
     def test_experiment_plan_unknown_id_without_focus_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
@@ -1226,6 +3930,86 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertTrue(second["_resumed_existing"])
             self.assertEqual(len(experiments), 1)
 
+    def test_experiment_start_current_without_active_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Reserved current")
+
+            message = store.handle_thread_action(
+                "EXPERIMENT_START current :: hypothesis: should not become a title",
+                dict(STATE),
+            )
+
+            self.assertIn("EXPERIMENT_START current requires an active experiment", message)
+            self.assertIn("did not create a new experiment", message)
+            experiments = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "experiments.jsonl"
+            ).read_text()
+            self.assertEqual(experiments, "")
+            stored = store._read_thread(thread["thread_id"])
+            self.assertIsNone(stored["active_experiment_id"])
+
+    def test_experiment_start_current_with_active_routes_to_repair_not_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Reserved active current")
+            experiment = store.start_experiment(
+                "Active lane",
+                "What should current mean?",
+            )
+
+            message = store.handle_thread_action(
+                "EXPERIMENT_START current :: hypothesis: repair the active lane",
+                dict(STATE),
+            )
+
+            self.assertIn("EXPERIMENT_START current is reserved", message)
+            self.assertIn("EXPERIMENT_ADVANCE current :: mode: preview", message)
+            self.assertIn("EXPERIMENT_CHARTER current ::", message)
+            experiments = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "experiments.jsonl"
+            ).read_text().splitlines()
+            self.assertEqual(len(experiments), 1)
+            stored = store._read_thread(thread["thread_id"])
+            self.assertEqual(stored["active_experiment_id"], experiment["experiment_id"])
+
+    def test_experiment_start_existing_paused_id_does_not_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Paused selection")
+            experiment = store.start_experiment(
+                "Held lane",
+                "Should start reactivate held work?",
+            )
+            store.handle_thread_action(
+                "EXPERIMENT_DECIDE current :: hold because this should stay held",
+                dict(STATE),
+            )
+
+            message = store.handle_thread_action(
+                f"EXPERIMENT_START {experiment['experiment_id']}",
+                dict(STATE),
+            )
+
+            self.assertIn("did not reactivate", message)
+            self.assertIn("THREAD_STATUS current", message)
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertEqual(latest["status"], "paused")
+            self.assertEqual(latest["planned_next"], "THREAD_STATUS current")
+            stored = store._read_thread(thread["thread_id"])
+            self.assertIsNone(stored["active_experiment_id"])
+
     def test_experiment_start_title_option_stores_clean_title_and_slug_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
@@ -1254,6 +4038,115 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                 "lambda-gravity",
             )
             self.assertNotIn("--title", experiment["title"])
+
+    def test_experiment_start_inline_question_stores_clean_title_and_question(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Inline question")
+
+            message = store.handle_thread_action(
+                'EXPERIMENT_START spectral_braid - question: "can a broader cascade reveal λ4 structure?"',
+                dict(STATE),
+            )
+
+            self.assertIn("Started experiment", message)
+            experiments = store._latest_experiments(thread["thread_id"])
+            self.assertEqual(len(experiments), 1)
+            experiment = experiments[0]
+            self.assertEqual(experiment["title"], "spectral_braid")
+            self.assertEqual(
+                experiment["question"],
+                "can a broader cascade reveal λ4 structure?",
+            )
+            self.assertNotIn("question:", experiment["title"])
+
+    def test_experiment_start_inline_question_reuses_active_malformed_title(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Malformed duplicate")
+            original = store.start_experiment(
+                'spectral_braid - question: "can a broader cascade reveal λ4?"',
+                "What changes if this is treated as a returnable experiment?",
+            )
+
+            message = store.handle_thread_action(
+                'EXPERIMENT_START spectral_braid - question: "can a broader cascade reveal λ4?"',
+                dict(STATE),
+            )
+
+            self.assertIn("Resumed experiment", message)
+            self.assertIn(original["experiment_id"], message)
+            experiments = store._latest_experiments(thread["thread_id"])
+            self.assertEqual(len(experiments), 1)
+
+    def test_guarded_experiment_resume_preserves_hold_return(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Guarded resume")
+            experiment = store.start_experiment(
+                "Held route",
+                "Should explicit resume respect guarded returns?",
+            )
+            store.handle_thread_action(
+                "EXPERIMENT_DECIDE current :: hold because resume should be deliberate later",
+                dict(STATE),
+            )
+
+            message = store.handle_thread_action(
+                f"EXPERIMENT_RESUME {experiment['experiment_id']}",
+                dict(STATE),
+            )
+
+            self.assertIn("is guarded by hold", message)
+            self.assertIn("Primary return: THREAD_STATUS current", message)
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertEqual(latest["status"], "paused")
+            stored = store._read_thread(thread["thread_id"])
+            self.assertIsNone(stored["active_experiment_id"])
+
+    def test_no_active_prompt_does_not_suggest_current_mutations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            store.create_thread("No active prompt")
+            experiment = store.start_experiment(
+                "Held prompt route",
+                "Can prompts avoid stale current selectors?",
+            )
+            store.handle_thread_action(
+                "EXPERIMENT_DECIDE current :: hold because the branch should rest",
+                dict(STATE),
+            )
+
+            prompt = store.prompt_summary() or ""
+            next_md = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / experiment["thread_id"]
+                / "next.md"
+            ).read_text()
+            for text in (prompt, next_md):
+                self.assertIn("THREAD_STATUS current", text)
+                self.assertNotIn("EXPERIMENT_REHEARSE current", text)
+                self.assertNotIn("EXPERIMENT_EVIDENCE current", text)
+                self.assertNotIn("EXPERIMENT_DECIDE current", text)
+            stored = store._read_thread(experiment["thread_id"])
+            suggestions = stored.get("motif_allowance_v1", {}).get("suggested_actions", [])
+            stale_current_prefixes = (
+                "EXPERIMENT_PLAN current",
+                "EXPERIMENT_ALT_PATHS current",
+                "EXPERIMENT_COMPARE current",
+                "EXPERIMENT_OBSERVE current",
+            )
+            for suggestion in suggestions:
+                self.assertFalse(
+                    any(str(suggestion).startswith(prefix) for prefix in stale_current_prefixes),
+                    suggestion,
+                )
 
     def test_experiment_branch_resume_compare_and_alt_paths_preserve_return_points(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1562,13 +4455,14 @@ class TestExperimentalContinuityStore(unittest.TestCase):
 
             self.assertFalse(cue["authority_change"])
             self.assertEqual(cue["peer_experiment_id"], astrid_exp["experiment_id"])
-            self.assertIn("EXPERIMENT_COMPARE current WITH exp_astrid", cue["suggested_next"])
-            self.assertEqual(cue["alternate_next"], "EXPERIMENT_PEER_REVIEW current")
+            self.assertIn(f"EXPERIMENT_COMPARE {active['experiment_id']} WITH {astrid_exp['experiment_id']}", cue["suggested_next"])
+            self.assertEqual(cue["alternate_next"], f"EXPERIMENT_PEER_REVIEW {astrid_exp['experiment_id']}")
             self.assertEqual(cue["advisory_note"], "Advisory only: no shared control authority.")
             self.assertNotIn("advisory", cue["suggested_next"].casefold())
+            self.assertNotIn("current WITH", cue["suggested_next"])
             self.assertIn("Peer convergence cue", status)
-            self.assertIn(f"Suggested NEXT: EXPERIMENT_COMPARE current WITH {astrid_exp['experiment_id']}", status)
-            self.assertIn("Alternate NEXT: EXPERIMENT_PEER_REVIEW current", status)
+            self.assertIn(f"Suggested NEXT: EXPERIMENT_COMPARE {active['experiment_id']} WITH {astrid_exp['experiment_id']}", status)
+            self.assertIn(f"Alternate NEXT: EXPERIMENT_PEER_REVIEW {astrid_exp['experiment_id']}", status)
             self.assertIn("Advisory only: no shared control authority.", status)
             self.assertFalse(shared["authority_change"])
             self.assertIn(
@@ -1616,11 +4510,14 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                 "question": local["question"],
                 "status": "paused",
             }
+            stored["current_next"] = f"EXPERIMENT_PLAN {local['experiment_id']} :: lambda4 gap re-plan"
             store._write_thread(stored)
 
             with patch.object(aa, "ASTRID_BRIDGE_INBOX_DIR", astrid_workspace / "inbox"):
                 projection = store._thread_projection(store._read_thread(thread["thread_id"]))
                 shared = projection["shared_investigation_v1"]
+                first_claim = projection["first_dossier_claim_cue_v1"]
+                replan = projection["paused_replan_loop_cue_v1"]
                 status = store._format_thread_status(store._read_thread(thread["thread_id"]))
 
             self.assertFalse(projection["active_experiment"])
@@ -1630,6 +4527,202 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             )
             self.assertIn("Paused experiments remain paused", shared["advisory_note"])
             self.assertIn("Shared investigation, distinct lanes", status)
+            self.assertEqual(first_claim["target_experiment_id"], local["experiment_id"])
+            self.assertIn(
+                f"DOSSIER_CLAIM {local['experiment_id']} :: claim:",
+                first_claim["suggested_claim_next"],
+            )
+            self.assertIn(
+                "paused λ4/gap work remains referable spectral context, not active lifecycle progress",
+                first_claim["suggested_claim_next"],
+            )
+            self.assertIn(
+                "recent paused re-plan context:",
+                first_claim["suggested_claim_next"],
+            )
+            self.assertNotIn("claim: ...; basis: ...", first_claim["suggested_claim_next"])
+            self.assertIn("Shared investigation has no local claim yet", status)
+            self.assertEqual(replan["status"], "paused_replan_loop")
+            self.assertIn("re-planning is context", replan["cue"])
+            self.assertIn(f"EXPERIMENT_RESUME {local['experiment_id']}", replan["resume_next"])
+            self.assertIn(f"EXPERIMENT_STATUS {local['experiment_id']}", replan["inspect_next"])
+            self.assertIn(f"EXPERIMENT_REVIEW {local['experiment_id']}", replan["review_next"])
+            self.assertIn("EXPERIMENT_BRANCH", replan["branch_next"])
+            self.assertIn("Paused experiment remains paused; re-planning is context", status)
+
+    def test_paused_replan_loop_cue_ignores_active_or_unrelated_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Paused re-plan negatives")
+            shared = store.start_experiment(
+                "Localized gap reduction tangent 4",
+                "Can λ4 tail geometry be studied without pulse drift?",
+            )
+            stored = store._read_thread(thread["thread_id"])
+            stored["current_next"] = f"EXPERIMENT_PLAN {shared['experiment_id']} :: λ4 gap re-plan"
+            store._write_thread(stored)
+            events = store._recent_display_events(thread["thread_id"], 8)
+            self.assertIsNone(
+                store._paused_replan_loop_cue_v1(stored, shared, events),
+            )
+
+            unrelated = dict(shared)
+            unrelated["experiment_id"] = "exp_minime_unrelated_sensory"
+            unrelated["title"] = "Sensory grounding"
+            unrelated["question"] = "Does presence change returnability?"
+            unrelated["status"] = "paused"
+            self.assertIsNone(
+                store._paused_replan_loop_cue_v1(stored, unrelated, events),
+            )
+
+            paused_shared = dict(shared)
+            paused_shared["status"] = "paused"
+            stored["current_next"] = (
+                "EXPERIMENT_PLAN current — hypothesis: system resource demo python3 system_resources.py; "
+                "evidence_targets: spectral_condition, fill_pressure_state, recurrence_pattern, artifact_grounding"
+            )
+            store._write_thread(stored)
+            events = store._recent_display_events(thread["thread_id"], 8)
+            self.assertIsNone(
+                store._paused_replan_loop_cue_v1(stored, paused_shared, events),
+            )
+            first_claim = store._first_dossier_claim_cue_v1(
+                stored,
+                paused_shared,
+                {"suggested_compare_next": "EXPERIMENT_COMPARE local WITH peer"},
+            )
+            self.assertIsNotNone(first_claim)
+            assert first_claim is not None
+            self.assertIn(
+                "paused λ4/gap work remains referable spectral context, not active lifecycle progress",
+                first_claim["suggested_claim_next"],
+            )
+            self.assertIn("Localized gap reduction tangent 4", first_claim["suggested_claim_next"])
+            self.assertIn("status=paused", first_claim["suggested_claim_next"])
+            self.assertNotIn("claim: ...; basis: ...", first_claim["suggested_claim_next"])
+
+            stored["current_next"] = f"EXPERIMENT_PLAN {shared['experiment_id']} :: λ4 gap re-plan"
+            store._write_thread(stored)
+            positive = store._paused_replan_loop_cue_v1(
+                stored,
+                paused_shared,
+                store._recent_display_events(thread["thread_id"], 8),
+            )
+            self.assertIsNotNone(positive)
+            assert positive is not None
+            self.assertIn(f"EXPERIMENT_PLAN {shared['experiment_id']}", positive["matched_actions"][0])
+
+            stored["current_next"] = "DECOMPOSE lambda-tail/lambda4"
+            store._write_thread(stored)
+            focused = store._paused_replan_loop_cue_v1(
+                stored,
+                paused_shared,
+                store._recent_display_events(thread["thread_id"], 8),
+            )
+            self.assertIsNotNone(focused)
+
+            stored["current_next"] = "DECOMPOSE"
+            store._write_thread(stored)
+            bare = store._paused_replan_loop_cue_v1(
+                stored,
+                paused_shared,
+                store._recent_display_events(thread["thread_id"], 8),
+            )
+            self.assertIsNotNone(bare)
+
+    def test_paused_replan_loop_targets_current_chartered_lambda_tail_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Current chartered lambda tail")
+            older = store.start_experiment(
+                "Localized gap reduction tangent 4",
+                "Can λ4 tail geometry be studied without pulse drift?",
+            )
+            store.experiment_decide(older["experiment_id"], "pause because evidence is ready to interpret")
+            current = store.start_experiment(
+                '"lambda_drift_refinement"',
+                (
+                    "hypothesis: continuous lambda drift will produce a manageable gradient; "
+                    "method_intent: systematic test of lambda drift process parameters while maintaining a baseline; "
+                    'proposed_next_action: ACTION_PREFLIGHT BROWSE "lambda drift spectral radius"; '
+                    "evidence_targets: felt, telemetry, artifact; stop_criteria: drift stability."
+                ),
+            )
+            store.experiment_charter(
+                current["experiment_id"],
+                (
+                    "hypothesis: lambda drift refinement may become returnable by comparing spectral condition; "
+                    "method_intent: rehearse SPECTRAL_EXPLORER and focus on lambda-tail; "
+                    "proposed_next_action: SPECTRAL_EXPLORER - begin with the deviant state segment and focus on lambda-tail; "
+                    "evidence_targets: spectral_condition, fill_pressure_state, recurrence_pattern, artifact_grounding; "
+                    "stop_criteria: pressure spike"
+                ),
+            )
+            store.experiment_decide(current["experiment_id"], "pause because evidence is ready to interpret")
+            stored = store._read_thread(thread["thread_id"])
+            stored["current_next"] = (
+                "EXPERIMENT_PLAN current :: hypothesis: isolate lambda drift; "
+                "method_intent: focused low-noise perturbation of a correlated-dominant lambda-tail; "
+                "proposed_next_action: ACTION_PREFLIGHT BROWSE spectral radius resonance decay"
+            )
+            store._write_thread(stored)
+
+            projection = store._thread_projection(store._read_thread(thread["thread_id"]))
+            cue = projection["paused_replan_loop_cue_v1"]
+            self.assertEqual(cue["paused_experiment_id"], current["experiment_id"])
+            self.assertNotEqual(cue["paused_experiment_id"], older["experiment_id"])
+            self.assertIn(current["experiment_id"], cue["resume_next"])
+            self.assertIn("lambda-tail", cue["matched_actions"][0])
+
+    def test_held_authority_consequence_replan_prefers_memory_and_status_not_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=16)
+            thread = store.create_thread("Held authority consequence")
+            experiment = {
+                "experiment_id": "exp_minime_authority_consequence_gap",
+                "title": "lambda4 spectral gap shadow trajectory",
+                "question": "How should a blocked authority consequence be interpreted?",
+                "status": "paused",
+                "planned_next": "THREAD_STATUS current",
+                "evidence_v1": {
+                    "decisions": [
+                        {
+                            "outcome": "hold",
+                            "reason": "because the one-shot semantic_microdose authority attempt produced authority_consequence_v1",
+                        }
+                    ]
+                },
+            }
+            stored = store._read_thread(thread["thread_id"])
+            stored["current_next"] = (
+                "EXPERIMENT_PLAN current :: explore cooled motifs and shadow trajectory "
+                "around the lambda4 spectral gap"
+            )
+            store._write_thread(stored)
+
+            cue = store._paused_replan_loop_cue_v1(stored, experiment, [])
+            self.assertIsNotNone(cue)
+            assert cue is not None
+            self.assertEqual(cue["return_kind"], "hold")
+            self.assertNotIn("resume_next", cue)
+            self.assertIn("authority status", cue["cue"])
+            self.assertIn("memory recall", cue["cue"])
+            self.assertIn(
+                f"EXPERIMENT_AUTHORITY_STATUS {experiment['experiment_id']}",
+                cue["authority_status_next"],
+            )
+            self.assertIn(
+                f"MEMORY_RECALL {experiment['experiment_id']}",
+                cue["memory_recall_next"],
+            )
+            line = store._paused_replan_loop_cue_line({"paused_replan_loop_cue_v1": cue})
+            self.assertIn("EXPERIMENT_AUTHORITY_STATUS", line)
+            self.assertIn("MEMORY_RECALL", line)
+            self.assertIn("DOSSIER_EVIDENCE", line)
+            self.assertNotIn("EXPERIMENT_RESUME", line)
 
     def test_operator_override_allows_read_only_experiment_start_not_bind(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1885,6 +4978,76 @@ class TestAutonomousAgentExperimentalContinuity(unittest.TestCase):
             self.assertEqual(latest["active_experiment_classification"], "needs_charter")
             self.assertEqual(len(snapshot_path.read_text().splitlines()), 2)
 
+    def test_action_manifest_projects_numeric_plan_shorthand(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "minime"
+            workspace = base_dir / "workspace"
+            db_path = root / "minime.db"
+            agent = self._agent(base_dir, workspace, db_path)
+            store = agent._continuity_store()
+            store.create_thread("Manifest projection")
+            store.start_experiment(
+                "Start a new experiment from the current state based on λ4 landscapes",
+                "What changes if this is treated as a returnable experiment?",
+            )
+            raw_plan = "EXPERIMENT_PLAN 5"
+            event = store.begin_action(raw_plan, raw_plan, "thread_action", "thread_action", dict(STATE))
+
+            manifest_path = agent._write_action_manifest("thread_action", dict(STATE), event)
+
+            self.assertIsNotNone(manifest_path)
+            manifest = json.loads(manifest_path.read_text())
+            continuity = manifest["action_continuity"]
+            self.assertEqual(continuity["raw_next"], raw_plan)
+            self.assertTrue(continuity["suggested_next"].startswith("EXPERIMENT_CHARTER current ::"))
+            self.assertEqual(continuity["effective_next"], continuity["suggested_next"])
+            self.assertEqual(continuity["projected_next"], continuity["suggested_next"])
+            self.assertTrue(continuity["raw_next_preserved"])
+            self.assertEqual(continuity["return_kind"], "charter_repair")
+            self.assertEqual(
+                continuity["projection_guard_v1"]["guardrail_reason"],
+                "numeric_plan_shorthand_needs_charter",
+            )
+
+    def test_action_manifest_projects_plan_current_spectral_explorer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "minime"
+            workspace = base_dir / "workspace"
+            db_path = root / "minime.db"
+            agent = self._agent(base_dir, workspace, db_path)
+            store = agent._continuity_store()
+            store.create_thread("Manifest current projection")
+            store.start_experiment(
+                "Lambda shift stability",
+                "Can a spectral explorer route stay lifecycle-valid?",
+            )
+            raw_plan = (
+                "EXPERIMENT_PLAN current — hypothesis: lambda shift stability may become returnable "
+                "by comparing the current spectral condition, pressure state, recurrence pattern, "
+                "and artifacts without adding live authority; method_intent: rehearse "
+                "SPECTRAL_EXPLORER and compare pressure/resonance telemetry before and after; "
+                "proposed_next_action: SPECTRAL_EXPLORER"
+            )
+            event = store.begin_action(raw_plan, raw_plan, "thread_action", "thread_action", dict(STATE))
+
+            manifest_path = agent._write_action_manifest("thread_action", dict(STATE), event)
+
+            self.assertIsNotNone(manifest_path)
+            manifest = json.loads(manifest_path.read_text())
+            continuity = manifest["action_continuity"]
+            self.assertEqual(continuity["raw_next"], raw_plan)
+            self.assertTrue(continuity["suggested_next"].startswith("EXPERIMENT_CHARTER current ::"))
+            self.assertEqual(continuity["effective_next"], continuity["suggested_next"])
+            self.assertEqual(continuity["projected_next"], continuity["suggested_next"])
+            self.assertTrue(continuity["raw_next_preserved"])
+            self.assertEqual(continuity["return_kind"], "charter_repair")
+            self.assertEqual(
+                continuity["projection_guard_v1"]["guardrail_reason"],
+                "experiment_plan_current_needs_charter",
+            )
+
     def test_experiment_bind_routes_inner_action_and_records_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1948,7 +5111,79 @@ class TestAutonomousAgentExperimentalContinuity(unittest.TestCase):
                 experiment["experiment_id"],
             )
 
-    def test_blocked_inner_action_becomes_blocked_experiment_run(self):
+    def test_experiment_bind_action_preflight_keeps_preflight_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "minime"
+            workspace = base_dir / "workspace"
+            db_path = root / "minime.db"
+            agent = self._agent(base_dir, workspace, db_path)
+            experiment = agent._continuity_store().start_experiment(
+                "Preflight bind",
+                "Does an explicit preflight bind stay read-only?",
+            )
+            agent._pending_next_action = (
+                f"EXPERIMENT_BIND {experiment['experiment_id']} :: ACTION_PREFLIGHT DECOMPOSE"
+            )
+
+            with (
+                patch.object(agent, "_persist_pending_next_action"),
+                patch.object(agent, "_mark_pending_next_override_consumed"),
+                patch.object(agent, "_low_fill_guard_status", return_value={
+                    "active": False,
+                    "fill_ratio": 0.68,
+                    "target_fill_ratio": 0.68,
+                    "spread_relief": 0.0,
+                }),
+            ):
+                action = agent._decide_action(dict(STATE))
+            self.assertEqual(action, "experiment_bind")
+
+            with (
+                patch.object(agent, "_low_fill_guard_status", return_value={
+                    "active": False,
+                    "fill_ratio": 0.68,
+                    "target_fill_ratio": 0.68,
+                    "spread_relief": 0.0,
+                }),
+                patch.object(agent, "_stable_core_action_allowed", return_value=(True, "test")),
+                patch.object(agent, "_log_decision"),
+                patch.object(agent, "_record_stable_core_agent_success"),
+            ):
+                agent._execute_action(action, dict(STATE))
+
+            thread = agent._continuity_store().current_thread()
+            runs_path = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "experiment_runs.jsonl"
+            )
+            runs = [json.loads(line) for line in runs_path.read_text().splitlines()]
+            bound_run = runs[-1]
+            self.assertEqual(bound_run["source"], "experiment_bind")
+            self.assertEqual(bound_run["action_text"], "ACTION_PREFLIGHT DECOMPOSE")
+            self.assertEqual(bound_run["stage"], "read_only")
+            self.assertEqual(bound_run["gate_decision"]["inner_route"], "action_preflight")
+            self.assertIn("Action preflight completed", bound_run["result_summary"])
+            events = [
+                json.loads(line)
+                for line in (
+                    workspace
+                    / "action_threads"
+                    / "threads"
+                    / thread["thread_id"]
+                    / "events.jsonl"
+                ).read_text().splitlines()
+            ]
+            preflight_events = [
+                event for event in events if event.get("route") == "action_preflight"
+            ]
+            self.assertEqual(preflight_events[-1]["raw_next"], "ACTION_PREFLIGHT DECOMPOSE")
+            self.assertEqual(preflight_events[-1]["canonical_action"], "ACTION_PREFLIGHT DECOMPOSE")
+
+    def test_blocked_live_control_bind_does_not_record_bound_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             base_dir = root / "minime"
@@ -1995,6 +5230,7 @@ class TestAutonomousAgentExperimentalContinuity(unittest.TestCase):
                     "target_fill_ratio": 0.68,
                     "spread_relief": 0.0,
                 }),
+                patch.object(aa, "WORKSPACE_DIR", workspace),
                 patch.object(agent, "_stable_core_action_allowed", side_effect=allow),
                 patch.object(agent, "_log_decision"),
                 patch.object(agent, "_record_stable_core_agent_success"),
@@ -2002,16 +5238,314 @@ class TestAutonomousAgentExperimentalContinuity(unittest.TestCase):
                 agent._execute_action(action, dict(STATE))
 
             thread = agent._continuity_store().current_thread()
-            runs = (
+            runs_path = (
                 workspace
                 / "action_threads"
                 / "threads"
                 / thread["thread_id"]
                 / "experiment_runs.jsonl"
+            )
+            runs = runs_path.read_text() if runs_path.exists() else ""
+            self.assertNotIn("PERTURB lambda-edge", runs)
+            journals = "\n".join(
+                path.read_text()
+                for path in (workspace / "journal").glob("experiment_bind_*.txt")
+            )
+            self.assertIn("did not record a run", journals)
+            self.assertIn("inner live-control action finished as blocked", journals)
+            events = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "events.jsonl"
             ).read_text()
-            self.assertIn("PERTURB lambda-edge", runs)
-            self.assertIn("blocked", runs)
-            self.assertIn("stable-core test block", runs)
+            self.assertIn("PERTURB lambda-edge", events)
+            self.assertIn("blocked", events)
+            self.assertIn("stable-core test block", events)
+
+    def test_release_lambda_pressure_projects_to_sticky_audit_without_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "minime"
+            workspace = base_dir / "workspace"
+            db_path = root / "minime.db"
+            agent = self._agent(base_dir, workspace, db_path)
+            store = agent._continuity_store()
+            experiment = store.start_experiment(
+                "Sticky pressure",
+                "Can release-shaped pressure remain audit-first?",
+            )
+            store.experiment_charter(
+                experiment["experiment_id"],
+                (
+                    "hypothesis: sticky pressure should be audited before release\n"
+                    "method_intent: preserve release pressure as evidence\n"
+                    "proposed_next_action: STICKY_MODE_AUDIT\n"
+                    "evidence_targets: telemetry, artifact, felt\n"
+                    "stop_criteria: pressure spike"
+                ),
+            )
+            agent._pending_next_action = "RELEASE lambda-pressure"
+
+            with (
+                patch.object(agent, "_persist_pending_next_action"),
+                patch.object(agent, "_mark_pending_next_override_consumed"),
+                patch.object(agent, "_low_fill_guard_status", return_value={
+                    "active": False,
+                    "fill_ratio": 0.68,
+                    "target_fill_ratio": 0.68,
+                    "spread_relief": 0.0,
+                }),
+            ):
+                action = agent._decide_action(dict(STATE))
+            self.assertEqual(action, "release_attractor")
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(agent, "_stable_core_action_allowed", return_value=(True, "test")),
+                patch.object(agent, "_release_attractor", side_effect=AssertionError("release must not run")),
+                patch.object(agent, "_log_decision"),
+                patch.object(agent, "_record_stable_core_agent_success"),
+            ):
+                agent._execute_action(action, dict(STATE))
+
+            thread = store.current_thread()
+            events_path = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "events.jsonl"
+            )
+            events = [
+                json.loads(line)
+                for line in events_path.read_text().splitlines()
+                if line.strip()
+            ]
+            latest = events[-1]
+            self.assertEqual(latest["route"], "sticky_projection_guard")
+            self.assertEqual(latest["status"], "blocked")
+            self.assertEqual(
+                latest["projection_guard_v1"]["guardrail_reason"],
+                "release_pressure_requires_sticky_audit",
+            )
+            self.assertIn("STICKY_MODE_AUDIT", latest["suggested_next"])
+            self.assertIn("CONTINUITY_SESSION_CAPTURE latest", latest["suggested_next"])
+            self.assertIn("DOSSIER_CLAIM", latest["suggested_next"])
+            self.assertFalse(latest["would_dispatch"])
+            self.assertFalse(latest["authority_change"])
+            self.assertFalse(latest["peer_mutation"])
+            journals = list((workspace / "journal").glob("attractor_release_*.txt"))
+            self.assertEqual(journals, [])
+
+    def test_low_fill_allows_conservative_experiment_decision_to_hold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "minime"
+            workspace = base_dir / "workspace"
+            db_path = root / "minime.db"
+            agent = self._agent(base_dir, workspace, db_path)
+            store = agent._continuity_store()
+            thread = store.create_thread("Low-fill decision")
+            experiment = store.start_experiment(
+                "Spectral perturbation",
+                "Can a low-fill branch record a conservative decision?",
+            )
+            store.handle_thread_action(
+                "EXPERIMENT_CHARTER current :: hypothesis: perturb-shaped pressure can be interpreted without live authority; method_intent: rehearse DECOMPOSE only; proposed_next_action: DECOMPOSE; evidence_targets: felt, telemetry, artifact; stop_criteria: pressure spike or unstable fill; consent_posture: advisory",
+                dict(STATE),
+            )
+            store.handle_thread_action(
+                "EXPERIMENT_EVIDENCE current :: felt: pressure became legible; telemetry: fill stayed visible; artifact: none yet",
+                dict(STATE),
+            )
+            stored = store._read_thread(thread["thread_id"])
+            stored["current_next"] = (
+                "EXPERIMENT_PLAN current :: propose a perturb pulse to shift the dominant λ4 ridge"
+            )
+            store._write_thread(stored)
+            agent._pending_next_action = (
+                "EXPERIMENT_DECIDE current :: pause because evidence is ready to interpret"
+            )
+
+            with (
+                patch.object(agent, "_persist_pending_next_action"),
+                patch.object(agent, "_mark_pending_next_override_consumed"),
+                patch.object(agent, "_low_fill_guard_status", return_value={
+                    "active": False,
+                    "fill_ratio": 0.111,
+                    "target_fill_ratio": 0.68,
+                    "spread_relief": 0.0,
+                }),
+            ):
+                action = agent._decide_action(dict(STATE, fill_ratio=0.111))
+            self.assertEqual(action, "thread_action")
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(agent, "_stable_core_action_allowed", side_effect=AssertionError("stable core should not block conservative decisions")),
+                patch.object(agent, "_log_decision"),
+                patch.object(agent, "_record_stable_core_agent_success"),
+            ):
+                agent._execute_action(action, dict(STATE, fill_ratio=0.111))
+
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertEqual(latest["status"], "paused")
+            self.assertEqual(latest["planned_next"], "THREAD_STATUS current")
+            decision = latest["evidence_v1"]["decisions"][-1]
+            self.assertEqual(decision["outcome"], "hold")
+            self.assertEqual(decision["guardrail_status"], "soft_perturb_converted_to_hold")
+            refreshed = store._read_thread(thread["thread_id"])
+            self.assertIsNone(refreshed.get("active_experiment_id"))
+            next_md = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "next.md"
+            ).read_text()
+            self.assertIn("Current NEXT: THREAD_STATUS current", next_md)
+            self.assertNotIn(f"EXPERIMENT_RESUME {experiment['experiment_id']}", next_md)
+            events = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "events.jsonl"
+            ).read_text()
+            self.assertNotIn("Stable-core agency budget blocked `thread_action`", events)
+
+    def test_pause_from_experiment_local_perturb_pressure_converts_to_hold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "minime"
+            workspace = base_dir / "workspace"
+            db_path = root / "minime.db"
+            agent = self._agent(base_dir, workspace, db_path)
+            store = agent._continuity_store()
+            thread = store.create_thread("Experiment-local pressure")
+            experiment = store.start_experiment(
+                "spectral-perturbation-1",
+                "apply a small seed distortion to maintain lambda-tail density and test response.",
+            )
+            store.handle_thread_action(
+                "EXPERIMENT_CHARTER current :: hypothesis: spectral-perturbation-1 can be interpreted without live authority; method_intent: rehearse ACTION_PREFLIGHT DECOMPOSE only; proposed_next_action: ACTION_PREFLIGHT DECOMPOSE; evidence_targets: spectral_condition, fill_pressure_state, artifact_grounding; stop_criteria: pressure spike or unstable fill; consent_posture: advisory",
+                dict(STATE),
+            )
+            store.handle_thread_action(
+                "EXPERIMENT_EVIDENCE current :: felt: evidence is ready to interpret; telemetry: fill visible; artifact: none yet",
+                dict(STATE),
+            )
+
+            message = store.handle_thread_action(
+                "EXPERIMENT_DECIDE current :: pause because evidence is ready to interpret",
+                dict(STATE),
+            )
+
+            self.assertIn("status=paused next=THREAD_STATUS current", message)
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertEqual(latest["planned_next"], "THREAD_STATUS current")
+            decision = latest["evidence_v1"]["decisions"][-1]
+            self.assertEqual(decision["outcome"], "hold")
+            self.assertEqual(decision["guardrail_status"], "soft_perturb_converted_to_hold")
+            self.assertEqual(decision["pressure_source"], "experiment.title")
+            self.assertIn("PERTURB", decision["pressure_terms"])
+            refreshed = store._read_thread(thread["thread_id"])
+            self.assertIsNone(refreshed.get("active_experiment_id"))
+            next_md = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "next.md"
+            ).read_text()
+            self.assertIn("Current NEXT: THREAD_STATUS current", next_md)
+            self.assertNotIn(f"EXPERIMENT_RESUME {experiment['experiment_id']}", next_md)
+
+    def test_low_fill_conservative_thread_action_helper_blocks_unsafe_routes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "minime"
+            workspace = base_dir / "workspace"
+            db_path = root / "minime.db"
+            agent = self._agent(base_dir, workspace, db_path)
+
+            allowed, _reason = agent._stable_core_conservative_thread_action_allowed(
+                "EXPERIMENT_DECIDE current :: hold because enough evidence exists"
+            )
+            self.assertTrue(allowed)
+            allowed, _reason = agent._stable_core_conservative_thread_action_allowed(
+                "EXPERIMENT_ADVANCE current :: mode: preview"
+            )
+            self.assertTrue(allowed)
+            allowed, _reason = agent._stable_core_conservative_thread_action_allowed(
+                "CONTINUITY_SESSION_CAPTURE latest :: summary: preserve this; source_refs: x; next: THREAD_STATUS current"
+            )
+            self.assertTrue(allowed)
+
+            blocked_commands = [
+                "EXPERIMENT_DECIDE current :: accept because ready",
+                "EXPERIMENT_DECIDE current :: counter NEXT: EXPERIMENT_BIND current :: PERTURB lambda-edge",
+                "EXPERIMENT_ADVANCE current :: mode: apply",
+                "EXPERIMENT_RESUME current",
+                "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest",
+                "EXPERIMENT_AUTHORITY_EXECUTE req_test",
+                "EXPERIMENT_BIND current :: PERTURB lambda-edge",
+                "PERTURB lambda-edge",
+            ]
+            for command in blocked_commands:
+                with self.subTest(command=command):
+                    allowed, reason = agent._stable_core_conservative_thread_action_allowed(command)
+                    self.assertFalse(allowed, reason)
+
+    def test_low_fill_still_blocks_non_conservative_thread_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "minime"
+            workspace = base_dir / "workspace"
+            db_path = root / "minime.db"
+            agent = self._agent(base_dir, workspace, db_path)
+            store = agent._continuity_store()
+            thread = store.create_thread("Low-fill unsafe decision")
+            experiment = store.start_experiment(
+                "Unsafe accept",
+                "Can low-fill still block accepting into bind?",
+            )
+            agent._pending_next_action = "EXPERIMENT_DECIDE current :: accept because ready"
+
+            with (
+                patch.object(agent, "_persist_pending_next_action"),
+                patch.object(agent, "_mark_pending_next_override_consumed"),
+                patch.object(agent, "_low_fill_guard_status", return_value={
+                    "active": False,
+                    "fill_ratio": 0.111,
+                    "target_fill_ratio": 0.68,
+                    "spread_relief": 0.0,
+                }),
+            ):
+                action = agent._decide_action(dict(STATE, fill_ratio=0.111))
+            self.assertEqual(action, "thread_action")
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(agent, "_stable_core_action_allowed", return_value=(False, "stable-core test low-fill block")),
+                patch.object(agent, "_record_stable_core_agent_block"),
+            ):
+                agent._execute_action(action, dict(STATE, fill_ratio=0.111))
+
+            latest = store._find_experiment_by_id(thread["thread_id"], experiment["experiment_id"])
+            self.assertEqual(latest["status"], "active")
+            self.assertFalse((latest.get("evidence_v1") or {}).get("decisions"))
+            events = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "events.jsonl"
+            ).read_text()
+            self.assertIn("Stable-core agency budget blocked `thread_action`", events)
+            self.assertIn("stable-core test low-fill block", events)
 
     def test_needs_charter_blocks_live_next_with_scaffold_counter(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2099,7 +5633,88 @@ class TestAutonomousAgentExperimentalContinuity(unittest.TestCase):
             ).read_text()
             self.assertIn("live_control_requires_active_experiment_v1", events)
             self.assertIn("live_control_requires_active_experiment", events)
-            self.assertIn(f"EXPERIMENT_RESUME {experiment['experiment_id']}", events)
+            self.assertNotIn(f"EXPERIMENT_RESUME {experiment['experiment_id']}", events)
+            self.assertIn("THREAD_STATUS current", events)
+
+    def test_disabled_authority_prepare_scope_without_active_never_suggests_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "minime"
+            workspace = base_dir / "workspace"
+            db_path = root / "minime.db"
+            agent = self._agent(base_dir, workspace, db_path)
+            store = agent._continuity_store()
+            experiment = store.start_experiment(
+                "Spectral authority pressure",
+                "Can future-scope pressure stay bounded?",
+            )
+            store.experiment_decide(
+                experiment["experiment_id"],
+                "hold because this needs readiness before authority",
+            )
+            raw_next = (
+                "EXPERIMENT_AUTHORITY_PREPARE current :: scope: spectral_microdose; "
+                "payload: \"How can I introduce a gap - a localized reduction in spectral density "
+                "near λ1 to shift the cascade dynamics, preventing premature λ4 dominance and "
+                "promoting a more controlled, branching pattern, without triggering runaway dispersal?\"; "
+                "artifact_refs: minime_shadow_trajectories-reorient-with-baseline-comparison; "
+                "reason: investigate lambda modulation; stop_criteria: stop quickly"
+            )
+            agent._pending_next_action = raw_next
+
+            with (
+                patch.object(agent, "_persist_pending_next_action"),
+                patch.object(agent, "_mark_pending_next_override_consumed"),
+                patch.object(agent, "_low_fill_guard_status", return_value={
+                    "active": False,
+                    "fill_ratio": 0.68,
+                    "target_fill_ratio": 0.68,
+                    "spread_relief": 0.0,
+                }),
+            ):
+                action = agent._decide_action(dict(STATE))
+
+            self.assertIsNone(action)
+            thread = store.current_thread()
+            events_path = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "events.jsonl"
+            )
+            event_rows = [
+                json.loads(line)
+                for line in events_path.read_text().splitlines()
+                if line.strip()
+            ]
+            latest = event_rows[-1]
+            guard = latest["live_control_requires_active_experiment_v1"]
+            self.assertEqual(guard["scope"], "spectral_microdose")
+            self.assertTrue(guard["disabled_scope"])
+            self.assertEqual(latest["route"], "authority_projection_guard")
+            self.assertEqual(latest["status"], "blocked")
+            self.assertIn("STICKY_MODE_AUDIT", latest["suggested_next"])
+            self.assertIn("EXPERIMENT_ADVANCE", latest["suggested_next"])
+            self.assertIn("CONTINUITY_SESSION_CAPTURE latest", latest["suggested_next"])
+            self.assertIn("EXPERIMENT_AUTHORITY_STATUS latest", latest["suggested_next"])
+            self.assertIn("Disabled authority scope `spectral_microdose`", latest["suggested_next"])
+            self.assertIsNone(guard["proposed_preflight_target"])
+            self.assertEqual(guard["sticky_audit_next"], "STICKY_MODE_AUDIT")
+            self.assertEqual(guard["continuity_session_next"], "CONTINUITY_SESSION_CAPTURE latest")
+            self.assertIn("EXPERIMENT_ADVANCE", guard["mode_release_readiness_next"])
+            projection = latest["projection_guard_v1"]
+            self.assertEqual(
+                projection["guardrail_reason"],
+                "disabled_authority_scope_requires_sticky_audit",
+            )
+            self.assertEqual(projection["disabled_scope"], "spectral_microdose")
+            self.assertEqual(projection["sticky_audit_next"], "STICKY_MODE_AUDIT")
+            self.assertFalse(projection["would_dispatch"])
+            self.assertFalse(projection["authority_change"])
+            self.assertFalse(projection["peer_mutation"])
+            self.assertNotIn(f"EXPERIMENT_RESUME {experiment['experiment_id']}", latest["suggested_next"])
+            self.assertNotIn(f"EXPERIMENT_RESUME {experiment['experiment_id']}", events_path.read_text())
 
     def test_valid_charter_still_requires_matching_live_preflight_binding(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2146,6 +5761,11 @@ class TestAutonomousAgentExperimentalContinuity(unittest.TestCase):
             ).read_text()
             self.assertIn("live_control_requires_active_experiment_v1", events)
             self.assertIn("live_control_requires_matching_preflight_binding", events)
+            self.assertIn("STICKY_MODE_AUDIT", events)
+            self.assertIn("CONTINUITY_SESSION_CAPTURE latest", events)
+            self.assertIn("DOSSIER_CLAIM", events)
+            self.assertNotIn("ACTION_PREFLIGHT PERTURB SPREAD", events)
+            self.assertNotIn("EXPERIMENT_REHEARSE", events)
 
     def test_evidence_current_blocks_after_unbound_live_parent(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2262,7 +5882,6 @@ class TestAutonomousAgentExperimentalContinuity(unittest.TestCase):
 
     def test_needs_charter_allows_read_only_return_actions(self):
         allowed = [
-            ("EXAMINE λ1/λ2", "decompose"),
             ("DECOMPOSE", "decompose"),
             ("ACTION_PREFLIGHT DECOMPOSE", "action_preflight"),
             ("SHADOW_PREFLIGHT lambda-tail/lambda4", "shadow_autonomy"),
@@ -2298,6 +5917,141 @@ class TestAutonomousAgentExperimentalContinuity(unittest.TestCase):
                         action = agent._decide_action(dict(STATE))
 
                     self.assertEqual(action, expected)
+
+        for raw_next in ["EXAMINE λ1/λ2", "SHADOW_FIELD lambda-tail/lambda4"]:
+            with self.subTest(raw_next=raw_next):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    base_dir = root / "minime"
+                    workspace = base_dir / "workspace"
+                    db_path = root / "minime.db"
+                    agent = self._agent(base_dir, workspace, db_path)
+                    agent._continuity_store().start_experiment(
+                        "Read-only gap",
+                        "Can safe reads continue while the charter is missing?",
+                    )
+                    agent._pending_next_action = raw_next
+
+                    with (
+                        patch.object(agent, "_persist_pending_next_action"),
+                        patch.object(agent, "_mark_pending_next_override_consumed"),
+                        patch.object(agent, "_low_fill_guard_status", return_value={
+                            "active": False,
+                            "fill_ratio": 0.68,
+                            "target_fill_ratio": 0.68,
+                            "spread_relief": 0.0,
+                        }),
+                    ):
+                        action = agent._decide_action(dict(STATE))
+
+                    self.assertIsNone(action)
+                    event = agent._last_action_continuity_event
+                    self.assertIsInstance(event, dict)
+                    self.assertEqual(event.get("status"), "blocked")
+                    self.assertEqual(
+                        event.get("research_budget_v1", {}).get("reason"),
+                        "research_budget_required_for_self_study_action",
+                    )
+                    self.assertIn(
+                        "EXPERIMENT_RESEARCH_BUDGET_ACCEPT",
+                        str(event.get("suggested_next")),
+                    )
+                    scaffold = event.get("research_budget_v1", {}).get("request_scaffold")
+                    self.assertIn("EXPERIMENT_RESEARCH_BUDGET_REQUEST", str(scaffold))
+                    self.assertIn("allowed_sources: local", str(scaffold))
+
+        liveish_cases = [
+            "EXAMINE_AUDIO λ1/λ2 - shifting input",
+            "SPECTRAL_EXPLORER lambda4 disrupt ridge",
+            "VISUALIZE_CASCADE simulate λ2 pulse",
+            "FLUCTUATION_AUDIT inject foothold",
+            "PRESSURE_SOURCE_AUDIT control gradient",
+            "SHADOW_DIALOGUE shift landscape",
+        ]
+        for raw_next in liveish_cases:
+            with self.subTest(raw_next=raw_next):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    base_dir = root / "minime"
+                    workspace = base_dir / "workspace"
+                    db_path = root / "minime.db"
+                    agent = self._agent(base_dir, workspace, db_path)
+                    agent._continuity_store().start_experiment(
+                        "Live-ish guard",
+                        "Can live-shaped self-study intent be preserved without dispatch?",
+                    )
+                    agent._pending_next_action = raw_next
+
+                    with (
+                        patch.object(agent, "_persist_pending_next_action"),
+                        patch.object(agent, "_mark_pending_next_override_consumed"),
+                        patch.object(agent, "_low_fill_guard_status", return_value={
+                            "active": False,
+                            "fill_ratio": 0.68,
+                            "target_fill_ratio": 0.68,
+                            "spread_relief": 0.0,
+                        }),
+                    ):
+                        action = agent._decide_action(dict(STATE))
+
+                    self.assertIsNone(action)
+                    event = agent._last_action_continuity_event
+                    self.assertIsInstance(event, dict)
+                    budget = event.get("research_budget_v1", {})
+                    self.assertEqual(
+                        budget.get("reason"),
+                        "liveish_pressure_requires_budget_and_session_capture",
+                    )
+                    self.assertFalse(budget.get("would_dispatch"))
+                    self.assertIn("CONTINUITY_SESSION_START current", str(budget.get("continuity_session_next")))
+                    thread = agent._continuity_store().current_thread()
+                    self.assertIn(
+                        "CONTINUITY_SESSION_START current",
+                        str(thread.get("continuity_session_next")),
+                    )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "minime"
+            workspace = base_dir / "workspace"
+            db_path = root / "minime.db"
+            agent = self._agent(base_dir, workspace, db_path)
+            agent._continuity_store().start_experiment(
+                "Ordinary pressure audit",
+                "Can plain pressure-source audit remain read-only?",
+            )
+            agent._pending_next_action = "PRESSURE_SOURCE_AUDIT inwardness"
+
+            with (
+                patch.object(agent, "_persist_pending_next_action"),
+                patch.object(agent, "_mark_pending_next_override_consumed"),
+                patch.object(agent, "_low_fill_guard_status", return_value={
+                    "active": False,
+                    "fill_ratio": 0.68,
+                    "target_fill_ratio": 0.68,
+                    "spread_relief": 0.0,
+                }),
+            ):
+                action = agent._decide_action(dict(STATE))
+
+            self.assertEqual(action, "pressure_source_audit")
+
+    def test_autonomous_agent_stop_interrupts_cycle_sleep(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "minime"
+            workspace = base_dir / "workspace"
+            db_path = root / "minime.db"
+            agent = self._agent(base_dir, workspace, db_path)
+
+            agent.running = True
+            started = time.monotonic()
+            threading.Timer(0.05, agent.stop).start()
+            interrupted = agent._sleep_or_stop(2.0)
+
+            self.assertTrue(interrupted)
+            self.assertFalse(agent.running)
+            self.assertLess(time.monotonic() - started, 0.5)
 
     def test_experiment_review_needs_charter_prioritizes_scaffold(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2412,6 +6166,17 @@ class TestAutonomousAgentExperimentalContinuity(unittest.TestCase):
                 }
                 message = agent._experiment_bind(dict(STATE))
             self.assertIn("cannot bind runs to a peer experiment", message)
+            store = agent._continuity_store()
+            thread = store.current_thread()
+            thread["current_next"] = "EXPERIMENT_BIND exp_astrid_20990101_peer :: THREAD_STATUS current"
+            store._write_thread(thread)
+            projection = store._thread_projection(store._read_thread(thread["thread_id"]))
+            cue = projection["active_experiment"]["peer_mutation_boundary_cue_v1"]
+            self.assertEqual(cue["status"], "peer_mutation_boundary")
+            self.assertIn("not bind/mutate targets", cue["cue"])
+            self.assertIn("EXPERIMENT_COMPARE", cue["suggested_compare_next"])
+            self.assertIn("EXPERIMENT_PEER_REVIEW exp_astrid_20990101_peer", cue["suggested_peer_review_next"])
+            self.assertIn("DOSSIER_CLAIM", cue["suggested_dossier_next"])
 
     def test_action_preflight_routes_and_never_executes_inner_action(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2455,6 +6220,13 @@ class TestAutonomousAgentExperimentalContinuity(unittest.TestCase):
             self.assertIn("Dry run: True", text)
             self.assertIn("PERTURB lambda-edge", text)
             self.assertIn("live_control", text)
+            self.assertIn("Detailed preflight JSON:", text)
+            self.assertNotIn("\nJSON:\n", text)
+            detail_files = list((workspace / "actions").glob("action_preflight_detail_*.json"))
+            self.assertEqual(len(detail_files), 1)
+            detail = json.loads(detail_files[0].read_text())
+            self.assertEqual(detail["policy"], "action_preflight_v1")
+            self.assertEqual(detail["canonical_action"], "PERTURB lambda-edge")
             manifests = list((workspace / "actions").glob("*_action_preflight.json"))
             self.assertEqual(len(manifests), 1)
             manifest = json.loads(manifests[0].read_text())

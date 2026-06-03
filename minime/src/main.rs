@@ -254,6 +254,13 @@ struct EigenPacket {
     /// 0=open distributed fabric, 1=collapsed into the fewest active modes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     distinguishability_loss: Option<f32>,
+    /// Current effective ESN leak. This is adaptive unless a gated direct
+    /// microdose override is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    esn_leak: Option<f32>,
+    /// Active direct ESN leak override status, if a one-shot gate is spending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    esn_leak_override_v1: Option<serde_json::Value>,
     /// Structural diversity derived from eigenvector concentration and
     /// inter-mode coupling geometry. Complements spectral entropy by asking
     /// whether the reservoir's shape itself is narrow or varied.
@@ -1787,6 +1794,18 @@ async fn run_engine(
                 let bus_noise = sensory_bus.get_exploration_noise();
                 if !stable_core_runtime.enabled && bus_noise.is_finite() {
                     esn.set_exploration_noise(bus_noise);
+                }
+                if !stable_core_runtime.enabled {
+                    if let Some(request) = sensory_bus.take_esn_leak_override() {
+                        esn.set_leak_override(
+                            request.leak,
+                            request.duration_ticks,
+                            request.request_id,
+                        );
+                    }
+                } else {
+                    let _ = sensory_bus.take_esn_leak_override();
+                    esn.clear_leak_override();
                 }
 
                 // Dynamic rho: adapt covariance forgetting factor based on fill + entropy.
@@ -5500,6 +5519,11 @@ async fn run_engine(
                 spectral_denominator_v1,
                 effective_dimensionality,
                 distinguishability_loss,
+                esn_leak: esn.as_ref().map(|engine| engine.get_leak()),
+                esn_leak_override_v1: esn
+                    .as_ref()
+                    .and_then(|engine| engine.leak_override_status())
+                    .and_then(|status| serde_json::to_value(status).ok()),
                 structural_entropy: Some(structural_entropy),
                 resonance_density_v1: Some(resonance_density_v1.clone()),
                 pressure_source_v1: Some(pressure_source_v1),
@@ -7348,6 +7372,8 @@ mod tests {
             spectral_denominator_v1: denominator,
             effective_dimensionality: denominator.map(|metrics| metrics.effective_dimensionality),
             distinguishability_loss: denominator.map(|metrics| metrics.distinguishability_loss),
+            esn_leak: Some(0.65),
+            esn_leak_override_v1: None,
             structural_entropy: None,
             resonance_density_v1: Some(ResonanceDensityV1::neutral()),
             pressure_source_v1: Some(PressureSourceV1::from_parts(

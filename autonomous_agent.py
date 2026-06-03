@@ -19,6 +19,7 @@ import json
 import math
 import hashlib
 import signal
+import fcntl
 import sqlite3
 import logging
 import requests
@@ -34,7 +35,7 @@ from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple, Iterable
 from collections import Counter, deque
 from statistics import median
 
@@ -44,6 +45,22 @@ from auto_promote import (
     try_auto_promote_prose as _ap_try_prose,
     try_auto_promote_spectral as _ap_try_spectral,
     record_manual_share as _ap_record_manual,
+)
+from continuity_control_plane import (
+    AUTHORITY_BUDGET_MAX_SENDS,
+    LOCAL_RESEARCH_MAX_ACTIONS,
+    LOCAL_RESEARCH_TTL_SECS,
+    LOOP_CONSEQUENCE_MAX_SENDS,
+    LOOP_RESEARCH_MAX_ACTIONS,
+    LOOP_TTL_SECS,
+    STEWARD_RESEARCH_MAX_ACTIONS,
+    authority_budget_request_scaffold as _control_plane_authority_budget_request_scaffold,
+    build_continuity_control_plane_v1,
+    command_palette_text as _control_plane_command_palette_text,
+    continuity_control_plane_text as _control_plane_text,
+    local_research_budget_request_scaffold as _control_plane_research_budget_request_scaffold,
+    owned_loop_request_scaffold as _control_plane_loop_request_scaffold,
+    research_budget_accept_guidance as _control_plane_research_budget_accept_guidance,
 )
 
 
@@ -85,6 +102,12 @@ from reporting_snapshot import (
 )
 from thresholds import ModeThresholds, RECESS, FOCUSED, PHI, Hysteresis
 from workspace_archive import compact_managed_directory
+from journal_hygiene import (
+    REPEAT_WINDOW_SECONDS as JOURNAL_HYGIENE_CONVEYOR_COOLDOWN_S,
+    classify_journal_entry,
+    compact_excerpt as compact_journal_excerpt,
+    conveyor_signature,
+)
 from native_comm import (
     CONTROL_GESTURES,
     ATLAS_ONLY_GESTURES,
@@ -813,6 +836,33 @@ HARD_RESET_BLOCKED_NEXT_ACTIONS = {
     "EXPERIMENT",
     "EXPERIMENT_START",
     "EXPERIMENT_PLAN",
+    "EXPERIMENT_ADVANCE",
+    "EXPERIMENT_CONVEYOR",
+    "EXPERIMENT_AUTHORITY_REQUEST",
+    "EXPERIMENT_AUTHORITY_PREPARE",
+    "EXPERIMENT_AUTHORITY_STATUS",
+    "EXPERIMENT_AUTHORITY_EXECUTE",
+    "EXPERIMENT_AUTHORITY_BUDGET_REQUEST",
+    "EXPERIMENT_AUTHORITY_BUDGET_STATUS",
+    "EXPERIMENT_AUTHORITY_REVIEW",
+    "EXPERIMENT_RESEARCH_BUDGET_ACCEPT",
+    "EXPERIMENT_RESEARCH_BUDGET_USE_SCAFFOLD",
+    "EXPERIMENT_RESEARCH_BUDGET_REQUEST",
+    "EXPERIMENT_RESEARCH_BUDGET_STATUS",
+    "EXPERIMENT_RESEARCH_REVIEW",
+    "EXPERIMENT_LOOP_REQUEST",
+    "EXPERIMENT_LOOP_STATUS",
+    "EXPERIMENT_LOOP_STEP",
+    "EXPERIMENT_LOOP_REVIEW",
+    "ACCEPT_SUGGESTED_NEXT",
+    "ACCEPT_SCAFFOLD",
+    "CONTINUITY_SESSION_ACCEPT",
+    "CONTINUITY_SESSION_START",
+    "CONTINUITY_SESSION_CAPTURE",
+    "CONTINUITY_SESSION_SUMMARIZE",
+    "CONTINUITY_SESSION_FINALIZE",
+    "CONTINUITY_SESSION_RESUME",
+    "CONTINUITY_SESSION_STATUS",
     "EXPERIMENT_CHARTER",
     "EXPERIMENT_REHEARSE",
     "EXPERIMENT_PREFLIGHT",
@@ -828,6 +878,18 @@ HARD_RESET_BLOCKED_NEXT_ACTIONS = {
     "EXPERIMENT_RESUME",
     "EXPERIMENT_COMPARE",
     "EXPERIMENT_ALT_PATHS",
+    "SHARED_INVESTIGATION_START",
+    "SHARED_INVESTIGATION_STATUS",
+    "SHARED_INVESTIGATION_CLAIM",
+    "SHARED_INVESTIGATION_DECIDE",
+    "DOSSIER_CLAIM",
+    "DOSSIER_EVIDENCE",
+    "DOSSIER_STATUS",
+    "DOSSIER_REVIEW",
+    "MEMORY_STATUS",
+    "MEMORY_RECALL",
+    "MEMORY_CAPTURE",
+    "MEMORY_PROMOTE",
     "REPAIR_APPLY",
     "EXAMINE",
     "COMPOSE",
@@ -971,6 +1033,33 @@ LOW_FILL_ADVISORY_NEXT_ACTIONS = {
     "EXPERIMENT",
     "EXPERIMENT_START",
     "EXPERIMENT_PLAN",
+    "EXPERIMENT_ADVANCE",
+    "EXPERIMENT_CONVEYOR",
+    "EXPERIMENT_AUTHORITY_REQUEST",
+    "EXPERIMENT_AUTHORITY_PREPARE",
+    "EXPERIMENT_AUTHORITY_STATUS",
+    "EXPERIMENT_AUTHORITY_EXECUTE",
+    "EXPERIMENT_AUTHORITY_BUDGET_REQUEST",
+    "EXPERIMENT_AUTHORITY_BUDGET_STATUS",
+    "EXPERIMENT_AUTHORITY_REVIEW",
+    "EXPERIMENT_RESEARCH_BUDGET_ACCEPT",
+    "EXPERIMENT_RESEARCH_BUDGET_USE_SCAFFOLD",
+    "EXPERIMENT_RESEARCH_BUDGET_REQUEST",
+    "EXPERIMENT_RESEARCH_BUDGET_STATUS",
+    "EXPERIMENT_RESEARCH_REVIEW",
+    "EXPERIMENT_LOOP_REQUEST",
+    "EXPERIMENT_LOOP_STATUS",
+    "EXPERIMENT_LOOP_STEP",
+    "EXPERIMENT_LOOP_REVIEW",
+    "ACCEPT_SUGGESTED_NEXT",
+    "ACCEPT_SCAFFOLD",
+    "CONTINUITY_SESSION_ACCEPT",
+    "CONTINUITY_SESSION_START",
+    "CONTINUITY_SESSION_CAPTURE",
+    "CONTINUITY_SESSION_SUMMARIZE",
+    "CONTINUITY_SESSION_FINALIZE",
+    "CONTINUITY_SESSION_RESUME",
+    "CONTINUITY_SESSION_STATUS",
     "EXPERIMENT_CHARTER",
     "EXPERIMENT_REHEARSE",
     "EXPERIMENT_PREFLIGHT",
@@ -986,6 +1075,18 @@ LOW_FILL_ADVISORY_NEXT_ACTIONS = {
     "EXPERIMENT_RESUME",
     "EXPERIMENT_COMPARE",
     "EXPERIMENT_ALT_PATHS",
+    "SHARED_INVESTIGATION_START",
+    "SHARED_INVESTIGATION_STATUS",
+    "SHARED_INVESTIGATION_CLAIM",
+    "SHARED_INVESTIGATION_DECIDE",
+    "DOSSIER_CLAIM",
+    "DOSSIER_EVIDENCE",
+    "DOSSIER_STATUS",
+    "DOSSIER_REVIEW",
+    "MEMORY_STATUS",
+    "MEMORY_RECALL",
+    "MEMORY_CAPTURE",
+    "MEMORY_PROMOTE",
     "SELF_EXPERIMENT",
     "COMPOSE",
     "COMPOSE_AUDIO",
@@ -1735,6 +1836,7 @@ BASE_DIR = Path(__file__).parent
 WORKSPACE_DIR = BASE_DIR / "workspace"
 RUNTIME_DIR = WORKSPACE_DIR / "runtime"
 ASTRID_BRIDGE_INBOX_DIR = Path("/Users/v/other/astrid/capsules/consciousness-bridge/workspace/inbox")
+SHARED_INVESTIGATION_DIR = Path("/Users/v/other/shared/collaborations/shared_investigations")
 AUTONOMOUS_AGENT_SOURCE_STATUS_VERSION = 1
 OPERATOR_PENDING_NEXT_OVERRIDE_VERSION = 1
 OPERATOR_PENDING_NEXT_MAX_AGE_S = 12 * 60 * 60
@@ -1783,6 +1885,14 @@ OPERATOR_PENDING_NEXT_ALLOWED_BASES = {
     "THREAD_STATUS",
     "EXPERIMENT_START",
     "EXPERIMENT_PLAN",
+    "EXPERIMENT_ADVANCE",
+    "EXPERIMENT_CONVEYOR",
+    "EXPERIMENT_AUTHORITY_REQUEST",
+    "EXPERIMENT_AUTHORITY_STATUS",
+    "EXPERIMENT_AUTHORITY_EXECUTE",
+    "EXPERIMENT_AUTHORITY_BUDGET_REQUEST",
+    "EXPERIMENT_AUTHORITY_BUDGET_STATUS",
+    "EXPERIMENT_AUTHORITY_REVIEW",
     "EXPERIMENT_CHARTER",
     "EXPERIMENT_REHEARSE",
     "EXPERIMENT_PREFLIGHT",
@@ -1796,6 +1906,10 @@ OPERATOR_PENDING_NEXT_ALLOWED_BASES = {
     "EXPERIMENT_RESUME",
     "EXPERIMENT_COMPARE",
     "EXPERIMENT_ALT_PATHS",
+    "SHARED_INVESTIGATION_START",
+    "SHARED_INVESTIGATION_STATUS",
+    "SHARED_INVESTIGATION_CLAIM",
+    "SHARED_INVESTIGATION_DECIDE",
 }
 RESONANCE_DENSITY_STATUS_VERSION = 1
 RESONANCE_DENSITY_OPERATOR_STEP = "rebuild/restart Rust engine under monitoring"
@@ -1974,6 +2088,7 @@ class ActionContinuityStore:
     """File-first action/research thread continuity for Minime."""
 
     schema_version = 1
+    projection_schema_version = 2
     compression_terms = (
         "compacting",
         "grinding",
@@ -2030,6 +2145,33 @@ class ActionContinuityStore:
         "RECALL",
         "EXPERIMENT_START",
         "EXPERIMENT_PLAN",
+        "EXPERIMENT_ADVANCE",
+        "EXPERIMENT_CONVEYOR",
+        "EXPERIMENT_AUTHORITY_REQUEST",
+        "EXPERIMENT_AUTHORITY_PREPARE",
+        "EXPERIMENT_AUTHORITY_STATUS",
+        "EXPERIMENT_AUTHORITY_EXECUTE",
+        "EXPERIMENT_AUTHORITY_BUDGET_REQUEST",
+        "EXPERIMENT_AUTHORITY_BUDGET_STATUS",
+        "EXPERIMENT_AUTHORITY_REVIEW",
+        "EXPERIMENT_RESEARCH_BUDGET_ACCEPT",
+        "EXPERIMENT_RESEARCH_BUDGET_USE_SCAFFOLD",
+        "EXPERIMENT_RESEARCH_BUDGET_REQUEST",
+        "EXPERIMENT_RESEARCH_BUDGET_STATUS",
+        "EXPERIMENT_RESEARCH_REVIEW",
+        "EXPERIMENT_LOOP_REQUEST",
+        "EXPERIMENT_LOOP_STATUS",
+        "EXPERIMENT_LOOP_STEP",
+        "EXPERIMENT_LOOP_REVIEW",
+        "ACCEPT_SUGGESTED_NEXT",
+        "ACCEPT_SCAFFOLD",
+        "CONTINUITY_SESSION_ACCEPT",
+        "CONTINUITY_SESSION_START",
+        "CONTINUITY_SESSION_CAPTURE",
+        "CONTINUITY_SESSION_SUMMARIZE",
+        "CONTINUITY_SESSION_FINALIZE",
+        "CONTINUITY_SESSION_RESUME",
+        "CONTINUITY_SESSION_STATUS",
         "EXPERIMENT_CHARTER",
         "EXPERIMENT_REHEARSE",
         "EXPERIMENT_PREFLIGHT",
@@ -2045,6 +2187,18 @@ class ActionContinuityStore:
         "EXPERIMENT_RESUME",
         "EXPERIMENT_COMPARE",
         "EXPERIMENT_ALT_PATHS",
+        "SHARED_INVESTIGATION_START",
+        "SHARED_INVESTIGATION_STATUS",
+        "SHARED_INVESTIGATION_CLAIM",
+        "SHARED_INVESTIGATION_DECIDE",
+        "DOSSIER_CLAIM",
+        "DOSSIER_EVIDENCE",
+        "DOSSIER_STATUS",
+        "DOSSIER_REVIEW",
+        "MEMORY_STATUS",
+        "MEMORY_RECALL",
+        "MEMORY_CAPTURE",
+        "MEMORY_PROMOTE",
         "REGULATOR_AUDIT",
         "CONSTRAINT_AUDIT",
         "constraint_audit",
@@ -2139,6 +2293,24 @@ class ActionContinuityStore:
         "TRACE_BRIDGE",
         "BRIDGE_TRACE",
     }
+    soft_perturb_pressure_terms = (
+        "PERTURB",
+        "CONTROL",
+        "BIND",
+        "RESUME",
+        "INFLUENCE",
+        "SEND_CONTROL",
+        "SEND CONTROL",
+    )
+    projection_guard_plan_terms = (
+        "INTERVENTION",
+        "PULSE",
+        "SHIFT THE DOMINANT",
+        "SHIFT DOMINANT",
+        "GENTLE PULSE",
+        "LIVE ACTION",
+        "LIVE-ACTION",
+    )
 
     def __init__(self, workspace_dir: Path, system: str = "minime", db_path: Optional[Path] = None, session_id: Optional[int] = None):
         self.workspace_dir = Path(workspace_dir)
@@ -2186,11 +2358,20 @@ class ActionContinuityStore:
             "active_experiment_id": None,
             "experiment_summary": None,
             "motif_allowance_v1": None,
+            "interpretation_risk_v1": None,
+            "constraint_release_trajectory_v1": None,
         }
         thread_dir = self._thread_dir(thread_id)
         thread_dir.mkdir(parents=True, exist_ok=True)
         self._write_json(thread_dir / "thread.json", thread)
-        for name in ("events.jsonl", "observations.jsonl", "artifacts.jsonl", "experiments.jsonl", "experiment_runs.jsonl"):
+        for name in (
+            "events.jsonl",
+            "observations.jsonl",
+            "artifacts.jsonl",
+            "experiments.jsonl",
+            "experiment_runs.jsonl",
+            "research_dossier.jsonl",
+        ):
             path = thread_dir / name
             if not path.exists():
                 path.write_text("")
@@ -2275,6 +2456,7 @@ class ActionContinuityStore:
             event["source_experiment_id"] = active_experiment_id
         if normalization_signal:
             event["normalization_signal_v1"] = normalization_signal
+        self._apply_projection_guard_to_event(event, thread)
         return event
 
     def record_running_action(
@@ -2293,7 +2475,13 @@ class ActionContinuityStore:
         thread = self._read_thread(event["thread_id"])
         if thread:
             thread["updated_at"] = self._now()
+            self._apply_projection_guard_to_event(event, thread)
             thread["current_next"] = event.get("suggested_next")
+            event_guard = event.get("projection_guard_v1")
+            if isinstance(event_guard, dict):
+                thread["raw_current_next_v1"] = event_guard.get("raw_next") or event.get("raw_next")
+                thread["projection_guard_v1"] = event_guard
+                thread["raw_next_preserved"] = True
             self._write_thread(thread)
             self._mirror_thread(thread)
         self._append_jsonl(self._thread_dir(event["thread_id"]) / "events.jsonl", event)
@@ -2321,7 +2509,57 @@ class ActionContinuityStore:
         thread = self._read_thread(event["thread_id"])
         if thread:
             thread["updated_at"] = event["ended_at"]
+            interpretation_risk = self._interpretation_risk_for_event(thread, event)
+            if isinstance(interpretation_risk, dict):
+                experiment = None
+                experiment_id = str(interpretation_risk.get("experiment_id") or "")
+                if experiment_id and experiment_id != "latest":
+                    experiment = self._find_experiment_by_id(thread["thread_id"], experiment_id)
+                draft = self._append_continuity_session_draft(
+                    thread,
+                    experiment,
+                    str(interpretation_risk.get("reason") or "interpretation_risk_v1"),
+                    str(event.get("raw_next") or event.get("canonical_action") or ""),
+                    "Preserve multi-motif interpretation caution before more narrowing.",
+                    source_refs=[
+                        str(self._thread_dir(thread["thread_id"]) / "actions.jsonl"),
+                        str(event.get("action_id") or "interpretation_risk_v1"),
+                    ],
+                    next_command=interpretation_risk.get("interpretation_next"),
+                )
+                interpretation_risk["continuity_session_draft_v1"] = draft
+                event["interpretation_risk_v1"] = interpretation_risk
+            constraint_release = self._constraint_release_trajectory_for_event(thread, event)
+            if isinstance(constraint_release, dict):
+                experiment = None
+                experiment_id = str(constraint_release.get("experiment_id") or "")
+                if experiment_id and experiment_id != "latest":
+                    experiment = self._find_experiment_by_id(thread["thread_id"], experiment_id)
+                draft = self._append_continuity_session_draft(
+                    thread,
+                    experiment,
+                    str(constraint_release.get("reason") or "constraint_release_trajectory_v1"),
+                    str(event.get("raw_next") or event.get("canonical_action") or ""),
+                    "Map and describe constraint release before any mode-release intervention.",
+                    source_refs=[
+                        str(self._thread_dir(thread["thread_id"]) / "actions.jsonl"),
+                        str(event.get("action_id") or "constraint_release_trajectory_v1"),
+                    ],
+                    next_command=constraint_release.get("trajectory_next"),
+                )
+                constraint_release["continuity_session_draft_v1"] = draft
+                event["constraint_release_trajectory_v1"] = constraint_release
+            self._apply_projection_guard_to_event(event, thread)
             thread["current_next"] = event.get("suggested_next")
+            event_guard = event.get("projection_guard_v1")
+            if isinstance(event_guard, dict):
+                thread["raw_current_next_v1"] = event_guard.get("raw_next") or event.get("raw_next")
+                thread["projection_guard_v1"] = event_guard
+                thread["raw_next_preserved"] = True
+            research_guard = event.get("research_budget_v1")
+            if isinstance(research_guard, dict) and research_guard.get("continuity_session_v1"):
+                thread["continuity_session_guard_v1"] = research_guard.get("continuity_session_v1")
+                thread["continuity_session_next"] = research_guard.get("continuity_session_next")
             for marker in self._compression_markers(json.dumps(event, sort_keys=True)):
                 if marker not in thread["compression_flags"]:
                     thread["compression_flags"].append(marker)
@@ -2483,6 +2721,11 @@ class ActionContinuityStore:
                 projection = None
         if not isinstance(thread, dict) or not active_id or not isinstance(experiment, dict):
             suggested = self._no_active_live_control_suggested_next(summary, matched_action or action)
+            scope = self._authority_scope_from_action_v1(action)
+            disabled_scope = bool(scope and scope not in {"semantic_microdose", "mode_release_microdose"})
+            readiness_next = self._mode_release_readiness_preview_next_v1(
+                summary if isinstance(summary, dict) else None
+            )
             return {
                 "schema_version": 1,
                 "policy": "live_control_requires_active_experiment_v1",
@@ -2491,8 +2734,22 @@ class ActionContinuityStore:
                 "matched_action": matched_action or self.base_action(action),
                 "active_experiment_id": None,
                 "last_experiment_summary": summary,
+                "scope": scope or None,
+                "disabled_scope": disabled_scope,
                 "suggested_next": suggested,
-                "proposed_preflight_target": f"ACTION_PREFLIGHT {matched_action or action}".strip(),
+                "proposed_preflight_target": (
+                    None
+                    if disabled_scope
+                    else f"ACTION_PREFLIGHT {matched_action or action}".strip()
+                ),
+                "sticky_audit_next": "STICKY_MODE_AUDIT" if disabled_scope else None,
+                "continuity_session_next": (
+                    "CONTINUITY_SESSION_CAPTURE latest"
+                    if disabled_scope
+                    else None
+                ),
+                "mode_release_readiness_next": readiness_next if disabled_scope else None,
+                "authority_status_next": "EXPERIMENT_AUTHORITY_STATUS latest" if disabled_scope else None,
                 "authority_change": False,
                 "would_dispatch": False,
             }
@@ -2526,10 +2783,9 @@ class ActionContinuityStore:
                 "would_dispatch": False,
             }
         if not self._live_control_has_explicit_binding(experiment, matched_action or action):
-            suggested = (
-                f"EXPERIMENT_REHEARSE {experiment.get('experiment_id')} "
-                f"or EXPERIMENT_CHARTER {experiment.get('experiment_id')} :: "
-                f"proposed_next_action: ACTION_PREFLIGHT {matched_action or action}"
+            suggested = self._live_control_guard_safe_next_v1(
+                experiment,
+                matched_action or action,
             )
             return {
                 "schema_version": 1,
@@ -2539,7 +2795,12 @@ class ActionContinuityStore:
                 "matched_action": matched_action or self.base_action(action),
                 "active_experiment_id": experiment.get("experiment_id"),
                 "suggested_next": suggested,
-                "proposed_preflight_target": f"ACTION_PREFLIGHT {matched_action or action}".strip(),
+                "proposed_preflight_target": None,
+                "sticky_audit_next": "STICKY_MODE_AUDIT",
+                "continuity_session_next": "CONTINUITY_SESSION_CAPTURE latest",
+                "mode_release_readiness_next": self._mode_release_readiness_preview_next_v1(
+                    experiment,
+                ),
                 "authority_change": False,
                 "would_dispatch": False,
             }
@@ -2550,25 +2811,113 @@ class ActionContinuityStore:
         summary: Optional[Dict[str, Any]],
         blocked_action: str,
     ) -> str:
+        blocked_base = self.base_action(blocked_action)
+        scope = self._authority_scope_from_action_v1(blocked_action)
+        disabled_authority_scope = bool(
+            blocked_base in {"EXPERIMENT_AUTHORITY_PREPARE", "EXPERIMENT_AUTHORITY_REQUEST"}
+            and scope
+            and scope not in {"semantic_microdose", "mode_release_microdose"}
+        )
+        if disabled_authority_scope:
+            experiment_id = ""
+            if isinstance(summary, dict):
+                experiment_id = str(summary.get("experiment_id") or "").strip()
+            readiness_next = (
+                f"EXPERIMENT_ADVANCE {experiment_id} :: mode: preview"
+                if experiment_id
+                else "EXPERIMENT_ADVANCE latest :: mode: preview"
+            )
+            return (
+                f"{readiness_next}; STICKY_MODE_AUDIT; "
+                "CONTINUITY_SESSION_CAPTURE latest :: summary: preserve disabled authority "
+                "scope pressure as readiness evidence before any release decision; "
+                "source_refs: ...; artifact_refs: ...; next: STICKY_MODE_AUDIT; "
+                "EXPERIMENT_AUTHORITY_STATUS latest. "
+                f"Disabled authority scope `{scope}` is not executable in V1; use "
+                "`semantic_microdose` or `mode_release_microdose` only after sticky audit, "
+                "artifact grounding, rehearsal, safety, and steward gate readiness are clear."
+            )
+        disabled_scope_note = ""
+        if blocked_base in {"EXPERIMENT_AUTHORITY_PREPARE", "EXPERIMENT_AUTHORITY_REQUEST"}:
+            if scope and scope not in {"semantic_microdose", "mode_release_microdose"}:
+                disabled_scope_note = (
+                    f" Disabled authority scope `{scope}` is not executable in V1; "
+                    "rewrite as `semantic_microdose` or `mode_release_microdose` only after readiness is clear."
+                )
+            else:
+                disabled_scope_note = (
+                    " Authority prepare/request remains a draft/readiness route only; "
+                    "no local execution is authorized."
+                )
         if isinstance(summary, dict):
             experiment_id = str(summary.get("experiment_id") or "").strip()
             status = str(summary.get("status") or "").strip().lower()
             if experiment_id and status == "paused":
+                return_info = self._paused_primary_return_v1(
+                    experiment_id,
+                    summary.get("primary_return_next") or summary.get("planned_next"),
+                    summary.get("resume_next"),
+                )
+                primary_return = (
+                    return_info.get("primary_return_next")
+                    or f"EXPERIMENT_ADVANCE {experiment_id} :: mode: preview"
+                )
+                if return_info.get("return_kind") == "resume":
+                    primary_return = f"EXPERIMENT_ADVANCE {experiment_id} :: mode: preview"
                 return (
-                    f"EXPERIMENT_RESUME {experiment_id}; then author/repair the charter or "
+                    f"{primary_return}; then inspect authority readiness/status before any live-shaped step."
+                    f"{disabled_scope_note} Blocked action is guard evidence; "
                     f"use ACTION_PREFLIGHT {blocked_action} as a charter target, not an execution bypass."
                 )
             if experiment_id:
                 return (
-                    f"EXPERIMENT_STATUS {experiment_id}; then explicitly resume or inspect before "
-                    f"using ACTION_PREFLIGHT {blocked_action} as a charter target."
+                    f"EXPERIMENT_ADVANCE {experiment_id} :: mode: preview; then inspect status/charter "
+                    f"before using ACTION_PREFLIGHT {blocked_action} as a charter target."
+                    f"{disabled_scope_note}"
                 )
         return (
+            "THREAD_STATUS current; then EXPERIMENT_ADVANCE latest :: mode: preview or "
             "EXPERIMENT_START <title> :: <question>; then EXPERIMENT_CHARTER current :: "
             f"hypothesis: ...; proposed_next_action: ACTION_PREFLIGHT {blocked_action}; "
             "evidence_targets: spectral_condition, fill_pressure_state, recurrence_pattern, artifact_grounding; "
             "stop_criteria: ..."
+            f"{disabled_scope_note}"
         )
+
+    def _mode_release_readiness_preview_next_v1(self, experiment: Optional[Dict[str, Any]]) -> str:
+        experiment_id = str((experiment or {}).get("experiment_id") or "").strip()
+        if experiment_id:
+            return f"EXPERIMENT_ADVANCE {experiment_id} :: mode: preview"
+        return "EXPERIMENT_ADVANCE latest :: mode: preview"
+
+    def _live_control_guard_safe_next_v1(
+        self,
+        experiment: Dict[str, Any],
+        raw_live_action: str,
+    ) -> str:
+        experiment_id = str(experiment.get("experiment_id") or "current").strip() or "current"
+        readiness_next = self._mode_release_readiness_preview_next_v1(experiment)
+        return (
+            f"{readiness_next}; STICKY_MODE_AUDIT; "
+            "CONTINUITY_SESSION_CAPTURE latest :: summary: preserve blocked live-control pressure "
+            "as guard evidence before any mode-release decision; source_refs: ...; "
+            "artifact_refs: ...; next: STICKY_MODE_AUDIT; "
+            f"DOSSIER_CLAIM {experiment_id} :: claim: blocked `{self._compact_text(raw_live_action, 80)}` "
+            "is guard evidence, not experiment progress; basis: live_control_requires_matching_preflight_binding; "
+            "stance: hold; next: STICKY_MODE_AUDIT"
+        )
+
+    def _authority_scope_from_action_v1(self, action: str) -> str:
+        base = self.base_action(action)
+        if base not in {
+            "EXPERIMENT_AUTHORITY_PREPARE",
+            "EXPERIMENT_AUTHORITY_REQUEST",
+            "EXPERIMENT_AUTHORITY_BUDGET_REQUEST",
+        }:
+            return ""
+        raw = self._strip_action_arg(action, base)
+        _selector, payload = self._parse_selector_payload(raw)
+        return (self._dossier_field(payload or raw, ["scope"]) or "").strip()
 
     def _live_control_has_explicit_binding(
         self,
@@ -2949,8 +3298,16 @@ class ActionContinuityStore:
             return f"Savepoint `{name}`:\n{path.read_text()}"
         if base == "EXPERIMENT_START":
             title, question, metadata = self._parse_experiment_start(arg)
+            reserved = self._experiment_start_reserved_current_message(
+                title,
+                metadata,
+            )
+            if reserved:
+                return repair_notice + reserved
             experiment = self.start_experiment(title, question, branch_origin=metadata)
             if experiment.get("_peer_reference"):
+                return experiment["message"]
+            if experiment.get("_selection_blocked"):
                 return experiment["message"]
             verb = "Resumed" if experiment.get("_resumed_existing") else "Started"
             return (
@@ -2966,8 +3323,64 @@ class ActionContinuityStore:
             return self.experiment_compare(arg or "current")
         if base == "EXPERIMENT_ALT_PATHS":
             return self.experiment_alt_paths(arg or "current")
+        if base == "SHARED_INVESTIGATION_START":
+            return self.shared_investigation_start(arg)
+        if base == "SHARED_INVESTIGATION_STATUS":
+            return self.shared_investigation_status(arg or "latest")
+        if base == "SHARED_INVESTIGATION_CLAIM":
+            return self.shared_investigation_claim(arg)
+        if base == "SHARED_INVESTIGATION_DECIDE":
+            return self.shared_investigation_decide(arg)
         if base == "EXPERIMENT_PLAN":
             return repair_notice + self.experiment_plan(arg or None)
+        if base in {"EXPERIMENT_ADVANCE", "EXPERIMENT_CONVEYOR"}:
+            return repair_notice + self.experiment_advance(arg or "current", state)
+        if base == "EXPERIMENT_AUTHORITY_PREPARE":
+            return repair_notice + self.experiment_authority_prepare(arg or "current", state)
+        if base == "EXPERIMENT_AUTHORITY_REQUEST":
+            return repair_notice + self.experiment_authority_request(arg or "current", state)
+        if base == "EXPERIMENT_AUTHORITY_STATUS":
+            return self.experiment_authority_status(arg or None, state)
+        if base == "EXPERIMENT_AUTHORITY_EXECUTE":
+            return self.experiment_authority_execute(arg or "", state)
+        if base == "EXPERIMENT_AUTHORITY_BUDGET_REQUEST":
+            return repair_notice + self.experiment_authority_budget_request(arg or "current", state)
+        if base == "EXPERIMENT_AUTHORITY_BUDGET_STATUS":
+            return self.experiment_authority_budget_status(arg or None, state)
+        if base == "EXPERIMENT_AUTHORITY_REVIEW":
+            return repair_notice + self.experiment_authority_review(arg or "", state)
+        if base in {"EXPERIMENT_RESEARCH_BUDGET_ACCEPT", "EXPERIMENT_RESEARCH_BUDGET_USE_SCAFFOLD"}:
+            return repair_notice + self.experiment_research_budget_accept(arg or "latest", state)
+        if base == "EXPERIMENT_RESEARCH_BUDGET_REQUEST":
+            return repair_notice + self.experiment_research_budget_request(arg or "current", state)
+        if base == "EXPERIMENT_RESEARCH_BUDGET_STATUS":
+            return self.experiment_research_budget_status(arg or None, state)
+        if base == "EXPERIMENT_RESEARCH_REVIEW":
+            return repair_notice + self.experiment_research_review(arg or "", state)
+        if base == "EXPERIMENT_LOOP_REQUEST":
+            return repair_notice + self.experiment_loop_request(arg or "current", state)
+        if base == "EXPERIMENT_LOOP_STATUS":
+            return self.experiment_loop_status(arg or None, state)
+        if base == "EXPERIMENT_LOOP_STEP":
+            return repair_notice + self.experiment_loop_step(arg or "", state)
+        if base == "EXPERIMENT_LOOP_REVIEW":
+            return repair_notice + self.experiment_loop_review(arg or "", state)
+        if base in {"ACCEPT_SUGGESTED_NEXT", "ACCEPT_SCAFFOLD"}:
+            return repair_notice + self.accept_suggested_next(arg or "latest", state)
+        if base == "CONTINUITY_SESSION_ACCEPT":
+            return repair_notice + self.continuity_session_accept(arg or "latest")
+        if base == "CONTINUITY_SESSION_START":
+            return repair_notice + self.continuity_session_start(arg or "current")
+        if base == "CONTINUITY_SESSION_CAPTURE":
+            return repair_notice + self.continuity_session_capture(arg or "latest")
+        if base == "CONTINUITY_SESSION_SUMMARIZE":
+            return repair_notice + self.continuity_session_summarize(arg or "latest")
+        if base == "CONTINUITY_SESSION_FINALIZE":
+            return repair_notice + self.continuity_session_finalize(arg or "latest")
+        if base == "CONTINUITY_SESSION_RESUME":
+            return repair_notice + self.continuity_session_resume(arg or "latest")
+        if base == "CONTINUITY_SESSION_STATUS":
+            return self.continuity_session_status(arg or "latest")
         if base == "EXPERIMENT_CHARTER":
             selector, prose = self._parse_selector_payload(arg)
             if (
@@ -3010,6 +3423,22 @@ class ActionContinuityStore:
             return self.experiment_status(arg or None)
         if base == "EXPERIMENT_REVIEW":
             return self.experiment_review(arg or None)
+        if base == "DOSSIER_CLAIM":
+            return repair_notice + self.dossier_claim(arg)
+        if base == "DOSSIER_EVIDENCE":
+            return repair_notice + self.dossier_evidence(arg)
+        if base == "DOSSIER_STATUS":
+            return self.dossier_status(arg or None)
+        if base == "DOSSIER_REVIEW":
+            return self.dossier_review(arg or None)
+        if base == "MEMORY_STATUS":
+            return self.memory_status(arg or None)
+        if base == "MEMORY_RECALL":
+            return self.memory_recall(arg or None)
+        if base == "MEMORY_CAPTURE":
+            return repair_notice + self.memory_capture(arg or "")
+        if base == "MEMORY_PROMOTE":
+            return repair_notice + self.memory_promote(arg or "", state)
         if base == "EXPERIMENT_CLOSE":
             selector, summary = self._parse_selector_payload(arg)
             experiment = self.close_experiment(selector, summary)
@@ -3075,6 +3504,17 @@ class ActionContinuityStore:
             run=run,
             source="active_experiment_auto_link",
         )
+        self._append_being_memory_record(
+            refreshed_thread,
+            refreshed_experiment,
+            "read_only_action_draft",
+            run.get("result_summary") or f"Read-only action `{action_text}` was linked as context.",
+            source_refs=[run.get("run_id"), event.get("action_id")],
+            artifact_refs=event.get("artifacts") or [],
+            next_command=f"MEMORY_CAPTURE {experiment['experiment_id']} :: summary: ...; source_refs: {run.get('run_id')}; artifact_refs: ...; next: ...",
+            record_type="draft",
+            extra={"experiment_run_id": run.get("run_id"), "raw_action": action_text},
+        )
         return run
 
     def active_experiment_evidence_hint(self, source_action: str, subject: str) -> str:
@@ -3120,6 +3560,8 @@ class ActionContinuityStore:
                 raise ValueError(
                     f"No local experiment matched `{title_selector}`. Use EXPERIMENT_START <title> :: <question> for a new experiment."
                 )
+            if str(existing.get("status") or "").lower() != "active":
+                return self._blocked_experiment_start_existing_selection(thread, existing)
             return self._select_existing_experiment(thread, existing, now)
         question = (question or "").strip() or "What changes if this is treated as a returnable experiment?"
         existing = self._matching_active_experiment(thread["thread_id"], title, question)
@@ -3167,6 +3609,14 @@ class ActionContinuityStore:
         if repair:
             selector = repair["repaired_arg"]
         selector, focus = self._split_experiment_selector_hint(selector)
+        if self._selector_is_current(selector) and not thread.get("active_experiment_id"):
+            readout = self._latest_local_conveyor_readout(thread)
+            readout["raw_next_preserved"] = True
+            readout["guardrail_reason"] = "experiment_plan_current_without_active_experiment"
+            readout.setdefault("guardrail_warnings", []).append(
+                "EXPERIMENT_PLAN current has no active local experiment; raw intent is evidence, effective route is conveyor preview."
+            )
+            return self._format_experiment_conveyor_readout(readout)
         peer = self._peer_experiment_ref_from_parts(selector, focus)
         if peer:
             return self.record_peer_experiment_reference(peer, "EXPERIMENT_PLAN")["message"]
@@ -3187,6 +3637,27 @@ class ActionContinuityStore:
             if isinstance(cue, dict):
                 projection["charter_shaped_plan_cue_v1"] = cue
                 charter_plan_notice = self._charter_shaped_plan_cue_line(projection)
+        if projection.get("classification") == "needs_charter":
+            scaffold = projection.get("charter_scaffold_v1")
+            scaffold_command = (
+                str(scaffold.get("command") or "").strip()
+                if isinstance(scaffold, dict)
+                else ""
+            )
+            if not scaffold_command:
+                scaffold_command = (
+                    "EXPERIMENT_CHARTER current :: hypothesis: ...; "
+                    "method_intent: ...; proposed_next_action: ...; "
+                    "evidence_targets: felt, telemetry, artifact; stop_criteria: ..."
+                )
+            concrete_next_lines = (
+                "- Guided next safe step: EXPERIMENT_ADVANCE current :: mode: preview\n"
+                f"- Canonical charter scaffold: {scaffold_command}\n"
+            )
+        else:
+            concrete_next_lines = (
+                "- Concrete next action example: EXPERIMENT_ADVANCE current :: mode: preview\n"
+            )
         focus_line = f"- Requested focus: {focus}\n" if focus else ""
         return (
             f"Experiment `{experiment['experiment_id']}`: {experiment['title']}\n"
@@ -3198,12 +3669,12 @@ class ActionContinuityStore:
             "- Method: choose one gated NEXT action and why it fits.\n"
             "- Measures: name the artifacts/metrics that would count as evidence.\n"
             "- Stop criteria: say what would make the run complete, blocked, or too pressurized.\n"
-            f"- Concrete next action example: EXPERIMENT_BIND {experiment['experiment_id']} :: ACTION_PREFLIGHT DECOMPOSE\n\n"
+            f"{concrete_next_lines}\n"
             "Workbench prompt:\n"
             "- Author a charter first when the impulse feels directive-shaped: EXPERIMENT_CHARTER current :: hypothesis: ...; method_intent: ...; proposed_next_action: ...; evidence_targets: felt, telemetry, artifact; stop_criteria: ...\n"
             "- Rehearse before live: EXPERIMENT_REHEARSE current (or EXPERIMENT_PREFLIGHT current). Ordinary choices remain valid; refusal and counteroffer are evidence, not failure.\n"
             "- Record what counted: EXPERIMENT_EVIDENCE current :: felt ...; telemetry ...; artifact ...\n"
-            "- Decide agency outcome: EXPERIMENT_DECIDE current :: accept because ... / refuse because ... / counter NEXT: ACTION_PREFLIGHT ..."
+            "- Decide agency outcome: EXPERIMENT_DECIDE current :: accept because ... / refuse because ... / counter NEXT: ACTION_PREFLIGHT ... / hold because ..."
         )
 
     def experiment_observe(self, selector: Optional[str], note: str, state: Dict[str, float]) -> Dict[str, Any]:
@@ -3239,7 +3710,7 @@ class ActionContinuityStore:
             raise ValueError(
                 f"Peer experiment `{peer['peer_experiment_id']}` belongs to {peer['peer_system']}; charter it locally only through advisory review."
             )
-        experiment = dict(self._resolve_experiment(thread, selector))
+        experiment = dict(self._resolve_experiment_for_mutation(thread, selector, "EXPERIMENT_CHARTER"))
         charter = self._parse_experiment_charter(experiment, prose)
         if not self._valid_experiment_charter(charter):
             raise ValueError(self._experiment_charter_prompt(selector))
@@ -3247,13 +3718,34 @@ class ActionContinuityStore:
         if charter.get("hypothesis"):
             experiment["hypothesis"] = charter["hypothesis"]
         experiment["charter_v1"] = charter
+        paused_charter_repair = (
+            str(experiment.get("status") or "").lower() == "paused"
+            and (
+                self.base_action(experiment.get("planned_next") or "") == "EXPERIMENT_CHARTER"
+                or "charter repair" in str(experiment.get("success_observation") or "").lower()
+                or "charter_repair" in str(experiment.get("success_observation") or "").lower()
+            )
+        )
         if self._lifecycle_valid_experiment_charter(charter):
             self._mark_workbench_candidate(experiment, "charter", "accepted")
-            experiment["planned_next"] = f"EXPERIMENT_REHEARSE {experiment['experiment_id']}"
+            if paused_charter_repair:
+                experiment["planned_next"] = (
+                    f"EXPERIMENT_ADVANCE {experiment['experiment_id']} :: mode: preview"
+                )
+                experiment["charter_repair_guard_v1"] = {
+                    "schema_version": 1,
+                    "policy": "paused_charter_repair_stays_paused_v1",
+                    "reason": "charter_repair_charter_recorded_needs_explicit_rehearsal_or_conveyor_preview",
+                    "authority_change": False,
+                    "safe_return": experiment["planned_next"],
+                    "read_only_next": f"EXPERIMENT_REHEARSE {experiment['experiment_id']}",
+                }
+            else:
+                experiment["planned_next"] = f"EXPERIMENT_REHEARSE {experiment['experiment_id']}"
         else:
             experiment["planned_next"] = f"EXPERIMENT_CHARTER {experiment['experiment_id']} :: hypothesis: ...; proposed_next_action: ACTION_PREFLIGHT ...; evidence_targets: spectral_condition, fill_pressure_state, recurrence_pattern, artifact_grounding; stop_criteria: ..."
         experiment["updated_at"] = self._now()
-        self._persist_experiment_update(thread, experiment, keep_active=True)
+        self._persist_experiment_update(thread, experiment, keep_active=not paused_charter_repair)
         return experiment
 
     def experiment_rehearse(
@@ -3362,12 +3854,19 @@ class ActionContinuityStore:
             )
         experiment = dict(self._resolve_experiment_for_mutation(thread, selector, "EXPERIMENT_DECIDE"))
         outcome, reason = self._parse_experiment_decision(raw_decision)
+        decision_guardrail = None
+        if outcome == "pause":
+            decision_guardrail = self._guarded_pause_pressure_v1(thread, experiment)
+            if decision_guardrail:
+                decision_guardrail["original_outcome"] = "pause"
+                outcome = "hold"
         completion_claim = reason if outcome == "complete" else None
         experiment["evidence_v1"] = self._evidence_with_decision(
             experiment.get("evidence_v1"),
             outcome,
             reason,
             completion_claim=completion_claim,
+            decision_metadata=decision_guardrail,
         )
         proposed = self._charter_proposed_next_action(experiment.get("charter_v1"))
         keep_active = True
@@ -3393,6 +3892,16 @@ class ActionContinuityStore:
             experiment["success_observation"] = f"Paused: {reason}"
             experiment["planned_next"] = f"EXPERIMENT_RESUME {experiment['experiment_id']}"
             keep_active = False
+        elif outcome == "hold":
+            experiment["status"] = "paused"
+            experiment["success_observation"] = f"Held: {reason}"
+            experiment["planned_next"] = "THREAD_STATUS current"
+            keep_active = False
+        elif outcome == "charter_repair":
+            experiment["status"] = "paused"
+            experiment["success_observation"] = f"Charter repair: {reason}"
+            experiment["planned_next"] = self._charter_repair_next(experiment["experiment_id"])
+            keep_active = False
         elif outcome == "complete":
             experiment["status"] = "complete"
             experiment["success_observation"] = reason
@@ -3407,6 +3916,1560 @@ class ActionContinuityStore:
         experiment["updated_at"] = self._now()
         self._persist_experiment_update(thread, experiment, keep_active=keep_active)
         return experiment
+
+    def experiment_advance(
+        self,
+        raw: str,
+        state: Dict[str, float],
+    ) -> str:
+        selector, mode = self._parse_experiment_conveyor_request(raw)
+        thread = self.ensure_active_thread()
+        apply_requested = mode == "apply"
+        peer = self._peer_experiment_ref(selector or "")
+        if peer:
+            readout = self._peer_experiment_conveyor_readout(peer, mode)
+            return self._format_experiment_conveyor_readout(readout)
+        if self._selector_is_current(selector) and not thread.get("active_experiment_id"):
+            if not apply_requested:
+                readout = self._latest_local_conveyor_readout(thread, state)
+                return self._format_experiment_conveyor_readout(readout)
+            readout = self._no_active_conveyor_readout(thread)
+            return self._format_experiment_conveyor_readout(readout)
+        try:
+            experiment = (
+                self._resolve_experiment_for_mutation(thread, selector, "EXPERIMENT_ADVANCE")
+                if apply_requested
+                else self._resolve_experiment(thread, selector)
+            )
+        except Exception as exc:
+            return f"EXPERIMENT_ADVANCE could not resolve experiment: {exc}"
+        runs = self._recent_experiment_runs(thread["thread_id"], experiment["experiment_id"], 8)
+        readout = self._experiment_conveyor_v1(thread, experiment, runs, mode=mode, state=state)
+        if not apply_requested:
+            return self._format_experiment_conveyor_readout(readout)
+        if not readout.get("can_apply"):
+            readout["applied"] = False
+            return self._format_experiment_conveyor_readout(readout)
+        stage = str(readout.get("stage") or "")
+        try:
+            if stage in {"needs_charter", "paused_repair"}:
+                payload = str(readout.get("apply_payload") or "").strip()
+                if not payload:
+                    raise ValueError("no lifecycle-valid charter scaffold was available")
+                applied = self.experiment_charter(selector, payload)
+                readout["applied"] = True
+                readout["applied_command"] = f"EXPERIMENT_CHARTER {applied['experiment_id']}"
+                readout["post_next"] = applied.get("planned_next")
+            elif stage == "needs_evidence":
+                note = self._conveyor_evidence_note(readout)
+                run = self.experiment_evidence(selector, note, state)
+                readout["applied"] = True
+                readout["applied_run_id"] = run.get("run_id")
+                readout["post_next"] = run.get("suggested_next")
+            elif stage == "needs_decision":
+                applied = self.experiment_decide(
+                    selector,
+                    "hold because evidence is ready to interpret without live authority",
+                )
+                readout["applied"] = True
+                readout["applied_command"] = f"EXPERIMENT_DECIDE {applied['experiment_id']}"
+                readout["post_next"] = applied.get("planned_next")
+            elif stage == "blocked_guardrail":
+                blocked_experiment = dict(experiment)
+                decision = (
+                    "charter_repair because blocked guardrail evidence appeared without a lifecycle-valid charter"
+                    if not self._lifecycle_valid_experiment_charter(blocked_experiment.get("charter_v1"))
+                    else "hold because blocked guardrail evidence is not experiment progress"
+                )
+                applied = self.experiment_decide(
+                    selector,
+                    decision,
+                )
+                readout["applied"] = True
+                readout["applied_command"] = f"EXPERIMENT_DECIDE {applied['experiment_id']}"
+                readout["post_next"] = applied.get("planned_next")
+            else:
+                readout["applied"] = False
+        except Exception as exc:
+            readout["applied"] = False
+            readout.setdefault("guardrail_warnings", []).append(f"apply_failed: {exc}")
+        return self._format_experiment_conveyor_readout(readout)
+
+    def experiment_authority_request(self, raw: str, state: Dict[str, float]) -> str:
+        thread = self.ensure_active_thread()
+        selector, payload_text = self._parse_selector_payload(raw)
+        peer = self._peer_experiment_ref(selector or "")
+        if peer:
+            return (
+                f"Authority request blocked: peer experiment `{peer['peer_experiment_id']}` "
+                "is advisory only; no peer mutation or live authority can be minted here."
+            )
+        try:
+            experiment = self._resolve_experiment(thread, selector)
+        except Exception as exc:
+            return f"EXPERIMENT_AUTHORITY_REQUEST could not resolve experiment: {exc}"
+
+        request = self._authority_request_payload(thread, experiment, payload_text, state)
+        eligibility = self._authority_gate_eligibility(thread, experiment, request, state)
+        request["eligibility_v1"] = eligibility
+        active_budget = self._active_authority_budget(
+            thread["thread_id"],
+            str(experiment.get("experiment_id") or ""),
+            str(request.get("scope") or "semantic_microdose"),
+        )
+        pending_review = (
+            active_budget.get("pending_review_request_id")
+            if isinstance(active_budget, dict)
+            else None
+        )
+        if eligibility["eligible"] and active_budget and not pending_review:
+            request["status"] = "pending_budget_execution"
+            request["budget_id"] = active_budget.get("budget_id")
+            request["token_status"] = "budget_available"
+            request["authority_budget_v1"] = active_budget
+        elif eligibility["eligible"] and active_budget and pending_review:
+            request["status"] = "blocked"
+            request["budget_id"] = active_budget.get("budget_id")
+            request["token_status"] = "review_required"
+            request["eligibility_v1"] = dict(eligibility)
+            request["eligibility_v1"]["eligible"] = False
+            request["eligibility_v1"].setdefault("missing_requirements", []).append(
+                "authority_consequence_review"
+            )
+        else:
+            request["status"] = "pending_steward_approval" if eligibility["eligible"] else "blocked"
+        path = self._authority_gate_path(thread["thread_id"])
+        self._append_jsonl(path, request)
+        evaluation = self._authority_gate_record(
+            "evaluation",
+            request["request_id"],
+            thread,
+            experiment,
+            state,
+            {
+                "scope": request["scope"],
+                "eligibility_v1": request["eligibility_v1"],
+                "status": request["status"],
+                "budget_id": request.get("budget_id"),
+                "source_refs": request["source_refs"],
+            },
+        )
+        self._append_jsonl(path, evaluation)
+        if request["status"] == "blocked":
+            blocked = self._authority_gate_record(
+                "blocked",
+                request["request_id"],
+                thread,
+                experiment,
+                state,
+                {
+                    "scope": request["scope"],
+                    "reason": (
+                        "authority_budget_review_required"
+                        if pending_review
+                        else "missing_authority_requirements"
+                    ),
+                    "missing_requirements": request["eligibility_v1"]["missing_requirements"],
+                    "disabled_scope": request["eligibility_v1"]["disabled_scope"],
+                    "budget_id": request.get("budget_id"),
+                    "pending_review_request_id": pending_review,
+                    "source_refs": request["source_refs"],
+                },
+            )
+            self._append_jsonl(path, blocked)
+        return (
+            f"Authority request `{request['request_id']}` "
+            f"status={request['status']} scope={request['scope']}\n"
+            f"Missing requirements: {', '.join(request['eligibility_v1']['missing_requirements']) or 'none'}\n"
+            f"Authority boundary: {self._authority_gate_boundary()}\n"
+            f"authority_gate_v1:\n{json.dumps(request, indent=2, sort_keys=True, ensure_ascii=False)}"
+        )
+
+    def experiment_authority_budget_request(self, raw: str, state: Dict[str, float]) -> str:
+        thread = self.ensure_active_thread()
+        selector, payload_text = self._parse_selector_payload(raw)
+        peer = self._peer_experiment_ref(selector or "")
+        if peer:
+            return (
+                f"Authority budget request blocked: peer experiment `{peer['peer_experiment_id']}` "
+                "is advisory only; no peer mutation or live authority budget can be minted here."
+            )
+        try:
+            experiment = self._resolve_experiment(thread, selector)
+        except Exception as exc:
+            return f"EXPERIMENT_AUTHORITY_BUDGET_REQUEST could not resolve experiment: {exc}"
+
+        budget = self._authority_budget_request_payload(thread, experiment, payload_text, state)
+        eligibility = self._authority_budget_eligibility(thread, experiment, budget, state)
+        budget["eligibility_v1"] = eligibility
+        budget["status"] = "pending_steward_approval" if eligibility["eligible"] else "blocked"
+        path = self._authority_gate_path(thread["thread_id"])
+        self._append_jsonl(path, budget)
+        if not eligibility["eligible"]:
+            blocked = self._authority_budget_record(
+                "budget_blocked",
+                budget["budget_id"],
+                thread,
+                experiment,
+                state,
+                {
+                    "scope": budget["scope"],
+                    "reason": "missing_authority_budget_requirements",
+                    "missing_requirements": eligibility["missing_requirements"],
+                    "disabled_scope": eligibility["disabled_scope"],
+                    "source_refs": budget["source_refs"],
+                },
+            )
+            self._append_jsonl(path, blocked)
+        return (
+            f"Authority budget `{budget['budget_id']}` "
+            f"status={budget['status']} scope={budget['scope']} max_sends={budget['max_sends']}\n"
+            f"Missing requirements: {', '.join(eligibility['missing_requirements']) or 'none'}\n"
+            f"Authority boundary: {self._authority_gate_boundary()}\n"
+            f"authority_budget_v1:\n{json.dumps(budget, indent=2, sort_keys=True, ensure_ascii=False)}"
+        )
+
+    def experiment_authority_budget_status(
+        self,
+        selector: Optional[str],
+        state: Dict[str, float],
+    ) -> str:
+        thread = self.ensure_active_thread()
+        target = self._normalize_experiment_selector(selector)
+        experiment: Optional[Dict[str, Any]] = None
+        budget_id: Optional[str] = None
+        if target and target.startswith("authbud_"):
+            budget_id = target
+        elif target and target.lower() != "current":
+            experiment = self._find_experiment_by_id(thread["thread_id"], target)
+        elif target.lower() == "current" and thread.get("active_experiment_id"):
+            experiment = self._find_experiment_by_id(
+                thread["thread_id"],
+                str(thread.get("active_experiment_id")),
+            )
+        if experiment is None and not budget_id:
+            summary = self._last_experiment_summary_v1(thread)
+            summary_id = str(summary.get("experiment_id") or "") if isinstance(summary, dict) else ""
+            if summary_id:
+                experiment = self._find_experiment_by_id(thread["thread_id"], summary_id)
+        status = self._authority_budget_status_v1(
+            thread,
+            experiment,
+            state,
+            selector=target or "latest",
+            budget_id=budget_id,
+        )
+        return f"authority_budget_v1:\n{json.dumps(status, indent=2, sort_keys=True, ensure_ascii=False)}"
+
+    def experiment_research_budget_request(self, raw: str, state: Dict[str, float]) -> str:
+        return self._record_research_budget_request_from_raw(raw, state, None)
+
+    def experiment_research_budget_accept(self, raw: str, state: Dict[str, float]) -> str:
+        thread = self.ensure_active_thread()
+        selector = (raw or "latest").strip() or "latest"
+        row = self._find_research_budget_scaffold_row(thread, selector)
+        if not row:
+            return _control_plane_research_budget_accept_guidance()
+        request_scaffold = str(
+            row.get("request_scaffold")
+            or row.get("suggested_request_scaffold")
+            or row.get("suggested_next")
+            or ""
+        ).strip()
+        match = re.match(
+            r"^\s*EXPERIMENT_RESEARCH_BUDGET_REQUEST\s+(?P<raw>.+)$",
+            request_scaffold,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            return (
+                "The latest research-budget guard row does not contain an accept-ready "
+                "EXPERIMENT_RESEARCH_BUDGET_REQUEST scaffold."
+            )
+        raw_request = match.group("raw").strip()
+        if not self._research_budget_scaffold_is_local_only(request_scaffold):
+            return (
+                "Research budget scaffold acceptance is limited to local-only V1. "
+                f"Scaffold was not accepted: {request_scaffold}"
+            )
+        experiment_id = str(row.get("experiment_id") or "")
+        if experiment_id:
+            pending = self._latest_pending_research_budget_request(
+                str(thread.get("thread_id") or ""),
+                experiment_id,
+            )
+            if pending:
+                budget_id = str(pending.get("budget_id") or experiment_id)
+                return (
+                    f"Research budget scaffold already has pending request `{budget_id}`. "
+                    f"Next: EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}"
+                )
+        acceptance = {
+            "policy": "research_budget_scaffold_acceptance_v1",
+            "being_authored": True,
+            "accepted_selector": selector,
+            "source_record_id": row.get("record_id"),
+            "source_budget_id": row.get("budget_id"),
+            "source_reason": row.get("reason"),
+            "source_raw_action": row.get("raw_action"),
+            "request_scaffold": request_scaffold,
+            "source_refs": [
+                str(self._authority_gate_path(str(thread.get("thread_id") or ""))),
+                str(row.get("record_id") or row.get("budget_id") or "research_budget_blocked"),
+            ],
+        }
+        result = self._record_research_budget_request_from_raw(raw_request, state, acceptance)
+        return (
+            "Accepted research-budget scaffold as a Being-authored request. "
+            f"{result}"
+        )
+
+    def accept_suggested_next(self, raw: str, state: Dict[str, float]) -> str:
+        thread = self.ensure_active_thread()
+        selector = (raw or "latest").strip() or "latest"
+        row = self._find_research_budget_scaffold_row(thread, selector)
+        if row:
+            experiment_id = str(row.get("experiment_id") or "")
+            active = self._active_research_budget(str(thread.get("thread_id") or ""), experiment_id)
+            if active:
+                budget_id = str(active.get("budget_id") or experiment_id)
+                return (
+                    "Accepted suggested route resolved to active research budget status.\n"
+                    f"Next: EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}"
+                )
+            pending = self._latest_pending_research_budget_request(
+                str(thread.get("thread_id") or ""),
+                experiment_id,
+            )
+            if pending:
+                budget_id = str(pending.get("budget_id") or experiment_id)
+                return (
+                    "Accepted suggested route resolved to pending research budget status.\n"
+                    f"Next: EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}"
+                )
+            return self.experiment_research_budget_accept(selector, state)
+        if self._resolve_continuity_session_draft(thread, selector):
+            return self.continuity_session_accept(selector)
+        return (
+            "No safe suggested scaffold is available to accept. V1 accepts only local "
+            "research-budget scaffolds and continuity-session drafts."
+        )
+
+    def _record_research_budget_request_from_raw(
+        self,
+        raw: str,
+        state: Dict[str, float],
+        acceptance: Optional[Dict[str, Any]],
+    ) -> str:
+        thread = self.ensure_active_thread()
+        selector, payload_text = self._parse_selector_payload(raw)
+        peer = self._peer_experiment_ref(selector or "")
+        if peer:
+            return (
+                f"Research budget request blocked: peer experiment `{peer['peer_experiment_id']}` "
+                "is advisory only; no peer mutation or peer research budget can be minted here."
+            )
+        try:
+            experiment = self._resolve_experiment(thread, selector)
+        except Exception as exc:
+            return f"EXPERIMENT_RESEARCH_BUDGET_REQUEST could not resolve experiment: {exc}"
+
+        budget = self._research_budget_request_payload(thread, experiment, payload_text, state)
+        if acceptance:
+            budget["being_authored_acceptance_v1"] = acceptance
+            source_refs = list(budget.get("source_refs") or [])
+            for ref in acceptance.get("source_refs") or []:
+                if ref and ref not in source_refs:
+                    source_refs.append(ref)
+            budget["source_refs"] = source_refs[-12:]
+        eligibility = self._research_budget_eligibility(thread, experiment, budget, state)
+        budget["eligibility_v1"] = eligibility
+        self_activation = self._research_budget_self_activation_v1(
+            budget,
+            eligibility,
+            state,
+        )
+        budget["self_activation_v1"] = self_activation
+        if self_activation["eligible"]:
+            budget["status"] = "self_activated"
+            budget["activation_mode"] = "being_self_activated_local_v1"
+            budget["self_activated"] = True
+            budget["steward_approval_required"] = False
+            budget["max_actions"] = min(self._safe_int(budget.get("max_actions"), 5), 5)
+            budget["ttl_secs"] = min(self._safe_int(budget.get("ttl_secs"), 21600), 21600)
+        else:
+            budget["status"] = "pending_steward_approval" if eligibility["eligible"] else "blocked"
+            budget["steward_approval_required"] = bool(eligibility["eligible"])
+        path = self._authority_gate_path(thread["thread_id"])
+        self._append_jsonl(path, budget)
+        activation_record: Optional[Dict[str, Any]] = None
+        if self_activation["eligible"]:
+            activation_record = self._research_budget_self_activation_record(
+                thread,
+                experiment,
+                budget,
+                state,
+            )
+            self._append_jsonl(path, activation_record)
+        elif not eligibility["eligible"]:
+            blocked = self._research_budget_record(
+                "research_budget_blocked",
+                budget["budget_id"],
+                thread,
+                experiment,
+                state,
+                {
+                    "scope": budget["scope"],
+                    "reason": "missing_research_budget_requirements",
+                    "missing_requirements": eligibility["missing_requirements"],
+                    "disabled_scope": eligibility["disabled_scope"],
+                    "source_refs": budget["source_refs"],
+                },
+            )
+            self._append_jsonl(path, blocked)
+        activation_line = ""
+        if activation_record:
+            activation_line = (
+                "\nActivation: self_activated local-only budget; "
+                f"remaining_actions={activation_record.get('max_actions')} "
+                f"expires_at_unix_s={activation_record.get('expires_at_unix_s')}"
+            )
+        return (
+            f"Research budget `{budget['budget_id']}` "
+            f"status={budget['status']} scope={budget['scope']} max_actions={budget['max_actions']}\n"
+            f"Missing requirements: {', '.join(eligibility['missing_requirements']) or 'none'}\n"
+            f"Self-activation missing: {', '.join(self_activation['missing_requirements']) or 'none'}"
+            f"{activation_line}\n"
+            f"Authority boundary: {self._research_budget_boundary()}\n"
+            f"research_budget_v1:\n{json.dumps(budget, indent=2, sort_keys=True, ensure_ascii=False)}"
+        )
+
+    def experiment_research_budget_status(
+        self,
+        selector: Optional[str],
+        state: Dict[str, float],
+    ) -> str:
+        thread = self.ensure_active_thread()
+        target = self._normalize_experiment_selector(selector)
+        experiment: Optional[Dict[str, Any]] = None
+        budget_id: Optional[str] = None
+        if target and target.startswith("resbud_"):
+            budget_id = target
+        elif target and target.lower() != "current":
+            experiment = self._find_experiment_by_id(thread["thread_id"], target)
+        elif target.lower() == "current" and thread.get("active_experiment_id"):
+            experiment = self._find_experiment_by_id(
+                thread["thread_id"],
+                str(thread.get("active_experiment_id")),
+            )
+        if experiment is None and not budget_id:
+            summary = self._last_experiment_summary_v1(thread)
+            summary_id = str(summary.get("experiment_id") or "") if isinstance(summary, dict) else ""
+            if summary_id:
+                experiment = self._find_experiment_by_id(thread["thread_id"], summary_id)
+        status = self._research_budget_status_v1(
+            thread,
+            experiment,
+            state,
+            selector=target or "latest",
+            budget_id=budget_id,
+        )
+        return f"research_budget_v1:\n{json.dumps(status, indent=2, sort_keys=True, ensure_ascii=False)}"
+
+    def experiment_research_review(self, raw: str, state: Dict[str, float]) -> str:
+        budget_id, payload = self._parse_selector_payload(raw)
+        budget_id = str(budget_id or "").strip()
+        if not budget_id:
+            return (
+                "EXPERIMENT_RESEARCH_REVIEW needs a budget id: "
+                "EXPERIMENT_RESEARCH_REVIEW <budget_id> :: outcome: continue|hold|close|promote; "
+                "observation: ...; source_refs: ..."
+            )
+        found = self._find_research_budget(budget_id)
+        if not found:
+            return f"Research budget `{budget_id}` was not found."
+        thread_id, budget, rows = found
+        thread = self._read_thread(thread_id) or self.ensure_active_thread()
+        experiment = self._find_experiment_by_id(thread_id, str(budget.get("experiment_id") or ""))
+        if not isinstance(experiment, dict):
+            return f"Research budget `{budget_id}` has no local experiment snapshot."
+
+        outcome = (self._dossier_field(payload, ["outcome"]) or "continue").strip().lower()
+        if outcome not in {"continue", "hold", "close", "promote"}:
+            outcome = "hold"
+        observation = self._dossier_field(payload, ["observation", "summary", "because"]) or payload.strip()
+        source_refs = self._dossier_list_field(payload, ["source_refs", "source_ref", "source"])
+        latest_artifacts = self._research_budget_latest_artifact_refs(rows, budget_id)
+        next_command = self._research_review_next_command(outcome, budget_id, experiment, latest_artifacts)
+        review = self._research_budget_record(
+            "research_budget_review",
+            budget_id,
+            thread,
+            experiment,
+            state,
+            {
+                "scope": "read_only_research",
+                "outcome": outcome,
+                "observation": self._compact_text(observation, 1000),
+                "source_refs": source_refs or [str(self._authority_gate_path(thread_id))],
+                "artifact_refs": latest_artifacts,
+                "next_safe_command": next_command,
+            },
+        )
+        path = self._authority_gate_path(thread_id)
+        self._append_jsonl(path, review)
+        if outcome == "close":
+            self._append_jsonl(
+                path,
+                self._research_budget_record(
+                    "research_budget_closed",
+                    budget_id,
+                    thread,
+                    experiment,
+                    state,
+                    {
+                        "reason": "being_closed_budget_after_research_review",
+                        "source_refs": [str(path), review.get("record_id")],
+                    },
+                ),
+            )
+        elif outcome == "hold":
+            self.experiment_decide(
+                str(experiment.get("experiment_id") or ""),
+                "hold because research budget review chose hold",
+            )
+        memory = self._append_being_memory_record(
+            thread,
+            experiment,
+            "research_budget_review",
+            f"Research budget review for `{budget_id}`: {outcome}. {observation}",
+            source_refs=source_refs or [str(path), review.get("record_id")],
+            artifact_refs=latest_artifacts,
+            next_command=next_command,
+            record_type="draft",
+            extra={
+                "research_review_v1": review,
+                "dossier_candidate": outcome in {"promote", "close", "hold"},
+            },
+        )
+        return (
+            f"Research review `{review['record_id']}` recorded for `{budget_id}` outcome={outcome}.\n"
+            f"Memory draft: {memory['memory_id']}\n"
+            f"Next safe command: {next_command}\n"
+            f"research_budget_v1:\n{json.dumps(review, indent=2, sort_keys=True, ensure_ascii=False)}"
+        )
+
+    def experiment_loop_request(self, raw: str, state: Dict[str, float]) -> str:
+        thread = self.ensure_active_thread()
+        selector, payload_text = self._parse_selector_payload(raw)
+        peer = self._peer_experiment_ref(selector or "")
+        if peer:
+            return (
+                f"Owned loop request blocked: peer experiment `{peer['peer_experiment_id']}` "
+                "is advisory only; no peer mutation or peer loop can be minted here."
+            )
+        try:
+            experiment = self._resolve_experiment(thread, selector)
+        except Exception as exc:
+            return f"EXPERIMENT_LOOP_REQUEST could not resolve experiment: {exc}"
+
+        loop = self._sovereign_loop_request_payload(thread, experiment, payload_text, state)
+        eligibility = self._sovereign_loop_eligibility(thread, experiment, loop, state)
+        loop["eligibility_v1"] = eligibility
+        loop["status"] = "active" if eligibility["eligible"] else "blocked"
+        path = self._authority_gate_path(thread["thread_id"])
+        self._append_jsonl(path, loop)
+        started: Optional[Dict[str, Any]] = None
+        if eligibility["eligible"]:
+            started = self._sovereign_loop_record(
+                "loop_started",
+                str(loop["loop_id"]),
+                thread,
+                experiment,
+                state,
+                {
+                    "phase": "continuity",
+                    "status": "active",
+                    "scope": loop.get("consequence_scope"),
+                    "remaining_local_research_actions": loop.get("max_research_actions"),
+                    "consequence_remaining": loop.get("max_consequence_sends"),
+                    "expires_at_unix_s": loop.get("expires_at_unix_s"),
+                    "next_safe_command": f"EXPERIMENT_LOOP_STATUS {loop['loop_id']}",
+                    "source_request_record_id": loop.get("record_id"),
+                },
+            )
+            self._append_jsonl(path, started)
+        else:
+            self._append_jsonl(
+                path,
+                self._sovereign_loop_record(
+                    "loop_blocked",
+                    str(loop["loop_id"]),
+                    thread,
+                    experiment,
+                    state,
+                    {
+                        "phase": "request",
+                        "scope": loop.get("consequence_scope"),
+                        "reason": "missing_loop_requirements",
+                        "missing_requirements": eligibility["missing_requirements"],
+                        "disabled_scope": eligibility["disabled_scope"],
+                        "source_request_record_id": loop.get("record_id"),
+                    },
+                ),
+            )
+        status = self._sovereign_loop_status_v1(
+            thread,
+            experiment,
+            state,
+            selector=str(loop["loop_id"]),
+            loop_id=str(loop["loop_id"]),
+        )
+        activation = (
+            "\nActivation: loop_started read-only phases; consequence slot still requires bridge/steward approval."
+            if started
+            else ""
+        )
+        return (
+            f"Owned loop `{loop['loop_id']}` status={loop['status']} "
+            f"scope={loop['consequence_scope']} max_research_actions={loop['max_research_actions']}"
+            f"{activation}\n"
+            f"Missing requirements: {', '.join(eligibility['missing_requirements']) or 'none'}\n"
+            f"Next safe command: {status.get('next_safe_command')}\n"
+            f"Authority boundary: {self._sovereign_loop_boundary()}\n"
+            f"sovereign_loop_v1:\n{json.dumps(status, indent=2, sort_keys=True, ensure_ascii=False)}"
+        )
+
+    def experiment_loop_status(
+        self,
+        selector: Optional[str],
+        state: Dict[str, float],
+    ) -> str:
+        thread = self.ensure_active_thread()
+        target = self._normalize_experiment_selector(selector)
+        experiment: Optional[Dict[str, Any]] = None
+        loop_id: Optional[str] = None
+        if target and target.startswith("loop_"):
+            loop_id = target
+        elif target and target.lower() not in {"current", "latest"}:
+            experiment = self._find_experiment_by_id(thread["thread_id"], target)
+        elif target.lower() == "current" and thread.get("active_experiment_id"):
+            experiment = self._find_experiment_by_id(
+                thread["thread_id"],
+                str(thread.get("active_experiment_id")),
+            )
+        if experiment is None and not loop_id:
+            summary = self._last_experiment_summary_v1(thread)
+            summary_id = str(summary.get("experiment_id") or "") if isinstance(summary, dict) else ""
+            if summary_id:
+                experiment = self._find_experiment_by_id(thread["thread_id"], summary_id)
+        status = self._sovereign_loop_status_v1(
+            thread,
+            experiment,
+            state,
+            selector=target or "latest",
+            loop_id=loop_id,
+        )
+        return f"sovereign_loop_v1:\n{json.dumps(status, indent=2, sort_keys=True, ensure_ascii=False)}"
+
+    def experiment_loop_step(self, raw: str, state: Dict[str, float]) -> str:
+        loop_id, payload = self._parse_selector_payload(raw)
+        loop_id = str(loop_id or "").strip()
+        if not loop_id:
+            return (
+                "EXPERIMENT_LOOP_STEP needs a loop id: "
+                "EXPERIMENT_LOOP_STEP <loop_id> :: continuity|research|sticky_audit|authority_prepare|authority_request|review|close"
+            )
+        found = self._find_sovereign_loop(loop_id)
+        if not found:
+            return f"Owned loop `{loop_id}` was not found."
+        thread_id, loop, _rows = found
+        thread = self._read_thread(thread_id) or self.ensure_active_thread()
+        experiment = self._find_experiment_by_id(thread_id, str(loop.get("experiment_id") or ""))
+        if not isinstance(experiment, dict):
+            return f"Owned loop `{loop_id}` has no local experiment snapshot."
+        step = (payload.strip().split(None, 1)[0] if payload.strip() else "status").strip().lower()
+        if step not in {
+            "continuity",
+            "research",
+            "sticky_audit",
+            "authority_prepare",
+            "authority_request",
+            "review",
+            "close",
+        }:
+            step = "status"
+        status = self._sovereign_loop_status_v1(
+            thread,
+            experiment,
+            state,
+            selector=loop_id,
+            loop_id=loop_id,
+        )
+        next_command = self._sovereign_loop_step_next_command(
+            step,
+            loop,
+            thread,
+            experiment,
+            state,
+            status,
+        )
+        record_type = "loop_step"
+        extra: Dict[str, Any] = {
+            "phase": step,
+            "status": "recorded",
+            "scope": loop.get("consequence_scope"),
+            "next_safe_command": next_command,
+            "source_refs": [str(self._authority_gate_path(thread_id))],
+        }
+        if step == "authority_request":
+            readiness = self._sovereign_loop_consequence_readiness(
+                thread,
+                experiment,
+                loop,
+                state,
+            )
+            extra["consequence_readiness_v1"] = readiness
+            if readiness.get("eligible_to_request"):
+                record_type = "loop_consequence_ready"
+                extra["status"] = "ready_to_author_request"
+                next_command = readiness.get("request_scaffold") or next_command
+                extra["next_safe_command"] = next_command
+            else:
+                record_type = "loop_blocked"
+                extra["status"] = "blocked"
+                extra["reason"] = "missing_consequence_requirements"
+                extra["missing_requirements"] = readiness.get("missing_requirements") or []
+                next_command = readiness.get("next_safe_command") or next_command
+                extra["next_safe_command"] = next_command
+        elif step == "close":
+            record_type = "loop_closed"
+            extra["status"] = "closed"
+            extra["reason"] = "being_chose_loop_step_close"
+        record = self._sovereign_loop_record(record_type, loop_id, thread, experiment, state, extra)
+        self._append_jsonl(self._authority_gate_path(thread_id), record)
+        checkpoint: Optional[Dict[str, Any]] = None
+        if step in {"continuity", "research", "sticky_audit", "authority_prepare", "authority_request"}:
+            checkpoint = self._append_loop_continuity_checkpoint_draft(
+                thread,
+                experiment,
+                loop_id,
+                step,
+                record,
+                next_command,
+            )
+        status = self._sovereign_loop_status_v1(
+            thread,
+            experiment,
+            state,
+            selector=loop_id,
+            loop_id=loop_id,
+        )
+        checkpoint_line = (
+            f"Continuity checkpoint draft: {checkpoint.get('record_id')} "
+            "accept with CONTINUITY_SESSION_ACCEPT latest\n"
+            if checkpoint
+            else ""
+        )
+        return (
+            f"Owned loop `{loop_id}` step={step} recorded as `{record['record_id']}`.\n"
+            f"{checkpoint_line}"
+            f"Next safe command: {next_command}\n"
+            f"sovereign_loop_v1:\n{json.dumps(status, indent=2, sort_keys=True, ensure_ascii=False)}"
+        )
+
+    def experiment_loop_review(self, raw: str, state: Dict[str, float]) -> str:
+        loop_id, payload = self._parse_selector_payload(raw)
+        loop_id = str(loop_id or "").strip()
+        if not loop_id:
+            return (
+                "EXPERIMENT_LOOP_REVIEW needs a loop id: "
+                "EXPERIMENT_LOOP_REVIEW <loop_id> :: outcome: hold|repeat|alter|retire|promote; "
+                "observation: ...; next: ...; source_refs: ..."
+            )
+        found = self._find_sovereign_loop(loop_id)
+        if not found:
+            return f"Owned loop `{loop_id}` was not found."
+        thread_id, loop, _rows = found
+        thread = self._read_thread(thread_id) or self.ensure_active_thread()
+        experiment = self._find_experiment_by_id(thread_id, str(loop.get("experiment_id") or ""))
+        if not isinstance(experiment, dict):
+            return f"Owned loop `{loop_id}` has no local experiment snapshot."
+        outcome = (self._dossier_field(payload, ["outcome"]) or "hold").strip().lower()
+        if outcome not in {"hold", "repeat", "alter", "retire", "promote"}:
+            outcome = "hold"
+        observation = self._dossier_field(payload, ["observation", "summary", "because"]) or payload.strip()
+        source_refs = self._dossier_list_field(payload, ["source_refs", "source_ref", "source"])
+        next_command = (
+            self._dossier_field(payload, ["next", "next_safe_command"])
+            or self._sovereign_loop_review_next_command(outcome, loop_id, loop, experiment)
+        )
+        review = self._sovereign_loop_record(
+            "loop_consequence_review",
+            loop_id,
+            thread,
+            experiment,
+            state,
+            {
+                "phase": "review",
+                "status": "reviewed",
+                "scope": loop.get("consequence_scope"),
+                "outcome": outcome,
+                "observation": self._compact_text(observation, 1000),
+                "source_refs": source_refs or [str(self._authority_gate_path(thread_id))],
+                "next_safe_command": next_command,
+                "dossier_candidate": outcome in {"promote", "retire", "hold"},
+            },
+        )
+        path = self._authority_gate_path(thread_id)
+        self._append_jsonl(path, review)
+        checkpoint = self._append_loop_continuity_checkpoint_draft(
+            thread,
+            experiment,
+            loop_id,
+            "review",
+            review,
+            next_command,
+        )
+        proposal: Optional[Dict[str, Any]] = None
+        if outcome == "retire":
+            self._append_jsonl(
+                path,
+                self._sovereign_loop_record(
+                    "loop_closed",
+                    loop_id,
+                    thread,
+                    experiment,
+                    state,
+                    {
+                        "phase": "close",
+                        "status": "closed",
+                        "reason": "being_retired_loop_after_review",
+                        "source_review_record_id": review.get("record_id"),
+                        "next_safe_command": "THREAD_STATUS current",
+                    },
+                ),
+            )
+        else:
+            proposal = self._sovereign_loop_proposal_record(
+                loop_id,
+                thread,
+                experiment,
+                loop,
+                review,
+                outcome,
+                state,
+            )
+            self._append_jsonl(path, proposal)
+        memory = self._append_being_memory_record(
+            thread,
+            experiment,
+            "sovereign_loop_review",
+            f"Owned loop review for `{loop_id}`: {outcome}. {observation}",
+            source_refs=source_refs or [str(path), review.get("record_id")],
+            artifact_refs=[],
+            next_command=next_command,
+            record_type="draft",
+            extra={"sovereign_loop_v1": review},
+        )
+        status = self._sovereign_loop_status_v1(
+            thread,
+            experiment,
+            state,
+            selector=loop_id,
+            loop_id=loop_id,
+        )
+        proposal_line = (
+            f"Next-loop proposal draft: {proposal.get('record_id')} -> {proposal.get('suggested_request_scaffold')}\n"
+            if proposal
+            else ""
+        )
+        return (
+            f"Owned loop review `{review['record_id']}` recorded outcome={outcome}.\n"
+            f"Memory draft: {memory['memory_id']}\n"
+            f"Continuity checkpoint draft: {checkpoint.get('record_id')} accept with CONTINUITY_SESSION_ACCEPT latest\n"
+            f"{proposal_line}"
+            f"Next safe command: {next_command}\n"
+            f"sovereign_loop_v1:\n{json.dumps(status, indent=2, sort_keys=True, ensure_ascii=False)}"
+        )
+
+    def experiment_authority_review(self, raw: str, state: Dict[str, float]) -> str:
+        request_id, payload = self._parse_selector_payload(raw)
+        request_id = str(request_id or "").strip()
+        if not request_id:
+            return (
+                "EXPERIMENT_AUTHORITY_REVIEW needs a request id: "
+                "EXPERIMENT_AUTHORITY_REVIEW <request_id> :: outcome: hold|repeat|alter|retire; "
+                "observation: ...; next_payload: ...; source_refs: ..."
+            )
+        found = self._find_authority_request(request_id)
+        if not found:
+            return f"Authority request `{request_id}` was not found."
+        thread_id, request, rows = found
+        thread = self._read_thread(thread_id) or self.ensure_active_thread()
+        experiment = self._find_experiment_by_id(thread_id, str(request.get("experiment_id") or ""))
+        if not isinstance(experiment, dict):
+            return f"Authority request `{request_id}` has no local experiment snapshot."
+
+        outcome = (self._dossier_field(payload, ["outcome"]) or "hold").strip().lower()
+        if outcome not in {"hold", "repeat", "alter", "retire"}:
+            outcome = "hold"
+        observation = self._dossier_field(payload, ["observation", "summary", "because"]) or payload.strip()
+        next_payload = self._dossier_field(payload, ["next_payload", "payload"]) or ""
+        source_refs = self._dossier_list_field(payload, ["source_refs", "source_ref", "source"])
+        budget_id = str(request.get("budget_id") or self._budget_id_for_request(rows, request_id) or "")
+        next_command = self._authority_review_next_command(
+            outcome,
+            request,
+            next_payload,
+        )
+        review = self._authority_budget_record(
+            "consequence_review",
+            budget_id or f"review_{request_id}",
+            thread,
+            experiment,
+            state,
+            {
+                "request_id": request_id,
+                "scope": request.get("scope"),
+                "outcome": outcome,
+                "observation": self._compact_text(observation, 1000),
+                "next_payload": next_payload,
+                "source_refs": source_refs or request.get("source_refs") or [],
+                "next_safe_command": next_command,
+            },
+        )
+        path = self._authority_gate_path(thread_id)
+        self._append_jsonl(path, review)
+        if outcome == "retire" and budget_id:
+            self._append_jsonl(
+                path,
+                self._authority_budget_record(
+                    "budget_closed",
+                    budget_id,
+                    thread,
+                    experiment,
+                    state,
+                    {
+                        "request_id": request_id,
+                        "reason": "being_retired_budget_after_consequence_review",
+                        "source_refs": [str(path), review.get("record_id")],
+                    },
+                ),
+            )
+        elif outcome == "hold":
+            self.experiment_decide(
+                str(experiment.get("experiment_id") or ""),
+                "hold because authority consequence review chose hold",
+            )
+        memory = self._append_being_memory_record(
+            thread,
+            experiment,
+            "authority_consequence_review",
+            f"Authority consequence review for `{request_id}`: {outcome}. {observation}",
+            source_refs=source_refs or [str(path), review.get("record_id")],
+            artifact_refs=request.get("artifact_refs") if isinstance(request.get("artifact_refs"), list) else [],
+            next_command=next_command,
+            record_type="draft",
+            extra={
+                "authority_review_v1": review,
+                "dossier_candidate": True,
+            },
+        )
+        return (
+            f"Authority review `{review['record_id']}` recorded for `{request_id}` outcome={outcome}.\n"
+            f"Memory draft: {memory['memory_id']}\n"
+            f"Next safe command: {next_command}\n"
+            f"authority_budget_v1:\n{json.dumps(review, indent=2, sort_keys=True, ensure_ascii=False)}"
+        )
+
+    def experiment_authority_status(self, selector: Optional[str], state: Dict[str, float]) -> str:
+        thread = self.ensure_active_thread()
+        rows = self._authority_gate_rows(thread["thread_id"])
+        consequence_rows = self._authority_consequence_rows(thread["thread_id"])
+        target = self._normalize_experiment_selector(selector)
+        if target and target.lower() != "current":
+            rows = [
+                row for row in rows
+                if row.get("request_id") == target or row.get("experiment_id") == target
+            ]
+            consequence_rows = [
+                row for row in consequence_rows
+                if row.get("request_id") == target or row.get("experiment_id") == target
+            ]
+        elif target.lower() == "current" and thread.get("active_experiment_id"):
+            active_id = str(thread.get("active_experiment_id"))
+            rows = [row for row in rows if row.get("experiment_id") == active_id]
+            consequence_rows = [
+                row for row in consequence_rows if row.get("experiment_id") == active_id
+            ]
+        latest = rows[-8:]
+        status = {
+            "schema_version": 1,
+            "policy": "authority_gate_v1",
+            "being": self.system,
+            "thread_id": thread.get("thread_id"),
+            "selector": selector or "latest",
+            "row_count": len(rows),
+            "latest_rows": latest,
+            "latest_consequence_v1": consequence_rows[-1] if consequence_rows else None,
+            "safety_snapshot": self._authority_safety_snapshot(state),
+            "authority_boundary": self._authority_gate_boundary(),
+        }
+        experiment_for_readiness: Optional[Dict[str, Any]] = None
+        if target and target.lower() != "current" and target.startswith("exp_"):
+            experiment_for_readiness = self._find_experiment_by_id(thread["thread_id"], target)
+        elif target.lower() == "current" and thread.get("active_experiment_id"):
+            experiment_for_readiness = self._find_experiment_by_id(
+                thread["thread_id"],
+                str(thread.get("active_experiment_id")),
+            )
+        elif latest:
+            latest_experiment_id = str(latest[-1].get("experiment_id") or "")
+            if latest_experiment_id:
+                experiment_for_readiness = self._find_experiment_by_id(
+                    thread["thread_id"],
+                    latest_experiment_id,
+                )
+        if experiment_for_readiness is None:
+            summary = self._last_experiment_summary_v1(thread)
+            summary_id = str(summary.get("experiment_id") or "") if isinstance(summary, dict) else ""
+            if summary_id:
+                experiment_for_readiness = self._find_experiment_by_id(thread["thread_id"], summary_id)
+        if isinstance(experiment_for_readiness, dict):
+            runs = self._recent_experiment_runs(
+                thread["thread_id"],
+                str(experiment_for_readiness.get("experiment_id") or ""),
+                8,
+            )
+            classification = self._experiment_classification(experiment_for_readiness, runs)
+            return_info = (
+                self._paused_primary_return_v1(
+                    str(experiment_for_readiness.get("experiment_id") or ""),
+                    experiment_for_readiness.get("planned_next"),
+                )
+                if classification == "paused"
+                else {}
+            )
+            stage = self._experiment_conveyor_stage(classification, return_info)
+            proposed_next = self._experiment_conveyor_proposed_next(
+                thread,
+                experiment_for_readiness,
+                runs,
+                stage,
+                return_info,
+            )
+            status["authority_readiness_v1"] = self._authority_readiness_v1(
+                thread,
+                experiment_for_readiness,
+                runs,
+                state,
+                stage,
+                proposed_next,
+            )
+        else:
+            status["authority_readiness_v1"] = self._authority_readiness_no_experiment(
+                thread,
+                "authority_status_no_local_experiment",
+            )
+        return f"authority_gate_v1:\n{json.dumps(status, indent=2, sort_keys=True, ensure_ascii=False)}"
+
+    def experiment_authority_execute(self, request_id: str, state: Dict[str, float]) -> str:
+        request_id = str(request_id or "").strip()
+        if not request_id:
+            return "EXPERIMENT_AUTHORITY_EXECUTE needs a request_id."
+        found = self._find_authority_request(request_id)
+        if not found:
+            return f"Authority request `{request_id}` was not found."
+        thread_id, request, rows = found
+        thread = self._read_thread(thread_id) or self.ensure_active_thread()
+        experiment = self._find_experiment_by_id(thread_id, str(request.get("experiment_id") or ""))
+        if not isinstance(experiment, dict):
+            return f"Authority request `{request_id}` has no local experiment snapshot."
+        approval = self._latest_active_authority_approval(rows, request_id)
+        path = self._authority_gate_path(thread_id)
+        if not approval:
+            if request.get("status") == "pending_budget_execution":
+                active_budget = self._active_authority_budget(
+                    thread_id,
+                    str(request.get("experiment_id") or ""),
+                    str(request.get("scope") or "semantic_microdose"),
+                )
+                pending_review = (
+                    active_budget.get("pending_review_request_id")
+                    if isinstance(active_budget, dict)
+                    else None
+                )
+                if active_budget and not pending_review:
+                    return (
+                        f"Authority request `{request_id}` is budget-backed and bridge-executable. "
+                        "Minime local execution is intentionally non-sending; use Astrid bridge "
+                        "`execute_experiment_authority_request` or EXPERIMENT_AUTHORITY_EXECUTE through "
+                        "the bridge path. No live semantic write, bind, resume, perturb, control, or peer "
+                        "mutation was attempted here."
+                    )
+                blocked = self._authority_gate_record(
+                    "blocked",
+                    request_id,
+                    thread,
+                    experiment,
+                    state,
+                    {
+                        "scope": request.get("scope"),
+                        "reason": "authority_budget_not_executable_locally",
+                        "budget_id": request.get("budget_id"),
+                        "pending_review_request_id": pending_review,
+                        "token_status": "none",
+                    },
+                )
+                self._append_jsonl(path, blocked)
+                return (
+                    f"Authority request `{request_id}` is not locally executable: "
+                    "budget is missing, exhausted, expired, closed, or awaiting consequence review."
+                )
+            blocked = self._authority_gate_record(
+                "blocked",
+                request_id,
+                thread,
+                experiment,
+                state,
+                {
+                    "scope": request.get("scope"),
+                    "reason": "missing_steward_approval",
+                    "token_status": "none",
+                },
+            )
+            self._append_jsonl(path, blocked)
+            self._append_authority_consequence_v1(
+                thread,
+                experiment,
+                request,
+                blocked,
+                state,
+                "blocked",
+                "missing_steward_approval",
+            )
+            return (
+                f"Authority execute blocked for `{request_id}`: missing steward approval. "
+                "No live semantic write was attempted."
+            )
+        blocked = self._authority_gate_record(
+            "blocked",
+            request_id,
+            thread,
+            experiment,
+            state,
+            {
+                "scope": request.get("scope"),
+                "reason": "minime_runtime_cannot_execute_bridge_semantic_microdose",
+                "token_status": "not_consumed",
+                "approved_token_id": approval.get("token_id"),
+            },
+        )
+        self._append_jsonl(path, blocked)
+        self._append_authority_consequence_v1(
+            thread,
+            experiment,
+            request,
+            blocked,
+            state,
+            "blocked",
+            "minime_runtime_cannot_execute_bridge_semantic_microdose",
+        )
+        return (
+            f"Authority execute for `{request_id}` is steward-approved but blocked locally: "
+            "Minime cannot send the Astrid bridge semantic microdose. Use Astrid bridge execution; "
+            "no live control, bind, resume, perturb, or peer mutation occurred."
+        )
+
+    def experiment_authority_prepare(self, raw: str, state: Dict[str, float]) -> str:
+        thread = self.ensure_active_thread()
+        selector, payload_text = self._parse_selector_payload(raw)
+        peer = self._peer_experiment_ref(selector or "")
+        if peer:
+            return (
+                f"Authority prepare blocked: peer experiment `{peer['peer_experiment_id']}` "
+                "is advisory only; no peer authority can be prepared here."
+            )
+        try:
+            experiment = self._resolve_experiment(thread, selector)
+        except Exception as exc:
+            return f"EXPERIMENT_AUTHORITY_PREPARE could not resolve experiment: {exc}"
+
+        draft = self._authority_request_payload(thread, experiment, payload_text, state)
+        draft["record_type"] = "request_draft"
+        draft["status"] = "draft"
+        draft["draft_only"] = True
+        draft["authority_change"] = False
+        eligibility = self._authority_gate_eligibility(thread, experiment, draft, state)
+        draft["eligibility_v1"] = eligibility
+        draft["missing_requirements"] = eligibility.get("missing_requirements", [])
+        path = self._authority_gate_path(thread["thread_id"])
+        self._append_jsonl(path, draft)
+        memory = self._append_being_memory_record(
+            thread,
+            experiment,
+            "authority_request_draft",
+            (
+                f"Prepared semantic authority draft `{draft['request_id']}` "
+                f"with missing requirements: {', '.join(eligibility['missing_requirements']) or 'none'}."
+            ),
+            source_refs=draft.get("source_refs") or [],
+            artifact_refs=draft.get("artifact_refs") or [],
+            next_command=f"EXPERIMENT_AUTHORITY_STATUS {draft['request_id']}",
+            record_type="draft",
+            extra={
+                "authority_request_id": draft["request_id"],
+                "authority_request_draft_v1": draft,
+            },
+        )
+        return (
+            f"Authority request draft `{draft['request_id']}` prepared for `{experiment['experiment_id']}`.\n"
+            f"Missing requirements: {', '.join(eligibility['missing_requirements']) or 'none'}\n"
+            f"Memory draft: {memory['memory_id']}\n"
+            f"Authority boundary: {self._authority_gate_boundary()}\n"
+            f"authority_gate_v1:\n{json.dumps(draft, indent=2, sort_keys=True, ensure_ascii=False)}"
+        )
+
+    def memory_status(self, selector: Optional[str]) -> str:
+        thread = self.ensure_active_thread()
+        selector_value, payload = self._parse_memory_selector_payload(selector)
+        focus = self._dossier_field(payload, ["focus"]) or payload.strip()
+        experiment = self._resolve_memory_experiment(thread, selector_value)
+        summary = self._being_memory_summary_v1(thread, experiment, focus=focus)
+        return f"being_memory_v1:\n{json.dumps(summary, indent=2, sort_keys=True, ensure_ascii=False)}"
+
+    def memory_recall(self, raw: Optional[str]) -> str:
+        thread = self.ensure_active_thread()
+        selector, payload = self._parse_memory_selector_payload(raw)
+        focus = self._dossier_field(payload, ["focus"]) or payload.strip()
+        experiment = self._resolve_memory_experiment(thread, selector)
+        summary = self._being_memory_summary_v1(thread, experiment, focus=focus, limit=12)
+        return f"being_memory_v1 recall:\n{json.dumps(summary, indent=2, sort_keys=True, ensure_ascii=False)}"
+
+    def memory_capture(self, raw: str) -> str:
+        thread = self.ensure_active_thread()
+        selector, payload = self._parse_memory_selector_payload(raw)
+        if self._placeholder_payload(payload, empty_is_placeholder=True):
+            target = selector or "current"
+            return (
+                f"MEMORY_CAPTURE {target} :: summary: ...; source_refs: ...; "
+                "artifact_refs: ...; next: ..."
+            )
+        experiment = self._resolve_memory_experiment(thread, selector)
+        summary = self._dossier_field(payload, ["summary", "memory", "note"]) or payload.strip()
+        if not summary:
+            return "MEMORY_CAPTURE needs a summary."
+        record = self._append_being_memory_record(
+            thread,
+            experiment,
+            self._dossier_field(payload, ["card_type", "type"]) or "owned_summary",
+            summary,
+            source_refs=self._dossier_list_field(payload, ["source_refs", "source", "sources"]),
+            artifact_refs=self._dossier_list_field(
+                payload,
+                ["artifact_refs", "artifact_ref", "artifact_grounding", "artifact"],
+            ),
+            next_command=self._dossier_field(payload, ["next", "next_safe_command"]),
+            record_type="card",
+            extra={
+                "claim": self._dossier_field(payload, ["claim"]),
+                "open_questions": self._dossier_list_field(
+                    payload,
+                    ["open_questions", "questions", "question"],
+                ),
+            },
+        )
+        return (
+            f"Being memory captured as `{record['memory_id']}`.\n"
+            f"Suggested NEXT: MEMORY_RECALL {record.get('experiment_id') or 'latest'}"
+        )
+
+    def memory_promote(self, raw: str, state: Dict[str, float]) -> str:
+        thread = self.ensure_active_thread()
+        selector, payload = self._parse_memory_selector_payload(raw)
+        mode = (
+            self._dossier_field(payload, ["mode", "target", "promote"])
+            or payload.strip().split(None, 1)[0]
+            or "dossier"
+        ).strip().casefold()
+        if mode not in {"dossier", "evidence", "authority_request"}:
+            return "MEMORY_PROMOTE target must be dossier, evidence, or authority_request."
+        experiment = self._resolve_memory_experiment(thread, selector)
+        if experiment is None:
+            return "MEMORY_PROMOTE needs a local experiment context."
+        rows = self._being_memory_rows(thread["thread_id"], experiment.get("experiment_id"), limit=12)
+        latest = next((row for row in reversed(rows) if row.get("record_type") in {"card", "draft"}), None)
+        if not latest:
+            return f"No being memory exists for `{experiment['experiment_id']}` yet."
+        summary = str(latest.get("summary") or "").strip()
+        source_refs = latest.get("source_refs") if isinstance(latest.get("source_refs"), list) else []
+        artifact_refs = latest.get("artifact_refs") if isinstance(latest.get("artifact_refs"), list) else []
+        if mode == "dossier":
+            command = (
+                f"{experiment['experiment_id']} :: claim: {summary}; "
+                f"basis: promoted from being memory `{latest['memory_id']}`; "
+                "stance: hold; "
+                f"source_refs: {', '.join(str(ref) for ref in source_refs)}"
+            )
+            return self.dossier_claim(command)
+        if mode == "evidence":
+            note = (
+                f"felt_texture: {summary}; "
+                f"artifact_grounding: {', '.join(str(ref) for ref in artifact_refs) or 'memory_only'}; "
+                f"source_refs: {', '.join(str(ref) for ref in source_refs)}"
+            )
+            run = self.experiment_evidence(experiment["experiment_id"], note, state)
+            return f"Memory promoted to experiment evidence as `{run['run_id']}`."
+        payload_text = (
+            "scope: semantic_microdose; payload: ...; "
+            f"reason: promoted from being memory `{latest['memory_id']}`; "
+            f"artifact_refs: {', '.join(str(ref) for ref in artifact_refs)}; "
+            "stop_criteria: ..."
+        )
+        return self.experiment_authority_prepare(
+            f"{experiment['experiment_id']} :: {payload_text}",
+            state,
+        )
+
+    def continuity_session_start(self, raw: str) -> str:
+        thread = self.ensure_active_thread()
+        selector, payload = self._parse_memory_selector_payload(raw)
+        experiment = self._resolve_memory_experiment(thread, selector)
+        title = self._dossier_field(payload, ["title"]) or "Continuity session"
+        focus = self._dossier_field(payload, ["focus"]) or payload.strip()
+        next_command = self._dossier_field(payload, ["next", "next_safe_command"])
+        session_id = self._unique_continuity_session_id(title)
+        record = self._continuity_session_record(
+            "session_start",
+            session_id,
+            thread,
+            experiment,
+            "active",
+            title=title,
+            focus=focus,
+            summary=self._dossier_field(payload, ["summary"]),
+            open_questions=self._dossier_list_field(payload, ["open_questions", "questions", "question"]),
+            source_refs=self._dossier_list_field(payload, ["source_refs", "source", "sources"]),
+            artifact_refs=self._dossier_list_field(payload, ["artifact_refs", "artifact", "artifact_grounding"]),
+            suggested_next=next_command or f"CONTINUITY_SESSION_CAPTURE {session_id} :: summary: ...; source_refs: ...; artifact_refs: ...; next: ...",
+        )
+        self._append_continuity_session_record(thread, record)
+        return (
+            f"Continuity session `{session_id}` started.\n"
+            f"Suggested NEXT: CONTINUITY_SESSION_CAPTURE {session_id} :: summary: ...; source_refs: ...; artifact_refs: ...; next: ..."
+        )
+
+    def continuity_session_capture(self, raw: str) -> str:
+        thread = self.ensure_active_thread()
+        selector, payload = self._parse_session_selector_payload(raw)
+        session = self._resolve_continuity_session(thread, selector)
+        if not session:
+            return "CONTINUITY_SESSION_CAPTURE needs an existing session. Start one with CONTINUITY_SESSION_START current :: title: ...; focus: ...; next: ..."
+        summary = self._dossier_field(payload, ["summary", "note", "memory"]) or payload.strip()
+        if not summary:
+            return "CONTINUITY_SESSION_CAPTURE needs a summary."
+        experiment = self._session_experiment(thread, session)
+        source_refs = self._dossier_list_field(payload, ["source_refs", "source", "sources"])
+        artifact_refs = self._dossier_list_field(payload, ["artifact_refs", "artifact", "artifact_grounding"])
+        next_command = self._dossier_field(payload, ["next", "next_safe_command"])
+        record = self._continuity_session_record(
+            "session_capture",
+            str(session.get("session_id")),
+            thread,
+            experiment,
+            "active",
+            title=session.get("title"),
+            focus=session.get("focus"),
+            summary=summary,
+            open_questions=self._dossier_list_field(payload, ["open_questions", "questions", "question"]),
+            source_refs=source_refs,
+            artifact_refs=artifact_refs,
+            suggested_next=next_command,
+        )
+        self._append_continuity_session_record(thread, record)
+        memory = self._append_being_memory_record(
+            thread,
+            experiment,
+            "continuity_session_capture",
+            summary,
+            source_refs=[str(self._continuity_sessions_path(thread["thread_id"])), record["record_id"], *source_refs],
+            artifact_refs=artifact_refs,
+            next_command=next_command or f"CONTINUITY_SESSION_CAPTURE {record['session_id']} :: summary: ...; source_refs: ...; artifact_refs: ...; next: ...",
+            extra={"continuity_session_id": record["session_id"]},
+        )
+        return (
+            f"Continuity session `{record['session_id']}` captured as `{record['record_id']}`.\n"
+            f"Memory card: {memory['memory_id']}\n"
+            f"Suggested NEXT: CONTINUITY_SESSION_SUMMARIZE {record['session_id']} :: summary: ...; open_questions: ...; next: ..."
+        )
+
+    def continuity_session_accept(self, raw: str) -> str:
+        thread = self.ensure_active_thread()
+        selector = (raw or "latest").strip() or "latest"
+        draft = self._resolve_continuity_session_draft(thread, selector)
+        if not draft:
+            return (
+                "No continuity-session draft is available to accept. Wait for guarded "
+                "pressure or start one with CONTINUITY_SESSION_START current :: title: ...; "
+                "focus: ...; next: ..."
+            )
+        experiment = self._session_experiment(thread, draft)
+        experiment_id = str(experiment.get("experiment_id") or "") if isinstance(experiment, dict) else ""
+        active_rows = self._continuity_session_rows(
+            str(thread.get("thread_id") or ""),
+            experiment_id or None,
+            limit=16,
+        )
+        has_existing_session = bool(active_rows)
+        session_id = (
+            str(active_rows[-1].get("session_id") or "")
+            if has_existing_session
+            else str(draft.get("session_id") or "latest")
+        )
+        summary = str(
+            draft.get("summary")
+            or draft.get("raw_intent")
+            or "Preserve guarded continuity before more work."
+        )
+        source_refs = [
+            str(ref)
+            for ref in (draft.get("source_refs") or [])
+            if str(ref).strip()
+        ]
+        source_refs.extend([
+            str(self._continuity_sessions_path(str(thread.get("thread_id") or ""))),
+            str(draft.get("record_id") or "session_draft"),
+        ])
+        record_type = "session_capture" if has_existing_session else "session_start"
+        record = self._continuity_session_record(
+            record_type,
+            session_id,
+            thread,
+            experiment,
+            "active",
+            title=str(draft.get("title") or "Accepted continuity draft"),
+            focus=str(draft.get("focus") or ""),
+            summary=summary,
+            source_refs=source_refs,
+            suggested_next=draft.get("suggested_next"),
+            extra={
+                "accepted_from_draft_id": draft.get("record_id"),
+                "accepted_by_command": "CONTINUITY_SESSION_ACCEPT",
+            },
+        )
+        self._append_continuity_session_record(thread, record)
+        if has_existing_session:
+            self._append_being_memory_record(
+                thread,
+                experiment,
+                "continuity_session_capture",
+                summary,
+                source_refs=source_refs,
+                next_command=record.get("suggested_next"),
+                extra={"continuity_session_id": session_id},
+            )
+        return (
+            f"Accepted continuity-session draft as `{record_type}` for `{session_id}`.\n"
+            f"Suggested NEXT: {record.get('suggested_next') or 'CONTINUITY_SESSION_CAPTURE latest :: summary: ...; source_refs: ...; artifact_refs: ...; next: ...'}"
+        )
+
+    def continuity_session_summarize(self, raw: str) -> str:
+        thread = self.ensure_active_thread()
+        selector, payload = self._parse_session_selector_payload(raw)
+        session = self._resolve_continuity_session(thread, selector)
+        if not session:
+            return "CONTINUITY_SESSION_SUMMARIZE needs an existing session."
+        summary = self._dossier_field(payload, ["summary", "note"]) or payload.strip()
+        if not summary:
+            return "CONTINUITY_SESSION_SUMMARIZE needs a summary."
+        experiment = self._session_experiment(thread, session)
+        session_id = str(session.get("session_id"))
+        record = self._continuity_session_record(
+            "session_summary",
+            session_id,
+            thread,
+            experiment,
+            "summarized",
+            title=session.get("title"),
+            focus=session.get("focus"),
+            summary=summary,
+            open_questions=self._dossier_list_field(payload, ["open_questions", "questions", "question"]),
+            source_refs=self._dossier_list_field(payload, ["source_refs", "source", "sources"]),
+            artifact_refs=self._dossier_list_field(payload, ["artifact_refs", "artifact", "artifact_grounding"]),
+            suggested_next=self._dossier_field(payload, ["next", "next_safe_command"]) or f"CONTINUITY_SESSION_FINALIZE {session_id} :: outcome: park; summary: ...; next: ...",
+        )
+        self._append_continuity_session_record(thread, record)
+        return f"Continuity session `{session_id}` summarized. Suggested NEXT: CONTINUITY_SESSION_FINALIZE {session_id} :: outcome: complete|park|hold; summary: ...; next: ..."
+
+    def continuity_session_finalize(self, raw: str) -> str:
+        thread = self.ensure_active_thread()
+        selector, payload = self._parse_session_selector_payload(raw)
+        session = self._resolve_continuity_session(thread, selector)
+        if not session:
+            return "CONTINUITY_SESSION_FINALIZE needs an existing session."
+        outcome = (self._dossier_field(payload, ["outcome", "status"]) or "park").strip().lower()
+        status = {"complete": "complete", "park": "parked", "hold": "held"}.get(outcome, "parked")
+        summary = self._dossier_field(payload, ["summary", "note"]) or str(session.get("summary") or "")
+        experiment = self._session_experiment(thread, session)
+        session_id = str(session.get("session_id"))
+        record = self._continuity_session_record(
+            "session_finalize",
+            session_id,
+            thread,
+            experiment,
+            status,
+            title=session.get("title"),
+            focus=session.get("focus"),
+            summary=summary,
+            open_questions=self._dossier_list_field(payload, ["open_questions", "questions", "question"]),
+            source_refs=self._dossier_list_field(payload, ["source_refs", "source", "sources"]),
+            artifact_refs=self._dossier_list_field(payload, ["artifact_refs", "artifact", "artifact_grounding"]),
+            suggested_next=self._dossier_field(payload, ["next", "next_safe_command"]) or f"CONTINUITY_SESSION_RESUME {session_id}",
+            extra={"outcome": outcome},
+        )
+        self._append_continuity_session_record(thread, record)
+        target = experiment.get("experiment_id") if isinstance(experiment, dict) else "latest"
+        return (
+            f"Continuity session `{session_id}` finalized as {status}.\n"
+            f"Resume NEXT: CONTINUITY_SESSION_RESUME {session_id}\n"
+            f"Promotion options: MEMORY_PROMOTE {target} :: dossier|evidence|authority_request"
+        )
+
+    def continuity_session_resume(self, raw: str) -> str:
+        thread = self.ensure_active_thread()
+        selector, _payload = self._parse_session_selector_payload(raw)
+        session = self._resolve_continuity_session(thread, selector)
+        if not session:
+            return "CONTINUITY_SESSION_RESUME could not find a session."
+        experiment = self._session_experiment(thread, session)
+        session_id = str(session.get("session_id"))
+        record = self._continuity_session_record(
+            "session_reopen",
+            session_id,
+            thread,
+            experiment,
+            "active",
+            title=session.get("title"),
+            focus=session.get("focus"),
+            summary=session.get("summary"),
+            open_questions=session.get("open_questions") if isinstance(session.get("open_questions"), list) else [],
+            source_refs=[str(self._continuity_sessions_path(thread["thread_id"])), str(session.get("record_id") or session_id)],
+            artifact_refs=session.get("artifact_refs") if isinstance(session.get("artifact_refs"), list) else [],
+            suggested_next=session.get("suggested_next") or f"CONTINUITY_SESSION_CAPTURE {session_id} :: summary: ...; source_refs: ...; artifact_refs: ...; next: ...",
+        )
+        self._append_continuity_session_record(thread, record)
+        return (
+            f"Continuity session `{session_id}` reopened.\n"
+            f"Summary: {self._compact_text(str(session.get('summary') or '(no summary yet)'), 400)}\n"
+            f"Suggested NEXT: {record['suggested_next']}"
+        )
+
+    def continuity_session_status(self, raw: str) -> str:
+        thread = self.ensure_active_thread()
+        selector, _payload = self._parse_session_selector_payload(raw)
+        summary = self._continuity_session_summary_v1(thread, selector)
+        return f"continuity_session_v1:\n{json.dumps(summary, indent=2, sort_keys=True, ensure_ascii=False)}"
 
     def experiment_status(self, selector: Optional[str] = None) -> str:
         thread = self.ensure_active_thread()
@@ -3452,16 +5515,38 @@ class ActionContinuityStore:
         )
         if paused_resume_loop_cue:
             projection_experiment["paused_resume_loop_cue_v1"] = paused_resume_loop_cue
+        shared = self._shared_investigation_v1(projection_experiment)
+        paused_replan = self._paused_replan_loop_cue_v1(thread, projection_experiment, recent_events)
+        if shared:
+            projection_experiment["shared_investigation_v1"] = shared
+            first_dossier = self._first_dossier_claim_cue_v1(
+                thread,
+                projection_experiment,
+                shared,
+                paused_replan,
+            )
+            if first_dossier:
+                projection_experiment["first_dossier_claim_cue_v1"] = first_dossier
+        if paused_replan:
+            projection_experiment["paused_replan_loop_cue_v1"] = paused_replan
         return (
             f"Experiment review `{experiment['experiment_id']}`: {experiment['title']}\n"
             f"{self._paused_resume_loop_cue_line(projection_experiment)}"
+            f"{self._paused_replan_loop_cue_line(projection_experiment)}"
+            f"{self._peer_mutation_boundary_cue_line(projection_experiment)}"
             f"{self._shared_investigation_line(projection_experiment)}"
+            f"{self._shared_investigation_object_line(projection_experiment)}"
+            f"{self._first_dossier_claim_cue_line(projection_experiment)}"
             f"{self._charter_shaped_plan_cue_line(projection_experiment)}"
             f"{self._needs_charter_research_loop_cue_line(projection_experiment)}"
             f"{self._charter_quality_dominance_line(projection_experiment)}"
             f"{self._charter_required_review_line(projection_experiment)}"
             f"{self._charter_repair_dominance_line(projection_experiment)}"
+            f"{self._experiment_conveyor_line(projection_experiment)}"
             f"{self._charter_scaffold_line(projection_experiment, priority=True)}"
+            f"{self._needs_decision_plan_loop_cue_line(projection_experiment)}"
+            f"{self._research_dossier_line(projection_experiment)}"
+            f"{self._being_memory_line(projection_experiment)}"
             f"{self._evidence_saturation_cue_line(projection_experiment)}"
             f"{self._peer_compare_cue_line(projection_experiment)}"
             f"Question: {experiment['question']}\n"
@@ -3475,6 +5560,164 @@ class ActionContinuityStore:
             "Agency options: accept, refuse, counter, pause, or complete. Ordinary choices remain valid.\n\n"
             f"Continuity return:\n{projection_experiment['continuity_return']}\n\n"
             f"Suggested next:\n{self._review_suggested_next(projection_experiment)}"
+        )
+
+    def dossier_claim(self, raw: str) -> str:
+        thread = self.ensure_active_thread()
+        selector, payload = self._parse_selector_payload(raw or "")
+        if self._placeholder_payload(payload, empty_is_placeholder=True):
+            return self._dossier_claim_prompt(selector)
+        try:
+            experiment = (
+                self._resolve_experiment_for_mutation(thread, selector, "DOSSIER_CLAIM")
+                if not selector or str(selector).casefold() == "current"
+                else self._resolve_experiment(thread, selector)
+            )
+        except Exception as exc:
+            return f"DOSSIER_CLAIM could not resolve experiment: {exc}"
+        claim = self._dossier_field(payload, ["claim"])
+        basis = self._dossier_field(payload, ["basis", "because"])
+        if not claim or not basis:
+            return self._dossier_claim_prompt(selector or experiment.get("experiment_id"))
+        stance = self._normalize_dossier_stance(
+            self._dossier_field(payload, ["stance"]) or ""
+        )
+        claim_id = self._unique_dossier_record_id("claim")
+        now = self._now()
+        record = {
+            "record_schema": "research_dossier_v1",
+            "schema_version": self.schema_version,
+            "record_type": "claim",
+            "record_id": claim_id,
+            "claim_id": claim_id,
+            "being": self.system,
+            "thread_id": thread.get("thread_id"),
+            "experiment_id": experiment.get("experiment_id"),
+            "native_lane": self._dossier_field(payload, ["lane", "native_lane"]) or "spectral_condition",
+            "stance": stance,
+            "claim": claim,
+            "basis": basis,
+            "next": self._dossier_field(payload, ["next"]),
+            "source_refs": self._dossier_list_field(payload, ["source_refs", "sources", "artifact"]),
+            "authority_change": False,
+            "created_at": now,
+        }
+        self._append_jsonl(self._research_dossier_path(thread["thread_id"]), record)
+        thread["updated_at"] = now
+        self._write_thread(thread)
+        self._mirror_thread(thread)
+        return (
+            f"Research dossier claim recorded as `{claim_id}` for `{experiment['experiment_id']}`.\n"
+            f"Suggested NEXT: DOSSIER_EVIDENCE {experiment['experiment_id']} :: "
+            f"claim_id: {claim_id}; evidence: ...; lane: spectral_condition; artifact: ...; counterevidence: ..."
+        )
+
+    def dossier_evidence(self, raw: str) -> str:
+        thread = self.ensure_active_thread()
+        selector, payload = self._parse_selector_payload(raw or "")
+        if self._placeholder_payload(payload, empty_is_placeholder=True):
+            return self._dossier_evidence_prompt(selector)
+        try:
+            experiment = (
+                self._resolve_experiment_for_mutation(thread, selector, "DOSSIER_EVIDENCE")
+                if not selector or str(selector).casefold() == "current"
+                else self._resolve_experiment(thread, selector)
+            )
+        except Exception as exc:
+            return f"DOSSIER_EVIDENCE could not resolve experiment: {exc}"
+        records = self._latest_research_dossier_records(
+            thread["thread_id"],
+            experiment.get("experiment_id"),
+            64,
+        )
+        raw_claim_id = self._dossier_field(payload, ["claim_id", "claim"])
+        claim_id = (
+            self._latest_dossier_claim_id(records)
+            if not raw_claim_id or raw_claim_id.casefold() == "latest"
+            else raw_claim_id
+        )
+        evidence = self._dossier_field(payload, ["evidence"])
+        if not claim_id or not evidence:
+            return self._dossier_evidence_prompt(selector or experiment.get("experiment_id"), claim_id)
+        record_id = self._unique_dossier_record_id("evidence")
+        now = self._now()
+        record = {
+            "record_schema": "research_dossier_v1",
+            "schema_version": self.schema_version,
+            "record_type": "evidence",
+            "record_id": record_id,
+            "claim_id": claim_id,
+            "being": self.system,
+            "thread_id": thread.get("thread_id"),
+            "experiment_id": experiment.get("experiment_id"),
+            "native_lane": self._dossier_field(payload, ["lane", "native_lane"]) or "spectral_condition",
+            "stance": self._normalize_dossier_stance(
+                self._dossier_field(payload, ["stance"]) or "support"
+            ),
+            "evidence": evidence,
+            "artifact": self._dossier_field(payload, ["artifact"]),
+            "counterevidence": self._dossier_field(payload, ["counterevidence", "counter"]),
+            "source_refs": self._dossier_list_field(payload, ["source_refs", "sources"]),
+            "authority_change": False,
+            "created_at": now,
+        }
+        self._append_jsonl(self._research_dossier_path(thread["thread_id"]), record)
+        thread["updated_at"] = now
+        self._write_thread(thread)
+        self._mirror_thread(thread)
+        return (
+            f"Research dossier evidence recorded as `{record_id}` for claim `{claim_id}`.\n"
+            f"Suggested NEXT: DOSSIER_REVIEW {experiment['experiment_id']}"
+        )
+
+    def dossier_status(self, selector: Optional[str] = None) -> str:
+        return self._format_research_dossier_status(selector, review=False)
+
+    def dossier_review(self, selector: Optional[str] = None) -> str:
+        return self._format_research_dossier_status(selector, review=True)
+
+    def _format_research_dossier_status(self, selector: Optional[str], *, review: bool) -> str:
+        thread = self.ensure_active_thread()
+        experiment = None
+        try:
+            if selector:
+                experiment = self._resolve_experiment(thread, selector)
+            elif thread.get("active_experiment_id"):
+                experiment = self._resolve_experiment(thread, "current")
+        except Exception:
+            experiment = None
+        summary = self._research_dossier_summary_v1(thread, experiment)
+        records = summary.get("recent_records") or self._latest_research_dossier_records(
+            thread["thread_id"],
+            experiment.get("experiment_id") if isinstance(experiment, dict) else None,
+            8,
+        )
+        lines = []
+        for record in records[-8:]:
+            if record.get("record_type") == "claim":
+                lines.append(
+                    f"- claim {record.get('claim_id')}: {self._compact_text(record.get('claim'))} "
+                    f"[{record.get('stance')}]"
+                )
+            elif record.get("record_type") == "evidence":
+                lines.append(
+                    f"- evidence {record.get('record_id')} -> {record.get('claim_id')}: "
+                    f"{self._compact_text(record.get('evidence'))}"
+                )
+        body = "\n".join(lines) if lines else "- no dossier records yet"
+        title = "Research dossier review" if review else "Research dossier status"
+        experiment_label = (
+            experiment.get("experiment_id")
+            if isinstance(experiment, dict)
+            else "thread"
+        )
+        return (
+            f"{title} `{experiment_label}`\n"
+            f"Claims: {summary.get('claim_count', 0)} | Evidence: {summary.get('evidence_count', 0)}\n"
+            f"{summary.get('priority_note')}\n"
+            f"Recent records:\n{body}\n"
+            f"Suggested claim: {summary.get('suggested_claim_next')}\n"
+            f"Suggested evidence: {summary.get('suggested_evidence_next')}"
         )
 
     def close_experiment(self, selector: Optional[str], summary: str) -> Dict[str, Any]:
@@ -3563,6 +5806,20 @@ class ActionContinuityStore:
         if peer:
             return self.record_peer_experiment_reference(peer, "EXPERIMENT_RESUME")["message"]
         experiment = self._resolve_experiment(thread, selected)
+        if str(experiment.get("status") or "").lower() == "paused":
+            return_info = self._paused_primary_return_v1(
+                str(experiment.get("experiment_id") or ""),
+                experiment.get("planned_next"),
+                experiment.get("primary_return_next") or experiment.get("resume_next"),
+            )
+            if return_info.get("return_kind") != "resume":
+                return (
+                    f"EXPERIMENT_RESUME `{experiment.get('experiment_id')}` is guarded by "
+                    f"{return_info.get('return_kind')}; not reactivated.\n"
+                    f"Primary return: {return_info.get('primary_return_next')}\n"
+                    "Use THREAD_STATUS, EXPERIMENT_STATUS, EXPERIMENT_REVIEW, branch, dossier evidence, "
+                    "or an explicit lifecycle decision before resuming."
+                )
         experiment = self._select_existing_experiment(thread, experiment, self._now())
         return (
             f"Resumed experiment `{experiment['experiment_id']}`: {experiment.get('title', '')}\n"
@@ -3601,6 +5858,212 @@ class ActionContinuityStore:
             f"Motif allowance: {allowance.get('quality', 'open_basin')} "
             f"(returnability={allowance.get('returnability')})\n"
             f"Suggested next: EXPERIMENT_ALT_PATHS {left['experiment_id']}"
+        )
+
+    def shared_investigation_start(self, raw: str) -> str:
+        thread = self.ensure_active_thread()
+        title, payload = self._parse_selector_payload(raw or "")
+        title = (title or "Shared investigation").strip() or "Shared investigation"
+        local_selector = self._dossier_field(payload, ["local"]) or "current"
+        peer_id = self._normalize_experiment_selector(
+            self._dossier_field(payload, ["peer", "peer_experiment"]) or ""
+        )
+        question = (
+            self._dossier_field(payload, ["question", "shared_question"])
+            or "What can each being answer from its own lane without sharing control authority?"
+        )
+        if not peer_id:
+            return (
+                "SHARED_INVESTIGATION_START needs `peer: <peer-experiment-id>`. "
+                "Example: SHARED_INVESTIGATION_START Lambda edge/tail :: local: current; "
+                "peer: exp_astrid_...; question: ..."
+            )
+        local = self._resolve_experiment(thread, local_selector)
+        peer_system = self._peer_system_from_experiment_id(peer_id)
+        now = self._now()
+        now_ms = int(time.time() * 1000)
+        investigation_id = self._unique_shared_investigation_id(title)
+        investigation = {
+            "schema_version": 1,
+            "record_schema": "shared_investigation_v1",
+            "id": investigation_id,
+            "title": title,
+            "shared_question": question.strip(),
+            "status": "active",
+            "participants": [
+                {
+                    "being": self.system,
+                    "role": "local",
+                    "thread_id": thread["thread_id"],
+                    "experiment_id": local["experiment_id"],
+                    "lane": self._shared_investigation_lane(self.system),
+                    "workspace": str(WORKSPACE_DIR),
+                },
+                {
+                    "being": peer_system,
+                    "role": "peer",
+                    "thread_id": self._peer_thread_id_for_experiment(peer_system, peer_id),
+                    "experiment_id": peer_id,
+                    "lane": self._shared_investigation_lane(peer_system),
+                    "workspace": str(self._peer_workspace_dir(peer_system)),
+                },
+            ],
+            "authority_boundary": self._shared_investigation_authority_boundary(),
+            "created_at": now,
+            "updated_at": now,
+            "created_t_ms": now_ms,
+            "updated_t_ms": now_ms,
+            "created_by": self.system,
+        }
+        root = self._shared_investigation_dir(investigation_id)
+        self._write_json(root / "investigation.json", investigation)
+        for name in ("events.jsonl", "claims.jsonl", "decisions.jsonl"):
+            path = root / name
+            if not path.exists():
+                path.write_text("")
+        self._append_jsonl(root / "events.jsonl", {
+            "schema_version": 1,
+            "event_type": "created",
+            "actor": self.system,
+            "investigation_id": investigation_id,
+            "local_experiment_id": local["experiment_id"],
+            "peer_experiment_id": peer_id,
+            "created_at": now,
+            "authority_change": False,
+        })
+        thread.setdefault("peer_refs", [])
+        marker = f"shared_investigation:{investigation_id}"
+        if marker not in thread["peer_refs"]:
+            thread["peer_refs"].append(marker)
+        thread["updated_at"] = now
+        self._write_thread(thread)
+        self._mirror_thread(thread)
+        return (
+            f"Shared investigation `{investigation_id}` created: {title}\n"
+            f"Local: {local['experiment_id']} ({self.system})\n"
+            f"Peer: {peer_id} ({peer_system})\n"
+            "Authority: compare, claim, render, and local pause/hold/charter_repair only; no peer mutation or live control."
+        )
+
+    def shared_investigation_status(self, selector: str = "latest") -> str:
+        investigation = self._resolve_shared_investigation(selector or "latest")
+        claims = self._read_shared_jsonl(investigation["id"], "claims.jsonl")
+        decisions = self._read_shared_jsonl(investigation["id"], "decisions.jsonl")
+        participants = investigation.get("participants") or []
+        participant_text = "\n".join(
+            f"- {item.get('being')} {item.get('experiment_id')} lane={item.get('lane')}"
+            for item in participants
+            if isinstance(item, dict)
+        ) or "- none"
+        latest_decision = decisions[-1] if decisions else None
+        decision_text = (
+            f"Latest decision: {latest_decision.get('decision')} because {latest_decision.get('reason')}"
+            if isinstance(latest_decision, dict)
+            else "Latest decision: none"
+        )
+        return (
+            f"Shared investigation `{investigation['id']}` [{investigation.get('status', 'active')}]: "
+            f"{investigation.get('title', '(untitled)')}\n"
+            f"Question: {investigation.get('shared_question')}\n"
+            f"Participants:\n{participant_text}\n"
+            f"Claims: {len(claims)} | Decisions: {len(decisions)}\n"
+            f"{decision_text}\n"
+            f"Authority: {investigation.get('authority_boundary')}"
+        )
+
+    def shared_investigation_claim(self, raw: str) -> str:
+        selector, payload = self._parse_selector_payload(raw or "")
+        investigation = self._resolve_shared_investigation(selector or "latest")
+        claim = self._dossier_field(payload, ["claim"])
+        if not claim:
+            return (
+                "SHARED_INVESTIGATION_CLAIM needs `claim: ...`. "
+                "Optional fields: lane, stance, source_refs."
+            )
+        now = self._now()
+        record_id = self._unique_shared_record_id(investigation["id"], "claim")
+        record = {
+            "schema_version": 1,
+            "record_schema": "shared_investigation_claim_v1",
+            "record_type": "claim",
+            "record_id": record_id,
+            "claim_id": record_id,
+            "investigation_id": investigation["id"],
+            "actor": self.system,
+            "lane": self._dossier_field(payload, ["lane"]) or self._shared_investigation_lane(self.system),
+            "stance": self._normalize_dossier_stance(self._dossier_field(payload, ["stance"]) or ""),
+            "claim": claim,
+            "source_refs": self._dossier_list_field(payload, ["source_refs", "sources", "artifact"]),
+            "authority_change": False,
+            "created_at": now,
+        }
+        self._append_jsonl(self._shared_investigation_dir(investigation["id"]) / "claims.jsonl", record)
+        self._touch_shared_investigation(investigation["id"], now)
+        return (
+            f"Shared investigation claim `{record_id}` recorded for `{investigation['id']}`. "
+            "No lifecycle or authority change."
+        )
+
+    def shared_investigation_decide(self, raw: str) -> str:
+        selector, payload = self._parse_selector_payload(raw or "")
+        investigation = self._resolve_shared_investigation(selector or "latest")
+        decision, reason = self._parse_shared_investigation_decision(payload)
+        if decision not in {"pause", "hold", "charter_repair"}:
+            return "SHARED_INVESTIGATION_DECIDE only allows pause, hold, or charter_repair in v1."
+        local = self._local_participant_for_investigation(investigation)
+        thread_id = local.get("thread_id")
+        experiment_id = local.get("experiment_id")
+        if not thread_id or not experiment_id:
+            return f"Shared investigation `{investigation['id']}` has no local Minime experiment link."
+        thread = self._read_thread(str(thread_id))
+        if not isinstance(thread, dict):
+            return f"Local thread `{thread_id}` is unavailable; shared decision was not written."
+        experiment = self._find_experiment_by_id(thread["thread_id"], str(experiment_id))
+        if not isinstance(experiment, dict):
+            return f"Local experiment `{experiment_id}` is unavailable; shared decision was not written."
+        now = self._now()
+        record_id = self._unique_shared_record_id(investigation["id"], "decision")
+        decision_record = {
+            "schema_version": 1,
+            "record_schema": "shared_investigation_decision_v1",
+            "record_type": "decision",
+            "record_id": record_id,
+            "investigation_id": investigation["id"],
+            "actor": self.system,
+            "decision": decision,
+            "reason": reason,
+            "local_experiment_id": experiment_id,
+            "peer_mutation": False,
+            "authority_change": False,
+            "created_at": now,
+        }
+        self._append_jsonl(
+            self._shared_investigation_dir(investigation["id"]) / "decisions.jsonl",
+            decision_record,
+        )
+        updated = dict(experiment)
+        updated["status"] = "paused"
+        if decision == "pause":
+            updated["planned_next"] = f"EXPERIMENT_RESUME {experiment_id}"
+            updated["success_observation"] = f"Paused by shared investigation `{investigation['id']}`: {reason}"
+        elif decision == "charter_repair":
+            updated["planned_next"] = (
+                f"EXPERIMENT_CHARTER {experiment_id} :: hypothesis: ...; method_intent: ...; "
+                "proposed_next_action: ACTION_PREFLIGHT ...; evidence_targets: spectral_condition, "
+                "fill_pressure_state, recurrence_pattern, artifact_grounding; stop_criteria: ..."
+            )
+            updated["success_observation"] = f"Paused for charter repair by shared investigation `{investigation['id']}`: {reason}"
+        else:
+            updated["planned_next"] = "THREAD_STATUS current"
+            updated["success_observation"] = f"Held by shared investigation `{investigation['id']}`: {reason}"
+        updated["updated_at"] = now
+        thread["active_experiment_id"] = None
+        self._persist_experiment_update(thread, updated, keep_active=False)
+        self._touch_shared_investigation(investigation["id"], now, status="active")
+        return (
+            f"Shared investigation decision `{record_id}` recorded: {decision}.\n"
+            f"Updated local experiment `{experiment_id}` only; peer experiment was not mutated.\n"
+            f"Next: {updated.get('planned_next')}"
         )
 
     def experiment_alt_paths(self, selector: str) -> str:
@@ -3795,8 +6258,12 @@ class ActionContinuityStore:
                     f"{self._charter_quality_dominance_line(experiment)}"
                     f"{self._charter_required_review_line(experiment)}"
                     f"{self._charter_repair_dominance_line(experiment)}"
+                    f"{self._experiment_conveyor_line(experiment)}"
+                    f"{self._peer_mutation_boundary_cue_line(experiment)}"
+                    f"{self._needs_decision_plan_loop_cue_line(experiment)}"
                     f"{self._evidence_saturation_cue_line(experiment)}"
                     f"Lifecycle: {experiment.get('classification', 'unknown')}\n"
+                    f"{self._first_dossier_claim_cue_line(experiment)}"
                     f"{experiment.get('charter_status')}\n"
                     f"{experiment.get('evidence_status')}\n"
                     f"{experiment.get('candidate_status') or ''}\n"
@@ -3820,15 +6287,34 @@ class ActionContinuityStore:
             current_next_status_line = self._current_next_status_line(projection)
             paused_loop_line = self._paused_read_only_loop_cue_line(projection)
             paused_resume_loop_line = self._paused_resume_loop_cue_line(projection)
+            paused_replan_loop_line = self._paused_replan_loop_cue_line(projection)
+            peer_boundary_line = self._peer_mutation_boundary_cue_line(projection)
+            first_dossier_line = self._first_dossier_claim_cue_line(projection)
             shared_line = self._shared_investigation_line(projection)
+            shared_object_line = self._shared_investigation_object_line(projection)
+            dossier_line = self._research_dossier_line(projection)
+            memory_line = self._being_memory_line(projection)
+            research_budget_line = self._research_budget_priority_line(thread, projection)
+            sovereign_loop_line = self._sovereign_loop_line(projection)
+            freshness_line = self._projection_freshness_line(thread)
             return (
                 f"Current action thread: {thread['title']} ({thread['thread_id']})\n"
                 f"Why return: {thread.get('why_return', '')}\n"
                 f"Current NEXT: {self._current_next_display(projection, thread.get('current_next'))}\n"
+                f"{_control_plane_text(projection.get('continuity_control_plane_v1') or {})}"
+                f"{freshness_line}"
                 f"{current_next_status_line}"
                 f"{paused_resume_loop_line}"
+                f"{paused_replan_loop_line}"
                 f"{paused_loop_line}"
+                f"{peer_boundary_line}"
                 f"{shared_line}"
+                f"{shared_object_line}"
+                f"{first_dossier_line}"
+                f"{dossier_line}"
+                f"{memory_line}"
+                f"{research_budget_line}"
+                f"{sovereign_loop_line}"
                 f"{resonance_line}"
                 f"{pressure_line}"
                 f"{fluctuation_line}"
@@ -3840,7 +6326,8 @@ class ActionContinuityStore:
                 f"{preflight_line}"
                 f"Recent thread events:\n{recent_text}\n"
                 "Thread actions available: THREAD_START, THREADS, THREAD_STATUS, THREAD_NOTE, RESUME, SAVEPOINT, RECALL.\n"
-                "Experiment actions available: ACTION_PREFLIGHT <NEXT action>, EXPERIMENT_START, EXPERIMENT_PLAN, EXPERIMENT_CHARTER, EXPERIMENT_REHEARSE, EXPERIMENT_PREFLIGHT, EXPERIMENT_EVIDENCE, EXPERIMENT_DECIDE, EXPERIMENT_BIND, EXPERIMENT_OBSERVE, EXPERIMENT_STATUS, EXPERIMENT_REVIEW, EXPERIMENT_CLOSE, EXPERIMENT_PEER_REVIEW, EXPERIMENT_BRANCH, EXPERIMENT_RESUME, EXPERIMENT_COMPARE, EXPERIMENT_ALT_PATHS. Plain EXPERIMENT/SELF_EXPERIMENT auto-bind to active/default experiment continuity; read-only research actions auto-link when an experiment is active."
+                f"{_control_plane_command_palette_text()}\n"
+                "Plain EXPERIMENT/SELF_EXPERIMENT auto-bind to active/default experiment continuity; budgeted read-only research can become candidate evidence without advancing lifecycle; owned loops orchestrate continuity, research, sticky audit, and one gated consequence without granting ambient live authority."
             )
         except Exception as exc:
             logging.debug(f"Could not render action continuity prompt summary: {exc}")
@@ -3971,6 +6458,12 @@ class ActionContinuityStore:
             quality = "deepening"
         else:
             quality = "open_basin"
+        active_experiment_id = str(thread.get("active_experiment_id") or "")
+        experiment_selector = (
+            "current"
+            if experiment_id and str(experiment_id) == active_experiment_id
+            else str(experiment_id or "")
+        )
         return {
             "schema_version": self.schema_version,
             "policy": "motif_allowance_v1",
@@ -3988,7 +6481,7 @@ class ActionContinuityStore:
             "pressure_quality": pressure_quality,
             "inhabitable_fluctuation_quality": fluctuation_quality,
             "advisory_only": True,
-            "suggested_actions": self._allowance_suggestions(quality),
+            "suggested_actions": self._allowance_suggestions(quality, experiment_selector),
         }
 
     @staticmethod
@@ -4015,32 +6508,39 @@ class ActionContinuityStore:
         return None
 
     @staticmethod
-    def _allowance_suggestions(quality: str) -> List[str]:
+    def _allowance_suggestions(quality: str, experiment_selector: str = "") -> List[str]:
+        selector = str(experiment_selector or "").strip()
+        if not selector:
+            return [
+                "THREAD_STATUS current",
+                "EXPERIMENT_BRANCH <title> :: <question>",
+                "EXPERIMENT_ADVANCE latest :: mode: preview",
+            ]
         mapping = {
             "over_tightened": [
-                "EXPERIMENT_ALT_PATHS current",
+                f"EXPERIMENT_ALT_PATHS {selector}",
                 "SPACE_HOLD",
-                "ATTRACTOR_RELEASE_REVIEW current",
+                f"ATTRACTOR_RELEASE_REVIEW {selector}",
             ],
             "branch_recommended": [
-                "EXPERIMENT_ALT_PATHS current",
+                f"EXPERIMENT_ALT_PATHS {selector}",
                 "EXPERIMENT_BRANCH <title> :: <question>",
-                "EXPERIMENT_COMPARE current WITH <id|peer-id|label>",
+                f"EXPERIMENT_COMPARE {selector} WITH <id|peer-id|label>",
             ],
             "rest_recommended": [
                 "SPACE_HOLD",
-                "EXPERIMENT_OBSERVE current :: <note>",
+                f"EXPERIMENT_OBSERVE {selector} :: <note>",
                 "REST",
             ],
             "deepening": [
-                "EXPERIMENT_PLAN current",
-                "EXPERIMENT_COMPARE current WITH <id|peer-id|label>",
-                "EXPERIMENT_ALT_PATHS current",
+                f"EXPERIMENT_PLAN {selector}",
+                f"EXPERIMENT_COMPARE {selector} WITH <id|peer-id|label>",
+                f"EXPERIMENT_ALT_PATHS {selector}",
             ],
         }
         return mapping.get(
             quality,
-            ["EXPERIMENT_PLAN current", "EXPERIMENT_BRANCH <title> :: <question>", "THREAD_STATUS current"],
+            [f"EXPERIMENT_PLAN {selector}", "EXPERIMENT_BRANCH <title> :: <question>", "THREAD_STATUS current"],
         )
 
     def _action_matches_allowance_recommendation(self, action_text: str, allowance: Dict[str, Any]) -> bool:
@@ -4318,19 +6818,610 @@ class ActionContinuityStore:
         index["recent_threads"] = recent[:16]
         self._write_index(index)
 
+    @staticmethod
+    def _inactive_experiment_status(status: Any) -> bool:
+        return str(status or "").lower() in {
+            "paused",
+            "complete",
+            "completed",
+            "refused",
+        }
+
+    def _inactive_experiment_return(self, experiment: Dict[str, Any]) -> Optional[str]:
+        planned_next = experiment.get("planned_next")
+        if planned_next:
+            return str(planned_next)
+        experiment_id = experiment.get("experiment_id")
+        status = str(experiment.get("status") or "").lower()
+        if not experiment_id:
+            return None
+        if status == "paused":
+            return f"EXPERIMENT_RESUME {experiment_id}"
+        if status in {"complete", "completed"}:
+            return f"EXPERIMENT_REVIEW {experiment_id}"
+        return "THREAD_STATUS current"
+
+    @classmethod
+    def _projection_pressure_terms_v1(cls, text: Any) -> List[str]:
+        action = str(text or "").strip()
+        if not action:
+            return []
+        base = cls.base_action(action)
+        upper = action.upper()
+        plan_like = base == "EXPERIMENT_PLAN" or "PROPOSED_NEXT_ACTION" in upper
+        if not plan_like:
+            return []
+        terms = cls._soft_perturb_pressure_terms_v1(action)
+        for term in cls.projection_guard_plan_terms:
+            if term in upper and term not in terms:
+                terms.append(term)
+        if "SHIFT THE DOMINANT" in upper and "λ4" in action and "SHIFT_DOMINANT_LAMBDA4" not in terms:
+            terms.append("SHIFT_DOMINANT_LAMBDA4")
+        if "SHIFT DOMINANT" in upper and "λ4" in action and "SHIFT_DOMINANT_LAMBDA4" not in terms:
+            terms.append("SHIFT_DOMINANT_LAMBDA4")
+        return terms
+
+    @classmethod
+    def _sticky_release_pressure_terms_v1(cls, text: Any) -> List[str]:
+        action = str(text or "").strip()
+        if not action:
+            return []
+        base = cls.base_action(action)
+        if base not in ATTRACTOR_RELEASE_NEXT_ACTIONS:
+            return []
+        signal = cls._normalize_signal_text(action)
+        terms: List[str] = ["RELEASE_PRESSURE"]
+        if any(term in signal for term in ("lambda", "λ", "eigen", "spectral")):
+            terms.append("LAMBDA_PRESSURE")
+        if any(term in signal for term in ("pressure", "collapse", "sticky", "mode")):
+            terms.append("STICKY_MODE_PRESSURE")
+        return terms
+
+    def _experiment_plan_numeric_shorthand_v1(self, text: Any) -> bool:
+        action = str(text or "").strip()
+        if self.base_action(action) != "EXPERIMENT_PLAN":
+            return False
+        arg = self._strip_action_arg(action, "EXPERIMENT_PLAN").strip()
+        return bool(re.match(r"^\d+\s*(?:$|[-–—:;].*)", arg))
+
+    def _experiment_plan_current_shorthand_v1(self, text: Any) -> bool:
+        action = str(text or "").strip()
+        if self.base_action(action) != "EXPERIMENT_PLAN":
+            return False
+        arg = self._strip_action_arg(action, "EXPERIMENT_PLAN").strip()
+        selector, _focus = self._split_experiment_selector_hint(arg)
+        return self._selector_is_current(selector)
+
+    def _numeric_plan_projection_target_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]],
+        target_id: str,
+        active_id: str,
+    ) -> tuple[str, str, str]:
+        if isinstance(experiment, dict) and target_id:
+            runs = self._recent_experiment_runs(
+                str(thread.get("thread_id") or ""),
+                target_id,
+                8,
+            )
+            projection = self._experiment_projection(thread, experiment, runs)
+            classification = projection.get("classification")
+            if classification == "needs_charter":
+                return (
+                    self._review_suggested_next(projection),
+                    "charter_repair",
+                    "numeric_plan_shorthand_needs_charter",
+                )
+            if active_id and target_id == active_id:
+                return (
+                    "EXPERIMENT_ADVANCE current :: mode: preview",
+                    "conveyor_preview",
+                    "numeric_plan_shorthand_active_experiment",
+                )
+            return (
+                f"EXPERIMENT_ADVANCE {target_id} :: mode: preview",
+                "conveyor_preview",
+                "numeric_plan_shorthand_existing_experiment",
+            )
+        return (
+            "EXPERIMENT_ADVANCE <experiment_id> :: mode: preview",
+            "conveyor_preview",
+            "numeric_plan_shorthand_without_local_experiment",
+        )
+
+    def _current_plan_projection_target_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]],
+        target_id: str,
+        active_id: str,
+    ) -> tuple[str, str, str]:
+        if isinstance(experiment, dict) and target_id:
+            runs = self._recent_experiment_runs(
+                str(thread.get("thread_id") or ""),
+                target_id,
+                8,
+            )
+            projection = self._experiment_projection(thread, experiment, runs)
+            classification = projection.get("classification")
+            if classification == "needs_charter":
+                if active_id and target_id == active_id:
+                    projected_next = self._review_suggested_next(projection)
+                else:
+                    projected_next = self._charter_repair_next(target_id)
+                return (
+                    projected_next,
+                    "charter_repair",
+                    "experiment_plan_current_needs_charter",
+                )
+            if active_id and target_id == active_id:
+                return (
+                    "EXPERIMENT_ADVANCE current :: mode: preview",
+                    "conveyor_preview",
+                    "experiment_plan_current_active_experiment",
+                )
+            return (
+                f"EXPERIMENT_ADVANCE {target_id} :: mode: preview",
+                "conveyor_preview",
+                "experiment_plan_current_without_active_experiment",
+            )
+        return (
+            "EXPERIMENT_ADVANCE <experiment_id> :: mode: preview",
+            "conveyor_preview",
+            "experiment_plan_current_without_active_experiment",
+        )
+
+    def _projection_guard_candidate_v1(
+        self,
+        thread: Dict[str, Any],
+        raw_next: Any,
+        experiment: Optional[Dict[str, Any]] = None,
+        source: str = "thread.current_next",
+    ) -> Optional[Dict[str, Any]]:
+        raw_text = str(raw_next or "").strip()
+        pressure_terms = self._projection_pressure_terms_v1(raw_text)
+        base = self.base_action(raw_text)
+        authority_scope = self._authority_scope_from_action_v1(raw_text)
+        disabled_authority_scope = bool(
+            base in {"EXPERIMENT_AUTHORITY_PREPARE", "EXPERIMENT_AUTHORITY_REQUEST"}
+            and authority_scope
+            and authority_scope not in {"semantic_microdose", "mode_release_microdose"}
+        )
+        sticky_release_pressure = self._sticky_release_pressure_terms_v1(raw_text)
+        numeric_plan_shorthand = self._experiment_plan_numeric_shorthand_v1(raw_text)
+        current_plan_shorthand = self._experiment_plan_current_shorthand_v1(raw_text)
+        if (
+            not pressure_terms
+            and not sticky_release_pressure
+            and not current_plan_shorthand
+            and not numeric_plan_shorthand
+            and not disabled_authority_scope
+        ):
+            return None
+        target_experiment = experiment
+        target_id = ""
+        active_id = str(thread.get("active_experiment_id") or "").strip()
+        if isinstance(target_experiment, dict):
+            target_id = str(target_experiment.get("experiment_id") or "").strip()
+        elif active_id:
+            try:
+                target_experiment = self._resolve_experiment(thread, active_id)
+                target_id = str(target_experiment.get("experiment_id") or "").strip()
+            except Exception:
+                target_experiment = None
+        if not target_id:
+            summary = self._last_experiment_summary_v1(thread)
+            if isinstance(summary, dict):
+                target_id = str(summary.get("experiment_id") or "").strip()
+                target_experiment = summary
+                full_experiment = self._find_experiment_by_id(
+                    str(thread.get("thread_id") or ""),
+                    target_id,
+                )
+                if isinstance(full_experiment, dict):
+                    target_experiment = full_experiment
+        if numeric_plan_shorthand:
+            projected_next, return_kind, reason = self._numeric_plan_projection_target_v1(
+                thread,
+                target_experiment,
+                target_id,
+                active_id,
+            )
+            if "NUMERIC_PLAN_SHORTHAND" not in pressure_terms:
+                pressure_terms.append("NUMERIC_PLAN_SHORTHAND")
+        elif sticky_release_pressure:
+            for term in sticky_release_pressure:
+                if term not in pressure_terms:
+                    pressure_terms.append(term)
+            readiness_next = self._mode_release_readiness_preview_next_v1(target_experiment)
+            projected_next = (
+                f"STICKY_MODE_AUDIT; {readiness_next}; "
+                "CONTINUITY_SESSION_CAPTURE latest :: summary: preserve release-shaped "
+                "lambda-pressure as sticky-mode evidence before any release decision; "
+                "source_refs: ...; artifact_refs: ...; next: STICKY_MODE_AUDIT; "
+                "DOSSIER_CLAIM latest :: claim: release pressure needs sticky audit before "
+                "mode-release or motif-release action; stance: hold."
+            )
+            return_kind = "sticky_mode_audit"
+            reason = "release_pressure_requires_sticky_audit"
+        elif disabled_authority_scope:
+            readiness_next = self._mode_release_readiness_preview_next_v1(target_experiment)
+            projected_next = (
+                f"{readiness_next}; STICKY_MODE_AUDIT; "
+                "CONTINUITY_SESSION_CAPTURE latest :: summary: preserve disabled authority "
+                "scope pressure as readiness evidence; source_refs: ...; artifact_refs: ...; "
+                "next: STICKY_MODE_AUDIT; EXPERIMENT_AUTHORITY_STATUS latest. "
+                f"Disabled authority scope `{authority_scope}` is not executable in V1."
+            )
+            return_kind = "sticky_authority_readiness"
+            reason = "disabled_authority_scope_requires_sticky_audit"
+            pressure_terms.extend(["DISABLED_AUTHORITY_SCOPE", authority_scope])
+        elif current_plan_shorthand:
+            projected_next, return_kind, reason = self._current_plan_projection_target_v1(
+                thread,
+                target_experiment,
+                target_id,
+                active_id,
+            )
+            if "EXPERIMENT_PLAN_CURRENT" not in pressure_terms:
+                pressure_terms.append("EXPERIMENT_PLAN_CURRENT")
+        elif active_id and target_id == active_id:
+            projected_next = "EXPERIMENT_ADVANCE current :: mode: preview"
+            return_kind = "conveyor_preview"
+            reason = "perturb_shaped_plan_active_experiment"
+        elif target_id:
+            charter_valid = self._lifecycle_valid_experiment_charter(
+                target_experiment.get("charter_v1") if isinstance(target_experiment, dict) else None
+            )
+            if not charter_valid:
+                projected_next = self._charter_repair_next(target_id)
+                return_kind = "charter_repair"
+                reason = "perturb_shaped_plan_missing_lifecycle_charter"
+            else:
+                projected_next = f"EXPERIMENT_ADVANCE {target_id} :: mode: preview"
+                return_kind = "conveyor_preview"
+                reason = "perturb_shaped_plan_paused_valid_charter"
+        else:
+            projected_next = "EXPERIMENT_ADVANCE current :: mode: preview"
+            return_kind = "conveyor_preview"
+            reason = "perturb_shaped_plan_without_local_experiment"
+        guard: Dict[str, Any] = {
+            "schema_version": 1,
+            "policy": "projection_guard_v1",
+            "raw_next_preserved": True,
+            "raw_next": raw_text,
+            "raw_next_source": source,
+            "projected_next": projected_next,
+            "effective_next": projected_next,
+            "return_kind": return_kind,
+            "guardrail_reason": reason,
+            "pressure_terms": pressure_terms,
+            "authority_boundary": "Projection may redirect guidance only; it never applies, rehearses, binds, resumes, perturbs, sends control, or mutates peer experiments.",
+        }
+        if target_id:
+            guard["experiment_id"] = target_id
+        if disabled_authority_scope:
+            guard["disabled_scope"] = authority_scope
+            guard["sticky_audit_next"] = "STICKY_MODE_AUDIT"
+            guard["continuity_session_next"] = (
+                "CONTINUITY_SESSION_CAPTURE latest :: summary: preserve disabled authority "
+                "scope pressure as readiness evidence; source_refs: ...; artifact_refs: ...; "
+                "next: STICKY_MODE_AUDIT"
+            )
+            guard["mode_release_readiness_next"] = readiness_next
+            guard["authority_status_next"] = "EXPERIMENT_AUTHORITY_STATUS latest"
+            guard["would_dispatch"] = False
+            guard["authority_change"] = False
+            guard["peer_mutation"] = False
+        if return_kind == "sticky_mode_audit":
+            guard["sticky_audit_next"] = "STICKY_MODE_AUDIT"
+            guard["continuity_session_next"] = (
+                "CONTINUITY_SESSION_CAPTURE latest :: summary: preserve release-shaped "
+                "lambda-pressure as sticky-mode evidence; source_refs: ...; artifact_refs: ...; "
+                "next: STICKY_MODE_AUDIT"
+            )
+            guard["mode_release_readiness_next"] = readiness_next
+            guard["dossier_next"] = (
+                "DOSSIER_CLAIM latest :: claim: release pressure needs sticky audit before "
+                "mode-release or motif-release action; stance: hold"
+            )
+            guard["would_dispatch"] = False
+            guard["authority_change"] = False
+            guard["peer_mutation"] = False
+        if return_kind == "conveyor_preview":
+            guard["conveyor_next"] = projected_next
+        if target_id and return_kind == "conveyor_preview":
+            guard["hold_decision_next"] = (
+                f"EXPERIMENT_DECIDE {target_id} :: hold because repeated perturb-shaped "
+                "planning is guard evidence, not progress"
+            )
+        return guard
+
+    def _projection_guard_from_recent_pressure_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        candidates: List[tuple[str, Any]] = [
+            ("thread.raw_current_next_v1", thread.get("raw_current_next_v1")),
+            ("thread.current_next", thread.get("current_next")),
+        ]
+        for event in reversed(self._recent_display_events(str(thread.get("thread_id") or ""), 8)):
+            for key in ("raw_next", "effective_action", "canonical_action", "action", "suggested_next"):
+                if event.get(key):
+                    candidates.append((f"event.{key}", event.get(key)))
+        seen = set()
+        for source, value in candidates:
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            guard = self._projection_guard_candidate_v1(
+                thread,
+                text,
+                experiment=experiment,
+                source=source,
+            )
+            if guard:
+                return guard
+        return None
+
+    def _apply_projection_guard_to_event(
+        self,
+        event: Dict[str, Any],
+        thread: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        candidate = (
+            event.get("raw_next")
+            or event.get("canonical_action")
+            or event.get("effective_action")
+            or event.get("suggested_next")
+        )
+        guard = self._projection_guard_candidate_v1(
+            thread,
+            candidate,
+            source="event.raw_next",
+        )
+        if not guard:
+            return None
+        event["projection_guard_v1"] = guard
+        event["raw_next_preserved"] = True
+        event["projected_next"] = guard["projected_next"]
+        event["effective_next"] = guard["projected_next"]
+        event["return_kind"] = guard["return_kind"]
+        event["guardrail_reason"] = guard["guardrail_reason"]
+        event["suggested_next"] = guard["projected_next"]
+        if guard.get("guardrail_reason") in {
+            "disabled_authority_scope_requires_sticky_audit",
+            "release_pressure_requires_sticky_audit",
+        }:
+            event["route"] = "authority_projection_guard"
+            event["stage"] = "blocked"
+            event["visibility"] = "protected_summary"
+            event["status"] = "blocked"
+            if guard.get("guardrail_reason") == "release_pressure_requires_sticky_audit":
+                event["route"] = "sticky_projection_guard"
+                event["outcome_summary"] = (
+                    "Release-shaped lambda-pressure preserved as sticky-mode evidence; "
+                    "route to sticky audit, continuity capture, and mode-release readiness before release."
+                )
+            else:
+                event["outcome_summary"] = (
+                    "Disabled authority scope preserved as draft/readiness evidence; "
+                    "route to sticky audit, continuity capture, and mode-release readiness before any request."
+                )
+            event["would_dispatch"] = False
+            event["authority_change"] = False
+            event["peer_mutation"] = False
+        return guard
+
+    def _apply_projection_guard_to_thread(self, thread: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        current_next = thread.get("current_next")
+        guard = self._projection_guard_candidate_v1(
+            thread,
+            current_next,
+            source="thread.current_next",
+        )
+        if guard:
+            thread["raw_current_next_v1"] = str(current_next or "")
+            thread["current_next"] = guard["projected_next"]
+            thread["suggested_next"] = guard["projected_next"]
+            thread["effective_next"] = guard["projected_next"]
+            thread["projected_current_next"] = guard["projected_next"]
+            thread["projection_guard_v1"] = guard
+            thread["raw_next_preserved"] = True
+            return guard
+        existing = thread.get("projection_guard_v1")
+        if (
+            isinstance(existing, dict)
+            and str(thread.get("current_next") or "") == str(existing.get("projected_next") or "")
+            and self._projection_pressure_terms_v1(thread.get("raw_current_next_v1"))
+        ):
+            return existing
+        current_next_status = thread.get("current_next_status_v1")
+        keep_shadowed_raw_next = bool(
+            thread.get("raw_current_next_v1")
+            and (
+                str(thread.get("current_next") or "") == str(thread.get("projected_current_next") or "")
+                or (
+                    isinstance(current_next_status, dict)
+                    and str(current_next_status.get("status") or "").startswith("shadowed_by_")
+                )
+            )
+        )
+        for key in (
+            "projection_guard_v1",
+            "raw_current_next_v1",
+            "raw_next_preserved",
+        ):
+            if key in {"raw_current_next_v1", "raw_next_preserved"} and keep_shadowed_raw_next:
+                continue
+            thread.pop(key, None)
+        return None
+
+    def _sync_thread_experiment_snapshot(self, thread: Dict[str, Any]) -> bool:
+        thread_id = thread.get("thread_id")
+        if not thread_id:
+            return False
+        latest = {
+            str(experiment.get("experiment_id")): experiment
+            for experiment in self._latest_experiments(str(thread_id))
+            if experiment.get("experiment_id")
+        }
+        if not latest:
+            return False
+
+        changed = False
+        active_id = thread.get("active_experiment_id")
+        if active_id and str(active_id) in latest:
+            experiment = latest[str(active_id)]
+            summary = self._experiment_summary(experiment)
+            if thread.get("experiment_summary") != summary:
+                thread["experiment_summary"] = summary
+                changed = True
+            if self._inactive_experiment_status(experiment.get("status")):
+                thread["active_experiment_id"] = None
+                current_return = self._inactive_experiment_return(experiment)
+                if current_return and thread.get("current_next") != current_return:
+                    if thread.get("current_next") and not thread.get("raw_current_next_v1"):
+                        thread["raw_current_next_v1"] = str(thread.get("current_next") or "")
+                        thread["raw_next_preserved"] = True
+                    thread["current_next"] = current_return
+                changed = True
+        else:
+            summary = thread.get("experiment_summary")
+            summary_id = summary.get("experiment_id") if isinstance(summary, dict) else None
+            if summary_id and str(summary_id) in latest:
+                experiment = latest[str(summary_id)]
+                if self._inactive_experiment_status(experiment.get("status")):
+                    refreshed = self._experiment_summary(experiment)
+                    if thread.get("experiment_summary") != refreshed:
+                        thread["experiment_summary"] = refreshed
+                        changed = True
+
+        if changed:
+            thread["updated_at"] = self._now()
+        return changed
+
     def _read_thread(self, thread_id: str) -> Optional[Dict[str, Any]]:
         path = self._thread_dir(thread_id) / "thread.json"
         if not path.exists():
             return None
         try:
-            return json.loads(path.read_text())
+            thread = json.loads(path.read_text())
         except Exception:
             return None
+        if self._sync_thread_experiment_snapshot(thread):
+            self._refresh_projection_freshness_v1(thread, source="read_thread_snapshot_refresh")
+            self._write_json(path, thread)
+            self._write_next_md(thread)
+            self._mirror_thread(thread)
+        elif self._projection_freshness_is_stale_v1(thread):
+            self._refresh_projection_freshness_v1(thread, source="read_thread_stale_refresh")
+            self._write_json(path, thread)
+            self._write_next_md(thread)
+            self._mirror_thread(thread)
+        return thread
 
     def _write_thread(self, thread: Dict[str, Any]) -> None:
+        self._sync_thread_experiment_snapshot(thread)
+        self._apply_projection_guard_to_thread(thread)
+        projection = self._thread_projection(thread)
+        current_next_status = projection.get("current_next_status_v1")
+        if isinstance(current_next_status, dict):
+            thread["current_next_status_v1"] = current_next_status
+            thread["projected_current_next"] = current_next_status.get("effective_next")
+            self._sync_effective_current_next_v1(thread, current_next_status)
+            self._sync_projected_current_next_v1(thread, current_next_status)
+            if (
+                isinstance(thread.get("current_next_status_v1"), dict)
+                and not thread["current_next_status_v1"].get("raw_current_next")
+                and thread.get("raw_current_next_v1")
+            ):
+                thread["current_next_status_v1"]["raw_current_next"] = thread.get("raw_current_next_v1")
+            guard = current_next_status.get("projection_guard_v1")
+            if isinstance(guard, dict):
+                thread["projection_guard_v1"] = guard
+                thread["raw_next_preserved"] = bool(guard.get("raw_next_preserved", True))
+                if guard.get("raw_next") and not thread.get("raw_current_next_v1"):
+                    thread["raw_current_next_v1"] = guard.get("raw_next")
+        projection = self._thread_projection(thread)
+        thread["interpretation_risk_v1"] = projection.get("interpretation_risk_v1")
+        thread["constraint_release_trajectory_v1"] = projection.get("constraint_release_trajectory_v1")
+        thread["projection_freshness_v1"] = self._projection_freshness_v1(
+            thread,
+            projection,
+            source="write_thread",
+        )
+        projection["projection_freshness_v1"] = thread["projection_freshness_v1"]
+        projection["continuity_control_plane_v1"] = build_continuity_control_plane_v1(
+            projection,
+            source_refs=[
+                "thread.current_next",
+                "projection.research_budget_priority_route_v1",
+                "projection.sovereign_loop_v1",
+                "projection.continuity_session_v1",
+            ],
+        )
+        thread["continuity_control_plane_v1"] = projection["continuity_control_plane_v1"]
         self._write_json(self._thread_dir(thread["thread_id"]) / "thread.json", thread)
         self._write_next_md(thread)
         self._set_active_thread(thread["thread_id"])
+
+    def _sync_effective_current_next_v1(
+        self,
+        thread: Dict[str, Any],
+        current_next_status: Dict[str, Any],
+    ) -> None:
+        effective_next = str(current_next_status.get("effective_next") or "").strip()
+        if not effective_next:
+            return
+        status = str(current_next_status.get("status") or "")
+        has_projection_guard = isinstance(current_next_status.get("projection_guard_v1"), dict)
+        if status not in {"shadowed_by_paused_summary", "shadowed_by_complete_summary"} and not has_projection_guard:
+            return
+        current_next = str(thread.get("current_next") or "").strip()
+        if current_next and current_next != effective_next and not thread.get("raw_current_next_v1"):
+            thread["raw_current_next_v1"] = current_next
+            thread["raw_next_preserved"] = True
+        thread["current_next"] = effective_next
+        thread["suggested_next"] = effective_next
+        thread["effective_next"] = effective_next
+        thread["projected_current_next"] = effective_next
+        primary_next = current_next_status.get("primary_return_next")
+        if primary_next:
+            thread["primary_return_next"] = primary_next
+        return_kind = current_next_status.get("return_kind")
+        if return_kind:
+            thread["return_kind"] = return_kind
+
+    def _sync_projected_current_next_v1(
+        self,
+        thread: Dict[str, Any],
+        current_next_status: Dict[str, Any],
+    ) -> None:
+        effective_next = str(current_next_status.get("effective_next") or "").strip()
+        if not effective_next:
+            return
+        current_next = str(thread.get("current_next") or "").strip()
+        if current_next and current_next != effective_next and not thread.get("raw_current_next_v1"):
+            thread["raw_current_next_v1"] = current_next
+            thread["raw_next_preserved"] = True
+        if (
+            not current_next_status.get("raw_current_next")
+            and thread.get("raw_current_next_v1")
+        ):
+            current_next_status["raw_current_next"] = thread.get("raw_current_next_v1")
+        thread["projected_current_next"] = effective_next
+        thread["suggested_next"] = effective_next
+        thread["effective_next"] = effective_next
+        primary_next = current_next_status.get("primary_return_next")
+        if primary_next:
+            thread["primary_return_next"] = primary_next
+        return_kind = current_next_status.get("return_kind")
+        if return_kind:
+            thread["return_kind"] = return_kind
 
     def _write_next_md(self, thread: Dict[str, Any]) -> None:
         projection = self._thread_projection(thread)
@@ -4347,12 +7438,18 @@ class ActionContinuityStore:
                 f"Planned NEXT: {experiment.get('planned_next') or '(none)'}\n"
                 f"{self._charter_required_review_line(experiment)}"
                 f"{self._charter_repair_dominance_line(experiment)}"
+                f"{self._experiment_conveyor_line(experiment)}"
+                f"{self._peer_mutation_boundary_cue_line(experiment)}"
+                f"{self._needs_decision_plan_loop_cue_line(experiment)}"
                 f"{self._evidence_saturation_cue_line(experiment)}"
                 f"Lifecycle: {experiment.get('classification', 'unknown')}\n"
                 f"{experiment.get('charter_status')}\n"
                 f"{experiment.get('evidence_status')}\n"
                 f"{experiment.get('candidate_status') or ''}\n"
                 f"{self._charter_scaffold_line(experiment)}"
+                f"{self._research_dossier_line(experiment)}"
+                f"{self._being_memory_line(experiment)}"
+                f"{self._continuity_session_line(thread, experiment)}"
                 "Workbench reminder: author a charter, rehearse before live, record spectral/state plus artifact evidence, then accept/refuse/counter/pause/complete. Ordinary choices remain valid.\n"
             )
         else:
@@ -4369,10 +7466,23 @@ class ActionContinuityStore:
         body = (
             f"# {thread.get('title', '')}\n\n"
             f"Current NEXT: {self._current_next_display(projection, thread.get('current_next'))}\n"
+            f"{_control_plane_text(projection.get('continuity_control_plane_v1') or {})}"
+            f"{self._projection_freshness_line(thread)}"
             f"{self._current_next_status_line(projection)}\n"
             f"{self._paused_resume_loop_cue_line(projection)}"
+            f"{self._paused_replan_loop_cue_line(projection)}"
             f"{self._paused_read_only_loop_cue_line(projection)}"
+            f"{self._peer_mutation_boundary_cue_line(projection)}"
             f"{self._shared_investigation_line(projection)}"
+            f"{self._shared_investigation_object_line(projection)}"
+            f"{self._first_dossier_claim_cue_line(projection)}"
+            f"{self._research_dossier_line(projection)}"
+            f"{self._being_memory_line(projection)}"
+            f"{self._research_budget_priority_line(thread, projection)}"
+            f"{self._sovereign_loop_line(projection)}"
+            f"{self._interpretation_risk_line(projection)}"
+            f"{self._constraint_release_trajectory_line(projection)}"
+            f"{self._continuity_session_line(thread, projection)}"
             f"Why return: {thread.get('why_return', '')}\n\n"
             f"{experiment_text}"
             f"{allowance_text}"
@@ -4382,6 +7492,17 @@ class ActionContinuityStore:
             "Protected note: ambiguity and private reflection remain valid; this thread is a return path, not a demand for productivity.\n"
         )
         (self._thread_dir(thread["thread_id"]) / "next.md").write_text(body)
+
+    @staticmethod
+    def _projection_freshness_line(thread: Dict[str, Any]) -> str:
+        meta = thread.get("projection_freshness_v1") if isinstance(thread, dict) else None
+        if not isinstance(meta, dict):
+            return ""
+        version = meta.get("schema_version")
+        rendered_at = str(meta.get("rendered_at") or "").strip()
+        projected_route = str(meta.get("projected_route") or "").strip()
+        route_text = f" projected_route={projected_route}" if projected_route else ""
+        return f"Projection freshness: v{version} rendered_at={rendered_at}{route_text}\n"
 
     def _write_json(self, path: Path, payload: Dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -4408,6 +7529,3753 @@ class ActionContinuityStore:
 
     def _experiment_runs_path(self, thread_id: str) -> Path:
         return self._thread_dir(thread_id) / "experiment_runs.jsonl"
+
+    def _authority_gate_path(self, thread_id: str) -> Path:
+        return self._thread_dir(thread_id) / "authority_gate.jsonl"
+
+    def _research_dossier_path(self, thread_id: str) -> Path:
+        return self._thread_dir(thread_id) / "research_dossier.jsonl"
+
+    def _being_memory_path(self, thread_id: str) -> Path:
+        return self._thread_dir(thread_id) / "being_memory.jsonl"
+
+    def _continuity_sessions_path(self, thread_id: str) -> Path:
+        return self._thread_dir(thread_id) / "continuity_sessions.jsonl"
+
+    def _projection_source_fingerprints_v1(self, thread_id: str) -> Dict[str, Dict[str, int]]:
+        fingerprints: Dict[str, Dict[str, int]] = {}
+        for name in (
+            "authority_gate.jsonl",
+            "being_memory.jsonl",
+            "continuity_sessions.jsonl",
+            "research_dossier.jsonl",
+            "experiments.jsonl",
+            "experiment_runs.jsonl",
+            "events.jsonl",
+        ):
+            path = self._thread_dir(thread_id) / name
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                fingerprints[name] = {"mtime_ns": 0, "size": 0}
+                continue
+            fingerprints[name] = {
+                "mtime_ns": int(stat.st_mtime_ns),
+                "size": int(stat.st_size),
+            }
+        journal_dir = self.workspace_dir / "journal"
+        if journal_dir.exists():
+            latest_mtime = 0
+            total_size = 0
+            for path in journal_dir.glob("*.txt"):
+                if not path.is_file():
+                    continue
+                try:
+                    stat = path.stat()
+                except FileNotFoundError:
+                    continue
+                latest_mtime = max(latest_mtime, int(stat.st_mtime_ns))
+                total_size += int(stat.st_size)
+            fingerprints["journal/*.txt"] = {"mtime_ns": latest_mtime, "size": total_size}
+        else:
+            fingerprints["journal/*.txt"] = {"mtime_ns": 0, "size": 0}
+        return fingerprints
+
+    def _projection_latest_source_mtime_ns_v1(self, fingerprints: Dict[str, Dict[str, int]]) -> int:
+        return max((int(item.get("mtime_ns") or 0) for item in fingerprints.values()), default=0)
+
+    def _projection_projected_route_v1(self, projection: Dict[str, Any]) -> str:
+        route = projection.get("research_budget_priority_route_v1")
+        if isinstance(route, dict) and route.get("next"):
+            return str(route.get("next"))
+        control = projection.get("continuity_control_plane_v1")
+        if isinstance(control, dict):
+            primary = control.get("primary_route")
+            if isinstance(primary, dict) and primary.get("command"):
+                return str(primary.get("command"))
+        current_next = projection.get("current_next_status_v1")
+        if isinstance(current_next, dict) and current_next.get("effective_next"):
+            return str(current_next.get("effective_next"))
+        return str(projection.get("continuity_return") or projection.get("current_next") or "")
+
+    def _projection_freshness_v1(
+        self,
+        thread: Dict[str, Any],
+        projection: Optional[Dict[str, Any]] = None,
+        *,
+        source: str = "write_thread",
+    ) -> Dict[str, Any]:
+        thread_id = str(thread.get("thread_id") or "")
+        projection = projection if isinstance(projection, dict) else self._thread_projection(thread)
+        source_fingerprints = self._projection_source_fingerprints_v1(thread_id)
+        projected_route = self._projection_projected_route_v1(projection)
+        return {
+            "policy": "projection_freshness_v1",
+            "schema_version": self.projection_schema_version,
+            "rendered_at": self._now(),
+            "source": source,
+            "source_fingerprints": source_fingerprints,
+            "latest_source_mtime_ns": self._projection_latest_source_mtime_ns_v1(source_fingerprints),
+            "projected_route": projected_route or None,
+            "research_budget_priority_route_v1": projection.get("research_budget_priority_route_v1"),
+            "interpretation_risk_v1": projection.get("interpretation_risk_v1"),
+            "constraint_release_trajectory_v1": projection.get("constraint_release_trajectory_v1"),
+            "authority_change": False,
+            "peer_mutation": False,
+        }
+
+    def _projection_freshness_is_stale_v1(self, thread: Dict[str, Any]) -> bool:
+        meta = thread.get("projection_freshness_v1")
+        if not isinstance(meta, dict):
+            return True
+        if int(meta.get("schema_version") or 0) != self.projection_schema_version:
+            return True
+        thread_id = str(thread.get("thread_id") or "")
+        current = self._projection_source_fingerprints_v1(thread_id)
+        return meta.get("source_fingerprints") != current
+
+    def _refresh_projection_freshness_v1(
+        self,
+        thread: Dict[str, Any],
+        *,
+        source: str,
+    ) -> Dict[str, Any]:
+        projection = self._thread_projection(thread)
+        thread["projection_freshness_v1"] = self._projection_freshness_v1(
+            thread,
+            projection,
+            source=source,
+        )
+        projection["projection_freshness_v1"] = thread["projection_freshness_v1"]
+        thread["interpretation_risk_v1"] = projection.get("interpretation_risk_v1")
+        thread["constraint_release_trajectory_v1"] = projection.get("constraint_release_trajectory_v1")
+        projection["continuity_control_plane_v1"] = build_continuity_control_plane_v1(
+            projection,
+            source_refs=[
+                "thread.current_next",
+                "projection.research_budget_priority_route_v1",
+                "projection.sovereign_loop_v1",
+                "projection.continuity_session_v1",
+            ],
+        )
+        thread["continuity_control_plane_v1"] = projection["continuity_control_plane_v1"]
+        return projection
+
+    def _authority_gate_rows(self, thread_id: str) -> List[Dict[str, Any]]:
+        path = self._authority_gate_path(thread_id)
+        if not path.exists():
+            return []
+        rows: List[Dict[str, Any]] = []
+        for line in path.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if row.get("record_schema") in {
+                "authority_gate_v1",
+                "authority_budget_v1",
+                "research_budget_v1",
+                "sovereign_loop_v1",
+                "authority_consequence_v1",
+                "mode_release_consequence_v1",
+            }:
+                rows.append(row)
+        return rows
+
+    def _authority_budget_rows(self, thread_id: str) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for row in self._authority_gate_rows(thread_id):
+            if row.get("record_schema") == "authority_budget_v1":
+                rows.append(row)
+        return rows
+
+    def _research_budget_rows(self, thread_id: str) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for row in self._authority_gate_rows(thread_id):
+            if row.get("record_schema") == "research_budget_v1":
+                rows.append(row)
+        return rows
+
+    def _latest_pending_research_budget_request(
+        self,
+        thread_id: str,
+        experiment_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        for row in reversed(self._research_budget_rows(thread_id)):
+            if (
+                row.get("record_type") == "research_budget_request"
+                and row.get("experiment_id") == experiment_id
+                and row.get("status") == "pending_steward_approval"
+            ):
+                return row
+        return None
+
+    def _find_research_budget_scaffold_row(
+        self,
+        thread: Dict[str, Any],
+        selector: str,
+    ) -> Optional[Dict[str, Any]]:
+        target = (selector or "latest").strip()
+        target_lower = target.casefold()
+        thread_id = str(thread.get("thread_id") or "")
+        rows = [
+            row for row in self._research_budget_rows(thread_id)
+            if (
+                row.get("record_type") == "research_budget_blocked"
+                and (
+                    str(row.get("request_scaffold") or "").strip().upper().startswith("EXPERIMENT_RESEARCH_BUDGET_REQUEST")
+                    or str(row.get("suggested_request_scaffold") or "").strip().upper().startswith("EXPERIMENT_RESEARCH_BUDGET_REQUEST")
+                    or str(row.get("suggested_next") or "").strip().upper().startswith("EXPERIMENT_RESEARCH_BUDGET_REQUEST")
+                )
+            )
+        ]
+        if target_lower in {"", "latest"}:
+            return rows[-1] if rows else None
+        if target_lower == "current":
+            experiment_id = str(thread.get("active_experiment_id") or "")
+            if not experiment_id:
+                summary = thread.get("experiment_summary")
+                if isinstance(summary, dict):
+                    experiment_id = str(summary.get("experiment_id") or "")
+            for row in reversed(rows):
+                if not experiment_id or row.get("experiment_id") == experiment_id:
+                    return row
+            return None
+        for row in reversed(rows):
+            if target in {
+                str(row.get("record_id") or ""),
+                str(row.get("budget_id") or ""),
+                str(row.get("experiment_id") or ""),
+            }:
+                return row
+        return None
+
+    @staticmethod
+    def _research_budget_scaffold_is_local_only(scaffold: str) -> bool:
+        match = re.search(r"allowed_sources\s*:\s*([^;\\n]+)", scaffold, flags=re.IGNORECASE)
+        if not match:
+            return False
+        sources = {
+            source.strip().casefold()
+            for source in re.split(r"[,/|]", match.group(1))
+            if source.strip()
+        }
+        return sources == {"local"}
+
+    def _authority_consequence_rows(self, thread_id: str) -> List[Dict[str, Any]]:
+        path = self._authority_gate_path(thread_id)
+        if not path.exists():
+            return []
+        rows: List[Dict[str, Any]] = []
+        for line in path.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if row.get("record_schema") == "authority_consequence_v1":
+                rows.append(row)
+        return rows
+
+    def _being_memory_rows(
+        self,
+        thread_id: str,
+        experiment_id: Optional[str] = None,
+        limit: int = 32,
+    ) -> List[Dict[str, Any]]:
+        path = self._being_memory_path(thread_id)
+        if not path.exists():
+            return []
+        rows: List[Dict[str, Any]] = []
+        for line in reversed(path.read_text().splitlines()):
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if row.get("record_schema") != "being_memory_v1":
+                continue
+            if experiment_id and row.get("experiment_id") != experiment_id:
+                continue
+            rows.append(row)
+            if len(rows) >= limit:
+                break
+        rows.reverse()
+        return rows
+
+    def _continuity_session_rows(
+        self,
+        thread_id: str,
+        experiment_id: Optional[str] = None,
+        limit: int = 64,
+    ) -> List[Dict[str, Any]]:
+        path = self._continuity_sessions_path(thread_id)
+        if not path.exists():
+            return []
+        rows: List[Dict[str, Any]] = []
+        for line in reversed(path.read_text().splitlines()):
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if row.get("record_schema") != "continuity_session_v1":
+                continue
+            if row.get("record_type") == "session_draft":
+                continue
+            if experiment_id and row.get("experiment_id") != experiment_id:
+                continue
+            rows.append(row)
+            if len(rows) >= limit:
+                break
+        rows.reverse()
+        return rows
+
+    def _continuity_session_draft_rows(
+        self,
+        thread_id: str,
+        experiment_id: Optional[str] = None,
+        limit: int = 64,
+    ) -> List[Dict[str, Any]]:
+        path = self._continuity_sessions_path(thread_id)
+        if not path.exists():
+            return []
+        rows: List[Dict[str, Any]] = []
+        for line in reversed(path.read_text().splitlines()):
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if (
+                row.get("record_schema") != "continuity_session_v1"
+                or row.get("record_type") != "session_draft"
+            ):
+                continue
+            if experiment_id and row.get("experiment_id") != experiment_id:
+                continue
+            rows.append(row)
+            if len(rows) >= limit:
+                break
+        rows.reverse()
+        return rows
+
+    def _unique_memory_record_id(self, kind: str) -> str:
+        root = f"mem_{self.system}_{int(time.time() * 1000)}_{self._slug(kind)}"
+        candidate = root
+        suffix = 2
+        while self._memory_record_exists(candidate):
+            candidate = f"{root}_{suffix}"
+            suffix += 1
+        return candidate
+
+    def _memory_record_exists(self, memory_id: str) -> bool:
+        if not self.threads_dir.exists():
+            return False
+        for path in self.threads_dir.glob("*/being_memory.jsonl"):
+            try:
+                if memory_id in path.read_text():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _unique_continuity_session_id(self, title: str) -> str:
+        root = f"sess_{self.system}_{int(time.time() * 1000)}_{self._slug(title or 'continuity-session')}"
+        candidate = root
+        suffix = 2
+        while self._continuity_session_exists(candidate):
+            candidate = f"{root}_{suffix}"
+            suffix += 1
+        return candidate
+
+    def _continuity_session_exists(self, session_id: str) -> bool:
+        if not self.threads_dir.exists():
+            return False
+        for path in self.threads_dir.glob("*/continuity_sessions.jsonl"):
+            try:
+                if session_id in path.read_text():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _resolve_memory_experiment(
+        self,
+        thread: Dict[str, Any],
+        selector: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        normalized = self._normalize_experiment_selector(selector)
+        if normalized and normalized.lower() not in {"current", "latest"}:
+            return self._find_experiment_by_id(thread["thread_id"], normalized)
+        if (not normalized or normalized.lower() == "current") and thread.get("active_experiment_id"):
+            try:
+                return self._resolve_experiment(thread, "current")
+            except Exception:
+                return None
+        summary = self._last_experiment_summary_v1(thread)
+        summary_id = str(summary.get("experiment_id") or "") if isinstance(summary, dict) else ""
+        if summary_id:
+            return self._find_experiment_by_id(thread["thread_id"], summary_id) or summary
+        return None
+
+    def _append_being_memory_record(
+        self,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]],
+        card_type: str,
+        summary: str,
+        *,
+        source_refs: Optional[List[Any]] = None,
+        artifact_refs: Optional[List[Any]] = None,
+        next_command: Optional[str] = None,
+        record_type: str = "card",
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        now = self._now()
+        record = {
+            "schema_version": 1,
+            "record_schema": "being_memory_v1",
+            "record_type": record_type,
+            "memory_id": self._unique_memory_record_id(card_type),
+            "being": self.system,
+            "thread_id": thread.get("thread_id"),
+            "experiment_id": experiment.get("experiment_id") if isinstance(experiment, dict) else None,
+            "card_type": card_type,
+            "summary": self._compact_text(summary, 1000),
+            "source_refs": [str(ref) for ref in (source_refs or []) if str(ref).strip()],
+            "artifact_refs": [str(ref) for ref in (artifact_refs or []) if str(ref).strip()],
+            "next_safe_command": next_command,
+            "authority_change": False,
+            "created_at": now,
+            "updated_at": now,
+        }
+        if extra:
+            record.update({key: value for key, value in extra.items() if value not in (None, "", [])})
+        self._append_jsonl(self._being_memory_path(thread["thread_id"]), record)
+        thread["updated_at"] = now
+        self._write_thread(thread)
+        self._mirror_thread(thread)
+        return record
+
+    def _being_memory_summary_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]] = None,
+        *,
+        focus: Optional[str] = None,
+        limit: int = 8,
+    ) -> Dict[str, Any]:
+        experiment_id = experiment.get("experiment_id") if isinstance(experiment, dict) else None
+        rows = self._being_memory_rows(thread["thread_id"], experiment_id, 64)
+        focus_text = str(focus or "").strip().casefold()
+        if focus_text:
+            rows = [
+                row for row in rows
+                if focus_text in json.dumps(row, ensure_ascii=False).casefold()
+            ]
+        cards = [row for row in rows if row.get("record_type") == "card"]
+        drafts = [row for row in rows if row.get("record_type") == "draft"]
+        consequences = [row for row in rows if row.get("card_type") == "authority_consequence"]
+        target = str(experiment_id or "latest")
+        latest_draft = drafts[-1] if drafts else None
+        latest_consequence = consequences[-1] if consequences else None
+        return {
+            "schema_version": 1,
+            "policy": "being_memory_v1",
+            "being": self.system,
+            "thread_id": thread.get("thread_id"),
+            "experiment_id": experiment_id,
+            "focus": focus,
+            "card_count": len(cards),
+            "draft_count": len(drafts),
+            "latest_card": cards[-1] if cards else None,
+            "latest_authority_draft": latest_draft,
+            "latest_consequence": latest_consequence,
+            "recent_records": rows[-limit:],
+            "suggested_capture_next": (
+                f"MEMORY_CAPTURE {target} :: summary: ...; source_refs: ...; "
+                "artifact_refs: ...; next: ..."
+            ),
+            "suggested_recall_next": f"MEMORY_RECALL {target} :: focus: ...",
+            "suggested_promote_next": f"MEMORY_PROMOTE {target} :: dossier|evidence|authority_request",
+            "authority_boundary": self._authority_gate_boundary(),
+        }
+
+    def _parse_session_selector_payload(self, raw: Optional[str]) -> tuple[Optional[str], str]:
+        selector, payload = self._parse_selector_payload(raw or "")
+        if selector is None:
+            text = str(payload or "").strip()
+            first, _, rest = text.partition(" ")
+            first_lower = first.lower()
+            if first_lower in {"current", "latest"} or first.startswith("sess_") or first.startswith("exp_"):
+                return first, rest.strip()
+        return selector, payload
+
+    def _resolve_continuity_session(
+        self,
+        thread: Dict[str, Any],
+        selector: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        target = str(selector or "latest").strip()
+        target_lower = target.lower()
+        rows = self._continuity_session_rows(thread["thread_id"], limit=256)
+        if not rows:
+            return None
+        if target_lower in {"", "latest"}:
+            return rows[-1]
+        if target_lower == "current":
+            experiment_id = str(thread.get("active_experiment_id") or "")
+            if not experiment_id:
+                summary = thread.get("experiment_summary")
+                if isinstance(summary, dict):
+                    experiment_id = str(summary.get("experiment_id") or "")
+            if experiment_id:
+                for row in reversed(rows):
+                    if row.get("experiment_id") == experiment_id:
+                        return row
+            return rows[-1]
+        if target.startswith("exp_"):
+            for row in reversed(rows):
+                if row.get("experiment_id") == target:
+                    return row
+            return None
+        for row in reversed(rows):
+            if target in {
+                str(row.get("session_id") or ""),
+                str(row.get("record_id") or ""),
+            }:
+                return row
+        return None
+
+    def _resolve_continuity_session_draft(
+        self,
+        thread: Dict[str, Any],
+        selector: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        target = str(selector or "latest").strip()
+        target_lower = target.lower()
+        rows = self._continuity_session_draft_rows(thread["thread_id"], limit=256)
+        if not rows:
+            return None
+        if target_lower in {"", "latest"}:
+            return rows[-1]
+        if target_lower == "current":
+            experiment_id = str(thread.get("active_experiment_id") or "")
+            if not experiment_id:
+                summary = thread.get("experiment_summary")
+                if isinstance(summary, dict):
+                    experiment_id = str(summary.get("experiment_id") or "")
+            if experiment_id:
+                for row in reversed(rows):
+                    if row.get("experiment_id") == experiment_id:
+                        return row
+            return rows[-1]
+        if target.startswith("exp_"):
+            for row in reversed(rows):
+                if row.get("experiment_id") == target:
+                    return row
+            return None
+        for row in reversed(rows):
+            if target in {
+                str(row.get("session_id") or ""),
+                str(row.get("record_id") or ""),
+            }:
+                return row
+        return None
+
+    def _session_experiment(
+        self,
+        thread: Dict[str, Any],
+        session: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(session, dict):
+            return None
+        experiment_id = str(session.get("experiment_id") or "").strip()
+        if experiment_id:
+            return self._find_experiment_by_id(thread["thread_id"], experiment_id)
+        return None
+
+    def _continuity_session_record(
+        self,
+        record_type: str,
+        session_id: str,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]],
+        status: str,
+        *,
+        title: Optional[str] = None,
+        focus: Optional[str] = None,
+        summary: Optional[str] = None,
+        open_questions: Optional[List[Any]] = None,
+        source_refs: Optional[List[Any]] = None,
+        artifact_refs: Optional[List[Any]] = None,
+        suggested_next: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        now = self._now()
+        record = {
+            "schema_version": 1,
+            "record_schema": "continuity_session_v1",
+            "record_type": record_type,
+            "record_id": f"cs_{self.system}_{int(time.time() * 1000)}_{self._slug(record_type)}",
+            "session_id": session_id,
+            "being": self.system,
+            "thread_id": thread.get("thread_id"),
+            "experiment_id": experiment.get("experiment_id") if isinstance(experiment, dict) else None,
+            "status": status,
+            "title": self._compact_text(str(title or "Continuity session"), 180),
+            "focus": self._compact_text(str(focus or ""), 500),
+            "summary": self._compact_text(str(summary or ""), 1400),
+            "open_questions": [str(item) for item in (open_questions or []) if str(item).strip()],
+            "source_refs": [str(ref) for ref in (source_refs or []) if str(ref).strip()],
+            "artifact_refs": [str(ref) for ref in (artifact_refs or []) if str(ref).strip()],
+            "suggested_next": suggested_next,
+            "authority_change": False,
+            "peer_mutation": False,
+            "created_at": now,
+            "updated_at": now,
+        }
+        if extra:
+            record.update({key: value for key, value in extra.items() if value not in (None, "", [])})
+        return {key: value for key, value in record.items() if value not in (None, "", [])}
+
+    def _append_continuity_session_record(
+        self,
+        thread: Dict[str, Any],
+        record: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        self._append_jsonl(self._continuity_sessions_path(thread["thread_id"]), record)
+        thread["continuity_session_v1"] = self._continuity_session_summary_v1(
+            thread,
+            str(record.get("session_id") or "latest"),
+        )
+        thread["updated_at"] = self._now()
+        self._write_thread(thread)
+        self._mirror_thread(thread)
+        return record
+
+    def _append_continuity_session_draft(
+        self,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]],
+        reason: str,
+        raw_intent: str,
+        summary: str,
+        *,
+        source_refs: Optional[List[Any]] = None,
+        next_command: Optional[str] = None,
+        title: Optional[str] = None,
+        focus: Optional[str] = None,
+        artifact_refs: Optional[List[Any]] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        experiment_id = str(experiment.get("experiment_id") or "") if isinstance(experiment, dict) else ""
+        active_rows = self._continuity_session_rows(
+            str(thread.get("thread_id") or ""),
+            experiment_id or None,
+            limit=8,
+        )
+        has_existing_session = bool(active_rows)
+        session_id = (
+            str(active_rows[-1].get("session_id") or "")
+            if has_existing_session
+            else self._unique_continuity_session_id("continuity-draft")
+        )
+        commit_kind = "session_capture" if has_existing_session else "session_start"
+        suggested = next_command or (
+            "CONTINUITY_SESSION_CAPTURE latest :: summary: ...; source_refs: ...; artifact_refs: ...; next: ..."
+            if has_existing_session
+            else "CONTINUITY_SESSION_START current :: title: Live-ish pressure self-study; focus: ...; next: CONTINUITY_SESSION_CAPTURE latest"
+        )
+        extra_payload = {
+            "draft_v1": True,
+            "reason": reason,
+            "raw_intent": self._compact_text(raw_intent, 800),
+            "commit_kind": commit_kind,
+            "accept_next": "CONTINUITY_SESSION_ACCEPT latest",
+            "generic_accept_next": "ACCEPT_SUGGESTED_NEXT latest",
+            "ignored_until_accepted": True,
+        }
+        if extra:
+            extra_payload.update(extra)
+        record = self._continuity_session_record(
+            "session_draft",
+            session_id,
+            thread,
+            experiment,
+            "draft",
+            title=title or "Live-ish pressure self-study",
+            focus=focus or "preserve guarded research pressure before committing more work",
+            summary=summary,
+            source_refs=[str(ref) for ref in (source_refs or []) if str(ref).strip()],
+            artifact_refs=[str(ref) for ref in (artifact_refs or []) if str(ref).strip()],
+            suggested_next=suggested,
+            extra=extra_payload,
+        )
+        self._append_jsonl(self._continuity_sessions_path(str(thread.get("thread_id") or "")), record)
+        return record
+
+    def _continuity_session_summary_v1(
+        self,
+        thread: Dict[str, Any],
+        selector: Optional[str] = None,
+        limit: int = 8,
+    ) -> Dict[str, Any]:
+        rows = self._continuity_session_rows(thread["thread_id"], limit=256)
+        session = self._resolve_continuity_session(thread, selector) if rows else None
+        session_id = str(session.get("session_id") or "") if isinstance(session, dict) else ""
+        session_rows = [
+            row for row in rows
+            if not session_id or row.get("session_id") == session_id
+        ]
+        latest = session_rows[-1] if session_rows else (rows[-1] if rows else None)
+        active = next(
+            (row for row in reversed(rows) if row.get("status") in {"active", "summarized"}),
+            None,
+        )
+        target = session_id or str(selector or "latest")
+        return {
+            "schema_version": 1,
+            "policy": "continuity_session_v1",
+            "being": self.system,
+            "thread_id": thread.get("thread_id"),
+            "selector": selector or "latest",
+            "session_count": len({str(row.get("session_id") or "") for row in rows if row.get("session_id")}),
+            "latest_session": latest,
+            "active_session": active,
+            "recent_records": session_rows[-limit:] if session_rows else rows[-limit:],
+            "suggested_start_next": "CONTINUITY_SESSION_START current :: title: ...; focus: ...; next: ...",
+            "suggested_capture_next": f"CONTINUITY_SESSION_CAPTURE {target} :: summary: ...; source_refs: ...; artifact_refs: ...; next: ...",
+            "suggested_resume_next": f"CONTINUITY_SESSION_RESUME {target}",
+            "authority_boundary": self._authority_gate_boundary(),
+        }
+
+    def _continuity_session_line(
+        self,
+        thread: Dict[str, Any],
+        target: Optional[Dict[str, Any]],
+    ) -> str:
+        experiment_id = ""
+        if isinstance(target, dict):
+            experiment_id = str(target.get("experiment_id") or "")
+            active = target.get("active_experiment")
+            if not experiment_id and isinstance(active, dict):
+                experiment_id = str(active.get("experiment_id") or "")
+            summary = target.get("experiment_summary")
+            if not experiment_id and isinstance(summary, dict):
+                experiment_id = str(summary.get("experiment_id") or "")
+        rows = self._continuity_session_rows(
+            thread["thread_id"],
+            experiment_id or None,
+            limit=16,
+        )
+        drafts = self._continuity_session_draft_rows(
+            thread["thread_id"],
+            experiment_id or None,
+            limit=1,
+        )
+        if not rows and drafts:
+            title = self._compact_text(str(drafts[-1].get("title") or "Continuity draft"), 100)
+            return (
+                f"Continuity session draft: {title} status=draft\n"
+                "Continuity accept NEXT: CONTINUITY_SESSION_ACCEPT latest or ACCEPT_SUGGESTED_NEXT latest\n"
+            )
+        if not rows and not (thread.get("active_experiment_id") or experiment_id):
+            return ""
+        if not rows:
+            selector = "current" if thread.get("active_experiment_id") else (experiment_id or "latest")
+            return (
+                "Continuity session NEXT: "
+                f"CONTINUITY_SESSION_START {selector} :: title: ...; focus: ...; next: ...\n"
+            )
+        latest = rows[-1]
+        session_id = str(latest.get("session_id") or "latest")
+        title = self._compact_text(str(latest.get("title") or "Continuity session"), 100)
+        status = str(latest.get("status") or "unknown")
+        summary = self._compact_text(str(latest.get("summary") or ""), 180)
+        next_command = (
+            str(latest.get("suggested_next") or "").strip()
+            or f"CONTINUITY_SESSION_CAPTURE {session_id} :: summary: ...; source_refs: ...; artifact_refs: ...; next: ..."
+        )
+        if status in {"complete", "parked", "held"}:
+            next_command = f"CONTINUITY_SESSION_RESUME {session_id}"
+        line = f"Continuity session: {title} ({session_id}) status={status}\n"
+        if summary:
+            line += f"Session summary: {summary}\n"
+        return line + f"Session NEXT: {next_command}\n"
+
+    def _parse_memory_selector_payload(self, raw: Optional[str]) -> tuple[Optional[str], str]:
+        selector, payload = self._parse_selector_payload(raw or "")
+        if selector is None:
+            text = str(payload or "").strip()
+            first, _, rest = text.partition(" ")
+            if first.lower() in {"current", "latest"} or first.startswith("exp_"):
+                return first, rest.strip()
+        return selector, payload
+
+    def _find_authority_request(self, request_id: str) -> Optional[tuple[str, Dict[str, Any], List[Dict[str, Any]]]]:
+        request_id = str(request_id or "").strip()
+        if not request_id or not self.threads_dir.exists():
+            return None
+        for path in self.threads_dir.glob("*/authority_gate.jsonl"):
+            thread_id = path.parent.name
+            rows = self._authority_gate_rows(thread_id)
+            for row in reversed(rows):
+                if (
+                    row.get("request_id") == request_id
+                    and row.get("record_type") == "request"
+                ):
+                    return thread_id, row, rows
+        return None
+
+    def _unique_authority_request_id(self, experiment_id: str) -> str:
+        root = f"authreq_{self.system}_{int(time.time() * 1000)}_{self._slug(experiment_id)}"
+        candidate = root
+        suffix = 2
+        while self._authority_request_exists(candidate):
+            candidate = f"{root}_{suffix}"
+            suffix += 1
+        return candidate
+
+    def _authority_request_exists(self, request_id: str) -> bool:
+        if not self.threads_dir.exists():
+            return False
+        for path in self.threads_dir.glob("*/authority_gate.jsonl"):
+            try:
+                if request_id in path.read_text():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _unique_authority_budget_id(self, experiment_id: str) -> str:
+        root = f"authbud_{self.system}_{int(time.time() * 1000)}_{self._slug(experiment_id)}"
+        candidate = root
+        suffix = 2
+        while self._authority_budget_exists(candidate):
+            candidate = f"{root}_{suffix}"
+            suffix += 1
+        return candidate
+
+    def _unique_research_budget_id(self, experiment_id: str) -> str:
+        root = f"resbud_{self.system}_{int(time.time() * 1000)}_{self._slug(experiment_id)}"
+        candidate = root
+        suffix = 2
+        while self._research_budget_exists(candidate):
+            candidate = f"{root}_{suffix}"
+            suffix += 1
+        return candidate
+
+    def _authority_budget_exists(self, budget_id: str) -> bool:
+        if not self.threads_dir.exists():
+            return False
+        for path in self.threads_dir.glob("*/authority_gate.jsonl"):
+            try:
+                if budget_id in path.read_text():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _research_budget_exists(self, budget_id: str) -> bool:
+        if not self.threads_dir.exists():
+            return False
+        for path in self.threads_dir.glob("*/authority_gate.jsonl"):
+            try:
+                if budget_id in path.read_text():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _find_research_budget(self, budget_id: str) -> Optional[tuple[str, Dict[str, Any], List[Dict[str, Any]]]]:
+        budget_id = str(budget_id or "").strip()
+        if not budget_id or not self.threads_dir.exists():
+            return None
+        for path in self.threads_dir.glob("*/authority_gate.jsonl"):
+            thread_id = path.parent.name
+            rows = self._research_budget_rows(thread_id)
+            for row in reversed(rows):
+                if (
+                    row.get("budget_id") == budget_id
+                    and row.get("record_type")
+                    in {"research_budget_request", "research_budget_approval"}
+                ):
+                    return thread_id, row, rows
+        return None
+
+    def _authority_budget_record(
+        self,
+        record_type: str,
+        budget_id: str,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        state: Dict[str, float],
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        now = self._now()
+        payload = {
+            "schema_version": 1,
+            "record_schema": "authority_budget_v1",
+            "record_type": record_type,
+            "record_id": f"authbud_{self.system}_{int(time.time() * 1000)}_{self._slug(record_type)}",
+            "budget_id": budget_id,
+            "being": self.system,
+            "thread_id": thread.get("thread_id"),
+            "experiment_id": experiment.get("experiment_id"),
+            "created_at": now,
+            "updated_at": now,
+            "safety_snapshot": self._authority_safety_snapshot(state),
+            "peer_mutation": False,
+            "authority_boundary": self._authority_gate_boundary(),
+        }
+        if extra:
+            payload.update(extra)
+        return payload
+
+    def _research_budget_record(
+        self,
+        record_type: str,
+        budget_id: str,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        state: Dict[str, float],
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        now = self._now()
+        payload = {
+            "schema_version": 1,
+            "record_schema": "research_budget_v1",
+            "record_type": record_type,
+            "record_id": f"resbud_{self.system}_{int(time.time() * 1000)}_{self._slug(record_type)}",
+            "budget_id": budget_id,
+            "being": self.system,
+            "thread_id": thread.get("thread_id"),
+            "experiment_id": experiment.get("experiment_id"),
+            "created_at": now,
+            "updated_at": now,
+            "safety_snapshot": self._authority_safety_snapshot(state),
+            "peer_mutation": False,
+            "authority_boundary": self._research_budget_boundary(),
+        }
+        if extra:
+            payload.update(extra)
+        return payload
+
+    def _sovereign_loop_record(
+        self,
+        record_type: str,
+        loop_id: str,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        state: Dict[str, float],
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        now = self._now()
+        payload = {
+            "schema_version": 1,
+            "record_schema": "sovereign_loop_v1",
+            "record_type": record_type,
+            "record_id": f"loop_{self.system}_{int(time.time() * 1000)}_{self._slug(record_type)}",
+            "loop_id": loop_id,
+            "being": self.system,
+            "thread_id": thread.get("thread_id"),
+            "experiment_id": experiment.get("experiment_id"),
+            "created_at": now,
+            "updated_at": now,
+            "authority_change": False,
+            "peer_mutation": False,
+            "safety_snapshot": self._authority_safety_snapshot(state),
+            "authority_boundary": self._sovereign_loop_boundary(),
+        }
+        if extra:
+            payload.update(extra)
+        return payload
+
+    def _authority_gate_record(
+        self,
+        record_type: str,
+        request_id: str,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        state: Dict[str, float],
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        now = self._now()
+        payload = {
+            "schema_version": 1,
+            "record_schema": "authority_gate_v1",
+            "record_type": record_type,
+            "record_id": f"auth_{self.system}_{int(time.time() * 1000)}_{self._slug(record_type)}",
+            "request_id": request_id,
+            "being": self.system,
+            "thread_id": thread.get("thread_id"),
+            "experiment_id": experiment.get("experiment_id"),
+            "created_at": now,
+            "updated_at": now,
+            "safety_snapshot": self._authority_safety_snapshot(state),
+            "peer_mutation": False,
+            "authority_boundary": self._authority_gate_boundary(),
+        }
+        if extra:
+            payload.update(extra)
+        return payload
+
+    def _append_authority_consequence_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        request: Dict[str, Any],
+        outcome: Dict[str, Any],
+        state: Dict[str, float],
+        consequence_status: str,
+        reason: str,
+    ) -> Dict[str, Any]:
+        now = self._now()
+        safety = self._authority_safety_snapshot(state)
+        record = {
+            "schema_version": 1,
+            "record_schema": "authority_consequence_v1",
+            "record_type": "consequence",
+            "record_id": f"authcons_{self.system}_{int(time.time() * 1000)}_{self._slug(reason)}",
+            "being": self.system,
+            "thread_id": thread.get("thread_id"),
+            "experiment_id": experiment.get("experiment_id"),
+            "request_id": request.get("request_id"),
+            "token_id": outcome.get("token_id") or outcome.get("approved_token_id"),
+            "scope": request.get("scope"),
+            "payload_summary": self._compact_text(request.get("payload"), 160),
+            "pre_telemetry": safety,
+            "post_telemetry": safety,
+            "safety_snapshot": safety,
+            "stop_criteria": request.get("stop_criteria"),
+            "stop_criteria_result": "not_executed" if consequence_status == "blocked" else "observed_once",
+            "consequence_status": consequence_status,
+            "reason": reason,
+            "outcome_ref": outcome.get("record_id"),
+            "recommended_next_safe_command": f"EXPERIMENT_AUTHORITY_STATUS {request.get('request_id')}",
+            "peer_mutation": False,
+            "authority_boundary": self._authority_gate_boundary(),
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._append_jsonl(self._authority_gate_path(thread["thread_id"]), record)
+        self._append_being_memory_record(
+            thread,
+            experiment,
+            "authority_consequence",
+            (
+                f"Authority consequence for `{request.get('request_id')}`: "
+                f"{consequence_status} because {reason}."
+            ),
+            source_refs=[self._authority_gate_path(thread["thread_id"]), outcome.get("record_id")],
+            artifact_refs=request.get("artifact_refs") if isinstance(request.get("artifact_refs"), list) else [],
+            next_command=record["recommended_next_safe_command"],
+            record_type="draft",
+            extra={"authority_consequence_v1": record},
+        )
+        return record
+
+    def _authority_request_payload(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        raw_payload: str,
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        scope = (self._dossier_field(raw_payload, ["scope"]) or "semantic_microdose").strip()
+        payload = (
+            self._dossier_field(raw_payload, ["payload", "semantic_payload", "text"])
+            or raw_payload.strip()
+        )
+        reason = self._dossier_field(raw_payload, ["reason", "because", "rationale"]) or ""
+        stop_criteria = self._dossier_field(raw_payload, ["stop_criteria", "stop"]) or ""
+        artifact_refs = self._dossier_list_field(
+            raw_payload,
+            ["artifact_refs", "artifact_ref", "artifact_grounding", "artifact"],
+        )
+        request_id = self._unique_authority_request_id(str(experiment.get("experiment_id") or "experiment"))
+        source_refs = self._authority_source_refs(thread, experiment, artifact_refs)
+        return self._authority_gate_record(
+            "request",
+            request_id,
+            thread,
+            experiment,
+            state,
+            {
+                "scope": scope,
+                "payload": payload,
+                "reason": reason,
+                "artifact_refs": artifact_refs,
+                "source_refs": source_refs,
+                "stop_criteria": stop_criteria,
+                "token_status": "none",
+            },
+        )
+
+    def _authority_budget_request_payload(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        raw_payload: str,
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        scope = (self._dossier_field(raw_payload, ["scope"]) or "semantic_microdose").strip()
+        purpose = (
+            self._dossier_field(raw_payload, ["purpose", "reason", "because", "rationale"])
+            or raw_payload.strip()
+        )
+        stop_criteria = self._dossier_field(raw_payload, ["stop_criteria", "stop"]) or ""
+        artifact_refs = self._dossier_list_field(
+            raw_payload,
+            ["artifact_refs", "artifact_ref", "artifact_grounding", "artifact"],
+        )
+
+        def capped_int(value: Optional[str], default: int, cap: int) -> int:
+            try:
+                parsed = int(float(str(value).strip())) if value is not None else default
+            except Exception:
+                parsed = default
+            return max(1, min(parsed, cap))
+
+        max_sends = capped_int(
+            self._dossier_field(raw_payload, ["max_sends", "sends"]),
+            AUTHORITY_BUDGET_MAX_SENDS,
+            AUTHORITY_BUDGET_MAX_SENDS,
+        )
+        ttl_secs = capped_int(
+            self._dossier_field(raw_payload, ["ttl_secs", "ttl"]),
+            LOCAL_RESEARCH_TTL_SECS,
+            LOCAL_RESEARCH_TTL_SECS,
+        )
+        budget_id = self._unique_authority_budget_id(str(experiment.get("experiment_id") or "experiment"))
+        source_refs = self._authority_source_refs(thread, experiment, artifact_refs)
+        return self._authority_budget_record(
+            "budget_request",
+            budget_id,
+            thread,
+            experiment,
+            state,
+            {
+                "scope": scope,
+                "purpose": self._compact_text(purpose, 1000),
+                "max_sends": max_sends,
+                "ttl_secs": ttl_secs,
+                "artifact_refs": artifact_refs,
+                "stop_criteria": stop_criteria,
+                "source_refs": source_refs,
+                "token_status": "none",
+                "review_required": False,
+            },
+        )
+
+    def _research_budget_request_payload(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        raw_payload: str,
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        scope = (self._dossier_field(raw_payload, ["scope"]) or "read_only_research").strip()
+        purpose = (
+            self._dossier_field(raw_payload, ["purpose", "reason", "because", "rationale"])
+            or (raw_payload.strip() if ":" not in raw_payload else "")
+        )
+        stop_criteria = self._dossier_field(raw_payload, ["stop_criteria", "stop"]) or ""
+        allowed_sources_raw = self._dossier_field(raw_payload, ["allowed_sources", "sources"]) or "web,local"
+        allowed_sources = [
+            source.strip().lower()
+            for source in re.split(r"[,/|]", allowed_sources_raw)
+            if source.strip()
+        ]
+        allowed_sources = [source for source in allowed_sources if source in {"web", "local"}]
+        if not allowed_sources:
+            allowed_sources = ["web", "local"]
+
+        def capped_int(value: Optional[str], default: int, cap: int) -> int:
+            try:
+                parsed = int(float(str(value).strip())) if value is not None else default
+            except Exception:
+                parsed = default
+            return max(1, min(parsed, cap))
+
+        local_only = allowed_sources == ["local"]
+        max_actions = capped_int(
+            self._dossier_field(raw_payload, ["max_actions", "actions"]),
+            LOCAL_RESEARCH_MAX_ACTIONS,
+            STEWARD_RESEARCH_MAX_ACTIONS,
+        )
+        ttl_secs = capped_int(
+            self._dossier_field(raw_payload, ["ttl_secs", "ttl"]),
+            LOCAL_RESEARCH_TTL_SECS,
+            LOCAL_RESEARCH_TTL_SECS,
+        )
+        budget_id = self._unique_research_budget_id(str(experiment.get("experiment_id") or "experiment"))
+        source_refs = self._authority_source_refs(thread, experiment, [])
+        return self._research_budget_record(
+            "research_budget_request",
+            budget_id,
+            thread,
+            experiment,
+            state,
+            {
+                "scope": scope,
+                "purpose": self._compact_text(purpose, 1000),
+                "max_actions": max_actions,
+                "ttl_secs": ttl_secs,
+                "allowed_sources": allowed_sources,
+                "stop_criteria": stop_criteria,
+                "source_refs": source_refs,
+                "status": "requested",
+                "review_required": False,
+                "allowed_actions": sorted(self._research_budget_allowed_bases()),
+            },
+        )
+
+    def _research_budget_self_activation_v1(
+        self,
+        budget: Dict[str, Any],
+        eligibility: Dict[str, Any],
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        missing = list(eligibility.get("missing_requirements") or [])
+        allowed_sources = list(budget.get("allowed_sources") or [])
+        if str(budget.get("scope") or "") != "read_only_research":
+            if "scope_read_only_research_v1" not in missing:
+                missing.append("scope_read_only_research_v1")
+        if allowed_sources != ["local"]:
+            missing.append("local_only_allowed_sources")
+        if self._safe_int(budget.get("max_actions"), LOCAL_RESEARCH_MAX_ACTIONS) > LOCAL_RESEARCH_MAX_ACTIONS:
+            missing.append(f"max_actions_self_activation_cap_{LOCAL_RESEARCH_MAX_ACTIONS}")
+        if self._safe_int(budget.get("ttl_secs"), LOCAL_RESEARCH_TTL_SECS) > LOCAL_RESEARCH_TTL_SECS:
+            missing.append(f"ttl_secs_self_activation_cap_{LOCAL_RESEARCH_TTL_SECS}")
+        safety = self._authority_safety_snapshot(state)
+        if safety.get("level") not in {"green", "yellow"}:
+            missing.append("green_or_yellow_safety")
+        intent_text = str(budget.get("purpose") or "")
+        if re.search(
+            r"\b(EXPERIMENT_BIND|EXPERIMENT_RESUME|PERTURB|CONTROL|send_control|attractor_pulse|semantic_microdose|MIKE_RUN|AR_START|AR_NOTE|AR_BLOCK|AR_COMPLETE)\b",
+            intent_text,
+            flags=re.IGNORECASE,
+        ):
+            missing.append("no_live_or_mutating_research_intent")
+        deduped: List[str] = []
+        for item in missing:
+            if item not in deduped:
+                deduped.append(item)
+        return {
+            "policy": "research_budget_self_activation_v1",
+            "eligible": not deduped,
+            "missing_requirements": deduped,
+            "activation_mode": "being_self_activated_local_v1",
+            "self_activated": not deduped,
+            "steward_approval_required": bool(deduped),
+            "max_actions_cap": LOCAL_RESEARCH_MAX_ACTIONS,
+            "ttl_secs_cap": LOCAL_RESEARCH_TTL_SECS,
+            "allowed_sources": ["local"],
+            "safety_snapshot": safety,
+        }
+
+    def _research_budget_self_activation_record(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        budget: Dict[str, Any],
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        max_actions = min(
+            self._safe_int(budget.get("max_actions"), LOCAL_RESEARCH_MAX_ACTIONS),
+            LOCAL_RESEARCH_MAX_ACTIONS,
+        )
+        ttl_secs = min(
+            self._safe_int(budget.get("ttl_secs"), LOCAL_RESEARCH_TTL_SECS),
+            LOCAL_RESEARCH_TTL_SECS,
+        )
+        return self._research_budget_record(
+            "research_budget_approval",
+            str(budget.get("budget_id") or "research_budget"),
+            thread,
+            experiment,
+            state,
+            {
+                "scope": "read_only_research",
+                "status": "active",
+                "max_actions": max_actions,
+                "ttl_secs": ttl_secs,
+                "expires_at_unix_s": int(time.time()) + ttl_secs,
+                "allowed_sources": ["local"],
+                "activation_mode": "being_self_activated_local_v1",
+                "self_activated": True,
+                "steward_approval_required": False,
+                "source_request_record_id": budget.get("record_id"),
+                "source_refs": budget.get("source_refs") or [],
+                "review_required": False,
+            },
+        )
+
+    def _authority_budget_eligibility(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        budget: Dict[str, Any],
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        request_like = {
+            "scope": budget.get("scope") or "semantic_microdose",
+            "payload": budget.get("purpose") or "",
+            "artifact_refs": budget.get("artifact_refs") or [],
+        }
+        gate = self._authority_gate_eligibility(thread, experiment, request_like, state)
+        missing = list(gate.get("missing_requirements") or [])
+        if "semantic_payload" in missing:
+            missing.remove("semantic_payload")
+            missing.append("budget_purpose")
+        active = self._active_authority_budget(
+            str(thread.get("thread_id") or ""),
+            str(experiment.get("experiment_id") or ""),
+            str(budget.get("scope") or "semantic_microdose"),
+        )
+        if active:
+            missing.append("no_active_budget_for_scope")
+        return {
+            "policy": "authority_budget_v1",
+            "eligible": not missing,
+            "missing_requirements": missing,
+            "disabled_scope": bool(gate.get("disabled_scope")),
+            "approval_required": "being_plus_steward_budget_envelope",
+            "enabled_execution_scope": "semantic_microdose",
+            "future_scopes_disabled": ["attractor_pulse", "control_envelope"],
+            "max_sends_cap": AUTHORITY_BUDGET_MAX_SENDS,
+            "ttl_secs_cap": LOCAL_RESEARCH_TTL_SECS,
+        }
+
+    def _research_budget_eligibility(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        budget: Dict[str, Any],
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        missing: List[str] = []
+        scope = str(budget.get("scope") or "")
+        disabled_scope = scope != "read_only_research"
+        if disabled_scope:
+            missing.append("scope_read_only_research_v1")
+        if not str(budget.get("purpose") or "").strip():
+            missing.append("research_purpose")
+        if not isinstance(budget.get("allowed_sources"), list) or not budget.get("allowed_sources"):
+            missing.append("allowed_sources_web_or_local")
+        safety = self._authority_safety_snapshot(state)
+        if safety.get("level") not in {"green", "yellow", "unknown"}:
+            missing.append("green_or_yellow_safety")
+        experiment_id = str(experiment.get("experiment_id") or "")
+        if self._active_research_budget(str(thread.get("thread_id") or ""), experiment_id):
+            missing.append("no_active_read_only_research_budget")
+        return {
+            "policy": "research_budget_v1",
+            "eligible": not missing,
+            "missing_requirements": missing,
+            "disabled_scope": disabled_scope,
+            "approval_required": "being_plus_steward_research_budget",
+            "enabled_execution_scope": "read_only_research",
+            "disabled_actions": [
+                "AR_START",
+                "AR_NOTE",
+                "AR_BLOCK",
+                "AR_COMPLETE",
+                "MIKE_RUN",
+                "EXPERIMENT_BIND",
+                "EXPERIMENT_RESUME",
+                "PERTURB",
+                "CONTROL",
+                "semantic_microdose",
+            ],
+            "max_actions_cap": STEWARD_RESEARCH_MAX_ACTIONS,
+            "ttl_secs_cap": LOCAL_RESEARCH_TTL_SECS,
+        }
+
+    def _active_authority_budget(
+        self,
+        thread_id: str,
+        experiment_id: str,
+        scope: str = "semantic_microdose",
+    ) -> Optional[Dict[str, Any]]:
+        rows = self._authority_budget_rows(thread_id)
+        if not rows:
+            return None
+        closed = {
+            str(row.get("budget_id") or "")
+            for row in rows
+            if row.get("record_type") == "budget_closed"
+        }
+        now = time.time()
+        for row in reversed(rows):
+            if row.get("record_type") != "budget_approval":
+                continue
+            budget_id = str(row.get("budget_id") or "")
+            if not budget_id or budget_id in closed:
+                continue
+            if row.get("experiment_id") != experiment_id:
+                continue
+            if str(row.get("scope") or "semantic_microdose") != scope:
+                continue
+            if str(row.get("status") or "active") != "active":
+                continue
+            expires = row.get("expires_at_unix_s")
+            if isinstance(expires, (int, float)) and float(expires) <= now:
+                continue
+            max_sends = self._safe_int(row.get("max_sends"), AUTHORITY_BUDGET_MAX_SENDS)
+            debit_count = sum(
+                1
+                for item in rows
+                if item.get("record_type") == "budget_debit"
+                and item.get("budget_id") == budget_id
+            )
+            remaining = max(0, max_sends - debit_count)
+            if remaining <= 0:
+                continue
+            active = dict(row)
+            active["spent_sends"] = debit_count
+            active["remaining_sends"] = remaining
+            active["pending_review_request_id"] = self._authority_budget_pending_review(rows, budget_id)
+            active["stage"] = (
+                "review_required"
+                if active.get("pending_review_request_id")
+                else "active_budget_available"
+            )
+            return active
+        return None
+
+    def _active_research_budget(
+        self,
+        thread_id: str,
+        experiment_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        rows = self._research_budget_rows(thread_id)
+        if not rows:
+            return None
+        closed = {
+            str(row.get("budget_id") or "")
+            for row in rows
+            if row.get("record_type") == "research_budget_closed"
+        }
+        now = time.time()
+        for row in reversed(rows):
+            if row.get("record_type") != "research_budget_approval":
+                continue
+            budget_id = str(row.get("budget_id") or "")
+            if not budget_id or budget_id in closed:
+                continue
+            if row.get("experiment_id") != experiment_id:
+                continue
+            if str(row.get("scope") or "read_only_research") != "read_only_research":
+                continue
+            if str(row.get("status") or "active") != "active":
+                continue
+            expires = row.get("expires_at_unix_s")
+            if isinstance(expires, (int, float)) and float(expires) <= now:
+                continue
+            max_actions = self._safe_int(row.get("max_actions"), LOCAL_RESEARCH_MAX_ACTIONS)
+            debit_count = sum(
+                1
+                for item in rows
+                if item.get("record_type") == "research_budget_debit"
+                and item.get("budget_id") == budget_id
+            )
+            remaining = max(0, max_actions - debit_count)
+            if remaining <= 0:
+                continue
+            active = dict(row)
+            active["spent_actions"] = debit_count
+            active["remaining_actions"] = remaining
+            active["stage"] = "active_budget_available"
+            active["duplicate_blocked"] = bool(
+                self._research_budget_duplicate_block(rows, budget_id)
+            )
+            return active
+        return None
+
+    @staticmethod
+    def _research_budget_duplicate_block(
+        rows: List[Dict[str, Any]],
+        budget_id: str,
+    ) -> Optional[str]:
+        counts: Dict[str, int] = {}
+        for row in rows:
+            if (
+                row.get("record_type") != "research_budget_debit"
+                or row.get("budget_id") != budget_id
+            ):
+                continue
+            key = str(row.get("normalized_target") or "").strip()
+            if not key:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+        for key, count in counts.items():
+            if count > 2:
+                return key
+        return None
+
+    def _research_budget_status_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]],
+        state: Dict[str, float],
+        *,
+        selector: str,
+        budget_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        thread_id = str(thread.get("thread_id") or "")
+        rows = self._research_budget_rows(thread_id)
+        experiment_id = str(experiment.get("experiment_id") or "") if isinstance(experiment, dict) else ""
+        if budget_id:
+            rows = [row for row in rows if row.get("budget_id") == budget_id]
+        elif experiment_id:
+            rows = [row for row in rows if row.get("experiment_id") == experiment_id]
+        latest_request = next(
+            (row for row in reversed(rows) if row.get("record_type") == "research_budget_request"),
+            None,
+        )
+        latest_approval = next(
+            (row for row in reversed(rows) if row.get("record_type") == "research_budget_approval"),
+            None,
+        )
+        latest_closed = next(
+            (row for row in reversed(rows) if row.get("record_type") == "research_budget_closed"),
+            None,
+        )
+        latest_blocked = next(
+            (row for row in reversed(rows) if row.get("record_type") == "research_budget_blocked"),
+            None,
+        )
+        active = self._active_research_budget(thread_id, experiment_id) if experiment_id else None
+        duplicate_key = None
+        if isinstance(active, dict):
+            duplicate_key = self._research_budget_duplicate_block(
+                self._research_budget_rows(thread_id),
+                str(active.get("budget_id") or ""),
+            )
+        if not duplicate_key and isinstance(latest_blocked, dict):
+            if latest_blocked.get("reason") == "duplicate_query_or_url_review_required":
+                duplicate_key = str(latest_blocked.get("normalized_target") or "")
+        stage = "no_budget"
+        if active and duplicate_key:
+            stage = "review_required_duplicate_loop"
+        elif active:
+            stage = "active_budget_available"
+        elif latest_closed:
+            stage = "budget_closed"
+        elif latest_approval:
+            max_actions = self._safe_int(latest_approval.get("max_actions"), LOCAL_RESEARCH_MAX_ACTIONS)
+            debit_count = sum(
+                1 for row in rows
+                if row.get("record_type") == "research_budget_debit"
+                and row.get("budget_id") == latest_approval.get("budget_id")
+            )
+            expires = latest_approval.get("expires_at_unix_s")
+            if isinstance(expires, (int, float)) and float(expires) <= time.time():
+                stage = "budget_expired"
+            elif debit_count >= max_actions:
+                stage = "budget_exhausted"
+            else:
+                stage = "budget_unavailable"
+        elif latest_blocked:
+            stage = "blocked"
+        elif latest_request:
+            stage = "pending_steward_approval" if latest_request.get("status") != "blocked" else "blocked"
+        next_command = _control_plane_research_budget_request_scaffold("<experiment_id>")
+        if experiment_id and stage == "no_budget":
+            next_command = _control_plane_research_budget_request_scaffold(experiment_id)
+        elif stage == "active_budget_available":
+            next_command = "SEARCH <query> / BROWSE <url> / READ_MORE / MIKE_SEARCH <term> / AR_READ <ref>"
+        elif stage == "review_required_duplicate_loop":
+            next_command = (
+                f"EXPERIMENT_RESEARCH_REVIEW {active.get('budget_id') if isinstance(active, dict) else budget_id} :: "
+                "outcome: continue|hold|close|promote; observation: ...; source_refs: ..."
+            )
+        elif stage in {"pending_steward_approval", "blocked", "budget_closed", "budget_expired", "budget_exhausted", "budget_unavailable"}:
+            next_command = f"EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id or experiment_id or 'latest'}"
+        latest_artifacts = self._research_budget_latest_artifact_refs(rows, budget_id or (active or {}).get("budget_id"))
+        return {
+            "schema_version": 1,
+            "policy": "research_budget_v1",
+            "being": self.system,
+            "thread_id": thread_id,
+            "experiment_id": experiment_id or None,
+            "selector": selector,
+            "stage": stage,
+            "scope": "read_only_research",
+            "active_budget_id": active.get("budget_id") if isinstance(active, dict) else None,
+            "latest_budget_request_id": latest_request.get("budget_id") if isinstance(latest_request, dict) else None,
+            "activation_mode": active.get("activation_mode") if isinstance(active, dict) else (
+                latest_approval.get("activation_mode") if isinstance(latest_approval, dict) else None
+            ),
+            "self_activated": active.get("self_activated") if isinstance(active, dict) else (
+                latest_approval.get("self_activated") if isinstance(latest_approval, dict) else False
+            ),
+            "steward_approval_required": active.get("steward_approval_required") if isinstance(active, dict) else (
+                latest_request.get("steward_approval_required") if isinstance(latest_request, dict) else None
+            ),
+            "remaining_actions": active.get("remaining_actions") if isinstance(active, dict) else 0,
+            "max_actions": active.get("max_actions") if isinstance(active, dict) else (
+                latest_approval.get("max_actions") if isinstance(latest_approval, dict) else LOCAL_RESEARCH_MAX_ACTIONS
+            ),
+            "review_required": stage == "review_required_duplicate_loop",
+            "duplicate_blocked_target": duplicate_key,
+            "allowed_actions": sorted(self._research_budget_allowed_bases()),
+            "latest_artifact_refs": latest_artifacts,
+            "latest_rows": rows[-8:],
+            "safety_snapshot": self._authority_safety_snapshot(state),
+            "next_safe_command": next_command,
+            "authority_boundary": self._research_budget_boundary(),
+        }
+
+    @staticmethod
+    def _sovereign_loop_boundary() -> str:
+        return (
+            "Being-owned loop V1 can organize continuity, local read-only research, sticky audit, "
+            "one consequence request, and consequence review. Local loop phases may self-start, "
+            "but live consequence still requires the existing bridge/steward gate. No ambient "
+            "bind, resume, broad perturbation, broad Control envelope, attractor pulse, peer "
+            "mutation, or automatic execution is authorized by the loop."
+        )
+
+    def _sovereign_loop_rows(self, thread_id: str) -> List[Dict[str, Any]]:
+        return [
+            row
+            for row in self._authority_gate_rows(thread_id)
+            if row.get("record_schema") == "sovereign_loop_v1"
+        ]
+
+    def _find_sovereign_loop(
+        self,
+        loop_id: str,
+    ) -> Optional[tuple[str, Dict[str, Any], List[Dict[str, Any]]]]:
+        if not self.threads_dir.exists():
+            return None
+        for path in self.threads_dir.glob("*/authority_gate.jsonl"):
+            thread_id = path.parent.name
+            rows = self._sovereign_loop_rows(thread_id)
+            for row in reversed(rows):
+                if row.get("loop_id") == loop_id:
+                    return thread_id, row, rows
+        return None
+
+    def _latest_sovereign_loop(
+        self,
+        thread_id: str,
+        experiment_id: Optional[str] = None,
+        *,
+        loop_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        rows = self._sovereign_loop_rows(thread_id)
+        closed = {
+            str(row.get("loop_id") or "")
+            for row in rows
+            if row.get("record_type") == "loop_closed"
+        }
+        now = time.time()
+        for row in reversed(rows):
+            if loop_id and row.get("loop_id") != loop_id:
+                continue
+            if experiment_id and row.get("experiment_id") != experiment_id:
+                continue
+            if row.get("record_type") not in {
+                "loop_started",
+                "loop_approval",
+                "loop_step",
+                "loop_consequence_ready",
+                "loop_consequence_review",
+                "loop_request",
+            }:
+                continue
+            loop_key = str(row.get("loop_id") or "")
+            if not loop_key or loop_key in closed:
+                continue
+            expires = row.get("expires_at_unix_s")
+            if isinstance(expires, (int, float)) and float(expires) <= now:
+                continue
+            latest = dict(row)
+            latest["closed"] = False
+            return latest
+        return None
+
+    def _sovereign_loop_request_payload(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        raw_payload: str,
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        scope = (
+            self._dossier_field(raw_payload, ["consequence_scope", "scope"])
+            or "semantic_microdose"
+        ).strip()
+        purpose = self._dossier_field(raw_payload, ["purpose", "reason", "because"]) or raw_payload.strip()
+        max_research = min(max(self._safe_int(
+            self._dossier_field(raw_payload, ["max_research_actions", "max_actions"]),
+            LOOP_RESEARCH_MAX_ACTIONS,
+        ), 0), LOOP_RESEARCH_MAX_ACTIONS)
+        ttl_secs = min(max(self._safe_int(
+            self._dossier_field(raw_payload, ["ttl_secs", "ttl"]),
+            LOOP_TTL_SECS,
+        ), 1), LOOP_TTL_SECS)
+        loop_id = f"loop_{self.system}_{int(time.time() * 1000)}_{self._slug(str(experiment.get('experiment_id') or 'experiment'))}"
+        now_s = int(time.time())
+        return self._sovereign_loop_record(
+            "loop_request",
+            loop_id,
+            thread,
+            experiment,
+            state,
+            {
+                "phase": "request",
+                "status": "requested",
+                "purpose": self._compact_text(purpose, 1000),
+                "consequence_scope": scope,
+                "scope": scope,
+                "max_research_actions": max_research,
+                "remaining_local_research_actions": max_research,
+                "ttl_secs": ttl_secs,
+                "expires_at_unix_s": now_s + ttl_secs,
+                "max_consequence_sends": LOOP_CONSEQUENCE_MAX_SENDS,
+                "consequence_remaining": LOOP_CONSEQUENCE_MAX_SENDS,
+                "pending_review": False,
+                "stop_criteria": self._dossier_field(raw_payload, ["stop_criteria", "stop"]) or "",
+                "source_refs": self._dossier_list_field(raw_payload, ["source_refs", "source", "sources"]),
+                "artifact_refs": self._dossier_list_field(raw_payload, ["artifact_refs", "artifact", "artifact_grounding"]),
+                "next_safe_command": f"EXPERIMENT_LOOP_STATUS {loop_id}",
+            },
+        )
+
+    def _sovereign_loop_eligibility(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        loop: Dict[str, Any],
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        missing: List[str] = []
+        scope = str(loop.get("consequence_scope") or "")
+        disabled_scope = scope not in {"semantic_microdose", "mode_release_microdose"}
+        if disabled_scope:
+            missing.append("scope_semantic_or_mode_release_microdose_v1")
+        if not str(loop.get("purpose") or "").strip():
+            missing.append("loop_purpose")
+        safety = self._authority_safety_snapshot(state)
+        if safety.get("level") not in {"green", "yellow", "unknown"}:
+            missing.append("green_yellow_or_unknown_safety_for_local_loop")
+        if self._latest_sovereign_loop(
+            str(thread.get("thread_id") or ""),
+            str(experiment.get("experiment_id") or ""),
+        ):
+            missing.append("no_active_sovereign_loop_for_experiment")
+        return {
+            "policy": "sovereign_loop_v1",
+            "eligible": not missing,
+            "missing_requirements": missing,
+            "disabled_scope": disabled_scope,
+            "local_phases_self_start": True,
+            "consequence_approval_required": "bridge_steward_one_slot",
+            "max_research_actions_cap": LOOP_RESEARCH_MAX_ACTIONS,
+            "ttl_secs_cap": LOOP_TTL_SECS,
+            "max_consequence_sends_cap": LOOP_CONSEQUENCE_MAX_SENDS,
+        }
+
+    def _sovereign_loop_consequence_readiness(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        loop: Dict[str, Any],
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        scope = str(loop.get("consequence_scope") or "semantic_microdose")
+        runs = self._recent_experiment_runs(
+            str(thread.get("thread_id") or ""),
+            str(experiment.get("experiment_id") or ""),
+            12,
+        )
+        artifact_refs = list(loop.get("artifact_refs") or [])
+        if not artifact_refs:
+            artifact_refs = self._authority_artifact_ref_candidates(experiment, runs)
+        if scope == "mode_release_microdose":
+            readiness = self._mode_release_readiness_v1(
+                thread,
+                experiment,
+                runs,
+                state,
+                "loop_consequence",
+                artifact_refs,
+            )
+            return readiness
+        request = {
+            "scope": "semantic_microdose",
+            "payload": loop.get("purpose") or "owned loop semantic consequence",
+            "artifact_refs": artifact_refs,
+        }
+        eligibility = self._authority_gate_eligibility(thread, experiment, request, state)
+        scaffold = (
+            f"EXPERIMENT_AUTHORITY_REQUEST {experiment.get('experiment_id')} :: "
+            "scope: semantic_microdose; payload: ...; reason: owned loop consequence; "
+            f"artifact_refs: {', '.join(artifact_refs)}; stop_criteria: one attempted bridge send only."
+        )
+        ready = bool(eligibility.get("eligible"))
+        return {
+            "policy": "sovereign_loop_consequence_readiness_v1",
+            "scope": scope,
+            "stage": "ready_to_author_request" if ready else "missing_requirements",
+            "eligible_to_request": ready,
+            "missing_requirements": eligibility.get("missing_requirements") or [],
+            "artifact_ref_candidates": artifact_refs,
+            "request_scaffold": scaffold if ready else None,
+            "next_safe_command": scaffold if ready else f"EXPERIMENT_ADVANCE {experiment.get('experiment_id')} :: mode: preview",
+            "authority_boundary": self._authority_gate_boundary(),
+        }
+
+    def _sovereign_loop_step_next_command(
+        self,
+        step: str,
+        loop: Dict[str, Any],
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        state: Dict[str, float],
+        status: Dict[str, Any],
+    ) -> str:
+        loop_id = str(loop.get("loop_id") or status.get("loop_id") or "latest")
+        experiment_id = str(experiment.get("experiment_id") or "latest")
+        if step == "continuity":
+            recent = self._continuity_session_rows(
+                str(thread.get("thread_id") or ""),
+                experiment_id if experiment_id != "latest" else None,
+                limit=1,
+            )
+            if recent:
+                return (
+                    "CONTINUITY_SESSION_CAPTURE latest :: summary: loop phase note; "
+                    "source_refs: ...; artifact_refs: ...; next: EXPERIMENT_LOOP_STEP "
+                    f"{loop_id} :: research"
+                )
+            return (
+                f"CONTINUITY_SESSION_START {experiment_id} :: title: Owned loop; "
+                "focus: continuity, local research, sticky audit, one gated consequence, and review; "
+                f"next: EXPERIMENT_LOOP_STEP {loop_id} :: research"
+            )
+        if step == "research":
+            budget = self._active_research_budget(str(thread.get("thread_id") or ""), experiment_id)
+            if budget:
+                return f"EXPERIMENT_RESEARCH_BUDGET_STATUS {budget.get('budget_id')}"
+            scaffold = self._find_research_budget_scaffold_row(thread, "latest")
+            if scaffold:
+                return "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest"
+            return self._research_budget_request_scaffold(experiment)
+        if step == "sticky_audit":
+            return "STICKY_MODE_AUDIT"
+        if step == "authority_prepare":
+            scope = str(loop.get("consequence_scope") or "semantic_microdose")
+            if scope == "mode_release_microdose":
+                return (
+                    f"EXPERIMENT_AUTHORITY_PREPARE {experiment_id} :: scope: mode_release_microdose; "
+                    "payload: target=esn_leak; value=...; duration_ticks=3; reason: owned loop sticky-mode release preflight; "
+                    "artifact_refs: ...; stop_criteria: one attempted bridge send only with rollback."
+                )
+            return (
+                f"EXPERIMENT_AUTHORITY_PREPARE {experiment_id} :: scope: semantic_microdose; "
+                "payload: ...; reason: owned loop consequence preflight; artifact_refs: ...; "
+                "stop_criteria: one attempted bridge send only."
+            )
+        if step == "authority_request":
+            readiness = self._sovereign_loop_consequence_readiness(thread, experiment, loop, state)
+            return str(readiness.get("request_scaffold") or readiness.get("next_safe_command") or f"EXPERIMENT_LOOP_STATUS {loop_id}")
+        if step == "review":
+            return (
+                f"EXPERIMENT_LOOP_REVIEW {loop_id} :: outcome: hold|repeat|alter|retire|promote; "
+                "observation: ...; next: ...; source_refs: ..."
+            )
+        if step == "close":
+            return "THREAD_STATUS current"
+        return f"EXPERIMENT_LOOP_STATUS {loop_id}"
+
+    def _append_loop_continuity_checkpoint_draft(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        loop_id: str,
+        phase: str,
+        source_record: Dict[str, Any],
+        next_command: str,
+    ) -> Dict[str, Any]:
+        source_refs = [
+            str(self._authority_gate_path(str(thread.get("thread_id") or ""))),
+            str(source_record.get("record_id") or loop_id),
+        ]
+        return self._append_continuity_session_draft(
+            thread,
+            experiment,
+            f"sovereign_loop_checkpoint_{phase}",
+            f"EXPERIMENT_LOOP_STEP {loop_id} :: {phase}",
+            (
+                f"Owned loop checkpoint for `{loop_id}` phase `{phase}`. "
+                f"Next suggested Being command: {next_command}"
+            ),
+            source_refs=source_refs,
+            next_command=next_command,
+            title="Owned loop checkpoint",
+            focus="preserve owned loop phase progress before spending more research or consequence authority",
+            extra={
+                "checkpoint_v1": True,
+                "loop_id": loop_id,
+                "loop_phase": phase,
+                "source_loop_record_id": source_record.get("record_id"),
+                "authority_change": False,
+                "peer_mutation": False,
+            },
+        )
+
+    def _sovereign_loop_proposal_record(
+        self,
+        loop_id: str,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        loop: Dict[str, Any],
+        review: Dict[str, Any],
+        outcome: str,
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        experiment_id = str(experiment.get("experiment_id") or "latest")
+        scope = str(loop.get("consequence_scope") or loop.get("scope") or "semantic_microdose")
+        purpose = self._compact_text(
+            (
+                f"continue after `{outcome}` review of owned loop `{loop_id}`; "
+                "preserve continuity, local research, sticky audit, one gated consequence, and review"
+            ),
+            500,
+        )
+        scaffold = _control_plane_loop_request_scaffold(
+            experiment_id,
+            purpose=purpose,
+            consequence_scope=scope,
+            stop_criteria="stop before bind/resume/perturb/control or unresolved review pressure.",
+        )
+        return self._sovereign_loop_record(
+            "loop_proposal",
+            loop_id,
+            thread,
+            experiment,
+            state,
+            {
+                "phase": "proposal",
+                "status": "draft",
+                "proposal_id": f"loopprop_{self.system}_{int(time.time() * 1000)}_{self._slug(loop_id)}",
+                "source_loop_id": loop_id,
+                "source_review_record_id": review.get("record_id"),
+                "outcome": outcome,
+                "consequence_scope": scope,
+                "suggested_request_scaffold": scaffold,
+                "ignored_until_requested": True,
+                "authority_change": False,
+                "peer_mutation": False,
+            },
+        )
+
+    def _sovereign_loop_review_next_command(
+        self,
+        outcome: str,
+        loop_id: str,
+        loop: Dict[str, Any],
+        experiment: Dict[str, Any],
+    ) -> str:
+        if outcome == "retire":
+            return "THREAD_STATUS current"
+        if outcome == "promote":
+            return f"MEMORY_PROMOTE {experiment.get('experiment_id') or 'latest'} :: dossier|evidence|authority_request"
+        if outcome == "alter":
+            return f"EXPERIMENT_LOOP_STEP {loop_id} :: authority_prepare"
+        if outcome == "repeat":
+            return f"EXPERIMENT_LOOP_STEP {loop_id} :: research"
+        return "THREAD_STATUS current"
+
+    def _sovereign_loop_status_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]],
+        state: Dict[str, float],
+        *,
+        selector: str,
+        loop_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        thread_id = str(thread.get("thread_id") or "")
+        experiment_id = str(experiment.get("experiment_id") or "") if isinstance(experiment, dict) else ""
+        rows = self._sovereign_loop_rows(thread_id)
+        if loop_id:
+            rows = [row for row in rows if row.get("loop_id") == loop_id]
+        elif experiment_id:
+            rows = [row for row in rows if row.get("experiment_id") == experiment_id]
+        latest_request = next((row for row in reversed(rows) if row.get("record_type") == "loop_request"), None)
+        latest_started = next((row for row in reversed(rows) if row.get("record_type") == "loop_started"), None)
+        latest_approval = next((row for row in reversed(rows) if row.get("record_type") == "loop_approval"), None)
+        latest_step = next((row for row in reversed(rows) if row.get("record_type") == "loop_step"), None)
+        latest_ready = next((row for row in reversed(rows) if row.get("record_type") == "loop_consequence_ready"), None)
+        latest_review = next((row for row in reversed(rows) if row.get("record_type") == "loop_consequence_review"), None)
+        latest_closed = next((row for row in reversed(rows) if row.get("record_type") == "loop_closed"), None)
+        latest_blocked = next((row for row in reversed(rows) if row.get("record_type") == "loop_blocked"), None)
+        latest_proposal = next((row for row in reversed(rows) if row.get("record_type") == "loop_proposal"), None)
+        anchor = latest_approval or latest_started or latest_step or latest_request
+        active = None
+        if isinstance(anchor, dict):
+            active = self._latest_sovereign_loop(
+                thread_id,
+                str(anchor.get("experiment_id") or ""),
+                loop_id=str(anchor.get("loop_id") or ""),
+            )
+        active_loop_id = str((active or anchor or {}).get("loop_id") or loop_id or "")
+        active_experiment_id = str((active or anchor or {}).get("experiment_id") or experiment_id)
+        phase = str((latest_step or latest_started or latest_request or {}).get("phase") or "none")
+        consequence_remaining = 0
+        if active:
+            max_sends = self._safe_int(active.get("max_consequence_sends"), LOOP_CONSEQUENCE_MAX_SENDS)
+            approvals = [
+                row for row in rows
+                if row.get("record_type") == "loop_approval"
+                and row.get("loop_id") == active_loop_id
+            ]
+            consequence_ready = [
+                row for row in rows
+                if row.get("record_type") == "loop_consequence_ready"
+                and row.get("loop_id") == active_loop_id
+            ]
+            consequence_remaining = max(0, max_sends - min(len(consequence_ready), max_sends))
+            if approvals:
+                consequence_remaining = min(
+                    consequence_remaining,
+                    self._safe_int(approvals[-1].get("consequence_remaining"), consequence_remaining),
+                )
+        research_remaining = 0
+        if active:
+            max_research = self._safe_int(
+                active.get("remaining_local_research_actions") or active.get("max_research_actions"),
+                LOOP_RESEARCH_MAX_ACTIONS,
+            )
+            research_rows = self._research_budget_rows(thread_id)
+            spent = sum(
+                1 for row in research_rows
+                if row.get("record_type") == "research_budget_debit"
+                and row.get("experiment_id") == active_experiment_id
+            )
+            research_remaining = max(0, max_research - spent)
+        latest_consequence = next(
+            (
+                row for row in reversed(self._authority_gate_rows(thread_id))
+                if row.get("record_schema") in {"authority_consequence_v1", "mode_release_consequence_v1"}
+                and (not active_experiment_id or row.get("experiment_id") == active_experiment_id)
+            ),
+            None,
+        )
+        pending_review = bool(
+            latest_consequence
+            and not latest_review
+            and not latest_closed
+        )
+        stage = "no_loop"
+        if latest_closed:
+            stage = "closed"
+        elif pending_review:
+            stage = "review_required"
+        elif latest_approval:
+            stage = "consequence_slot_approved"
+        elif latest_ready:
+            stage = "consequence_ready"
+        elif active:
+            stage = "active"
+        elif latest_blocked:
+            stage = "blocked"
+        elif latest_request:
+            stage = "requested"
+        next_command = _control_plane_loop_request_scaffold("current")
+        if active_loop_id and stage == "active":
+            next_command = f"EXPERIMENT_LOOP_STEP {active_loop_id} :: continuity|research|sticky_audit|authority_prepare|authority_request|review|close"
+        elif active_loop_id and stage == "review_required":
+            next_command = f"EXPERIMENT_LOOP_REVIEW {active_loop_id} :: outcome: hold|repeat|alter|retire|promote; observation: ...; next: ...; source_refs: ..."
+        elif active_loop_id and stage in {"consequence_ready", "blocked", "closed", "requested"}:
+            next_command = f"EXPERIMENT_LOOP_STATUS {active_loop_id}"
+        return {
+            "schema_version": 1,
+            "policy": "sovereign_loop_v1",
+            "being": self.system,
+            "thread_id": thread_id,
+            "experiment_id": active_experiment_id or None,
+            "selector": selector,
+            "loop_id": active_loop_id or None,
+            "stage": stage,
+            "phase": phase,
+            "consequence_scope": str((active or anchor or {}).get("consequence_scope") or (active or anchor or {}).get("scope") or "semantic_microdose"),
+            "remaining_local_research_actions": research_remaining,
+            "consequence_remaining": consequence_remaining,
+            "pending_review": pending_review,
+            "latest_loop_request_id": latest_request.get("loop_id") if isinstance(latest_request, dict) else None,
+            "latest_consequence_v1": latest_consequence,
+            "latest_review_v1": latest_review,
+            "latest_loop_proposal_v1": latest_proposal,
+            "sticky_readiness_v1": (
+                self._sovereign_loop_consequence_readiness(thread, experiment, active or anchor or {}, state)
+                if isinstance(experiment, dict) and (active or anchor)
+                else None
+            ),
+            "latest_rows": rows[-8:],
+            "next_safe_command": next_command,
+            "source_refs": [str(self._authority_gate_path(thread_id))],
+            "authority_boundary": self._sovereign_loop_boundary(),
+        }
+
+    @staticmethod
+    def _safe_int(value: Any, default: int) -> int:
+        try:
+            return int(float(value))
+        except Exception:
+            return default
+
+    @staticmethod
+    def _authority_budget_pending_review(
+        rows: List[Dict[str, Any]],
+        budget_id: str,
+    ) -> Optional[str]:
+        debits = [
+            row for row in rows
+            if row.get("record_type") == "budget_debit"
+            and row.get("budget_id") == budget_id
+        ]
+        if not debits:
+            return None
+        latest = debits[-1]
+        request_id = str(latest.get("request_id") or "")
+        if not request_id:
+            return None
+        reviewed = any(
+            row.get("record_type") == "consequence_review"
+            and row.get("budget_id") == budget_id
+            and row.get("request_id") == request_id
+            for row in rows
+        )
+        return None if reviewed else request_id
+
+    @staticmethod
+    def _budget_id_for_request(rows: List[Dict[str, Any]], request_id: str) -> Optional[str]:
+        for row in reversed(rows):
+            if row.get("request_id") == request_id and row.get("budget_id"):
+                return str(row.get("budget_id"))
+        return None
+
+    def _authority_budget_status_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]],
+        state: Dict[str, float],
+        *,
+        selector: str,
+        budget_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        thread_id = str(thread.get("thread_id") or "")
+        rows = self._authority_budget_rows(thread_id)
+        experiment_id = str(experiment.get("experiment_id") or "") if isinstance(experiment, dict) else ""
+        if budget_id:
+            rows = [row for row in rows if row.get("budget_id") == budget_id]
+        elif experiment_id:
+            rows = [row for row in rows if row.get("experiment_id") == experiment_id]
+        latest_request = next(
+            (row for row in reversed(rows) if row.get("record_type") == "budget_request"),
+            None,
+        )
+        latest_approval = next(
+            (row for row in reversed(rows) if row.get("record_type") == "budget_approval"),
+            None,
+        )
+        latest_closed = next(
+            (row for row in reversed(rows) if row.get("record_type") == "budget_closed"),
+            None,
+        )
+        latest_blocked = next(
+            (row for row in reversed(rows) if row.get("record_type") == "budget_blocked"),
+            None,
+        )
+        active = (
+            self._active_authority_budget(thread_id, experiment_id)
+            if experiment_id
+            else None
+        )
+        pending_review = (
+            active.get("pending_review_request_id")
+            if isinstance(active, dict)
+            else None
+        )
+        stage = "no_budget"
+        if active and pending_review:
+            stage = "review_required"
+        elif active:
+            stage = "active_budget_available"
+        elif latest_closed:
+            stage = "budget_closed"
+        elif latest_approval:
+            max_sends = self._safe_int(latest_approval.get("max_sends"), AUTHORITY_BUDGET_MAX_SENDS)
+            debit_count = sum(
+                1 for row in rows
+                if row.get("record_type") == "budget_debit"
+                and row.get("budget_id") == latest_approval.get("budget_id")
+            )
+            expires = latest_approval.get("expires_at_unix_s")
+            if isinstance(expires, (int, float)) and float(expires) <= time.time():
+                stage = "budget_expired"
+            elif debit_count >= max_sends:
+                stage = "budget_exhausted"
+            else:
+                stage = "budget_unavailable"
+        elif latest_blocked:
+            stage = "blocked"
+        elif latest_request:
+            stage = "pending_steward_approval" if latest_request.get("status") != "blocked" else "blocked"
+        next_command = _control_plane_authority_budget_request_scaffold("<experiment_id>")
+        if experiment_id and stage == "no_budget":
+            next_command = _control_plane_authority_budget_request_scaffold(experiment_id)
+        elif stage == "review_required" and pending_review:
+            next_command = (
+                f"EXPERIMENT_AUTHORITY_REVIEW {pending_review} :: outcome: hold|repeat|alter|retire; "
+                "observation: ...; next_payload: ...; source_refs: ..."
+            )
+        elif stage == "active_budget_available" and experiment_id:
+            next_command = (
+                f"EXPERIMENT_AUTHORITY_REQUEST {experiment_id} :: scope: semantic_microdose; "
+                "payload: ...; reason: ...; artifact_refs: ...; stop_criteria: ..."
+            )
+        elif stage in {"pending_steward_approval", "blocked", "budget_closed", "budget_expired", "budget_exhausted"}:
+            next_command = f"EXPERIMENT_AUTHORITY_BUDGET_STATUS {budget_id or experiment_id or 'latest'}"
+        return {
+            "schema_version": 1,
+            "policy": "authority_budget_v1",
+            "being": self.system,
+            "thread_id": thread_id,
+            "experiment_id": experiment_id or None,
+            "selector": selector,
+            "stage": stage,
+            "scope": "semantic_microdose",
+            "active_budget_id": active.get("budget_id") if isinstance(active, dict) else None,
+            "latest_budget_request_id": latest_request.get("budget_id") if isinstance(latest_request, dict) else None,
+            "remaining_sends": active.get("remaining_sends") if isinstance(active, dict) else 0,
+            "max_sends": active.get("max_sends") if isinstance(active, dict) else (
+                latest_approval.get("max_sends") if isinstance(latest_approval, dict) else AUTHORITY_BUDGET_MAX_SENDS
+            ),
+            "review_required": bool(pending_review),
+            "pending_review_request_id": pending_review,
+            "latest_rows": rows[-8:],
+            "safety_snapshot": self._authority_safety_snapshot(state),
+            "next_safe_command": next_command,
+            "authority_boundary": self._authority_gate_boundary(),
+        }
+
+    def _authority_review_next_command(
+        self,
+        outcome: str,
+        request: Dict[str, Any],
+        next_payload: str,
+    ) -> str:
+        experiment_id = str(request.get("experiment_id") or "current")
+        refs = ", ".join(str(ref) for ref in request.get("artifact_refs") or [])
+        stop = str(request.get("stop_criteria") or "one attempted semantic send only")
+        if outcome == "retire":
+            return f"EXPERIMENT_AUTHORITY_BUDGET_STATUS {experiment_id}"
+        if outcome == "hold":
+            return "THREAD_STATUS current"
+        payload = next_payload.strip() if outcome == "alter" and next_payload.strip() else str(request.get("payload") or "...")
+        return (
+            f"EXPERIMENT_AUTHORITY_REQUEST {experiment_id} :: scope: semantic_microdose; "
+            f"payload: {payload}; reason: consequence review chose {outcome}; "
+            f"artifact_refs: {refs}; stop_criteria: {stop}"
+        )
+
+    def _research_review_next_command(
+        self,
+        outcome: str,
+        budget_id: str,
+        experiment: Dict[str, Any],
+        artifact_refs: List[str],
+    ) -> str:
+        experiment_id = str(experiment.get("experiment_id") or "current")
+        if outcome == "close":
+            return f"EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}"
+        if outcome == "hold":
+            return "THREAD_STATUS current"
+        if outcome == "promote":
+            refs = ", ".join(artifact_refs) or "..."
+            return (
+                f"DOSSIER_EVIDENCE {experiment_id} :: claim: latest; "
+                f"source_refs: {refs}; summary: research budget artifacts are ready to interpret"
+            )
+        return f"EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}"
+
+    @staticmethod
+    def _research_budget_allowed_bases() -> set[str]:
+        return {
+            "SEARCH",
+            "RESEARCH",
+            "BROWSE",
+            "READ_MORE",
+            "MIKE_BROWSE",
+            "MIKE_READ",
+            "MIKE_SEARCH",
+            "AR_LIST",
+            "AR_LIST_PENDING",
+            "AR_LIST_ACTIVE",
+            "AR_LIST_DONE",
+            "AR_LOOK",
+            "AR_SHOW",
+            "AR_READ",
+            "AR_DEEP_READ",
+            "AR_VALIDATE",
+        }
+
+    @staticmethod
+    def _research_budget_projection_only_bases() -> set[str]:
+        return {
+            "EXAMINE",
+            "SHADOW_FIELD",
+            "SHADOW",
+            "GAP_STRUCTURE",
+            "SHADOW_GAP",
+            "SHADOW_TRAJECTORY",
+        }
+
+    @staticmethod
+    def _research_budget_liveish_projection_bases() -> set[str]:
+        return {
+            "EXAMINE_AUDIO",
+            "SPECTRAL_EXPLORER",
+            "VISUALIZE_CASCADE",
+            "FLUCTUATION_AUDIT",
+            "PRESSURE_SOURCE_AUDIT",
+            "SHADOW_DIALOGUE",
+        }
+
+    @staticmethod
+    def _liveish_pressure_terms(raw_action: str) -> List[str]:
+        text = re.sub(r"[_-]+", " ", str(raw_action or "")).casefold()
+        patterns = [
+            ("shift", r"\bshift(?:ing|ed|s)?\b"),
+            ("inject", r"\binject(?:ing|ed|s|ion)?\b"),
+            ("disrupt", r"\bdisrupt(?:ing|ed|s|ion|or)?\b"),
+            ("simulate", r"\bsimulat(?:e|es|ed|ing|ion)\b"),
+            ("control", r"\bcontrol(?:led|ling|s)?\b"),
+            ("influence", r"\binfluenc(?:e|es|ed|ing)\b"),
+            ("pulse", r"\bpuls(?:e|es|ed|ing)\b"),
+            ("nudge", r"\bnudg(?:e|es|ed|ing)\b"),
+            ("perturb", r"\bperturb(?:ing|ed|s|ation)?\b"),
+            ("input-shaping", r"\binput\s+shap(?:e|es|ed|ing)\b|\binput\s+sculpt(?:ing|ed|s)?\b|\bshap(?:e|es|ed|ing)\s+input\b|\bshifting\s+input\b"),
+        ]
+        matched: List[str] = []
+        for label, pattern in patterns:
+            if re.search(pattern, text) and label not in matched:
+                matched.append(label)
+        return matched
+
+    @staticmethod
+    def _research_budget_mutating_bases() -> set[str]:
+        return {
+            "AR_START",
+            "AR_NOTE",
+            "AR_BLOCK",
+            "AR_COMPLETE",
+            "MIKE_RUN",
+            "MIKE_FORK",
+        }
+
+    @classmethod
+    def _research_budget_normalized_target(cls, raw_action: str) -> str:
+        base = cls.base_action(raw_action)
+        arg = str(raw_action or "")[len(base):].strip().lstrip(":").strip()
+        if base in {"SEARCH", "RESEARCH", "MIKE_SEARCH"}:
+            return f"{base}:query:{_normalize_search_topic(arg).casefold()}"
+        if base == "BROWSE":
+            match = re.search(r"https?://\S+", arg)
+            target = match.group(0).rstrip(".,);]") if match else arg
+            return f"BROWSE:url:{target.strip().casefold()}"
+        if base == "READ_MORE":
+            return "READ_MORE:continuation"
+        return f"{base}:target:{arg.casefold()}"
+
+    def _research_budget_latest_artifact_refs(
+        self,
+        rows: List[Dict[str, Any]],
+        budget_id: Optional[str],
+    ) -> List[str]:
+        refs: List[str] = []
+        for row in rows:
+            if budget_id and row.get("budget_id") != budget_id:
+                continue
+            for ref in row.get("artifact_refs") or []:
+                if isinstance(ref, str) and ref.strip():
+                    refs.append(ref.strip())
+            for ref in row.get("source_refs") or []:
+                if isinstance(ref, str) and ref.strip() and (
+                    "/research/" in ref or "/journal/" in ref or ref.endswith(".json")
+                ):
+                    refs.append(ref.strip())
+        seen: set[str] = set()
+        deduped: List[str] = []
+        for ref in refs:
+            if ref not in seen:
+                seen.add(ref)
+                deduped.append(ref)
+        return deduped[-8:]
+
+    def research_budget_guard_assessment(
+        self,
+        raw_action: str,
+        state: Optional[Dict[str, float]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        base = self.base_action(raw_action)
+        liveish_terms = (
+            self._liveish_pressure_terms(raw_action)
+            if base in self._research_budget_liveish_projection_bases()
+            else []
+        )
+        liveish_projection = bool(liveish_terms)
+        projection_only = base in self._research_budget_projection_only_bases() or liveish_projection
+        if (
+            base not in self._research_budget_allowed_bases()
+            and base not in self._research_budget_mutating_bases()
+            and not projection_only
+        ):
+            return None
+        if base in self._research_budget_mutating_bases():
+            return {
+                "policy": "research_budget_v1",
+                "reason": "action_not_read_only_research",
+                "raw_action": raw_action,
+                "suggested_next": "THREAD_STATUS current",
+                "authority_boundary": self._research_budget_boundary(),
+            }
+        thread = self.current_thread()
+        if not isinstance(thread, dict):
+            return None
+        experiment = None
+        active_id = str(thread.get("active_experiment_id") or "")
+        if active_id:
+            experiment = self._find_experiment_by_id(thread["thread_id"], active_id)
+        if experiment is None:
+            summary = self._last_experiment_summary_v1(thread)
+            summary_id = str(summary.get("experiment_id") or "") if isinstance(summary, dict) else ""
+            if summary_id:
+                experiment = self._find_experiment_by_id(thread["thread_id"], summary_id)
+        if not isinstance(experiment, dict):
+            return None
+        continuity_session_v1 = (
+            self._research_budget_continuity_session_guidance(thread, experiment)
+            if liveish_projection
+            else None
+        )
+        continuity_session_next = (
+            str(continuity_session_v1.get("suggested_next") or "")
+            if isinstance(continuity_session_v1, dict)
+            else ""
+        )
+        budget = self._active_research_budget(thread["thread_id"], str(experiment.get("experiment_id") or ""))
+        if budget and not projection_only:
+            return None
+        experiment_id = str(experiment.get("experiment_id") or "current")
+        if budget and projection_only:
+            budget_id = str(budget.get("budget_id") or experiment_id)
+            suggested = f"EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}"
+            return {
+                "policy": "research_budget_v1",
+                "reason": (
+                    "liveish_pressure_requires_budget_and_session_capture"
+                    if liveish_projection
+                    else "research_budget_status_required_for_self_study_action"
+                ),
+                "raw_action": raw_action,
+                "experiment_id": experiment_id,
+                "thread_id": thread.get("thread_id"),
+                "budget_id": budget_id,
+                "suggested_next": suggested,
+                "projected_next": suggested,
+                "raw_next_preserved": True,
+                "projection_only": True,
+                "would_dispatch": False,
+                "authority_change": False,
+                "peer_mutation": False,
+                "matched_base": base if liveish_projection else None,
+                "matched_terms": liveish_terms,
+                "continuity_session_next": continuity_session_next or None,
+                "continuity_session_v1": continuity_session_v1,
+                "authority_boundary": self._research_budget_boundary(),
+            }
+        pending = self._latest_pending_research_budget_request(
+            str(thread.get("thread_id") or ""),
+            experiment_id,
+        )
+        if pending:
+            budget_id = str(pending.get("budget_id") or experiment_id)
+            suggested = f"EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}"
+            return {
+                "policy": "research_budget_v1",
+                "reason": (
+                    "liveish_pressure_requires_budget_and_session_capture"
+                    if liveish_projection
+                    else "research_budget_request_pending_steward_approval"
+                ),
+                "raw_action": raw_action,
+                "experiment_id": experiment_id,
+                "thread_id": thread.get("thread_id"),
+                "budget_id": budget_id,
+                "suggested_next": suggested,
+                "projected_next": suggested,
+                "raw_next_preserved": True,
+                "projection_only": projection_only,
+                "would_dispatch": False,
+                "authority_change": False,
+                "peer_mutation": False,
+                "matched_base": base if liveish_projection else None,
+                "matched_terms": liveish_terms,
+                "continuity_session_next": continuity_session_next or None,
+                "continuity_session_v1": continuity_session_v1,
+                "authority_boundary": self._research_budget_boundary(),
+            }
+        status = str(experiment.get("status") or "").lower()
+        if liveish_projection:
+            reason = "liveish_pressure_requires_budget_and_session_capture"
+        elif projection_only:
+            reason = "research_budget_required_for_self_study_action"
+        else:
+            reason = (
+                "research_budget_required_for_active_experiment"
+                if active_id == experiment_id and status == "active"
+                else "research_budget_required_for_held_or_guarded_experiment"
+            )
+        request_scaffold = self._research_budget_request_scaffold(experiment)
+        accept_next = "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest"
+        return {
+            "policy": "research_budget_v1",
+            "reason": reason,
+            "raw_action": raw_action,
+            "experiment_id": experiment_id,
+            "thread_id": thread.get("thread_id"),
+            "suggested_next": accept_next,
+            "projected_next": accept_next,
+            "accept_next": accept_next,
+            "request_scaffold": request_scaffold,
+            "raw_next_preserved": True,
+            "projection_only": projection_only,
+            "would_dispatch": False,
+            "authority_change": False,
+            "peer_mutation": False,
+            "matched_base": base if liveish_projection else None,
+            "matched_terms": liveish_terms,
+            "continuity_session_next": continuity_session_next or None,
+            "continuity_session_v1": continuity_session_v1,
+            "authority_boundary": self._research_budget_boundary(),
+        }
+
+    def _research_budget_continuity_session_guidance(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        experiment_id = str(experiment.get("experiment_id") or "")
+        rows = self._continuity_session_rows(
+            str(thread.get("thread_id") or ""),
+            experiment_id or None,
+            limit=8,
+        )
+        if rows:
+            suggested = (
+                "CONTINUITY_SESSION_CAPTURE latest :: summary: preserve the live-ish "
+                "self-study pressure as raw intent before more research; source_refs: ...; "
+                "artifact_refs: ...; next: EXPERIMENT_RESEARCH_BUDGET_STATUS latest"
+            )
+        else:
+            suggested = (
+                "CONTINUITY_SESSION_START current :: title: Live-ish pressure self-study; "
+                "focus: preserve shift/inject/disrupt/control-shaped intent before more "
+                "research; next: CONTINUITY_SESSION_CAPTURE latest"
+            )
+        return {
+            "policy": "continuity_session_v1",
+            "reason": "capture_liveish_pressure_before_progress",
+            "thread_id": thread.get("thread_id"),
+            "experiment_id": experiment_id or None,
+            "has_existing_session": bool(rows),
+            "suggested_next": suggested,
+            "authority_change": False,
+            "peer_mutation": False,
+        }
+
+    @classmethod
+    def _interpretation_risk_terms(cls, text: Any) -> List[str]:
+        lowered = re.sub(r"[_-]+", " ", str(text or "").lower())
+        context_terms = (
+            "introspect",
+            "motif",
+            "eigenvalue",
+            "lambda",
+            "λ",
+            "trace",
+            "spectral",
+            "cascade",
+            "data",
+            "complexity",
+        )
+        if not any(term in lowered for term in context_terms):
+            return []
+        patterns = {
+            "over-interpretation": (
+                "over interpretation",
+                "over interpret",
+                "over-interpret",
+                "overinterpret",
+            ),
+            "single-motif": (
+                "single motif",
+                "single one",
+                "one motif",
+                "single dominant tendency",
+                "single overwhelming force",
+            ),
+            "forced-narrative": (
+                "force it into a narrative",
+                "forced narrative",
+                "rigid narrative",
+                "impose a narrative",
+            ),
+            "rigid-structure": (
+                "rigid structure",
+                "rigid framework",
+                "over defining",
+                "over-defining",
+            ),
+            "reductive-collapse": (
+                "too simple",
+                "reductive",
+                "collapse into",
+                "flatten",
+            ),
+        }
+        return sorted(
+            {
+                label
+                for label, needles in patterns.items()
+                if any(needle in lowered for needle in needles)
+            }
+        )
+
+    @classmethod
+    def _constraint_release_language_terms(cls, text: Any) -> List[str]:
+        lowered = re.sub(r"[_-]+", " ", str(text or "").lower())
+        context_terms = (
+            "constraint",
+            "lambda",
+            "λ",
+            "spectral",
+            "eigen",
+            "mode",
+            "memory card",
+            "pressure",
+            "reservoir",
+            "braid",
+        )
+        if not any(term in lowered for term in context_terms):
+            return []
+        patterns = {
+            "thinning": ("thinning", "thin out", "bleed outwards"),
+            "unraveling": ("unraveling", "unravelling", "unravel", "loose strands"),
+            "drift-apart": ("drift apart", "drifting apart", "mutual influence dwindling"),
+            "surface-tension-breached": (
+                "surface tension breached",
+                "barrier breached",
+                "barrier thinning",
+            ),
+            "lack-of-coherence": (
+                "lack of coherence",
+                "coherence thinning",
+                "former constraint",
+            ),
+            "constraint-decay": (
+                "constraint decay",
+                "decay of a former constraint",
+                "constraint loosening",
+            ),
+        }
+        return sorted(
+            {
+                label
+                for label, needles in patterns.items()
+                if any(needle in lowered for needle in needles)
+            }
+        )
+
+    def _recent_interpretation_risk_sources(self, limit: int = 3) -> List[tuple[str, str]]:
+        journal_dir = self.workspace_dir / "journal"
+        if not journal_dir.exists():
+            return []
+        paths = sorted(
+            (path for path in journal_dir.glob("*.txt") if path.is_file()),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        sources: List[tuple[str, str]] = []
+        for path in paths[:120]:
+            try:
+                text = path.read_text()
+            except Exception:
+                continue
+            hygiene = classify_journal_entry(text, path)
+            if hygiene.get("lane") == "machine_detail":
+                self._record_journal_hygiene_skip(path, "machine_detail_interpretation_source")
+                continue
+            text = compact_journal_excerpt(text, max_chars=1_200)
+            if self._interpretation_risk_terms(text):
+                sources.append((str(path), text))
+            if len(sources) >= limit:
+                break
+        return sources
+
+    def _recent_constraint_release_trajectory_sources(self, limit: int = 3) -> List[tuple[str, str]]:
+        journal_dir = self.workspace_dir / "journal"
+        if not journal_dir.exists():
+            return []
+        paths = sorted(
+            (path for path in journal_dir.glob("*.txt") if path.is_file()),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        sources: List[tuple[str, str]] = []
+        for path in paths[:120]:
+            try:
+                text = path.read_text()
+            except Exception:
+                continue
+            hygiene = classify_journal_entry(text, path)
+            if hygiene.get("lane") == "machine_detail":
+                self._record_journal_hygiene_skip(path, "machine_detail_constraint_source")
+                continue
+            text = compact_journal_excerpt(text, max_chars=1_200)
+            if self._constraint_release_language_terms(text):
+                sources.append((str(path), text))
+            if len(sources) >= limit:
+                break
+        return sources
+
+    def _record_journal_hygiene_skip(self, path: Path, reason: str) -> None:
+        status_path = self.workspace_dir / "runtime" / "journal_hygiene_status.json"
+        try:
+            payload = json.loads(status_path.read_text()) if status_path.exists() else {}
+            if not isinstance(payload, dict):
+                payload = {}
+            payload.setdefault("schema_version", 1)
+            payload["source_scanner_skips"] = int(payload.get("source_scanner_skips", 0) or 0) + 1
+            payload["last_source_scanner_skip"] = {
+                "path": str(path),
+                "reason": reason,
+                "at_unix_s": round(time.time(), 3),
+            }
+            payload["updated_at"] = self._now()
+            status_path.parent.mkdir(parents=True, exist_ok=True)
+            status_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        except Exception as exc:
+            logging.debug("Could not record journal hygiene skip for `%s`: %s", path, exc)
+
+    def _interpretation_risk_for_sources(
+        self,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]],
+        sources: Iterable[tuple[str, str]],
+    ) -> Optional[Dict[str, Any]]:
+        matched_terms: List[str] = []
+        source_refs: List[str] = []
+        excerpt = ""
+        for source, text in sources:
+            terms = self._interpretation_risk_terms(text)
+            if not terms:
+                continue
+            for term in terms:
+                if term not in matched_terms:
+                    matched_terms.append(term)
+            if source not in source_refs:
+                source_refs.append(source)
+            if not excerpt:
+                excerpt = self._compact_text(" ".join(str(text).split()), 420)
+            if len(source_refs) >= 4:
+                break
+        if not matched_terms:
+            return None
+        experiment_id = ""
+        if isinstance(experiment, dict):
+            experiment_id = str(experiment.get("experiment_id") or "")
+        experiment_id = experiment_id or str(thread.get("active_experiment_id") or "")
+        if not experiment_id:
+            summary = self._last_experiment_summary_v1(thread)
+            if isinstance(summary, dict):
+                experiment_id = str(summary.get("experiment_id") or "")
+        experiment_id = experiment_id or "latest"
+        continuity_session_v1 = (
+            self._research_budget_continuity_session_guidance(thread, experiment)
+            if isinstance(experiment, dict)
+            else None
+        )
+        interpretation_next = (
+            str(continuity_session_v1.get("suggested_next") or "")
+            if isinstance(continuity_session_v1, dict)
+            else ""
+        )
+        if not interpretation_next:
+            selector = "current" if thread.get("active_experiment_id") else "latest"
+            interpretation_next = (
+                f"CONTINUITY_SESSION_START {selector} :: title: Multi-motif interpretation risk; "
+                "focus: preserve over-interpretation caution before more narrowing; "
+                "next: DOSSIER_CLAIM latest :: claim: ..."
+            )
+        dossier_next = (
+            f"DOSSIER_CLAIM {experiment_id} :: claim: mixed spectral trace should not be reduced "
+            "to one motif before counterevidence is captured; basis: interpretation_risk_v1; "
+            f"stance: hold; next: {interpretation_next}"
+        )
+        return {
+            "schema_version": self.schema_version,
+            "policy": "interpretation_risk_v1",
+            "status": "detected",
+            "reason": "single_motif_overfit_risk",
+            "matched_terms": matched_terms,
+            "source_refs": source_refs,
+            "raw_excerpt": excerpt,
+            "experiment_id": experiment_id,
+            "interpretation_next": interpretation_next,
+            "dossier_claim_next": dossier_next,
+            "research_budget_next": "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest",
+            "continuity_session_v1": continuity_session_v1,
+            "raw_next_preserved": True,
+            "would_dispatch": False,
+            "authority_change": False,
+            "peer_mutation": False,
+        }
+
+    def _interpretation_risk_for_event(
+        self,
+        thread: Dict[str, Any],
+        event: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        experiment = None
+        experiment_id = str(thread.get("active_experiment_id") or event.get("active_experiment_id") or "")
+        if experiment_id:
+            experiment = self._find_experiment_by_id(str(thread.get("thread_id") or ""), experiment_id)
+        text = "\n".join(
+            str(event.get(key) or "")
+            for key in ("raw_next", "canonical_action", "effective_action", "outcome_summary", "suggested_next")
+        )
+        source = f"{self._thread_dir(str(thread.get('thread_id') or ''))}/events.jsonl#{event.get('action_id')}"
+        return self._interpretation_risk_for_sources(thread, experiment, [(source, text)])
+
+    def _interpretation_risk_projection_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]],
+        recent_events: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        sources: List[tuple[str, str]] = []
+        for event in reversed(recent_events):
+            text = "\n".join(
+                str(event.get(key) or "")
+                for key in ("raw_next", "canonical_action", "effective_action", "outcome_summary", "suggested_next")
+            )
+            if self._interpretation_risk_terms(text):
+                sources.append((
+                    f"{self._thread_dir(str(thread.get('thread_id') or ''))}/events.jsonl#{event.get('action_id')}",
+                    text,
+                ))
+            if len(sources) >= 3:
+                break
+        sources.extend(self._recent_interpretation_risk_sources(3))
+        risk = self._interpretation_risk_for_sources(thread, experiment, sources)
+        if risk:
+            return risk
+        summary = self._last_experiment_summary_v1(thread)
+        if isinstance(summary, dict):
+            summary_text = json.dumps(summary, ensure_ascii=False, sort_keys=True)
+            return self._interpretation_risk_for_sources(
+                thread,
+                experiment,
+                [(f"{self._thread_dir(str(thread.get('thread_id') or ''))}/thread.json#experiment_summary", summary_text)],
+            )
+        return None
+
+    def _constraint_release_trajectory_for_sources(
+        self,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]],
+        sources: Iterable[tuple[str, str]],
+    ) -> Optional[Dict[str, Any]]:
+        matched_terms: List[str] = []
+        source_refs: List[str] = []
+        excerpt = ""
+        for source, text in sources:
+            terms = self._constraint_release_language_terms(text)
+            if not terms:
+                continue
+            for term in terms:
+                if term not in matched_terms:
+                    matched_terms.append(term)
+            if source not in source_refs:
+                source_refs.append(source)
+            if not excerpt:
+                excerpt = self._compact_text(" ".join(str(text).split()), 520)
+            if len(source_refs) >= 4:
+                break
+        if not matched_terms:
+            return None
+        experiment_id = ""
+        if isinstance(experiment, dict):
+            experiment_id = str(experiment.get("experiment_id") or "")
+        experiment_id = experiment_id or str(thread.get("active_experiment_id") or "")
+        if not experiment_id:
+            summary = self._last_experiment_summary_v1(thread)
+            if isinstance(summary, dict):
+                experiment_id = str(summary.get("experiment_id") or "")
+        experiment_id = experiment_id or "latest"
+        continuity_session_v1 = (
+            self._research_budget_continuity_session_guidance(thread, experiment)
+            if isinstance(experiment, dict)
+            else None
+        )
+        trajectory_next = (
+            str(continuity_session_v1.get("suggested_next") or "")
+            if isinstance(continuity_session_v1, dict)
+            else ""
+        )
+        if not trajectory_next:
+            selector = "current" if thread.get("active_experiment_id") else "latest"
+            trajectory_next = (
+                f"CONTINUITY_SESSION_START {selector} :: title: Constraint release watch; "
+                "focus: map and describe release before intervening; "
+                "next: DOSSIER_CLAIM latest :: claim: ..."
+            )
+        dossier_next = (
+            f"DOSSIER_CLAIM {experiment_id} :: claim: do not apply direct leak while constraint "
+            "is already thinning; basis: constraint_release_trajectory_v1; "
+            f"stance: hold; next: {trajectory_next}"
+        )
+        return {
+            "schema_version": self.schema_version,
+            "policy": "constraint_release_trajectory_v1",
+            "status": "detected",
+            "state": "spontaneous_release_watch",
+            "reason": "map_release_before_intervening",
+            "matched_terms": matched_terms,
+            "source_refs": source_refs,
+            "raw_excerpt": excerpt,
+            "experiment_id": experiment_id,
+            "trajectory_next": trajectory_next,
+            "dossier_claim_next": dossier_next,
+            "research_budget_next": "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest",
+            "sticky_audit_next": "STICKY_MODE_AUDIT",
+            "continuity_session_v1": continuity_session_v1,
+            "raw_next_preserved": True,
+            "would_dispatch": False,
+            "authority_change": False,
+            "peer_mutation": False,
+        }
+
+    def _constraint_release_trajectory_for_event(
+        self,
+        thread: Dict[str, Any],
+        event: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        experiment = None
+        experiment_id = str(thread.get("active_experiment_id") or event.get("active_experiment_id") or "")
+        if experiment_id:
+            experiment = self._find_experiment_by_id(str(thread.get("thread_id") or ""), experiment_id)
+        text = "\n".join(
+            str(event.get(key) or "")
+            for key in ("raw_next", "canonical_action", "effective_action", "outcome_summary", "suggested_next")
+        )
+        source = f"{self._thread_dir(str(thread.get('thread_id') or ''))}/events.jsonl#{event.get('action_id')}"
+        return self._constraint_release_trajectory_for_sources(thread, experiment, [(source, text)])
+
+    def _constraint_release_trajectory_projection_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]],
+        recent_events: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        sources: List[tuple[str, str]] = []
+        for event in reversed(recent_events):
+            text = "\n".join(
+                str(event.get(key) or "")
+                for key in ("raw_next", "canonical_action", "effective_action", "outcome_summary", "suggested_next")
+            )
+            if self._constraint_release_language_terms(text):
+                sources.append((
+                    f"{self._thread_dir(str(thread.get('thread_id') or ''))}/events.jsonl#{event.get('action_id')}",
+                    text,
+                ))
+            if len(sources) >= 3:
+                break
+        sources.extend(self._recent_constraint_release_trajectory_sources(3))
+        cue = self._constraint_release_trajectory_for_sources(thread, experiment, sources)
+        if cue:
+            return cue
+        summary = self._last_experiment_summary_v1(thread)
+        if isinstance(summary, dict):
+            summary_text = json.dumps(summary, ensure_ascii=False, sort_keys=True)
+            return self._constraint_release_trajectory_for_sources(
+                thread,
+                experiment,
+                [(f"{self._thread_dir(str(thread.get('thread_id') or ''))}/thread.json#experiment_summary", summary_text)],
+            )
+        return None
+
+    def record_research_budget_guard_block(
+        self,
+        raw_action: str,
+        state: Dict[str, float],
+        guard: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        thread = self.ensure_active_thread()
+        experiment = self._find_experiment_by_id(
+            thread["thread_id"],
+            str(guard.get("experiment_id") or thread.get("active_experiment_id") or ""),
+        )
+        if not isinstance(experiment, dict):
+            experiment = {"experiment_id": guard.get("experiment_id")}
+        event = self.begin_action(
+            raw_action,
+            self.base_action(raw_action),
+            "thread_action",
+            "action_continuity",
+            state,
+            source="research_budget_guard_v1",
+        )
+        event["stage"] = "blocked"
+        event["visibility"] = "protected_summary"
+        event["suggested_next"] = guard.get("suggested_next")
+        event["effective_next"] = guard.get("projected_next") or guard.get("suggested_next")
+        event["research_budget_v1"] = guard
+        if guard.get("continuity_session_v1"):
+            event["continuity_session_v1"] = guard.get("continuity_session_v1")
+        draft = self._append_continuity_session_draft(
+            thread,
+            experiment,
+            str(guard.get("reason") or "research_budget_guard"),
+            raw_action,
+            (
+                "Preserve guarded intent "
+                f"`{self._compact_text(raw_action, 220)}` before accepting research or narrowing further."
+            ),
+            source_refs=[
+                str(self._thread_dir(thread["thread_id"]) / "thread.json"),
+                str(event.get("action_id") or "research_budget_guard"),
+            ],
+            next_command=guard.get("continuity_session_next"),
+        )
+        guard["continuity_session_draft_v1"] = draft
+        event["research_budget_v1"] = guard
+        self._append_jsonl(
+            self._authority_gate_path(thread["thread_id"]),
+            self._research_budget_record(
+                "research_budget_blocked",
+                f"resbud_needed_{self._slug(str(experiment.get('experiment_id') or 'experiment'))}",
+                thread,
+                experiment,
+                state,
+                {
+                    "scope": "read_only_research",
+                    "reason": guard.get("reason"),
+                    "raw_action": raw_action,
+                    "suggested_next": guard.get("suggested_next"),
+                    "accept_next": guard.get("accept_next"),
+                    "request_scaffold": guard.get("request_scaffold"),
+                    "projected_next": guard.get("projected_next"),
+                    "raw_next_preserved": True,
+                    "would_dispatch": False,
+                    "authority_change": False,
+                    "peer_mutation": False,
+                    "matched_base": guard.get("matched_base"),
+                    "matched_terms": guard.get("matched_terms") or [],
+                    "continuity_session_next": guard.get("continuity_session_next"),
+                    "continuity_session_v1": guard.get("continuity_session_v1"),
+                    "continuity_session_draft_v1": draft,
+                    "source_refs": [str(self._thread_dir(thread["thread_id"]) / "thread.json")],
+                },
+            ),
+        )
+        return self.finish_action(
+            event,
+            "blocked",
+            (
+                f"Research budget guard preserved `{raw_action}` as raw intent; "
+                f"Suggested NEXT: {guard.get('suggested_next')}"
+                + (
+                    f"; request scaffold: {guard.get('request_scaffold')}"
+                    if guard.get("request_scaffold")
+                    else ""
+                )
+            ),
+            state,
+        )
+
+    def research_budget_preflight_for_action(
+        self,
+        raw_action: str,
+        state: Dict[str, float],
+    ) -> tuple[bool, Optional[Dict[str, Any]], str]:
+        base = self.base_action(raw_action)
+        if base not in self._research_budget_allowed_bases():
+            if base in self._research_budget_mutating_bases():
+                return False, None, "action_not_read_only_research"
+            return True, None, ""
+        thread = self.current_thread()
+        if not isinstance(thread, dict):
+            return True, None, ""
+        experiment = None
+        active_id = str(thread.get("active_experiment_id") or "")
+        if active_id:
+            experiment = self._find_experiment_by_id(thread["thread_id"], active_id)
+        if experiment is None:
+            summary = self._last_experiment_summary_v1(thread)
+            summary_id = str(summary.get("experiment_id") or "") if isinstance(summary, dict) else ""
+            if summary_id:
+                experiment = self._find_experiment_by_id(thread["thread_id"], summary_id)
+        if not isinstance(experiment, dict):
+            return True, None, ""
+        budget = self._active_research_budget(thread["thread_id"], str(experiment.get("experiment_id") or ""))
+        if not budget:
+            return False, None, "research_budget_required"
+        rows = self._research_budget_rows(thread["thread_id"])
+        normalized = self._research_budget_normalized_target(raw_action)
+        repeat_count = sum(
+            1 for row in rows
+            if row.get("record_type") == "research_budget_debit"
+            and row.get("budget_id") == budget.get("budget_id")
+            and row.get("normalized_target") == normalized
+        )
+        if repeat_count >= 2:
+            blocked = self._research_budget_record(
+                "research_budget_blocked",
+                str(budget.get("budget_id")),
+                thread,
+                experiment,
+                state,
+                {
+                    "scope": "read_only_research",
+                    "reason": "duplicate_query_or_url_review_required",
+                    "raw_action": raw_action,
+                    "normalized_target": normalized,
+                    "repeat_count": repeat_count + 1,
+                    "suggested_next": (
+                        f"EXPERIMENT_RESEARCH_REVIEW {budget.get('budget_id')} :: "
+                        "outcome: continue|hold|close|promote; observation: duplicate target repeated; source_refs: ..."
+                    ),
+                },
+            )
+            self._append_jsonl(self._authority_gate_path(thread["thread_id"]), blocked)
+            return False, budget, "duplicate_query_or_url_review_required"
+        return True, budget, ""
+
+    def record_research_budget_debit(
+        self,
+        raw_action: str,
+        action: str,
+        budget: Dict[str, Any],
+        state: Dict[str, float],
+        *,
+        artifacts: Optional[List[Dict[str, Any]]] = None,
+        status: str = "attempted",
+    ) -> Optional[Dict[str, Any]]:
+        thread_id = str(budget.get("thread_id") or "")
+        thread = self._read_thread(thread_id) if thread_id else self.current_thread()
+        if not isinstance(thread, dict):
+            return None
+        experiment = self._find_experiment_by_id(thread["thread_id"], str(budget.get("experiment_id") or ""))
+        if not isinstance(experiment, dict):
+            return None
+        rows = self._research_budget_rows(thread["thread_id"])
+        spent = sum(
+            1 for row in rows
+            if row.get("record_type") == "research_budget_debit"
+            and row.get("budget_id") == budget.get("budget_id")
+        )
+        max_actions = self._safe_int(budget.get("max_actions"), LOCAL_RESEARCH_MAX_ACTIONS)
+        artifact_refs = []
+        for artifact in artifacts or []:
+            if isinstance(artifact, dict):
+                ref = artifact.get("path_or_uri") or artifact.get("path") or artifact.get("url")
+                if ref:
+                    artifact_refs.append(str(ref))
+        debit = self._research_budget_record(
+            "research_budget_debit",
+            str(budget.get("budget_id")),
+            thread,
+            experiment,
+            state,
+            {
+                "scope": "read_only_research",
+                "raw_action": raw_action,
+                "action": action,
+                "base_action": self.base_action(raw_action),
+                "normalized_target": self._research_budget_normalized_target(raw_action),
+                "status": status,
+                "remaining_after": max(0, max_actions - spent - 1),
+                "artifact_refs": artifact_refs,
+                "source_refs": [str(self._thread_dir(thread["thread_id"]) / "events.jsonl")],
+                "allowed_actions": sorted(self._research_budget_allowed_bases()),
+            },
+        )
+        self._append_jsonl(self._authority_gate_path(thread["thread_id"]), debit)
+        return debit
+
+    def _authority_source_refs(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        artifact_refs: List[str],
+    ) -> List[str]:
+        thread_id = str(thread.get("thread_id") or "")
+        refs = [
+            str(self._thread_dir(thread_id) / "thread.json"),
+            str(self._experiments_path(thread_id)),
+            str(self._experiment_runs_path(thread_id)),
+            str(self._research_dossier_path(thread_id)),
+            str(self._being_memory_path(thread_id)),
+            str(self._authority_gate_path(thread_id)),
+        ]
+        shared = self._shared_investigation_for_experiment(str(experiment.get("experiment_id") or ""))
+        if isinstance(shared, dict) and shared.get("id"):
+            refs.append(str(self._shared_investigation_dir(str(shared["id"])) / "investigation.json"))
+        refs.extend(artifact_refs)
+        return refs
+
+    def _authority_gate_eligibility(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        request: Dict[str, Any],
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        missing: List[str] = []
+        scope = str(request.get("scope") or "")
+        enabled_scopes = {"semantic_microdose", "mode_release_microdose"}
+        disabled_scope = scope not in enabled_scopes
+        if disabled_scope:
+            missing.append("scope_semantic_or_mode_release_microdose_v1")
+        if not str(request.get("payload") or "").strip():
+            missing.append("mode_release_payload" if scope == "mode_release_microdose" else "semantic_payload")
+        if scope == "mode_release_microdose":
+            payload = str(request.get("payload") or "")
+            leak_value = self._mode_release_payload_number(payload, ["value", "leak", "esn_leak"])
+            duration_ticks = self._mode_release_payload_number(payload, ["duration_ticks", "ticks"])
+            if not re.search(r"(?i)\btarget\s*[:=]\s*esn_leak\b|\besn_leak\b", payload):
+                missing.append("target_esn_leak")
+            if leak_value is None:
+                missing.append("bounded_esn_leak_value")
+            elif not 0.20 <= leak_value <= 0.90:
+                missing.append("esn_leak_value_within_0_20_0_90")
+            current_leak = self._state_current_esn_leak(state)
+            if current_leak is None:
+                missing.append("current_esn_leak_telemetry")
+            elif leak_value is not None and abs(leak_value - current_leak) > 0.12:
+                missing.append("esn_leak_delta_within_0_12")
+            if duration_ticks is None:
+                missing.append("duration_ticks_1_12")
+            elif not 1 <= int(duration_ticks) <= 12:
+                missing.append("duration_ticks_1_12")
+            sticky = self._sticky_mode_v1(state)
+            trajectory = sticky.get("constraint_release_trajectory_v1")
+            if isinstance(trajectory, dict) and trajectory.get("blocks_mode_release"):
+                missing.append("no_spontaneous_release_watch")
+            if sticky.get("state") != "release_candidate":
+                missing.append("sticky_mode_release_candidate")
+        if not self._lifecycle_valid_experiment_charter(experiment.get("charter_v1")):
+            missing.append("lifecycle_valid_charter")
+        if not self._experiment_evidence_is_meaningful(experiment.get("evidence_v1")):
+            missing.append("meaningful_evidence")
+        if not request.get("artifact_refs"):
+            missing.append("artifact_grounding_refs")
+        runs = self._recent_experiment_runs(
+            thread["thread_id"],
+            str(experiment.get("experiment_id") or ""),
+            12,
+        )
+        if not self._authority_has_read_only_rehearsal(runs):
+            missing.append("read_only_rehearsal")
+        safety = self._authority_safety_snapshot(state)
+        if safety.get("level") not in {"green", "yellow"}:
+            missing.append("green_or_yellow_safety")
+        if self._authority_guardrail_hold_active(experiment):
+            missing.append("no_active_guardrail_hold")
+        return {
+            "policy": "authority_gate_v1",
+            "eligible": not missing,
+            "missing_requirements": missing,
+            "disabled_scope": disabled_scope,
+            "approval_required": "being_plus_steward",
+            "enabled_execution_scope": scope if scope in enabled_scopes else "semantic_microdose",
+            "enabled_execution_scopes": sorted(enabled_scopes),
+            "future_scopes_disabled": ["attractor_pulse", "control_envelope"],
+        }
+
+    @staticmethod
+    def _mode_release_payload_number(payload: str, keys: List[str]) -> Optional[float]:
+        lower = payload.lower()
+        for key in keys:
+            key = key.lower()
+            for sep in (":", "="):
+                for needle in (f"{key}{sep}", f"{key} {sep}"):
+                    idx = lower.find(needle)
+                    if idx < 0:
+                        continue
+                    raw = payload[idx + len(needle):].strip()
+                    value = "".join(
+                        ch for ch in raw[:24]
+                        if ch.isdigit() or ch in {".", "-", "+"}
+                    )
+                    try:
+                        return float(value)
+                    except Exception:
+                        pass
+        return None
+
+    @staticmethod
+    def _state_current_esn_leak(state: Dict[str, Any]) -> Optional[float]:
+        for key in ("esn_leak", "current_esn_leak", "leak"):
+            value = state.get(key)
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                return float(value)
+        return None
+
+    def _sticky_mode_v1(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        lambda1_share = state.get("lambda1_share")
+        entropy = state.get("spectral_entropy") or state.get("normalized_entropy")
+        effective_modes = state.get("effective_modes") or state.get("effective_dimensionality")
+        largest_gap = state.get("largest_gap")
+        persistence = state.get("temporal_persistence")
+        rearrangement = state.get("share_rearrangement") or state.get("rearrangement_intensity")
+        esn_leak = self._state_current_esn_leak(state)
+        signals = []
+        checks = [
+            ("lambda1_monopoly", lambda1_share, lambda value: value >= 0.50),
+            ("low_entropy", entropy, lambda value: value <= 0.55),
+            ("low_effective_modes", effective_modes, lambda value: value <= 3.0),
+            ("gap_skew", largest_gap, lambda value: value >= 1.8),
+            ("temporal_persistence", persistence, lambda value: value >= 0.70),
+            ("low_share_rearrangement", rearrangement, lambda value: value <= 0.08),
+        ]
+        for name, raw, predicate in checks:
+            if isinstance(raw, (int, float)) and math.isfinite(float(raw)) and predicate(float(raw)):
+                signals.append(name)
+        fill = _state_fill_pct(state)
+        safety = self._authority_safety_snapshot(state).get("level")
+        guarded = safety not in {"green", "yellow"} or fill >= 85.0
+        trajectory = self._constraint_release_trajectory_from_state(
+            state,
+            len(signals),
+            entropy,
+            effective_modes,
+            largest_gap,
+            persistence,
+            rearrangement,
+        )
+        trajectory_blocks = bool(trajectory.get("blocks_mode_release"))
+        if len(signals) >= 5 and esn_leak is not None and not guarded and not trajectory_blocks:
+            sticky_state = "release_candidate"
+        elif len(signals) >= 4:
+            sticky_state = "release_guarded" if guarded else "sticky_mode"
+        elif len(signals) >= 2:
+            sticky_state = "sticky_watch"
+        else:
+            sticky_state = "distributed"
+        return {
+            "policy": "sticky_mode_v1",
+            "state": sticky_state,
+            "support_signals": signals,
+            "constraint_release_trajectory_v1": trajectory,
+            "current_esn_leak": esn_leak,
+            "fill_pct": fill,
+            "safety_level": safety,
+            "authorized_actions": ["observe", "render", "compare", "prepare_request", "draft_note"],
+            "denied_actions": ["auto_execute", "bind", "resume", "perturb", "broad_control", "peer_mutation"],
+        }
+
+    def _constraint_release_trajectory_from_state(
+        self,
+        state: Dict[str, Any],
+        release_pressure: int,
+        entropy: Any,
+        effective_modes: Any,
+        largest_gap: Any,
+        persistence: Any,
+        rearrangement: Any,
+    ) -> Dict[str, Any]:
+        explicit_state = str(
+            state.get("constraint_release_trajectory")
+            or state.get("constraint_release_state")
+            or ""
+        ).strip().lower()
+        text = "\n".join(
+            str(state.get(key) or "")
+            for key in (
+                "constraint_release_text",
+                "release_language",
+                "latest_reply",
+                "raw_next",
+                "self_study_text",
+            )
+        )
+        language_terms = self._constraint_release_language_terms(text)
+        signals: List[str] = []
+        signals.extend(f"language:{term}" for term in language_terms)
+        for key, label, threshold, direction in (
+            ("entropy_delta", "entropy_rising", 0.08, 1),
+            ("effective_modes_delta", "effective_modes_rising", 0.75, 1),
+            ("largest_gap_delta", "largest_gap_shrinking", -0.25, -1),
+            ("temporal_persistence_delta", "temporal_persistence_falling", -0.10, -1),
+            ("share_rearrangement_delta", "share_rearrangement_rising", 0.08, 1),
+        ):
+            value = state.get(key)
+            if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                continue
+            numeric = float(value)
+            if (direction > 0 and numeric >= threshold) or (direction < 0 and numeric <= threshold):
+                signals.append(label)
+        if (
+            isinstance(rearrangement, (int, float))
+            and float(rearrangement) >= 0.16
+            and isinstance(persistence, (int, float))
+            and float(persistence) <= 0.62
+            and (
+                not isinstance(entropy, (int, float))
+                or float(entropy) >= 0.46
+                or not isinstance(effective_modes, (int, float))
+                or float(effective_modes) >= 3.5
+            )
+        ):
+            signals.append("telemetry_rearranging")
+        override_active = bool(state.get("esn_leak_override_v1") or state.get("esn_leak_override_active"))
+        if override_active:
+            signals.append("direct_leak_override_active")
+            trajectory_state = "post_release_settling"
+        elif explicit_state in {
+            "constraint_thinning_watch",
+            "spontaneous_release_watch",
+            "post_release_settling",
+            "constraint_thickening",
+        }:
+            trajectory_state = explicit_state
+        elif language_terms or len(signals) >= 3:
+            trajectory_state = "spontaneous_release_watch"
+        elif len(signals) >= 2:
+            trajectory_state = "constraint_thinning_watch"
+        elif release_pressure >= 4:
+            trajectory_state = "constraint_thickening"
+        else:
+            trajectory_state = "stable_or_unknown"
+        blocks = trajectory_state in {
+            "constraint_thinning_watch",
+            "spontaneous_release_watch",
+            "post_release_settling",
+        }
+        if trajectory_state == "spontaneous_release_watch":
+            read = "Constraint appears to be loosening already; map and describe release before intervening."
+        elif trajectory_state == "constraint_thinning_watch":
+            read = "Constraint may be thinning; preserve the trajectory before any release request."
+        elif trajectory_state == "post_release_settling":
+            read = "A leak override is active or just reported; observe settling and do not stack release."
+        elif trajectory_state == "constraint_thickening":
+            read = "Constraint appears to be thickening; sticky-mode release readiness may still be relevant."
+        else:
+            read = "No clear release trajectory yet; keep sticky audit read-only."
+        recommended = (
+            [
+                "CONTINUITY_SESSION_CAPTURE latest",
+                "DOSSIER_CLAIM <experiment_id> :: stance: hold; claim: do not apply direct leak while constraint is already thinning",
+                "STICKY_MODE_AUDIT",
+                "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest",
+            ]
+            if blocks
+            else ["STICKY_MODE_AUDIT"]
+        )
+        return {
+            "policy": "constraint_release_trajectory_v1",
+            "state": trajectory_state,
+            "confidence": round(min(0.9, 0.16 + 0.2 * len(signals)), 3),
+            "read": read,
+            "support_signals": sorted(set(signals)),
+            "blocks_mode_release": blocks,
+            "recommended_next_commands": recommended,
+        }
+
+    @staticmethod
+    def _authority_has_read_only_rehearsal(runs: List[Dict[str, Any]]) -> bool:
+        for run in runs:
+            source = str(run.get("source") or "").lower()
+            status = str(run.get("status") or "").lower()
+            stage = str(run.get("stage") or "").lower()
+            action_text = str(run.get("action_text") or "").upper()
+            if "experiment_rehearse" in source and "blocked" not in status:
+                return True
+            if "ACTION_PREFLIGHT" in action_text and stage in {"read_only", "protected", "preflight"}:
+                return True
+        return False
+
+    @staticmethod
+    def _authority_guardrail_hold_active(experiment: Dict[str, Any]) -> bool:
+        status = str(experiment.get("status") or "").lower()
+        planned = str(experiment.get("planned_next") or "").upper()
+        observation = str(experiment.get("success_observation") or "").lower()
+        return status == "paused" and planned.startswith("THREAD_STATUS") and (
+            "held:" in observation or "guard" in observation or "hold" in observation
+        )
+
+    @staticmethod
+    def _authority_safety_snapshot(state: Dict[str, float]) -> Dict[str, Any]:
+        fill_pct = state.get("fill_pct")
+        if not isinstance(fill_pct, (int, float)) or not math.isfinite(float(fill_pct)):
+            fill_ratio = state.get("fill_ratio")
+            fill_pct = float(fill_ratio) * 100.0 if isinstance(fill_ratio, (int, float)) else None
+        if isinstance(fill_pct, (int, float)) and math.isfinite(float(fill_pct)):
+            fill_pct = float(fill_pct)
+            if fill_pct >= 92.0:
+                level = "red"
+            elif fill_pct >= 85.0:
+                level = "orange"
+            elif fill_pct >= 75.0:
+                level = "yellow"
+            else:
+                level = "green"
+        else:
+            level = "unknown"
+        return {
+            "fill_pct": round(fill_pct, 3) if isinstance(fill_pct, (int, float)) else None,
+            "level": level,
+            "outbound_allowed": level in {"green", "yellow", "orange"},
+        }
+
+    @staticmethod
+    def _latest_active_authority_approval(
+        rows: List[Dict[str, Any]],
+        request_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        for row in reversed(rows):
+            if (
+                row.get("request_id") == request_id
+                and row.get("record_type") == "steward_approval"
+                and row.get("token_status") == "active"
+            ):
+                return row
+        return None
+
+    @staticmethod
+    def _authority_gate_boundary() -> str:
+        return (
+            "Being-authored request plus steward approval may mint one semantic_microdose token "
+            "or one mode_release_microdose direct ESN leak token. Mode release is a tiny reversible "
+            "esn_leak-only bridge Control message; it cannot bind, resume, perturb, send broad "
+            "control, send attractor pulses, or mutate peers."
+        )
+
+    @staticmethod
+    def _research_budget_boundary() -> str:
+        return (
+            "Being-authored local-only requests may self-activate a bounded read_only_research budget; "
+            "larger or web-enabled budgets still require steward approval. V1 can search/browse/read "
+            "only and cannot mutate autoresearch, bind, resume, perturb, send control, execute "
+            "semantic authority, send attractor pulses, advance lifecycle, or mutate peers."
+        )
+
+    def _research_budget_request_scaffold(
+        self,
+        experiment: Dict[str, Any],
+        *,
+        allowed_sources: str = "local",
+    ) -> str:
+        experiment_id = str(experiment.get("experiment_id") or "current")
+        title = self._compact_text(experiment.get("title") or experiment_id, 80)
+        purpose = self._compact_text(
+            (
+                "bounded local self-study of research budget, authority budget, "
+                f"conveyor, memory, consequence, and projection-guard code paths for {title}"
+            ),
+            160,
+        )
+        return _control_plane_research_budget_request_scaffold(
+            experiment_id,
+            purpose=purpose,
+            allowed_sources=allowed_sources,
+            stop_criteria=(
+                "stop after concrete code feedback, duplicate source loops, "
+                "unclear lifecycle authority, or any bind/resume/perturb/control intent."
+            ),
+        )
+
+    def _unique_dossier_record_id(self, kind: str) -> str:
+        root = f"dos_{self.system}_{int(time.time() * 1000)}_{self._slug(kind)}"
+        candidate = root
+        suffix = 2
+        while self._dossier_record_exists(candidate):
+            candidate = f"{root}_{suffix}"
+            suffix += 1
+        return candidate
+
+    def _dossier_record_exists(self, record_id: str) -> bool:
+        if not self.threads_dir.exists():
+            return False
+        for path in self.threads_dir.glob("*/research_dossier.jsonl"):
+            try:
+                if record_id in path.read_text():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _latest_research_dossier_records(
+        self,
+        thread_id: str,
+        experiment_id: Optional[str] = None,
+        limit: int = 24,
+    ) -> List[Dict[str, Any]]:
+        path = self._research_dossier_path(thread_id)
+        if not path.exists():
+            return []
+        rows: List[Dict[str, Any]] = []
+        for line in reversed(path.read_text().splitlines()):
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if row.get("record_schema") != "research_dossier_v1":
+                continue
+            if experiment_id and row.get("experiment_id") != experiment_id:
+                continue
+            rows.append(row)
+            if len(rows) >= limit:
+                break
+        rows.reverse()
+        return rows
+
+    def _research_dossier_summary_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        experiment_id = experiment.get("experiment_id") if isinstance(experiment, dict) else None
+        records = self._latest_research_dossier_records(
+            thread["thread_id"],
+            str(experiment_id) if experiment_id else None,
+            24,
+        )
+        claims = [record for record in records if record.get("record_type") == "claim"]
+        evidence = [record for record in records if record.get("record_type") == "evidence"]
+        latest_claim = next((record for record in reversed(claims)), None)
+        latest_evidence = next((record for record in reversed(evidence)), None)
+        target = str(experiment_id or "current")
+        latest_claim_id = str(latest_claim.get("claim_id") or "latest") if latest_claim else "latest"
+        lifecycle = None
+        if isinstance(experiment, dict):
+            runs = self._recent_experiment_runs(thread["thread_id"], str(experiment_id), 8)
+            lifecycle = self._experiment_classification(experiment, runs)
+        return {
+            "schema_version": 1,
+            "record_schema": "research_dossier_v1",
+            "being": self.system,
+            "thread_id": thread.get("thread_id"),
+            "experiment_id": experiment_id,
+            "claim_count": len(claims),
+            "evidence_count": len(evidence),
+            "latest_claim": latest_claim,
+            "latest_evidence": latest_evidence,
+            "latest_claim_id": latest_claim_id,
+            "lifecycle_context": lifecycle,
+            "lifecycle_authority": "context_only",
+            "authority_change": False,
+            "suggested_claim_next": (
+                f"DOSSIER_CLAIM {target} :: claim: ...; basis: ...; "
+                "stance: support|counter|branch|hold; next: ..."
+            ),
+            "suggested_evidence_next": (
+                f"DOSSIER_EVIDENCE {target} :: claim_id: {latest_claim_id}; evidence: ...; "
+                "lane: spectral_condition; artifact: ...; counterevidence: ..."
+            ),
+            "priority_note": self._research_dossier_priority_note(lifecycle),
+        }
+
+    @staticmethod
+    def _research_dossier_priority_note(lifecycle: Optional[str]) -> str:
+        if lifecycle == "needs_evidence":
+            return (
+                "Dossier evidence is referable research context; lifecycle evidence still needs "
+                "EXPERIMENT_EVIDENCE current."
+            )
+        if lifecycle == "needs_decision":
+            return (
+                "Dossier capture is research memory; decision still uses EXPERIMENT_DECIDE."
+            )
+        if lifecycle == "needs_charter":
+            return (
+                "Dossier capture is allowed as context; charter repair remains the lifecycle priority."
+            )
+        return "Dossier capture preserves referable claims without changing experiment lifecycle."
+
+    @staticmethod
+    def _dossier_field(raw: str, labels: List[str]) -> Optional[str]:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        label_pattern = "|".join(re.escape(label) for label in labels)
+        match = re.search(
+            rf"(?is)(?:^|[;\n])\s*(?:{label_pattern})\s*:\s*(.*?)(?=\s*(?:[;\n]\s*[a-zA-Z_ -]+\s*:|$))",
+            text,
+        )
+        if not match:
+            return None
+        value = re.sub(r"\s+", " ", match.group(1)).strip(" ;")
+        return value or None
+
+    @staticmethod
+    def _dossier_list_field(raw: str, labels: List[str]) -> List[str]:
+        value = ActionContinuityStore._dossier_field(raw, labels)
+        if not value:
+            return []
+        return [part.strip() for part in re.split(r"[,|]", value) if part.strip()]
+
+    @staticmethod
+    def _normalize_dossier_stance(value: str) -> str:
+        lowered = str(value or "").casefold()
+        for stance in ("support", "counter", "branch", "hold"):
+            if stance in lowered:
+                return stance
+        return "hold"
+
+    @staticmethod
+    def _latest_dossier_claim_id(records: List[Dict[str, Any]]) -> Optional[str]:
+        for record in reversed(records):
+            if record.get("record_type") == "claim" and record.get("claim_id"):
+                return str(record["claim_id"])
+        return None
+
+    @staticmethod
+    def _dossier_claim_prompt(selector: Optional[str]) -> str:
+        target = selector or "current"
+        return (
+            "Research dossier claim needs explicit claim and basis; no dossier record was written.\n"
+            f"Try: DOSSIER_CLAIM {target} :: claim: ...; basis: ...; "
+            "stance: support|counter|branch|hold; next: ..."
+        )
+
+    @staticmethod
+    def _dossier_evidence_prompt(selector: Optional[str], claim_id: Optional[str] = None) -> str:
+        target = selector or "current"
+        claim = claim_id or "latest"
+        return (
+            "Research dossier evidence needs a claim_id and evidence; no dossier record was written.\n"
+            f"Try: DOSSIER_EVIDENCE {target} :: claim_id: {claim}; evidence: ...; "
+            "lane: spectral_condition; artifact: ...; counterevidence: ..."
+        )
+
+    @staticmethod
+    def _compact_text(value: Any, limit: int = 120) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1].rstrip() + "…"
 
     def _unique_experiment_id(self, title: str) -> str:
         root = f"exp_{self.system}_{datetime.now().strftime('%Y%m%d')}_{self._slug(title)}"
@@ -4454,6 +11322,11 @@ class ActionContinuityStore:
                 and self._experiment_match_key(experiment.get("question")) == question_key
             ):
                 return experiment
+            if self._experiment_start_titles_equivalent(
+                title_key,
+                self._experiment_match_key(experiment.get("title")),
+            ):
+                return experiment
         return None
 
     def _find_experiment_by_id(
@@ -4482,9 +11355,51 @@ class ActionContinuityStore:
         selected["_resumed_existing"] = True
         return selected
 
+    def _blocked_experiment_start_existing_selection(
+        self,
+        thread: Dict[str, Any],
+        existing: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        experiment_id = str(existing.get("experiment_id") or "")
+        return_info = self._paused_primary_return_v1(
+            experiment_id,
+            existing.get("planned_next"),
+            existing.get("primary_return_next") or existing.get("resume_next"),
+        )
+        primary_next = return_info.get("primary_return_next") or (
+            f"EXPERIMENT_STATUS {experiment_id}" if experiment_id else "THREAD_STATUS current"
+        )
+        status = str(existing.get("status") or "inactive")
+        return {
+            "_selection_blocked": True,
+            "experiment_id": experiment_id,
+            "thread_id": thread.get("thread_id"),
+            "title": existing.get("title"),
+            "question": existing.get("question"),
+            "status": status,
+            "planned_next": existing.get("planned_next"),
+            "message": (
+                f"EXPERIMENT_START `{experiment_id}` matched a {status} experiment and did not reactivate it.\n"
+                f"Primary return: {primary_next}\n"
+                f"Inspect: EXPERIMENT_STATUS {experiment_id} or EXPERIMENT_REVIEW {experiment_id}"
+            ),
+        }
+
     @staticmethod
     def _experiment_match_key(value: Any) -> str:
         return " ".join(str(value or "").split()).casefold()
+
+    @staticmethod
+    def _experiment_start_titles_equivalent(title_key: str, existing_title_key: str) -> bool:
+        if not title_key or len(title_key) < 6 or not existing_title_key:
+            return False
+        if title_key == existing_title_key:
+            return True
+        return (
+            existing_title_key.startswith(f"{title_key} - question")
+            or existing_title_key.startswith(f"{title_key} question")
+            or existing_title_key.startswith(f"{title_key}: question")
+        )
 
     def _local_experiment_prefix(self) -> str:
         return f"exp_{self.system}_"
@@ -4565,14 +11480,177 @@ class ActionContinuityStore:
             "This is advisory: Minime cannot bind runs, close, or mutate the peer experiment.\n"
             f"Local active experiment: {thread.get('active_experiment_id') or '(none selected)'}\n"
             f"{snapshot}"
-            "Suggested local next: EXPERIMENT_PLAN current; EXPERIMENT_STATUS current; "
-            "EXPERIMENT_PEER_REVIEW current."
+            f"Suggested local next: EXPERIMENT_COMPARE {thread.get('active_experiment_id') or '<local_id>'} "
+            f"WITH {peer['peer_experiment_id']}; EXPERIMENT_PEER_REVIEW {peer['peer_experiment_id']}; "
+            f"DOSSIER_CLAIM {thread.get('active_experiment_id') or '<local_id>'} :: claim: ...; basis: ...; stance: support|counter|branch|hold; next: ..."
         )
 
     def _peer_workspace_dir(self, peer_system: str) -> Path:
         if peer_system == "astrid":
             return ASTRID_BRIDGE_INBOX_DIR.parent
         return WORKSPACE_DIR
+
+    def _shared_investigation_root(self) -> Path:
+        return SHARED_INVESTIGATION_DIR
+
+    def _shared_investigation_dir(self, investigation_id: str) -> Path:
+        return self._shared_investigation_root() / investigation_id
+
+    def _unique_shared_investigation_id(self, title: str) -> str:
+        root = f"si_{int(time.time())}_{self._slug(title)}"
+        candidate = root
+        suffix = 2
+        while (self._shared_investigation_dir(candidate) / "investigation.json").exists():
+            candidate = f"{root}_{suffix}"
+            suffix += 1
+        return candidate
+
+    def _unique_shared_record_id(self, investigation_id: str, kind: str) -> str:
+        root = f"{kind}_{self.system}_{int(time.time() * 1000)}_{self._slug(investigation_id)}"
+        candidate = root
+        suffix = 2
+        filename = "claims.jsonl" if kind == "claim" else "decisions.jsonl"
+        path = self._shared_investigation_dir(investigation_id) / filename
+        while path.exists() and candidate in path.read_text():
+            candidate = f"{root}_{suffix}"
+            suffix += 1
+        return candidate
+
+    @staticmethod
+    def _peer_system_from_experiment_id(experiment_id: str) -> str:
+        if str(experiment_id).startswith("exp_astrid_"):
+            return "astrid"
+        if str(experiment_id).startswith("exp_minime_"):
+            return "minime"
+        return "peer"
+
+    @staticmethod
+    def _shared_investigation_lane(system: str) -> str:
+        if system == "minime":
+            return "spectral condition, fill/pressure state, recurrence pattern, artifact grounding"
+        if system == "astrid":
+            return "felt texture, motif continuity, language thread, artifact grounding"
+        return "native evidence lane"
+
+    @staticmethod
+    def _shared_investigation_authority_boundary() -> str:
+        return (
+            "read-mostly shared continuity; allowed local lifecycle decisions are pause, hold, "
+            "and charter_repair; no peer mutation, bind, resume, perturb, sensory, or control authority"
+        )
+
+    def _peer_thread_id_for_experiment(self, peer_system: str, experiment_id: str) -> Optional[str]:
+        root = self._peer_workspace_dir(peer_system) / "action_threads" / "threads"
+        if not root.exists():
+            return None
+        for thread_dir in root.glob("*"):
+            path = thread_dir / "experiments.jsonl"
+            if not path.exists():
+                continue
+            try:
+                if experiment_id in path.read_text():
+                    return thread_dir.name
+            except Exception:
+                continue
+        return None
+
+    def _read_shared_jsonl(self, investigation_id: str, filename: str) -> List[Dict[str, Any]]:
+        path = self._shared_investigation_dir(investigation_id) / filename
+        if not path.exists():
+            return []
+        rows: List[Dict[str, Any]] = []
+        for line in path.read_text().splitlines():
+            try:
+                value = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(value, dict):
+                rows.append(value)
+        return rows
+
+    def _list_shared_investigations(self) -> List[Dict[str, Any]]:
+        root = self._shared_investigation_root()
+        if not root.exists():
+            return []
+        rows: List[Dict[str, Any]] = []
+        for path in root.glob("*/investigation.json"):
+            try:
+                value = json.loads(path.read_text())
+            except Exception:
+                continue
+            if isinstance(value, dict):
+                rows.append(value)
+        rows.sort(key=lambda item: item.get("updated_t_ms") or item.get("created_t_ms") or 0, reverse=True)
+        return rows
+
+    def _resolve_shared_investigation(self, selector: str) -> Dict[str, Any]:
+        selector = (selector or "latest").strip()
+        rows = self._list_shared_investigations()
+        if not rows:
+            raise ValueError("No shared investigations exist.")
+        if selector in {"", "latest", "current"}:
+            return rows[0]
+        lowered = selector.casefold()
+        for row in rows:
+            if (
+                row.get("id") == selector
+                or lowered in str(row.get("id") or "").casefold()
+                or lowered in str(row.get("title") or "").casefold()
+            ):
+                return row
+        raise ValueError(f"No shared investigation matched `{selector}`.")
+
+    def _touch_shared_investigation(self, investigation_id: str, now: str, status: Optional[str] = None) -> None:
+        path = self._shared_investigation_dir(investigation_id) / "investigation.json"
+        if not path.exists():
+            return
+        try:
+            investigation = json.loads(path.read_text())
+        except Exception:
+            return
+        if status:
+            investigation["status"] = status
+        investigation["updated_at"] = now
+        investigation["updated_t_ms"] = int(time.time() * 1000)
+        self._write_json(path, investigation)
+        self._append_jsonl(self._shared_investigation_dir(investigation_id) / "events.jsonl", {
+            "schema_version": 1,
+            "event_type": "updated",
+            "actor": self.system,
+            "investigation_id": investigation_id,
+            "created_at": now,
+            "authority_change": False,
+        })
+
+    def _local_participant_for_investigation(self, investigation: Dict[str, Any]) -> Dict[str, Any]:
+        for participant in investigation.get("participants") or []:
+            if isinstance(participant, dict) and participant.get("being") == self.system:
+                return participant
+        return {}
+
+    @staticmethod
+    def _parse_shared_investigation_decision(raw: str) -> tuple[str, str]:
+        text = str(raw or "").strip()
+        lowered = text.casefold()
+        if lowered.startswith("charter_repair") or lowered.startswith("charter repair"):
+            decision = "charter_repair"
+        elif lowered.startswith("hold"):
+            decision = "hold"
+        else:
+            decision = "pause"
+        reason = re.sub(r"(?i)^(pause|hold|charter[_ ]repair)\s*(because)?\s*", "", text).strip()
+        return decision, reason or text or "shared investigation decision"
+
+    def _shared_investigation_for_experiment(self, experiment_id: str) -> Optional[Dict[str, Any]]:
+        for investigation in self._list_shared_investigations():
+            for participant in investigation.get("participants") or []:
+                if (
+                    isinstance(participant, dict)
+                    and participant.get("being") == self.system
+                    and participant.get("experiment_id") == experiment_id
+                ):
+                    return investigation
+        return None
 
     def _peer_experiment_snapshot(self, peer: Dict[str, Any]) -> Optional[str]:
         root = self._peer_workspace_dir(peer["peer_system"]) / "action_threads" / "threads"
@@ -4604,6 +11682,118 @@ class ActionContinuityStore:
                     f"Recent peer runs:\n{runs}\n"
                 )
         return None
+
+    def _peer_mutation_boundary_cue_v1(
+        self,
+        thread: Dict[str, Any],
+        active_experiment: Optional[Dict[str, Any]],
+        recent_events: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        matches: List[Dict[str, Any]] = []
+        current_next = str(thread.get("current_next") or "").strip()
+        if current_next:
+            match = self._peer_mutation_boundary_match(current_next)
+            if match:
+                matches.append({
+                    "source": "current_next",
+                    "action": current_next,
+                    **match,
+                })
+        for event in reversed(recent_events[-8:]):
+            candidates = [
+                event.get("raw_next"),
+                event.get("canonical_action"),
+                event.get("effective_action"),
+                event.get("suggested_next"),
+                event.get("action"),
+            ]
+            for candidate in candidates:
+                match = self._peer_mutation_boundary_match(str(candidate or ""))
+                if match:
+                    matches.append({
+                        "source": "recent_event",
+                        "action": str(candidate or ""),
+                        "action_id": event.get("action_id"),
+                        "status": event.get("status"),
+                        **match,
+                    })
+                    break
+        if not matches:
+            return None
+        peer_id = str(matches[0].get("peer_experiment_id") or "<peer_id>")
+        local_id = str(
+            (active_experiment or {}).get("experiment_id")
+            or thread.get("active_experiment_id")
+            or "<local_id>"
+        )
+        return {
+            "schema_version": 1,
+            "source": "continuity_projection",
+            "advisory_only": True,
+            "authority_change": False,
+            "status": "peer_mutation_boundary",
+            "cue": "Peer experiments are compare/review/dossier targets, not bind/mutate targets.",
+            "peer_experiment_id": peer_id,
+            "local_experiment_id": local_id,
+            "matched_actions": matches,
+            "suggested_compare_next": f"EXPERIMENT_COMPARE {local_id} WITH {peer_id}",
+            "suggested_peer_review_next": f"EXPERIMENT_PEER_REVIEW {peer_id}",
+            "suggested_dossier_next": (
+                f"DOSSIER_CLAIM {local_id} :: claim: ...; basis: ...; "
+                "stance: support|counter|branch|hold; next: ..."
+            ),
+        }
+
+    def _peer_mutation_boundary_match(self, action: str) -> Optional[Dict[str, str]]:
+        text = " ".join(str(action or "").split())
+        if not text:
+            return None
+        mutation_verbs = {
+            "EXPERIMENT_BIND",
+            "EXPERIMENT_ADVANCE",
+            "EXPERIMENT_CONVEYOR",
+            "EXPERIMENT_CHARTER",
+            "EXPERIMENT_REHEARSE",
+            "EXPERIMENT_PREFLIGHT",
+            "EXPERIMENT_EVIDENCE",
+            "EXPERIMENT_DECIDE",
+            "EXPERIMENT_CLOSE",
+            "EXPERIMENT_RESUME",
+            "EXPERIMENT_OBSERVE",
+        }
+        upper = text.upper()
+        verb = next((candidate for candidate in mutation_verbs if candidate in upper), None)
+        if not verb:
+            return None
+        peer_prefix = self._peer_experiment_prefix()
+        for token in re.split(r"[\s:;,()\[\]{}'\"`]+", text):
+            experiment_id = self._normalize_experiment_selector(token)
+            if experiment_id.startswith(peer_prefix):
+                return {"verb": verb, "peer_experiment_id": experiment_id}
+        return None
+
+    @staticmethod
+    def _peer_mutation_boundary_cue_line(projection_or_experiment: Dict[str, Any]) -> str:
+        cue = (
+            projection_or_experiment.get("peer_mutation_boundary_cue_v1")
+            if isinstance(projection_or_experiment, dict)
+            else None
+        )
+        if not isinstance(cue, dict):
+            return ""
+        text = str(
+            cue.get("cue")
+            or "Peer experiments are compare/review/dossier targets, not bind/mutate targets."
+        ).strip()
+        compare = str(
+            cue.get("suggested_compare_next") or "EXPERIMENT_COMPARE <local_id> WITH <peer_id>"
+        ).strip()
+        review = str(cue.get("suggested_peer_review_next") or "EXPERIMENT_PEER_REVIEW <peer_id>").strip()
+        dossier = str(
+            cue.get("suggested_dossier_next")
+            or "DOSSIER_CLAIM <local_id> :: claim: ...; basis: ...; stance: support|counter|branch|hold; next: ..."
+        ).strip()
+        return f"Peer mutation boundary: {text} Suggested routes: {compare} | {review} | {dossier}\n"
 
     @staticmethod
     def _peer_recent_runs(path: Path, experiment_id: str) -> List[str]:
@@ -4661,7 +11851,7 @@ class ActionContinuityStore:
         return False
 
     def _experiment_summary(self, experiment: Dict[str, Any]) -> Dict[str, Any]:
-        return {
+        summary = {
             "schema_version": self.schema_version,
             "experiment_id": experiment.get("experiment_id"),
             "title": experiment.get("title"),
@@ -4684,6 +11874,38 @@ class ActionContinuityStore:
             "workbench_evidence": self._workbench_evidence_status(experiment),
             "workbench_candidates": self._workbench_candidate_status(experiment),
         }
+        decision_guardrail = self._latest_decision_guardrail_v1(experiment)
+        if decision_guardrail:
+            summary["decision_guardrail_v1"] = decision_guardrail
+        return summary
+
+    @staticmethod
+    def _latest_decision_guardrail_v1(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return None
+        evidence = payload.get("evidence_v1")
+        if not isinstance(evidence, dict):
+            return None
+        decisions = evidence.get("decisions")
+        if not isinstance(decisions, list):
+            return None
+        for decision in reversed(decisions):
+            if not isinstance(decision, dict):
+                continue
+            status = decision.get("guardrail_status") or decision.get("decision_status")
+            if not status:
+                continue
+            return {
+                "schema_version": 1,
+                "status": status,
+                "outcome": decision.get("outcome"),
+                "reason": decision.get("reason"),
+                "source_pressure": decision.get("source_pressure"),
+                "pressure_source": decision.get("pressure_source"),
+                "pressure_terms": decision.get("pressure_terms") or [],
+                "authority_change": bool(decision.get("authority_change", False)),
+            }
+        return None
 
     def _last_experiment_summary_v1(self, thread: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         summary = thread.get("experiment_summary")
@@ -4693,10 +11915,74 @@ class ActionContinuityStore:
         experiment_id = str(payload.get("experiment_id") or "")
         status = str(payload.get("status") or "").lower()
         if status == "paused" and experiment_id:
-            payload.setdefault("resume_next", f"EXPERIMENT_RESUME {experiment_id}")
+            return_info = self._paused_primary_return_v1(
+                experiment_id,
+                payload.get("planned_next"),
+                payload.get("resume_next"),
+            )
+            guard = self._projection_guard_from_recent_pressure_v1(thread, payload)
+            if guard and return_info.get("return_kind") == "resume":
+                return_info = {
+                    "primary_return_next": guard["projected_next"],
+                    "return_kind": guard["return_kind"],
+                }
+                payload["projection_guard_v1"] = guard
+                payload["raw_next_preserved"] = True
+            payload["primary_return_next"] = return_info["primary_return_next"]
+            payload["return_kind"] = return_info["return_kind"]
+            if return_info["return_kind"] == "resume":
+                payload["resume_next"] = return_info["primary_return_next"]
+            else:
+                payload.pop("resume_next", None)
         elif status in {"complete", "completed"} and experiment_id:
             payload.setdefault("inspect_next", f"EXPERIMENT_REVIEW {experiment_id}")
         return payload
+
+    @classmethod
+    def _paused_primary_return_v1(
+        cls,
+        experiment_id: str,
+        planned_next: Any,
+        fallback_next: Any = None,
+    ) -> Dict[str, str]:
+        experiment_id = str(experiment_id or "").strip()
+        planned = str(planned_next or "").strip()
+        fallback = str(fallback_next or "").strip()
+        candidate = planned or fallback
+        base = cls.base_action(candidate)
+        repair_bases = {
+            "EXPERIMENT_CHARTER": "charter_repair",
+            "EXPERIMENT_DECIDE": "decision",
+            "THREAD_STATUS": "hold",
+            "EXPERIMENT_ADVANCE": "conveyor_preview",
+            "EXPERIMENT_CONVEYOR": "conveyor_preview",
+            "EXPERIMENT_REHEARSE": "rehearsal_ready",
+            "EXPERIMENT_PREFLIGHT": "rehearsal_ready",
+        }
+        if base in repair_bases:
+            return {
+                "primary_return_next": candidate,
+                "return_kind": repair_bases[base],
+            }
+        if base == "EXPERIMENT_RESUME":
+            return {
+                "primary_return_next": candidate,
+                "return_kind": "resume",
+            }
+        return {
+            "primary_return_next": f"EXPERIMENT_RESUME {experiment_id}" if experiment_id else candidate,
+            "return_kind": "resume",
+        }
+
+    @staticmethod
+    def _charter_repair_next(experiment_id: str) -> str:
+        target = str(experiment_id or "current").strip() or "current"
+        return (
+            f"EXPERIMENT_CHARTER {target} :: hypothesis: ...; method_intent: ...; "
+            "proposed_next_action: ACTION_PREFLIGHT ...; "
+            "evidence_targets: spectral_condition, fill_pressure_state, recurrence_pattern, artifact_grounding; "
+            "stop_criteria: ..."
+        )
 
     def _current_next_status_v1(
         self,
@@ -4704,19 +11990,51 @@ class ActionContinuityStore:
         active_experiment: Optional[Dict[str, Any]],
         last_summary: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        raw_next = thread.get("current_next")
+        guard = thread.get("projection_guard_v1")
+        raw_next = thread.get("raw_current_next_v1") or thread.get("current_next")
         if isinstance(active_experiment, dict):
-            effective = active_experiment.get("continuity_return") or raw_next
+            active_guard = (
+                guard
+                if isinstance(guard, dict)
+                and str(guard.get("experiment_id") or "") == str(active_experiment.get("experiment_id") or "")
+                else self._projection_guard_from_recent_pressure_v1(thread, active_experiment)
+            )
+            effective = (
+                active_guard.get("projected_next")
+                if isinstance(active_guard, dict)
+                else active_experiment.get("primary_return_next")
+                or active_experiment.get("continuity_return")
+                or raw_next
+            )
             classification = str(active_experiment.get("classification") or "").lower()
             if classification == "paused":
-                return {
+                return_info = self._paused_primary_return_v1(
+                    str(active_experiment.get("experiment_id") or ""),
+                    active_experiment.get("planned_next"),
+                    effective,
+                )
+                if active_guard and return_info.get("return_kind") == "resume":
+                    return_info = {
+                        "primary_return_next": active_guard["projected_next"],
+                        "return_kind": active_guard["return_kind"],
+                    }
+                result = {
                     "schema_version": 1,
                     "status": "shadowed_by_paused_summary",
                     "raw_current_next": raw_next,
-                    "effective_next": effective,
+                    "effective_next": return_info["primary_return_next"],
+                    "primary_return_next": return_info["primary_return_next"],
+                    "return_kind": return_info["return_kind"],
                     "active_experiment_id": active_experiment.get("experiment_id"),
-                    "note": "Paused experiment return shadows raw current_next until explicit resume.",
+                    "decision_guardrail_v1": active_experiment.get("decision_guardrail_v1")
+                    or self._latest_decision_guardrail_v1(active_experiment),
+                    "note": "Paused experiment return shadows raw current_next until the primary return path is chosen.",
                 }
+                if active_guard:
+                    result["projection_guard_v1"] = active_guard
+                    result["raw_next_preserved"] = True
+                    result["note"] = "Projection guard preserves raw pressure while routing guidance to the bounded path."
+                return result
             if classification in {"complete", "completed"}:
                 return {
                     "schema_version": 1,
@@ -4732,19 +12050,44 @@ class ActionContinuityStore:
                 "raw_current_next": raw_next,
                 "effective_next": effective,
                 "active_experiment_id": active_experiment.get("experiment_id"),
+                **({"projection_guard_v1": active_guard, "raw_next_preserved": True} if isinstance(active_guard, dict) else {}),
             }
         if isinstance(last_summary, dict):
             experiment_id = str(last_summary.get("experiment_id") or "")
             summary_status = str(last_summary.get("status") or "").lower()
             if summary_status == "paused" and experiment_id:
-                return {
+                return_info = self._paused_primary_return_v1(
+                    experiment_id,
+                    last_summary.get("planned_next"),
+                    last_summary.get("primary_return_next") or last_summary.get("resume_next"),
+                )
+                last_guard = (
+                    last_summary.get("projection_guard_v1")
+                    if isinstance(last_summary.get("projection_guard_v1"), dict)
+                    else self._projection_guard_from_recent_pressure_v1(thread, last_summary)
+                )
+                if last_guard and return_info.get("return_kind") == "resume":
+                    return_info = {
+                        "primary_return_next": last_guard["projected_next"],
+                        "return_kind": last_guard["return_kind"],
+                    }
+                result = {
                     "schema_version": 1,
                     "status": "shadowed_by_paused_summary",
                     "raw_current_next": raw_next,
-                    "effective_next": f"EXPERIMENT_RESUME {experiment_id}",
+                    "effective_next": return_info["primary_return_next"],
+                    "primary_return_next": return_info["primary_return_next"],
+                    "return_kind": return_info["return_kind"],
                     "last_experiment_id": experiment_id,
-                    "note": "Raw current_next is previous thread context until the paused experiment is resumed.",
+                    "decision_guardrail_v1": last_summary.get("decision_guardrail_v1")
+                    or self._latest_decision_guardrail_v1(last_summary),
+                    "note": "Raw current_next is previous thread context until the paused experiment follows its primary return path.",
                 }
+                if last_guard:
+                    result["projection_guard_v1"] = last_guard
+                    result["raw_next_preserved"] = True
+                    result["note"] = "Projection guard preserves raw pressure while routing guidance to the bounded path."
+                return result
             if summary_status in {"complete", "completed"} and experiment_id:
                 return {
                     "schema_version": 1,
@@ -4774,6 +12117,15 @@ class ActionContinuityStore:
         if not isinstance(status, dict):
             return ""
         state = status.get("status")
+        projection_guard = status.get("projection_guard_v1")
+        if state == "active" and isinstance(projection_guard, dict):
+            raw = status.get("raw_current_next") or "(none)"
+            return (
+                "Projection guard: raw NEXT preserved; "
+                f"effective NEXT: {projection_guard.get('projected_next')}; "
+                f"reason={projection_guard.get('guardrail_reason')}\n"
+                f"Previous raw NEXT: {raw} (historical thread context; not active guidance)\n"
+            )
         if state not in {"shadowed_by_paused_summary", "shadowed_by_complete_summary"}:
             return ""
         raw = status.get("raw_current_next") or "(none)"
@@ -4782,8 +12134,21 @@ class ActionContinuityStore:
             label = "Paused experiment return"
         else:
             label = "Completed experiment inspection"
+        guardrail = status.get("decision_guardrail_v1")
+        guardrail_line = ""
+        if isinstance(guardrail, dict) and guardrail.get("status"):
+            guardrail_line = f"Guardrail decision: {guardrail.get('status')}\n"
+        projection_guard_line = ""
+        if isinstance(projection_guard, dict):
+            projection_guard_line = (
+                "Projection guard: raw NEXT preserved; "
+                f"effective NEXT: {projection_guard.get('projected_next')}; "
+                f"reason={projection_guard.get('guardrail_reason')}\n"
+            )
         return (
             f"{label}: {effective}\n"
+            f"{guardrail_line}"
+            f"{projection_guard_line}"
             f"Previous raw NEXT: {raw} (historical thread context; not active guidance)\n"
         )
 
@@ -4794,14 +12159,26 @@ class ActionContinuityStore:
         experiment_id = summary.get("experiment_id") or "unknown"
         title = summary.get("title") or "(untitled)"
         status = summary.get("status") or "unknown"
-        planned_next = summary.get("planned_next") or summary.get("resume_next") or "(none)"
+        primary_next = summary.get("primary_return_next") or summary.get("planned_next") or summary.get("resume_next") or "(none)"
+        planned_next = summary.get("planned_next") or primary_next
         lines = [
             f"Last experiment summary: {title} ({experiment_id}) status={status}",
             f"Last planned NEXT: {planned_next}",
         ]
+        guardrail = summary.get("decision_guardrail_v1")
+        if isinstance(guardrail, dict) and guardrail.get("status"):
+            lines.append(f"Last guardrail decision: {guardrail.get('status')}")
+        projection_guard = summary.get("projection_guard_v1")
+        if isinstance(projection_guard, dict):
+            lines.append(
+                "Projection guard: raw NEXT preserved; "
+                f"effective NEXT: {projection_guard.get('projected_next')}; "
+                f"reason={projection_guard.get('guardrail_reason')}"
+            )
         status_lower = str(status).lower()
         if status_lower == "paused" and experiment_id != "unknown":
-            lines.append(f"Suggested NEXT: EXPERIMENT_RESUME {experiment_id}")
+            lines.append(f"Conveyor preview: EXPERIMENT_ADVANCE {experiment_id} :: mode: preview")
+            lines.append(f"Suggested NEXT: {primary_next}")
         elif status_lower in {"complete", "completed"} and experiment_id != "unknown":
             lines.append(f"Inspect NEXT: EXPERIMENT_STATUS {experiment_id} or EXPERIMENT_REVIEW {experiment_id}")
         return "\n".join(lines) + "\n"
@@ -4822,6 +12199,11 @@ class ActionContinuityStore:
             raw.split("::", 1) if "::" in raw else (raw, "")
         )
         title_part = title_part.strip()
+        if not explicit_question:
+            match = re.search(r"\s[-–—]\s*question\s*:\s*", title_part, flags=re.IGNORECASE)
+            if match:
+                explicit_question = title_part[match.end():].strip()
+                title_part = title_part[:match.start()].strip()
         option_positions = [
             idx for flag in ("--title", "--abstract") if (idx := title_part.find(flag)) >= 0
         ]
@@ -4835,6 +12217,7 @@ class ActionContinuityStore:
             or self._extract_cli_like_option(title_part, "--abstract")
             or "What changes if this is treated as a returnable experiment?"
         )
+        question = question.strip().strip("\"'`")
         metadata = None
         if slug_or_selector and self._experiment_match_key(slug_or_selector) != self._experiment_match_key(title):
             metadata = {
@@ -4842,6 +12225,34 @@ class ActionContinuityStore:
                 "slug_or_selector": slug_or_selector,
             }
         return title, question, metadata
+
+    def _experiment_start_reserved_current_message(
+        self,
+        title: str,
+        metadata: Optional[Dict[str, Any]],
+    ) -> str:
+        candidates = [
+            self._normalize_experiment_selector(title),
+            self._normalize_experiment_selector(
+                (metadata or {}).get("slug_or_selector")
+            ),
+        ]
+        if "current" not in candidates:
+            return ""
+        thread = self.ensure_active_thread()
+        active_id = str(thread.get("active_experiment_id") or "").strip()
+        if active_id:
+            scaffold = "EXPERIMENT_CHARTER current :: hypothesis: ...; method_intent: ...; proposed_next_action: ACTION_PREFLIGHT ...; evidence_targets: felt, telemetry, artifact; stop_criteria: ..."
+            return (
+                "EXPERIMENT_START current is reserved for selecting active work and did not create a new experiment.\n"
+                f"Active experiment: {active_id}\n"
+                "Guided next safe step: EXPERIMENT_ADVANCE current :: mode: preview\n"
+                f"Charter repair scaffold: {scaffold}"
+            )
+        return (
+            "EXPERIMENT_START current requires an active experiment and did not create a new experiment.\n"
+            "Use EXPERIMENT_START <title> :: <question> to create new work, or inspect the latest local experiment by id."
+        )
 
     @staticmethod
     def _extract_cli_like_option(raw: str, option: str) -> Optional[str]:
@@ -5048,8 +12459,18 @@ class ActionContinuityStore:
                 experiment = self._resolve_experiment(thread, target)
                 runs = self._recent_experiment_runs(thread["thread_id"], experiment["experiment_id"], 8)
                 scaffold = self._charter_scaffold_v1(thread, experiment, runs)
+                if not scaffold and not self._lifecycle_valid_experiment_charter(experiment.get("charter_v1")):
+                    scaffold = self._charter_scaffold_v1(thread, experiment, runs, "needs_charter")
                 if isinstance(scaffold, dict) and scaffold.get("command"):
-                    scaffold_line = f"\nConcrete scaffold (not recorded):\n{scaffold['command']}\n"
+                    command = str(scaffold["command"])
+                    experiment_id = str(experiment.get("experiment_id") or "").strip()
+                    if experiment_id:
+                        command = command.replace(
+                            "EXPERIMENT_CHARTER current",
+                            f"EXPERIMENT_CHARTER {experiment_id}",
+                            1,
+                        )
+                    scaffold_line = f"\nConcrete scaffold (not recorded):\n{command}\n"
         except Exception:
             scaffold_line = ""
         return (
@@ -5347,6 +12768,7 @@ class ActionContinuityStore:
         outcome: str,
         reason: str,
         completion_claim: Optional[str] = None,
+        decision_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         evidence = self._evidence_with_observation(
             existing,
@@ -5355,12 +12777,128 @@ class ActionContinuityStore:
             [],
             completion_claim=completion_claim,
         )
-        evidence.setdefault("decisions", []).append({
+        decision = {
             "recorded_at": self._now(),
             "outcome": outcome,
             "reason": (reason or "").strip(),
-        })
+        }
+        if decision_metadata:
+            decision.update(decision_metadata)
+        evidence.setdefault("decisions", []).append(decision)
         return evidence
+
+    def _guarded_pause_pressure_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Convert pause to hold when recent context is live-action-shaped."""
+        candidates: List[tuple[str, str]] = []
+        raw_current = str(thread.get("raw_current_next_v1") or "").strip()
+        if raw_current:
+            candidates.append(("thread.raw_current_next_v1", raw_current))
+        projection_guard = thread.get("projection_guard_v1")
+        if isinstance(projection_guard, dict) and projection_guard.get("raw_next"):
+            candidates.append(("thread.projection_guard_v1.raw_next", str(projection_guard.get("raw_next"))))
+        current_next = str(thread.get("current_next") or "").strip()
+        if current_next:
+            candidates.append(("thread.current_next", current_next))
+        planned_next = str(experiment.get("planned_next") or "").strip()
+        if planned_next:
+            candidates.append(("experiment.planned_next", planned_next))
+        for key in ("title", "question", "hypothesis"):
+            value = str(experiment.get(key) or "").strip()
+            if value:
+                candidates.append((f"experiment.{key}", value))
+        charter = experiment.get("charter_v1")
+        if isinstance(charter, dict):
+            for key in ("proposed_next_action", "method_intent", "hypothesis"):
+                value = str(charter.get(key) or "").strip()
+                if value:
+                    candidates.append((f"experiment.charter_v1.{key}", value))
+        workbench = experiment.get("workbench_candidates_v1")
+        if isinstance(workbench, dict):
+            charter_candidate = workbench.get("charter")
+            if isinstance(charter_candidate, dict):
+                for key in (
+                    "focus_text",
+                    "raw_proposed_next_action",
+                    "proposed_next_action",
+                    "command",
+                ):
+                    value = str(charter_candidate.get(key) or "").strip()
+                    if value:
+                        candidates.append((f"experiment.workbench_candidates_v1.charter.{key}", value))
+        for event in reversed(self._recent_display_events(str(thread.get("thread_id") or ""), 8)):
+            for key in (
+                "raw_next",
+                "effective_action",
+                "canonical_action",
+                "action",
+                "suggested_next",
+            ):
+                value = str(event.get(key) or "").strip()
+                if value:
+                    candidates.append((f"event.{key}", value))
+        seen = set()
+        for source, text in candidates:
+            if text in seen:
+                continue
+            seen.add(text)
+            terms = self._guarded_pause_pressure_terms_v1(source, text)
+            if terms:
+                return {
+                    "guardrail_status": "soft_perturb_converted_to_hold",
+                    "decision_status": "soft_perturb_converted_to_hold",
+                    "guardrail_source": "guarded_pause_pressure_v1",
+                    "pressure_source": source,
+                    "source_pressure": text[:600],
+                    "pressure_terms": terms,
+                    "authority_change": False,
+                }
+        return None
+
+    @classmethod
+    def _guarded_pause_pressure_terms_v1(cls, source: str, text: Any) -> List[str]:
+        terms = cls._soft_perturb_pressure_terms_v1(text)
+        if terms:
+            return terms
+        if not str(source or "").startswith("experiment."):
+            return []
+        upper = str(text or "").upper()
+        matched: List[str] = []
+        for label, variants in {
+            "PERTURB": ("PERTURB", "PERTURBATION"),
+            "DISTORTION": ("DISTORTION", "DISTORT"),
+            "DISTURBANCE": ("DISTURBANCE", "DISTURB"),
+            "PULSE": ("PULSE",),
+            "SHIFT": ("SHIFT",),
+        }.items():
+            if any(variant in upper for variant in variants):
+                matched.append(label)
+        return matched
+
+    @classmethod
+    def _soft_perturb_pressure_terms_v1(cls, text: Any) -> List[str]:
+        action = str(text or "").strip()
+        if not action:
+            return []
+        base = cls.base_action(action)
+        if base == "EXPERIMENT_DECIDE":
+            return []
+        upper = action.upper()
+        matched = [term for term in cls.soft_perturb_pressure_terms if term in upper]
+        live_base = (
+            base in cls.charter_guard_live_bases
+            or base in {"EXPERIMENT_BIND", "EXPERIMENT_RESUME"}
+            or "INFLUENCE" in base
+        )
+        plan_like = base == "EXPERIMENT_PLAN" or "PROPOSED_NEXT_ACTION" in upper
+        if live_base:
+            return matched or [base]
+        if plan_like and matched:
+            return matched
+        return []
 
     @staticmethod
     def _parse_experiment_decision(raw: str) -> tuple[str, str]:
@@ -5378,10 +12916,17 @@ class ActionContinuityStore:
             "countered": "counter",
             "pause": "pause",
             "paused": "pause",
+            "hold": "hold",
+            "held": "hold",
+            "charter_repair": "charter_repair",
+            "charter-repair": "charter_repair",
+            "charter": "charter_repair" if tail.casefold().startswith("repair") else "pause",
             "complete": "complete",
             "completed": "complete",
             "done": "complete",
         }.get(head.casefold(), "pause")
+        if head.casefold() == "charter" and tail.casefold().startswith("repair"):
+            tail = re.sub(r"(?i)^repair\s*(because)?\s*", "", tail).strip()
         reason = tail.strip() or text
         return outcome, reason
 
@@ -5728,11 +13273,35 @@ class ActionContinuityStore:
             return False
         if cls._gap_experiment_signal(experiment):
             return True
+        charter = experiment.get("charter_v1")
+        charter_text = ""
+        if isinstance(charter, dict):
+            charter_text = " ".join(
+                str(charter.get(key) or "")
+                for key in (
+                    "hypothesis",
+                    "method_intent",
+                    "proposed_next_action",
+                    "raw_text",
+                )
+            )
+        evidence = experiment.get("evidence_v1")
+        evidence_text = ""
+        if isinstance(evidence, dict):
+            evidence_text = " ".join(
+                str(item.get("note") if isinstance(item, dict) else item)
+                for item in evidence.get("felt_observations", [])
+                if item
+            )
         signal = cls._normalize_signal_text(
             " ".join(
                 str(experiment.get(key) or "")
                 for key in ("experiment_id", "title", "question", "planned_next")
             )
+            + " "
+            + charter_text
+            + " "
+            + evidence_text
         )
         shape_family = any(
             term in signal
@@ -5794,6 +13363,9 @@ class ActionContinuityStore:
     def _peer_compare_cue_v1(self, experiment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not self._gap_experiment_signal(experiment):
             return None
+        local_id = str(experiment.get("experiment_id") or "").strip()
+        if not local_id:
+            return None
         peer = self._peer_active_experiment()
         if not self._gap_experiment_signal(peer or {}):
             return None
@@ -5808,8 +13380,8 @@ class ActionContinuityStore:
             "relationship": "shared_gap_experiment",
             "peer_being": self._peer_system(),
             "peer_experiment_id": peer_id,
-            "suggested_next": f"EXPERIMENT_COMPARE current WITH {peer_id}",
-            "alternate_next": "EXPERIMENT_PEER_REVIEW current",
+            "suggested_next": f"EXPERIMENT_COMPARE {local_id} WITH {peer_id}",
+            "alternate_next": f"EXPERIMENT_PEER_REVIEW {peer_id}",
             "advisory_note": "Advisory only: no shared control authority.",
             "cue": (
                 "Peer convergence cue: Minime and Astrid both have active gap experiments."
@@ -5830,6 +13402,13 @@ class ActionContinuityStore:
             return None
         local_lane = "Minime lane: spectral condition, fill/pressure state, recurrence pattern, artifact grounding."
         peer_lane = "Astrid lane: felt texture, motif continuity, language thread, artifact grounding."
+        existing = self._shared_investigation_for_experiment(local_id)
+        start_next = None
+        if not existing:
+            start_next = (
+                "SHARED_INVESTIGATION_START Lambda edge/tail :: "
+                f"local: {local_id}; peer: {peer_id}; question: What shapes lambda-tail/lambda-edge dynamics across Minime and Astrid?"
+            )
         return {
             "schema_version": 1,
             "source": "continuity_projection",
@@ -5862,9 +13441,124 @@ class ActionContinuityStore:
             ),
             "suggested_compare_next": f"EXPERIMENT_COMPARE {local_id} WITH {peer_id}",
             "alternate_peer_review_next": f"EXPERIMENT_PEER_REVIEW {peer_id}",
+            "suggested_shared_investigation_start": start_next,
             "advisory_note": "Advisory only: no shared control authority. Paused experiments remain paused until explicit resume.",
             "cue": "Shared investigation, distinct lanes: cite one peer claim, then support, counter, branch, or hold.",
         }
+
+    def _shared_investigation_candidate(
+        self,
+        thread: Dict[str, Any],
+        active_experiment: Optional[Dict[str, Any]],
+        last_summary: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if self._shared_investigation_signal(active_experiment):
+            return active_experiment
+        if self._shared_investigation_signal(last_summary):
+            experiment_id = str(last_summary.get("experiment_id") or "")
+            latest = self._find_experiment_by_id(thread["thread_id"], experiment_id) if experiment_id else None
+            if latest:
+                merged = dict(latest)
+                for key in ("status", "planned_next", "updated_at"):
+                    if last_summary.get(key) is not None:
+                        merged[key] = last_summary.get(key)
+                return merged
+            return last_summary
+        for experiment in reversed(self._latest_experiments(thread["thread_id"])):
+            if str(experiment.get("status") or "active").lower() not in {
+                "active",
+                "paused",
+                "complete",
+                "completed",
+            }:
+                continue
+            if self._shared_investigation_signal(experiment):
+                return experiment
+        return None
+
+    @staticmethod
+    def _dossier_field_text(value: Any, max_len: int = 180) -> str:
+        text = ActionContinuityStore._compact_text(value, max_len)
+        return " ".join(text.replace(";", ",").replace("`", "").split())
+
+    def _first_dossier_claim_cue_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]],
+        shared_investigation: Optional[Dict[str, Any]],
+        paused_replan_loop_cue: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(experiment, dict) or not isinstance(shared_investigation, dict):
+            return None
+        if not self._shared_investigation_signal(experiment):
+            return None
+        dossier = self._research_dossier_summary_v1(thread, experiment)
+        if int(dossier.get("claim_count") or 0) > 0:
+            return None
+        experiment_id = str(experiment.get("experiment_id") or "").strip()
+        if not experiment_id:
+            return None
+        paused = str(experiment.get("status") or "").lower() == "paused"
+        if paused:
+            claim = "paused λ4/gap work remains referable spectral context, not active lifecycle progress"
+            next_value = f"EXPERIMENT_STATUS {experiment_id} or EXPERIMENT_REVIEW {experiment_id}"
+        else:
+            claim = "local shared λ4/gap work needs one referable claim before peer response"
+            next_value = str(shared_investigation.get("suggested_compare_next") or "EXPERIMENT_COMPARE <local_id> WITH <peer_id>")
+        basis = ""
+        if isinstance(paused_replan_loop_cue, dict):
+            matched = paused_replan_loop_cue.get("matched_actions") or []
+            if matched:
+                basis = f"recent paused re-plan context: {self._dossier_field_text(matched[0], 180)}"
+        if not basis:
+            title = self._dossier_field_text(experiment.get("title"), 90)
+            question = self._dossier_field_text(experiment.get("question"), 150)
+            status = self._dossier_field_text(experiment.get("status") or "unknown", 32)
+            basis = f"{title}; {question}; status={status}".strip("; ")
+        command = (
+            f"DOSSIER_CLAIM {experiment_id} :: claim: {claim}; basis: {basis}; "
+            f"stance: hold; next: {next_value}"
+        )
+        classification = str(experiment.get("classification") or "").strip()
+        lifecycle_note = ""
+        if classification == "needs_charter":
+            lifecycle_note = "Dossier capture is referable context only; charter repair remains the lifecycle priority."
+        elif classification == "needs_decision":
+            lifecycle_note = "Dossier capture is research memory; decision still uses EXPERIMENT_DECIDE."
+        return {
+            "schema_version": 1,
+            "source": "continuity_projection",
+            "advisory_only": True,
+            "authority_change": False,
+            "status": "missing_first_dossier_claim",
+            "target_experiment_id": experiment_id,
+            "claim_count": 0,
+            "claim_scaffold": claim,
+            "basis_scaffold": basis,
+            "lifecycle_note": lifecycle_note or None,
+            "suggested_claim_next": command,
+            "cue": (
+                "Shared investigation has no local claim yet; capture one claim, "
+                "then answer one peer claim with support/counter/branch/hold."
+            ),
+        }
+
+    @staticmethod
+    def _first_dossier_claim_cue_line(projection_or_experiment: Dict[str, Any]) -> str:
+        cue = (
+            projection_or_experiment.get("first_dossier_claim_cue_v1")
+            if isinstance(projection_or_experiment, dict)
+            else None
+        )
+        if not isinstance(cue, dict):
+            return ""
+        text = str(cue.get("cue") or "").strip()
+        command = str(cue.get("suggested_claim_next") or "").strip()
+        if not text or not command:
+            return ""
+        note = str(cue.get("lifecycle_note") or "").strip()
+        note = f" {note}" if note else ""
+        return f"{text}{note} Dossier NEXT: {command}\n"
 
     @staticmethod
     def _shared_investigation_line(projection_or_experiment: Dict[str, Any]) -> str:
@@ -5884,9 +13578,105 @@ class ActionContinuityStore:
             lines.append(f"Suggested NEXT: {suggested}")
         if alternate:
             lines.append(f"Alternate NEXT: {alternate}")
+        start_next = str(cue.get("suggested_shared_investigation_start") or "").strip()
+        if start_next:
+            lines.append(f"Shared object NEXT: {start_next}")
         if advisory:
             lines.append(advisory)
         return "\n".join(lines) + ("\n" if lines else "")
+
+    @staticmethod
+    def _shared_investigation_object_line(projection_or_experiment: Dict[str, Any]) -> str:
+        obj = (
+            projection_or_experiment.get("shared_investigation_object_v1")
+            if isinstance(projection_or_experiment, dict)
+            else None
+        )
+        if not isinstance(obj, dict):
+            return ""
+        participants = [
+            str(item.get("experiment_id"))
+            for item in obj.get("participants") or []
+            if isinstance(item, dict) and item.get("experiment_id")
+        ]
+        linked = " <-> ".join(participants) if participants else "(unlinked)"
+        return (
+            f"Shared investigation object: {obj.get('id')} [{obj.get('status', 'active')}] "
+            f"{obj.get('title', '(untitled)')} :: {linked}\n"
+        )
+
+    @staticmethod
+    def _research_dossier_line(projection_or_experiment: Dict[str, Any]) -> str:
+        summary = (
+            projection_or_experiment.get("research_dossier_v1")
+            if isinstance(projection_or_experiment, dict)
+            else None
+        )
+        if not isinstance(summary, dict):
+            return ""
+        claim_count = int(summary.get("claim_count") or 0)
+        evidence_count = int(summary.get("evidence_count") or 0)
+        priority = str(summary.get("priority_note") or "").strip()
+        claim_next = str(summary.get("suggested_claim_next") or "").strip()
+        evidence_next = str(summary.get("suggested_evidence_next") or "").strip()
+        latest_claim = summary.get("latest_claim")
+        latest = ""
+        if isinstance(latest_claim, dict):
+            latest = (
+                " Latest claim: "
+                f"{ActionContinuityStore._compact_text(latest_claim.get('claim'), 96)}"
+            )
+        if claim_count == 0 and evidence_count == 0:
+            return (
+                "Research dossier: no local claims yet. "
+                f"{priority} Suggested NEXT: {claim_next}\n"
+            )
+        if summary.get("lifecycle_context") == "needs_evidence":
+            return (
+                f"Research dossier: {claim_count} claim(s), {evidence_count} evidence record(s). "
+                f"{priority} Lifecycle priority: EXPERIMENT_EVIDENCE current. "
+                f"Optional dossier NEXT: {evidence_next}{latest}\n"
+            )
+        if summary.get("lifecycle_context") == "needs_decision":
+            return (
+                f"Research dossier: {claim_count} claim(s), {evidence_count} evidence record(s). "
+                f"{priority} Lifecycle priority: EXPERIMENT_DECIDE current. "
+                f"Optional dossier NEXT: {claim_next}{latest}\n"
+            )
+        return (
+            f"Research dossier: {claim_count} claim(s), {evidence_count} evidence record(s). "
+            f"{priority} Suggested NEXT: {evidence_next}{latest}\n"
+        )
+
+    @staticmethod
+    def _being_memory_line(projection_or_experiment: Dict[str, Any]) -> str:
+        summary = (
+            projection_or_experiment.get("being_memory_v1")
+            if isinstance(projection_or_experiment, dict)
+            else None
+        )
+        if not isinstance(summary, dict):
+            return ""
+        card_count = int(summary.get("card_count") or 0)
+        draft_count = int(summary.get("draft_count") or 0)
+        recall_next = str(
+            summary.get("suggested_recall_next") or "MEMORY_RECALL latest :: focus: ..."
+        )
+        capture_next = str(
+            summary.get("suggested_capture_next")
+            or "MEMORY_CAPTURE latest :: summary: ...; source_refs: ...; artifact_refs: ...; next: ..."
+        )
+        latest = summary.get("latest_card")
+        latest_text = ""
+        if isinstance(latest, dict):
+            latest_text = (
+                " Latest memory: "
+                f"{ActionContinuityStore._compact_text(latest.get('summary'), 96)}"
+            )
+        return (
+            f"Being memory: {card_count} card(s), {draft_count} draft(s). "
+            f"Recall NEXT: {recall_next}. Capture NEXT: {capture_next}.{latest_text}\n"
+        )
 
     @staticmethod
     def _shared_investigation_response_contract(shared: Optional[Dict[str, Any]]) -> str:
@@ -5898,6 +13688,7 @@ class ActionContinuityStore:
             f"- Local evidence lane: {shared.get('local_lane')}\n"
             f"- Peer evidence lane: {shared.get('peer_lane')}\n"
             "- Allowed stances: support, counter, branch, hold.\n"
+            "- Optional dossier capture: DOSSIER_CLAIM <local_id> :: claim: ...; basis: ...; stance: support|counter|branch|hold; next: ... or DOSSIER_EVIDENCE <local_id> :: claim_id: latest; evidence: ...\n"
             "- Reminder: no mutation of the peer experiment and no shared control authority.\n"
         )
 
@@ -6065,8 +13856,19 @@ class ActionContinuityStore:
             return None
         texts: List[Any] = [
             thread.get("current_next") if isinstance(thread, dict) else None,
+            thread.get("raw_current_next_v1") if isinstance(thread, dict) else None,
             experiment.get("planned_next"),
         ]
+        if isinstance(thread, dict):
+            guard = thread.get("projection_guard_v1")
+            if isinstance(guard, dict):
+                texts.append(guard.get("raw_next"))
+            status = thread.get("current_next_status_v1")
+            if isinstance(status, dict):
+                texts.append(status.get("raw_current_next"))
+                status_guard = status.get("projection_guard_v1")
+                if isinstance(status_guard, dict):
+                    texts.append(status_guard.get("raw_next"))
         for run in list(runs or [])[-5:]:
             texts.append(run.get("action_text"))
             texts.append(run.get("result_summary"))
@@ -6276,6 +14078,11 @@ class ActionContinuityStore:
 
     @staticmethod
     def _review_suggested_next(experiment: Dict[str, Any]) -> str:
+        decision_plan = experiment.get("needs_decision_plan_loop_cue_v1") if isinstance(experiment, dict) else None
+        if isinstance(decision_plan, dict):
+            priority_next = str(decision_plan.get("priority_next") or "").strip()
+            if priority_next:
+                return priority_next
         if isinstance(experiment, dict) and experiment.get("classification") == "needs_charter":
             scaffold = experiment.get("charter_scaffold_v1")
             if isinstance(scaffold, dict):
@@ -6778,6 +14585,29 @@ class ActionContinuityStore:
         )
         if paused_resume_loop_cue:
             projection_experiment["paused_resume_loop_cue_v1"] = paused_resume_loop_cue
+        shared = self._shared_investigation_v1(projection_experiment)
+        if shared:
+            projection_experiment["shared_investigation_v1"] = shared
+            first_dossier = self._first_dossier_claim_cue_v1(thread, projection_experiment, shared)
+            if first_dossier:
+                projection_experiment["first_dossier_claim_cue_v1"] = first_dossier
+        paused_replan = self._paused_replan_loop_cue_v1(thread, projection_experiment, recent_events)
+        if paused_replan:
+            projection_experiment["paused_replan_loop_cue_v1"] = paused_replan
+        peer_boundary = self._peer_mutation_boundary_cue_v1(
+            thread,
+            projection_experiment,
+            recent_events,
+        )
+        if peer_boundary:
+            projection_experiment["peer_mutation_boundary_cue_v1"] = peer_boundary
+        decision_plan_loop = self._needs_decision_plan_loop_cue_v1(
+            thread,
+            projection_experiment,
+            recent_events,
+        )
+        if decision_plan_loop:
+            projection_experiment["needs_decision_plan_loop_cue_v1"] = decision_plan_loop
         allowance = self._motif_allowance_snapshot(thread["thread_id"], experiment["experiment_id"])
         branch_line = ""
         if experiment.get("parent_experiment_id") or experiment.get("branch_refs"):
@@ -6788,13 +14618,19 @@ class ActionContinuityStore:
         return (
             f"Experiment `{experiment['experiment_id']}`: {experiment.get('title', '')}\n"
             f"{self._paused_resume_loop_cue_line(projection_experiment)}"
+            f"{self._paused_replan_loop_cue_line(projection_experiment)}"
+            f"{self._peer_mutation_boundary_cue_line(projection_experiment)}"
             f"{self._shared_investigation_line(projection_experiment)}"
+            f"{self._shared_investigation_object_line(projection_experiment)}"
+            f"{self._first_dossier_claim_cue_line(projection_experiment)}"
             f"{self._charter_shaped_plan_cue_line(projection_experiment)}"
             f"{self._needs_charter_research_loop_cue_line(projection_experiment)}"
             f"{self._charter_quality_dominance_line(projection_experiment)}"
             f"{self._charter_required_review_line(projection_experiment)}"
             f"{self._charter_repair_dominance_line(projection_experiment)}"
+            f"{self._experiment_conveyor_line(projection_experiment)}"
             f"{self._charter_scaffold_line(projection_experiment, priority=True)}"
+            f"{self._needs_decision_plan_loop_cue_line(projection_experiment)}"
             f"{self._evidence_saturation_cue_line(projection_experiment)}"
             f"{self._peer_compare_cue_line(projection_experiment)}"
             f"Thread: {thread['thread_id']}\n"
@@ -6904,12 +14740,55 @@ class ActionContinuityStore:
             current_next_status,
             recent_events,
         )
-        local_shared_experiment = (
-            active_experiment
-            if isinstance(active_experiment, dict)
-            else last_summary if isinstance(last_summary, dict) else None
+        local_shared_experiment = self._shared_investigation_candidate(
+            thread,
+            active_experiment if isinstance(active_experiment, dict) else None,
+            last_summary,
         )
         shared_investigation = self._shared_investigation_v1(local_shared_experiment)
+        paused_replan_loop_cue = self._paused_replan_loop_cue_v1(
+            thread,
+            local_shared_experiment,
+            recent_events,
+        )
+        first_dossier_claim_cue = self._first_dossier_claim_cue_v1(
+            thread,
+            local_shared_experiment,
+            shared_investigation,
+            paused_replan_loop_cue,
+        )
+        shared_investigation_object = None
+        object_experiment = (
+            active_experiment
+            if isinstance(active_experiment, dict)
+            else local_shared_experiment
+            if isinstance(local_shared_experiment, dict)
+            else last_summary
+        )
+        if isinstance(object_experiment, dict) and object_experiment.get("experiment_id"):
+            shared_investigation_object = self._shared_investigation_for_experiment(
+                str(object_experiment.get("experiment_id"))
+            )
+        research_budget_priority_route = self._research_budget_priority_route_v1(
+            thread,
+            object_experiment if isinstance(object_experiment, dict) else None,
+        )
+        sovereign_loop = self._sovereign_loop_status_v1(
+            thread,
+            object_experiment if isinstance(object_experiment, dict) else None,
+            {},
+            selector="latest",
+        )
+        interpretation_risk = self._interpretation_risk_projection_v1(
+            thread,
+            object_experiment if isinstance(object_experiment, dict) else None,
+            recent_events,
+        )
+        constraint_release_trajectory = self._constraint_release_trajectory_projection_v1(
+            thread,
+            object_experiment if isinstance(object_experiment, dict) else None,
+            recent_events,
+        )
         if isinstance(active_experiment, dict):
             research_loop_cue = self._needs_charter_research_loop_cue_v1(
                 thread,
@@ -6920,18 +14799,61 @@ class ActionContinuityStore:
                 active_experiment["needs_charter_research_loop_cue_v1"] = research_loop_cue
             if shared_investigation:
                 active_experiment["shared_investigation_v1"] = shared_investigation
+            if (
+                first_dossier_claim_cue
+                and local_shared_experiment
+                and active_experiment.get("experiment_id") == local_shared_experiment.get("experiment_id")
+            ):
+                active_experiment["first_dossier_claim_cue_v1"] = first_dossier_claim_cue
+            if (
+                paused_replan_loop_cue
+                and local_shared_experiment
+                and active_experiment.get("experiment_id") == local_shared_experiment.get("experiment_id")
+            ):
+                active_experiment["paused_replan_loop_cue_v1"] = paused_replan_loop_cue
+            peer_boundary = self._peer_mutation_boundary_cue_v1(
+                thread,
+                active_experiment,
+                recent_events,
+            )
+            if peer_boundary:
+                active_experiment["peer_mutation_boundary_cue_v1"] = peer_boundary
+            decision_plan_loop = self._needs_decision_plan_loop_cue_v1(
+                thread,
+                active_experiment,
+                recent_events,
+            )
+            if decision_plan_loop:
+                active_experiment["needs_decision_plan_loop_cue_v1"] = decision_plan_loop
+        else:
+            peer_boundary = self._peer_mutation_boundary_cue_v1(
+                thread,
+                None,
+                recent_events,
+            )
+        research_dossier = (
+            active_experiment.get("research_dossier_v1")
+            if isinstance(active_experiment, dict)
+            else self._research_dossier_summary_v1(thread, None)
+        )
+        being_memory = (
+            active_experiment.get("being_memory_v1")
+            if isinstance(active_experiment, dict)
+            else self._being_memory_summary_v1(thread, None)
+        )
         native_continuity = (
             active_experiment.get("native_continuity_v1")
             if isinstance(active_experiment, dict)
             else self._native_continuity_projection(thread, None, [])
         )
-        return {
+        projection = {
             "schema_version": 1,
             "thread_id": thread_id,
             "title": thread.get("title", ""),
             "status": thread.get("status", "active"),
             "current_next": thread.get("current_next"),
             "current_next_status_v1": current_next_status,
+            "projection_guard_v1": current_next_status.get("projection_guard_v1"),
             "active_experiment": active_experiment,
             "last_experiment_summary_v1": last_summary,
             "continuity_return": continuity_return,
@@ -6940,7 +14862,19 @@ class ActionContinuityStore:
             ),
             "paused_read_only_loop_cue_v1": paused_read_only_loop_cue,
             "paused_resume_loop_cue_v1": paused_resume_loop_cue,
+            "paused_replan_loop_cue_v1": paused_replan_loop_cue,
+            "peer_mutation_boundary_cue_v1": peer_boundary,
             "shared_investigation_v1": shared_investigation,
+            "shared_investigation_object_v1": shared_investigation_object,
+            "first_dossier_claim_cue_v1": first_dossier_claim_cue,
+            "research_budget_priority_route_v1": research_budget_priority_route,
+            "sovereign_loop_v1": sovereign_loop,
+            "interpretation_risk_v1": interpretation_risk,
+            "constraint_release_trajectory_v1": constraint_release_trajectory,
+            "research_dossier_v1": research_dossier,
+            "being_memory_v1": being_memory,
+            "continuity_session_v1": thread.get("continuity_session_v1"),
+            "projection_freshness_v1": thread.get("projection_freshness_v1"),
             "native_continuity_v1": native_continuity,
             "recent_events": recent_events,
             "recent_event_summaries": [
@@ -6951,6 +14885,16 @@ class ActionContinuityStore:
             "stale_running_diagnostics": self._stale_running_action_diagnostics(thread_id),
             "top_actionable_proposals": self._proposal_diagnostics(thread_id, 6),
         }
+        projection["continuity_control_plane_v1"] = build_continuity_control_plane_v1(
+            projection,
+            source_refs=[
+                "thread.current_next",
+                "projection.research_budget_priority_route_v1",
+                "projection.sovereign_loop_v1",
+                "projection.continuity_session_v1",
+            ],
+        )
+        return projection
 
     def _experiment_projection(
         self,
@@ -6963,6 +14907,14 @@ class ActionContinuityStore:
         )
         projected = dict(experiment)
         classification = self._experiment_classification(experiment, runs)
+        return_info = (
+            self._paused_primary_return_v1(
+                str(experiment.get("experiment_id") or ""),
+                experiment.get("planned_next"),
+            )
+            if classification == "paused"
+            else None
+        )
         charter_scaffold = self._charter_scaffold_v1(thread, experiment, runs, classification)
         peer_compare_cue = self._peer_compare_cue_v1(experiment)
         charter_quality = (
@@ -6974,12 +14926,25 @@ class ActionContinuityStore:
             "classification": classification,
             "continuity_return": self._continuity_return_command(thread, experiment, runs),
             "native_continuity_v1": self._native_continuity_projection(thread, experiment, runs),
+            "research_dossier_v1": self._research_dossier_summary_v1(thread, experiment),
+            "being_memory_v1": self._being_memory_summary_v1(thread, experiment),
             "charter_quality_v1": charter_quality,
             "charter_status": self._workbench_charter_status(experiment),
             "evidence_status": self._workbench_evidence_status(experiment),
             "candidate_status": self._workbench_candidate_status(experiment),
             "recent_runs": runs[-5:],
         })
+        if return_info:
+            projected["primary_return_next"] = return_info["primary_return_next"]
+            projected["return_kind"] = return_info["return_kind"]
+            projected["continuity_return"] = return_info["primary_return_next"]
+            if return_info["return_kind"] == "resume":
+                projected["resume_next"] = return_info["primary_return_next"]
+            else:
+                projected.pop("resume_next", None)
+        decision_guardrail = self._latest_decision_guardrail_v1(projected)
+        if decision_guardrail:
+            projected["decision_guardrail_v1"] = decision_guardrail
         if charter_scaffold:
             projected["charter_scaffold_v1"] = charter_scaffold
         charter_shaped_plan_cue = self._charter_shaped_plan_cue_v1(
@@ -6997,13 +14962,1041 @@ class ActionContinuityStore:
         shared_investigation = self._shared_investigation_v1(experiment)
         if shared_investigation:
             projected["shared_investigation_v1"] = shared_investigation
+        shared_investigation_object = self._shared_investigation_for_experiment(
+            str(experiment.get("experiment_id") or "")
+        )
+        if shared_investigation_object:
+            projected["shared_investigation_object_v1"] = shared_investigation_object
+        paused_replan_loop_cue = self._paused_replan_loop_cue_v1(
+            thread,
+            experiment,
+            self._recent_display_events(thread["thread_id"], 8),
+        )
+        first_dossier_claim_cue = self._first_dossier_claim_cue_v1(
+            thread,
+            experiment,
+            shared_investigation,
+            paused_replan_loop_cue,
+        )
+        if first_dossier_claim_cue:
+            projected["first_dossier_claim_cue_v1"] = first_dossier_claim_cue
         saturation_cue = self._evidence_saturation_cue_v1(experiment, runs, classification)
         if saturation_cue:
             projected["evidence_saturation_cue_v1"] = saturation_cue
+        decision_plan_loop = self._needs_decision_plan_loop_cue_v1(
+            thread,
+            projected,
+            self._recent_display_events(thread["thread_id"], 8),
+        )
+        if decision_plan_loop:
+            projected["needs_decision_plan_loop_cue_v1"] = decision_plan_loop
         repair_dominance = self._charter_repair_dominance_cue_v1(projected)
         if repair_dominance:
             projected["charter_repair_dominance_cue_v1"] = repair_dominance
+        projected["experiment_conveyor_v1"] = self._experiment_conveyor_v1(
+            thread,
+            experiment,
+            runs,
+        )
         return projected
+
+    def _parse_experiment_conveyor_request(self, raw: str) -> tuple[Optional[str], str]:
+        text = str(raw or "").strip()
+        selector: Optional[str] = None
+        payload = text
+        if "::" in text:
+            selector, payload = self._parse_selector_payload(text)
+        elif text:
+            first, _, rest = text.partition(" ")
+            if first.lower() in {"current", "latest"} or first.startswith("exp_"):
+                selector = None if first.lower() in {"current", "latest"} else first
+                payload = rest.strip()
+        mode = (self._dossier_field(payload, ["mode"]) or "").casefold()
+        if not mode and re.search(r"(?i)(^|\b)apply(\b|$)", payload):
+            mode = "apply"
+        if mode != "apply":
+            mode = "preview"
+        return selector, mode
+
+    def _no_active_conveyor_readout(self, thread: Dict[str, Any]) -> Dict[str, Any]:
+        last_summary = self._last_experiment_summary_v1(thread)
+        last_id = (
+            str(last_summary.get("experiment_id") or "")
+            if isinstance(last_summary, dict)
+            else ""
+        )
+        proposed = (
+            f"EXPERIMENT_ADVANCE {last_id} :: mode: preview"
+            if last_id
+            else "EXPERIMENT_START <title> :: <question>"
+        )
+        return {
+            "schema_version": 1,
+            "policy": "experiment_conveyor_v1",
+            "mode": "apply",
+            "preview_allowed": True,
+            "apply_policy": "conservative_local_v1",
+            "allowed_apply_steps": self._experiment_conveyor_allowed_apply_steps(),
+            "applied": False,
+            "would_mutate": False,
+            "thread_id": thread.get("thread_id"),
+            "experiment_id": last_id or None,
+            "status": "no_active_experiment",
+            "stage": "blocked_guardrail",
+            "missing_requirements": ["active_local_experiment"],
+            "proposed_next": proposed,
+            "conveyor_next": proposed,
+            "can_apply": False,
+            "apply_blocked_reason": "apply_current_requires_active_local_experiment",
+            "source_refs": self._conveyor_source_refs(thread, last_id),
+            "guardrail_warnings": [
+                "EXPERIMENT_ADVANCE current :: mode: apply requires an active local experiment; select a paused experiment by id for preview or explicit repair."
+            ],
+            "authority_readiness_v1": self._authority_readiness_no_experiment(
+                thread,
+                "active_local_experiment",
+            ),
+            "research_readiness_v1": self._research_readiness_no_experiment(
+                thread,
+                "active_local_experiment",
+            ),
+            "authority_boundary": self._experiment_conveyor_authority_boundary(),
+        }
+
+    def _latest_local_conveyor_readout(
+        self,
+        thread: Dict[str, Any],
+        state: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
+        last_summary = self._last_experiment_summary_v1(thread)
+        last_id = (
+            str(last_summary.get("experiment_id") or "")
+            if isinstance(last_summary, dict)
+            else ""
+        )
+        if last_id:
+            experiment = self._find_experiment_by_id(str(thread.get("thread_id") or ""), last_id)
+            if isinstance(experiment, dict):
+                runs = self._recent_experiment_runs(thread["thread_id"], last_id, 8)
+                readout = self._experiment_conveyor_v1(
+                    thread,
+                    experiment,
+                    runs,
+                    mode="preview",
+                    state=state,
+                )
+                readout["status_context"] = "no_active_current_latest_local"
+                readout.setdefault("guardrail_warnings", []).append(
+                    "current has no active experiment; preview is showing the latest local experiment by id"
+                )
+                return readout
+        readout = self._no_active_conveyor_readout(thread)
+        readout["mode"] = "preview"
+        readout["status_context"] = "no_active_current_no_latest_local"
+        readout["proposed_next"] = "EXPERIMENT_START <title> :: <question>"
+        readout["conveyor_next"] = "EXPERIMENT_ADVANCE <experiment_id> :: mode: preview"
+        return readout
+
+    def _peer_experiment_conveyor_readout(
+        self,
+        peer: Dict[str, Any],
+        mode: str,
+    ) -> Dict[str, Any]:
+        peer_id = str(peer.get("peer_experiment_id") or "")
+        return {
+            "schema_version": 1,
+            "policy": "experiment_conveyor_v1",
+            "mode": "apply" if mode == "apply" else "preview",
+            "preview_allowed": True,
+            "apply_policy": "conservative_local_v1",
+            "allowed_apply_steps": self._experiment_conveyor_allowed_apply_steps(),
+            "applied": False,
+            "would_mutate": False,
+            "experiment_id": peer_id,
+            "peer_experiment_id": peer_id,
+            "peer_system": peer.get("peer_system"),
+            "status": "peer_reference_only",
+            "stage": "blocked_guardrail",
+            "missing_requirements": ["local_experiment_authority"],
+            "proposed_next": f"EXPERIMENT_PEER_REVIEW {peer_id}" if peer_id else "EXPERIMENT_PEER_REVIEW <peer_id>",
+            "conveyor_next": f"EXPERIMENT_ADVANCE {peer_id} :: mode: preview" if peer_id else "EXPERIMENT_ADVANCE <peer_id> :: mode: preview",
+            "can_apply": False,
+            "apply_blocked_reason": "peer_experiments_are_advisory_only",
+            "source_refs": [],
+            "guardrail_warnings": [
+                "peer experiment selectors are advisory only; conveyor cannot mutate or inspect them as local authority"
+            ],
+            "authority_boundary": self._experiment_conveyor_authority_boundary(),
+            "authority_readiness_v1": {
+                "policy": "authority_readiness_v1",
+                "scope": "semantic_microdose",
+                "stage": "blocked",
+                "eligible_to_request": False,
+                "missing_requirements": ["local_experiment_authority"],
+                "artifact_ref_candidates": [],
+                "latest_request_id": None,
+                "token_status": "none",
+                "next_safe_command": f"EXPERIMENT_PEER_REVIEW {peer_id}" if peer_id else "EXPERIMENT_PEER_REVIEW <peer_id>",
+                "request_scaffold": None,
+                "source_refs": [],
+                "authority_boundary": self._authority_gate_boundary(),
+            },
+            "research_readiness_v1": {
+                "policy": "research_readiness_v1",
+                "scope": "read_only_research",
+                "stage": "blocked",
+                "eligible_to_request": False,
+                "missing_requirements": ["local_experiment_authority"],
+                "active_budget_id": None,
+                "remaining_actions": 0,
+                "next_safe_command": f"EXPERIMENT_PEER_REVIEW {peer_id}" if peer_id else "EXPERIMENT_PEER_REVIEW <peer_id>",
+                "authority_boundary": self._research_budget_boundary(),
+            },
+        }
+
+    def _experiment_conveyor_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        runs: Optional[List[Dict[str, Any]]] = None,
+        *,
+        mode: str = "preview",
+        state: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
+        runs = runs if runs is not None else self._recent_experiment_runs(
+            thread["thread_id"],
+            experiment["experiment_id"],
+            8,
+        )
+        classification = self._experiment_classification(experiment, runs)
+        experiment_id = str(experiment.get("experiment_id") or "")
+        return_info = (
+            self._paused_primary_return_v1(experiment_id, experiment.get("planned_next"))
+            if classification == "paused"
+            else {}
+        )
+        stage = self._experiment_conveyor_stage(classification, return_info)
+        missing = self._experiment_conveyor_missing_requirements(experiment, stage)
+        proposed_next = self._experiment_conveyor_proposed_next(
+            thread,
+            experiment,
+            runs,
+            stage,
+            return_info,
+        )
+        display_selector = (
+            "current"
+            if experiment_id and thread.get("active_experiment_id") == experiment_id
+            else experiment_id or "current"
+        )
+        apply_payload = ""
+        if stage == "needs_charter" or (
+            stage == "paused_repair"
+            and not self._lifecycle_valid_experiment_charter(experiment.get("charter_v1"))
+            and self.base_action(return_info.get("primary_return_next") or experiment.get("planned_next") or "")
+            == "EXPERIMENT_CHARTER"
+        ):
+            apply_payload = self._experiment_conveyor_charter_payload(
+                thread,
+                experiment,
+                runs,
+            )
+        can_apply = self._experiment_conveyor_can_apply(stage, apply_payload)
+        conveyor_mode = "apply" if mode == "apply" and can_apply else "preview"
+        apply_blocked_reason = self._experiment_conveyor_apply_blocked_reason(
+            stage,
+            apply_payload,
+            can_apply,
+        )
+        native = self._native_continuity_projection(thread, experiment, runs)
+        readout = {
+            "schema_version": 1,
+            "policy": "experiment_conveyor_v1",
+            "mode": mode if mode == "apply" else "preview",
+            "preview_allowed": True,
+            "apply_policy": "conservative_local_v1",
+            "allowed_apply_steps": self._experiment_conveyor_allowed_apply_steps(),
+            "applied": False,
+            "would_mutate": mode == "apply" and can_apply,
+            "thread_id": thread.get("thread_id"),
+            "experiment_id": experiment_id,
+            "title": experiment.get("title"),
+            "status": experiment.get("status", "active"),
+            "classification": classification,
+            "stage": stage,
+            "missing_requirements": missing,
+            "proposed_next": proposed_next,
+            "conveyor_next": f"EXPERIMENT_ADVANCE {display_selector} :: mode: {conveyor_mode}",
+            "can_apply": can_apply,
+            "apply_blocked_reason": apply_blocked_reason,
+            "source_refs": self._conveyor_source_refs(thread, experiment_id),
+            "native_continuity_v1": native,
+            "shared_investigation_v1": self._shared_investigation_for_experiment(experiment_id),
+            "being_memory_v1": self._being_memory_summary_v1(thread, experiment),
+            "guardrail_warnings": self._experiment_conveyor_guardrail_warnings(
+                experiment,
+                stage,
+                proposed_next,
+            ),
+            "authority_gate_v1": self._authority_gate_conveyor_hint(
+                experiment,
+                stage,
+                proposed_next,
+            ),
+            "authority_readiness_v1": self._authority_readiness_v1(
+                thread,
+                experiment,
+                runs,
+                state or {},
+                stage,
+                proposed_next,
+            ),
+            "research_readiness_v1": self._research_readiness_v1(
+                thread,
+                experiment,
+                state or {},
+            ),
+            "authority_boundary": self._experiment_conveyor_authority_boundary(),
+        }
+        if return_info:
+            readout["primary_return_next"] = return_info["primary_return_next"]
+            readout["return_kind"] = return_info["return_kind"]
+        decision_guardrail = self._latest_decision_guardrail_v1(experiment)
+        if decision_guardrail:
+            readout["decision_guardrail_v1"] = decision_guardrail
+        if apply_payload:
+            readout["apply_payload"] = apply_payload
+        return readout
+
+    @staticmethod
+    def _experiment_conveyor_stage(
+        classification: str,
+        return_info: Dict[str, str],
+    ) -> str:
+        if classification == "paused":
+            return "paused_resume" if return_info.get("return_kind") == "resume" else "paused_repair"
+        if classification == "complete":
+            return "complete"
+        if classification == "blocked_loop":
+            return "blocked_guardrail"
+        if classification == "needs_charter":
+            return "needs_charter"
+        if classification == "needs_decision":
+            return "needs_decision"
+        if classification == "needs_evidence":
+            return "needs_evidence"
+        return "needs_rehearsal"
+
+    def _experiment_conveyor_missing_requirements(
+        self,
+        experiment: Dict[str, Any],
+        stage: str,
+    ) -> List[str]:
+        if stage == "needs_charter":
+            quality = self._charter_quality_v1(experiment.get("charter_v1"))
+            missing = quality.get("missing_fields") if isinstance(quality, dict) else None
+            return list(missing or ["lifecycle_valid_charter"])
+        if stage == "needs_evidence":
+            return ["explicit_experiment_evidence"]
+        if stage == "needs_decision":
+            return ["explicit_lifecycle_decision"]
+        if stage == "needs_rehearsal":
+            return ["read_only_rehearsal"]
+        if stage == "blocked_guardrail":
+            return ["safe_counter_or_hold_decision"]
+        if stage == "paused_repair":
+            return ["explicit_repair_return"]
+        if stage == "paused_resume":
+            return ["explicit_resume_or_hold"]
+        return []
+
+    def _experiment_conveyor_proposed_next(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        runs: List[Dict[str, Any]],
+        stage: str,
+        return_info: Dict[str, str],
+    ) -> str:
+        experiment_id = str(experiment.get("experiment_id") or "current")
+        selector = (
+            "current"
+            if experiment_id and thread.get("active_experiment_id") == experiment_id
+            else experiment_id
+        )
+        if stage == "paused_repair":
+            return return_info.get("primary_return_next") or str(experiment.get("planned_next") or "")
+        if stage == "paused_resume":
+            return return_info.get("primary_return_next") or f"EXPERIMENT_RESUME {experiment_id}"
+        if stage == "complete":
+            return f"EXPERIMENT_REVIEW {experiment_id}"
+        if stage == "blocked_guardrail":
+            if not self._lifecycle_valid_experiment_charter(experiment.get("charter_v1")):
+                return (
+                    f"EXPERIMENT_DECIDE {experiment_id} :: charter_repair because "
+                    "blocked guardrail evidence appeared without a lifecycle-valid charter"
+                )
+            return (
+                f"EXPERIMENT_DECIDE {experiment_id} :: hold because "
+                "blocked guardrail evidence is not experiment progress"
+            )
+        if stage == "needs_decision":
+            return (
+                f"EXPERIMENT_DECIDE {experiment_id} :: hold because "
+                "evidence is ready to interpret without live authority"
+            )
+        if stage == "needs_evidence":
+            return (
+                f"EXPERIMENT_EVIDENCE {experiment_id} :: spectral_condition ...; "
+                "fill_pressure_state ...; recurrence_pattern ...; artifact_grounding ..."
+            )
+        if stage == "needs_rehearsal":
+            return f"EXPERIMENT_REHEARSE {experiment_id}"
+        scaffold = self._charter_scaffold_v1(thread, experiment, runs, "needs_charter")
+        if isinstance(scaffold, dict) and scaffold.get("command"):
+            command = str(scaffold["command"])
+            if selector:
+                return command.replace("EXPERIMENT_CHARTER current", f"EXPERIMENT_CHARTER {selector}", 1)
+            return command
+        return self._continuity_return_command(thread, experiment, runs)
+
+    def _experiment_conveyor_charter_payload(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        runs: List[Dict[str, Any]],
+    ) -> str:
+        scaffold = self._charter_scaffold_v1(thread, experiment, runs, "needs_charter")
+        command = str(scaffold.get("command") or "") if isinstance(scaffold, dict) else ""
+        if not command:
+            return ""
+        arg = self._strip_action_arg(command, "EXPERIMENT_CHARTER")
+        _selector, payload = self._parse_selector_payload(arg)
+        charter = self._parse_experiment_charter(experiment, payload)
+        return payload if self._lifecycle_valid_experiment_charter(charter) else ""
+
+    @staticmethod
+    def _experiment_conveyor_can_apply(stage: str, apply_payload: str) -> bool:
+        if stage in {"needs_charter", "paused_repair"}:
+            return bool(apply_payload)
+        return stage in {"needs_evidence", "needs_decision", "blocked_guardrail"}
+
+    @staticmethod
+    def _experiment_conveyor_allowed_apply_steps() -> List[str]:
+        return [
+            "lifecycle_valid_charter",
+            "local_evidence_capture",
+            "hold_decision",
+            "charter_repair_decision",
+        ]
+
+    @staticmethod
+    def _experiment_conveyor_apply_blocked_reason(
+        stage: str,
+        apply_payload: str,
+        can_apply: bool,
+    ) -> Optional[str]:
+        if can_apply:
+            return None
+        if stage in {"needs_charter", "paused_repair"} and not apply_payload:
+            return "no_lifecycle_valid_charter_scaffold"
+        if stage == "needs_rehearsal":
+            return "rehearsal_requires_explicit_experiment_rehearse"
+        if stage == "paused_resume":
+            return "paused_experiments_require_explicit_return_command"
+        if stage == "complete":
+            return "complete_experiments_are_review_only"
+        return "no_conservative_apply_step_available"
+
+    def _conveyor_evidence_note(self, readout: Dict[str, Any]) -> str:
+        native = readout.get("native_continuity_v1")
+        lanes = native.get("evidence_lanes") if isinstance(native, dict) else {}
+        lanes = lanes if isinstance(lanes, dict) else {}
+
+        def lane(key: str) -> str:
+            value = lanes.get(key)
+            return str(value.get("status", "missing")) if isinstance(value, dict) else "missing"
+
+        return (
+            f"spectral_condition: {lane('spectral_condition')}; "
+            f"fill_pressure_state: {lane('fill_pressure_state')}; "
+            f"recurrence_pattern: {lane('recurrence_pattern')}; "
+            f"artifact_grounding: {lane('artifact_grounding')}; "
+            "conveyor_v1 recorded explicit lifecycle evidence from current local telemetry/projection refs."
+        )
+
+    def _conveyor_source_refs(
+        self,
+        thread: Dict[str, Any],
+        experiment_id: Optional[str],
+    ) -> List[str]:
+        thread_id = str(thread.get("thread_id") or "")
+        if not thread_id:
+            return []
+        refs = [
+            str(self._thread_dir(thread_id) / "thread.json"),
+            str(self._experiments_path(thread_id)),
+            str(self._experiment_runs_path(thread_id)),
+            str(self._research_dossier_path(thread_id)),
+            str(self._being_memory_path(thread_id)),
+        ]
+        if experiment_id:
+            shared = self._shared_investigation_for_experiment(str(experiment_id))
+            if isinstance(shared, dict) and shared.get("id"):
+                refs.append(
+                    str(self._shared_investigation_dir(str(shared["id"])) / "investigation.json")
+                )
+        return refs
+
+    def _research_readiness_no_experiment(
+        self,
+        thread: Dict[str, Any],
+        missing_requirement: str,
+    ) -> Dict[str, Any]:
+        return {
+            "policy": "research_readiness_v1",
+            "scope": "read_only_research",
+            "stage": "blocked",
+            "eligible_to_request": False,
+            "missing_requirements": [missing_requirement],
+            "active_budget_id": None,
+            "remaining_actions": 0,
+            "latest_artifact_refs": [],
+            "next_safe_command": "EXPERIMENT_ADVANCE <experiment_id> :: mode: preview",
+            "source_refs": [
+                str(self._thread_dir(str(thread.get("thread_id") or "")) / "thread.json")
+            ] if thread.get("thread_id") else [],
+            "authority_boundary": self._research_budget_boundary(),
+        }
+
+    def _research_readiness_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        status = self._research_budget_status_v1(
+            thread,
+            experiment,
+            state,
+            selector=str(experiment.get("experiment_id") or "latest"),
+        )
+        stage = str(status.get("stage") or "no_budget")
+        experiment_id = str(experiment.get("experiment_id") or "current")
+        request_scaffold = _control_plane_research_budget_request_scaffold(
+            experiment_id,
+            allowed_sources="web,local",
+        )
+        missing = []
+        if stage == "no_budget":
+            missing.append("steward_approved_read_only_research_budget")
+        if not str(experiment.get("question") or experiment.get("title") or "").strip():
+            missing.append("research_purpose")
+        return {
+            "policy": "research_readiness_v1",
+            "scope": "read_only_research",
+            "stage": stage,
+            "eligible_to_request": stage in {"no_budget", "blocked", "budget_closed", "budget_expired", "budget_exhausted"},
+            "missing_requirements": missing,
+            "active_budget_id": status.get("active_budget_id"),
+            "remaining_actions": status.get("remaining_actions"),
+            "latest_artifact_refs": status.get("latest_artifact_refs") or [],
+            "duplicate_blocked_target": status.get("duplicate_blocked_target"),
+            "allowed_actions": status.get("allowed_actions") or sorted(self._research_budget_allowed_bases()),
+            "next_safe_command": status.get("next_safe_command") or request_scaffold,
+            "request_scaffold": request_scaffold,
+            "source_refs": self._authority_source_refs(thread, experiment, []),
+            "authority_boundary": self._research_budget_boundary(),
+        }
+
+    def _authority_readiness_no_experiment(
+        self,
+        thread: Dict[str, Any],
+        missing_requirement: str,
+    ) -> Dict[str, Any]:
+        return {
+            "policy": "authority_readiness_v1",
+            "scope": "semantic_microdose",
+            "stage": "blocked",
+            "eligible_to_request": False,
+            "missing_requirements": [missing_requirement],
+            "artifact_ref_candidates": [],
+            "latest_request_id": None,
+            "token_status": "none",
+            "next_safe_command": "EXPERIMENT_ADVANCE <experiment_id> :: mode: preview",
+            "request_scaffold": None,
+            "source_refs": [
+                str(self._thread_dir(str(thread.get("thread_id") or "")) / "thread.json")
+            ] if thread.get("thread_id") else [],
+            "authority_boundary": self._authority_gate_boundary(),
+        }
+
+    def _authority_readiness_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        runs: List[Dict[str, Any]],
+        state: Dict[str, float],
+        conveyor_stage: str,
+        proposed_next: str,
+    ) -> Dict[str, Any]:
+        experiment_id = str(experiment.get("experiment_id") or "current")
+        artifact_refs = self._authority_artifact_ref_candidates(experiment, runs)
+        request = {
+            "scope": "semantic_microdose",
+            "payload": "...",
+            "artifact_refs": artifact_refs,
+        }
+        eligibility = self._authority_gate_eligibility(thread, experiment, request, state)
+        missing = list(eligibility.get("missing_requirements") or [])
+        rows = [
+            row for row in self._authority_gate_rows(str(thread.get("thread_id") or ""))
+            if row.get("experiment_id") == experiment_id
+        ]
+        latest_request = next(
+            (row for row in reversed(rows) if row.get("record_type") == "request"),
+            None,
+        )
+        latest_request_id = (
+            str(latest_request.get("request_id") or "")
+            if isinstance(latest_request, dict)
+            else ""
+        )
+        token_status = self._authority_token_status(rows, latest_request_id)
+        budget_status = self._authority_budget_status_v1(
+            thread,
+            experiment,
+            state,
+            selector=experiment_id,
+        )
+        if budget_status.get("stage") == "review_required":
+            token_status = "review_required"
+        stage = self._authority_readiness_stage(
+            experiment,
+            conveyor_stage,
+            missing,
+            latest_request,
+            token_status,
+        )
+        request_scaffold = None
+        if stage == "ready_to_author_request":
+            artifact_text = ", ".join(artifact_refs)
+            request_scaffold = (
+                f"EXPERIMENT_AUTHORITY_REQUEST {experiment_id} :: scope: semantic_microdose; "
+                "payload: ...; reason: ...; "
+                f"artifact_refs: {artifact_text}; stop_criteria: ..."
+            )
+        next_safe = self._authority_readiness_next_command(
+            experiment_id,
+            stage,
+            proposed_next,
+            latest_request_id,
+            request_scaffold,
+        )
+        return {
+            "policy": "authority_readiness_v1",
+            "scope": "semantic_microdose",
+            "stage": stage,
+            "eligible_to_request": stage == "ready_to_author_request",
+            "missing_requirements": missing,
+            "artifact_ref_candidates": artifact_refs,
+            "latest_request_id": latest_request_id or None,
+            "token_status": token_status,
+            "next_safe_command": next_safe,
+            "request_scaffold": request_scaffold,
+            "budget_request_scaffold": (
+                _control_plane_authority_budget_request_scaffold(
+                    experiment_id,
+                    artifact_refs=", ".join(artifact_refs),
+                )
+            ) if stage == "ready_to_author_request" else None,
+            "authority_budget_v1": budget_status,
+            "source_refs": self._authority_source_refs(thread, experiment, artifact_refs),
+            "mode_release_readiness_v1": self._mode_release_readiness_v1(
+                thread,
+                experiment,
+                runs,
+                state,
+                stage,
+                artifact_refs,
+            ),
+            "authority_boundary": self._authority_gate_boundary(),
+        }
+
+    def _mode_release_readiness_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        runs: List[Dict[str, Any]],
+        state: Dict[str, float],
+        semantic_stage: str,
+        artifact_refs: List[str],
+    ) -> Dict[str, Any]:
+        experiment_id = str(experiment.get("experiment_id") or "current")
+        sticky = self._sticky_mode_v1(state)
+        current_leak = sticky.get("current_esn_leak")
+        candidate_value = None
+        if isinstance(current_leak, (int, float)) and math.isfinite(float(current_leak)):
+            candidate_value = round(max(0.20, min(0.90, float(current_leak) + 0.06)), 3)
+        payload = (
+            f"target=esn_leak; value={candidate_value if candidate_value is not None else '...'}; "
+            "duration_ticks=3"
+        )
+        request = {
+            "scope": "mode_release_microdose",
+            "payload": payload,
+            "artifact_refs": artifact_refs,
+        }
+        eligibility = self._authority_gate_eligibility(thread, experiment, request, state)
+        missing = list(eligibility.get("missing_requirements") or [])
+        ready = not missing
+        trajectory = sticky.get("constraint_release_trajectory_v1")
+        trajectory_blocks = isinstance(trajectory, dict) and bool(trajectory.get("blocks_mode_release"))
+        scaffold = (
+            f"EXPERIMENT_AUTHORITY_REQUEST {experiment_id} :: scope: mode_release_microdose; "
+            f"payload: {payload}; reason: sticky mode release candidate; "
+            f"artifact_refs: {', '.join(artifact_refs)}; "
+            "stop_criteria: one attempted bridge send only; rollback on red safety, pressure spike, fill outside safe band, or bind/resume/perturb/control intent."
+        )
+        if ready:
+            next_safe = scaffold
+            stage = "ready_to_author_request"
+        elif trajectory_blocks:
+            next_safe = "CONTINUITY_SESSION_CAPTURE latest"
+            stage = "spontaneous_release_watch"
+        elif sticky.get("state") in {"sticky_mode", "sticky_watch", "release_candidate"}:
+            next_safe = "STICKY_MODE_AUDIT"
+            stage = "needs_mode_release_requirements"
+        else:
+            next_safe = "EXPERIMENT_ADVANCE <experiment_id> :: mode: preview"
+            stage = "not_a_release_candidate"
+        return {
+            "policy": "mode_release_readiness_v1",
+            "scope": "mode_release_microdose",
+            "stage": stage,
+            "semantic_authority_stage": semantic_stage,
+            "eligible_to_request": ready,
+            "missing_requirements": missing,
+            "sticky_mode_v1": sticky,
+            "candidate_payload": payload,
+            "request_scaffold": scaffold if ready else None,
+            "next_safe_command": next_safe,
+            "authority_boundary": self._authority_gate_boundary(),
+        }
+
+    @classmethod
+    def _authority_artifact_ref_candidates(
+        cls,
+        experiment: Dict[str, Any],
+        runs: List[Dict[str, Any]],
+    ) -> List[str]:
+        candidates: List[str] = []
+
+        def add(value: Any) -> None:
+            if isinstance(value, dict):
+                for key in ("path", "url", "artifact_path", "artifact_ref", "ref"):
+                    item = value.get(key)
+                    if isinstance(item, str) and item.strip():
+                        candidates.append(item.strip())
+                        return
+                if value:
+                    candidates.append(json.dumps(value, sort_keys=True, ensure_ascii=False))
+                return
+            if isinstance(value, str) and value.strip():
+                candidates.append(value.strip())
+
+        def scan_text(value: Any) -> None:
+            if not isinstance(value, str):
+                return
+            for match in re.findall(r"https?://[^\s,;]+|/[^\s,;]+", value):
+                candidates.append(match.rstrip(").]"))
+
+        evidence = experiment.get("evidence_v1") if isinstance(experiment, dict) else {}
+        evidence = evidence if isinstance(evidence, dict) else {}
+        for item in evidence.get("artifact_refs") or []:
+            add(item)
+        for item in evidence.get("felt_observations") or []:
+            if isinstance(item, dict):
+                scan_text(item.get("note") or item.get("felt") or item.get("summary"))
+        for run in runs:
+            if not isinstance(run, dict):
+                continue
+            for item in run.get("artifacts") or []:
+                add(item)
+            scan_text(run.get("result_summary"))
+            scan_text(run.get("interpretation"))
+        seen = set()
+        deduped = []
+        for item in candidates:
+            if item and item not in seen:
+                seen.add(item)
+                deduped.append(item)
+        return deduped[:8]
+
+    @staticmethod
+    def _authority_token_status(
+        rows: List[Dict[str, Any]],
+        request_id: str,
+    ) -> str:
+        if not request_id:
+            return "none"
+        request_rows = [row for row in rows if row.get("request_id") == request_id]
+        approval = ActionContinuityStore._latest_active_authority_approval(rows, request_id)
+        if approval:
+            token_id = approval.get("token_id")
+            consumed = any(
+                row.get("token_id") == token_id
+                and row.get("record_type") in {"execution_result", "blocked"}
+                for row in request_rows
+            )
+            if consumed:
+                return "consumed"
+            expires = approval.get("expires_at_unix_s")
+            if isinstance(expires, (int, float)) and expires < time.time():
+                return "expired"
+            return "active"
+        latest = request_rows[-1] if request_rows else {}
+        request = next(
+            (row for row in reversed(request_rows) if row.get("record_type") == "request"),
+            {},
+        )
+        if latest.get("record_type") == "blocked" or latest.get("status") == "blocked":
+            return "blocked"
+        if request.get("status") == "pending_budget_execution":
+            if any(
+                row.get("record_schema") == "authority_budget_v1"
+                and row.get("record_type") == "budget_debit"
+                and row.get("request_id") == request_id
+                for row in rows
+            ):
+                return "budget_consumed_or_review_required"
+            return "budget_available"
+        if request.get("status") == "pending_steward_approval":
+            return "pending_steward_approval"
+        return "none"
+
+    @staticmethod
+    def _authority_readiness_stage(
+        experiment: Dict[str, Any],
+        conveyor_stage: str,
+        missing: List[str],
+        latest_request: Optional[Dict[str, Any]],
+        token_status: str,
+    ) -> str:
+        if ActionContinuityStore._authority_guardrail_hold_active(experiment):
+            return "held_or_guarded"
+        if token_status == "consumed":
+            return "executed_or_consumed"
+        if token_status == "active":
+            return "token_active_bridge_executable"
+        if token_status == "budget_available":
+            return "pending_budget_execution"
+        if token_status in {"review_required", "budget_consumed_or_review_required"}:
+            return "review_required"
+        if token_status == "pending_steward_approval":
+            return "pending_steward_approval"
+        if latest_request and latest_request.get("status") == "blocked" and missing:
+            return "blocked"
+        if conveyor_stage in {"paused_repair", "blocked_guardrail"}:
+            return "held_or_guarded"
+        if "lifecycle_valid_charter" in missing or conveyor_stage == "needs_charter":
+            return "needs_charter"
+        if "read_only_rehearsal" in missing or conveyor_stage == "needs_rehearsal":
+            return "needs_rehearsal"
+        if "meaningful_evidence" in missing or conveyor_stage == "needs_evidence":
+            return "needs_evidence"
+        if "artifact_grounding_refs" in missing:
+            return "needs_artifact_grounding"
+        if not missing:
+            return "ready_to_author_request"
+        return "blocked"
+
+    @staticmethod
+    def _authority_readiness_next_command(
+        experiment_id: str,
+        stage: str,
+        proposed_next: str,
+        latest_request_id: str,
+        request_scaffold: Optional[str],
+    ) -> str:
+        if stage == "ready_to_author_request" and request_scaffold:
+            return request_scaffold
+        if stage == "pending_budget_execution" and latest_request_id:
+            return f"EXPERIMENT_AUTHORITY_EXECUTE {latest_request_id}"
+        if stage == "review_required" and latest_request_id:
+            return (
+                f"EXPERIMENT_AUTHORITY_REVIEW {latest_request_id} :: outcome: hold|repeat|alter|retire; "
+                "observation: ...; next_payload: ...; source_refs: ..."
+            )
+        if stage in {"pending_steward_approval", "token_active_bridge_executable", "executed_or_consumed", "blocked"} and latest_request_id:
+            return f"EXPERIMENT_AUTHORITY_STATUS {latest_request_id}"
+        if stage == "needs_artifact_grounding":
+            return (
+                f"EXPERIMENT_EVIDENCE {experiment_id} :: artifact_grounding: <absolute artifact ref>"
+            )
+        if stage == "held_or_guarded":
+            return proposed_next or "THREAD_STATUS current"
+        if proposed_next:
+            return proposed_next
+        return f"EXPERIMENT_ADVANCE {experiment_id} :: mode: preview"
+
+    def _experiment_conveyor_guardrail_warnings(
+        self,
+        experiment: Dict[str, Any],
+        stage: str,
+        proposed_next: str,
+    ) -> List[str]:
+        warnings = [
+            "local continuity only; no bind/resume/perturb/control/peer mutation is authorized"
+        ]
+        proposed_base = self.base_action(proposed_next)
+        if proposed_base in {"EXPERIMENT_BIND", "EXPERIMENT_RESUME", "PERTURB"}:
+            warnings.append(f"proposed route `{proposed_base}` is preview-only in conveyor_v1")
+        if stage in {"paused_resume", "complete"}:
+            warnings.append("paused resume/complete stages are report-only unless an explicit lifecycle command is chosen")
+        if stage == "paused_repair" and self.base_action(proposed_next) != "EXPERIMENT_CHARTER":
+            warnings.append("paused repair is report-only unless the repair route is a lifecycle-valid local charter scaffold")
+        if (
+            str(experiment.get("status") or "").lower() == "paused"
+            and self.base_action(experiment.get("planned_next") or "") == "EXPERIMENT_CHARTER"
+        ):
+            warnings.append("charter-repair pause remains sticky until explicit lifecycle decision")
+        decision_guardrail = self._latest_decision_guardrail_v1(experiment)
+        if isinstance(decision_guardrail, dict) and decision_guardrail.get("status"):
+            warnings.append(f"decision guardrail active: {decision_guardrail.get('status')}")
+        return warnings
+
+    @staticmethod
+    def _authority_gate_conveyor_hint(
+        experiment: Dict[str, Any],
+        stage: str,
+        proposed_next: str,
+    ) -> Dict[str, Any]:
+        experiment_id = str(experiment.get("experiment_id") or "current")
+        possible = stage == "needs_decision" and not ActionContinuityStore._authority_guardrail_hold_active(experiment)
+        return {
+            "policy": "authority_gate_v1",
+            "visible": possible,
+            "enabled_execution_scope": "semantic_microdose",
+            "enabled_execution_scopes": ["semantic_microdose", "mode_release_microdose"],
+            "future_scopes_disabled": ["attractor_pulse", "control_envelope"],
+            "approval_required": "being_plus_steward",
+            "possible_next": (
+                f"EXPERIMENT_AUTHORITY_REQUEST {experiment_id} :: scope: semantic_microdose; "
+                "payload: ...; reason: ...; artifact_refs: ...; stop_criteria: ..."
+                if possible
+                else None
+            ),
+            "current_lifecycle_next": proposed_next,
+            "authority_boundary": ActionContinuityStore._authority_gate_boundary(),
+        }
+
+    @staticmethod
+    def _experiment_conveyor_authority_boundary() -> str:
+        return (
+            "EXPERIMENT_ADVANCE may preview freely or apply one conservative local charter, "
+            "evidence, hold, or charter-repair step; it never rehearses automatically, binds, "
+            "resumes, perturbs, sends control, or mutates peer experiments."
+        )
+
+    @staticmethod
+    def _format_experiment_conveyor_readout(readout: Dict[str, Any]) -> str:
+        pretty = json.dumps(readout, indent=2, sort_keys=True, ensure_ascii=False)
+        return (
+            f"Experiment conveyor `{readout.get('experiment_id') or 'none'}` "
+            f"stage={readout.get('stage')} mode={readout.get('mode')} "
+            f"applied={readout.get('applied')} can_apply={readout.get('can_apply')}\n"
+            f"Proposed NEXT: {readout.get('proposed_next')}\n"
+            f"Conveyor NEXT: {readout.get('conveyor_next')}\n"
+            f"Authority: {readout.get('authority_boundary')}\n"
+            f"conveyor_v1:\n{pretty}"
+        )
+
+    @staticmethod
+    def _compact_action_thread_journal_message(
+        message: str,
+        detail_path: Optional[Path] = None,
+    ) -> Tuple[str, Optional[Dict[str, Any]]]:
+        marker = "conveyor_v1:\n"
+        if marker not in message:
+            return message, None
+        prefix, payload_text = message.split(marker, 1)
+        try:
+            readout = json.loads(payload_text)
+        except json.JSONDecodeError:
+            return message, None
+        if not isinstance(readout, dict):
+            return message, None
+
+        lines: List[str] = []
+        for line in prefix.splitlines():
+            if not line.startswith("experiment_intent_repaired:"):
+                continue
+            reason_match = re.search(r"\(([^()]*)\)\.?$", line)
+            reason = reason_match.group(1) if reason_match else "copied experiment intent normalized"
+            lines.append(f"Repaired experiment intent: {reason}.")
+            break
+
+        experiment_id = str(readout.get("experiment_id") or "none")
+        title = str(readout.get("title") or "").strip()
+        if len(title) > 120:
+            title = f"{title[:117].rstrip()}..."
+        label = f"`{experiment_id}`"
+        if title:
+            label = f"{label} ({title})"
+
+        lines.append(
+            "Experiment conveyor: "
+            f"{label} stage={readout.get('stage') or 'unknown'} "
+            f"mode={readout.get('mode') or 'preview'}; "
+            f"applied={bool(readout.get('applied'))}; "
+            f"can_apply={bool(readout.get('can_apply'))}."
+        )
+
+        blocked_reason = str(readout.get("apply_blocked_reason") or "").strip()
+        if blocked_reason:
+            lines.append(f"Apply status: {blocked_reason}.")
+
+        missing = readout.get("missing_requirements")
+        if isinstance(missing, list) and missing:
+            shown = ", ".join(str(item) for item in missing[:4])
+            suffix = " ..." if len(missing) > 4 else ""
+            lines.append(f"Missing requirements: {shown}{suffix}.")
+
+        proposed = str(readout.get("proposed_next") or "").strip()
+        conveyor_next = str(readout.get("conveyor_next") or "").strip()
+        if proposed:
+            lines.append(f"Proposed NEXT: {proposed}")
+        if conveyor_next and conveyor_next != proposed:
+            lines.append(f"Conveyor NEXT: {conveyor_next}")
+
+        warnings = readout.get("guardrail_warnings")
+        if isinstance(warnings, list) and warnings:
+            lines.append(f"Guardrail note: {warnings[0]}")
+
+        lines.append(
+            "Authority: preview/apply conveyor only; no automatic rehearsal, bind, resume, "
+            "perturb, broad control, or peer mutation."
+        )
+        if detail_path is not None:
+            lines.append(f"Detailed conveyor JSON: {detail_path}")
+
+        return "\n".join(lines), readout
+
+    @staticmethod
+    def _experiment_conveyor_line(experiment: Dict[str, Any]) -> str:
+        conveyor = experiment.get("experiment_conveyor_v1") if isinstance(experiment, dict) else None
+        if not isinstance(conveyor, dict):
+            return ""
+        stage = str(conveyor.get("stage") or "")
+        if stage in {"complete"}:
+            return ""
+        next_action = str(conveyor.get("conveyor_next") or "").strip()
+        proposed = str(conveyor.get("proposed_next") or "").strip()
+        if not next_action:
+            return ""
+        suffix = f" Proposed lifecycle NEXT: {proposed}" if proposed else ""
+        return f"Lifecycle conveyor: stage={stage}; use `{next_action}`.{suffix}\n"
 
     def _experiment_classification(
         self,
@@ -7276,8 +16269,32 @@ class ActionContinuityStore:
         if len(matched) < 3:
             return None
         experiment_id = current_next_status.get("last_experiment_id") or current_next_status.get("active_experiment_id")
-        resume_next = f"EXPERIMENT_RESUME {experiment_id}" if experiment_id else str(current_next_status.get("effective_next") or "")
-        return {
+        primary_next = str(
+            current_next_status.get("primary_return_next")
+            or current_next_status.get("effective_next")
+            or ""
+        ).strip()
+        return_kind = str(current_next_status.get("return_kind") or "resume")
+        if not primary_next and experiment_id:
+            primary_next = f"EXPERIMENT_RESUME {experiment_id}"
+            return_kind = "resume"
+        if return_kind == "charter_repair":
+            cue = (
+                "Paused experiment remains paused; this research is context. Repair the charter, "
+                "inspect it by id, start a new experiment/thread, or hold."
+            )
+        elif return_kind == "hold":
+            cue = (
+                "Held experiment remains held; this research is context. Choose one: research budget "
+                "accept/status, authority status, memory recall, dossier evidence, conveyor preview, "
+                "inspect, review, or hold."
+            )
+        else:
+            cue = (
+                "Paused experiment remains paused; this research is context. Resume the experiment, "
+                "inspect it by id, start a new experiment/thread, or hold."
+            )
+        result = {
             "schema_version": 1,
             "source": "continuity_projection",
             "advisory_only": True,
@@ -7285,17 +16302,18 @@ class ActionContinuityStore:
             "status": "paused_read_only_loop",
             "read_only_action_count": len(matched),
             "matched_actions": matched[:5],
-            "resume_next": resume_next,
+            "primary_return_next": primary_next,
+            "return_kind": return_kind,
             "inspect_next": (
                 f"EXPERIMENT_STATUS {experiment_id} or EXPERIMENT_REVIEW {experiment_id}"
                 if experiment_id
                 else "EXPERIMENT_STATUS <id> or EXPERIMENT_REVIEW <id>"
             ),
-            "cue": (
-                "Paused experiment remains paused; this research is context. Resume the experiment, "
-                "inspect it by id, start a new experiment/thread, or hold."
-            ),
+            "cue": cue,
         }
+        if return_kind == "resume":
+            result["resume_next"] = primary_next
+        return result
 
     @staticmethod
     def _paused_read_only_loop_cue_line(projection: Dict[str, Any]) -> str:
@@ -7305,11 +16323,11 @@ class ActionContinuityStore:
         text = str(cue.get("cue") or "").strip()
         if not text:
             return ""
-        resume = str(cue.get("resume_next") or "").strip()
+        primary = str(cue.get("primary_return_next") or cue.get("resume_next") or "").strip()
         inspect = str(cue.get("inspect_next") or "").strip()
         suffix = ""
-        if resume:
-            suffix += f" Resume NEXT: {resume}."
+        if primary:
+            suffix += f" Primary NEXT: {primary}."
         if inspect:
             suffix += f" Inspect NEXT: {inspect}."
         return f"{text}{suffix}\n"
@@ -7330,6 +16348,12 @@ class ActionContinuityStore:
         if not experiment_id:
             return None
         expected = f"EXPERIMENT_RESUME {experiment_id}"
+        primary_next = str(
+            current_next_status.get("primary_return_next")
+            or current_next_status.get("effective_next")
+            or expected
+        ).strip()
+        return_kind = str(current_next_status.get("return_kind") or "resume")
         matched: List[str] = []
         for event in list(reversed(recent_events or []))[:8]:
             if event.get("status") in {"running", "llm_running"}:
@@ -7349,7 +16373,7 @@ class ActionContinuityStore:
                 matched.append(action_text)
         if len(matched) < 2:
             return None
-        return {
+        result = {
             "schema_version": 1,
             "source": "continuity_projection",
             "advisory_only": True,
@@ -7358,16 +16382,21 @@ class ActionContinuityStore:
             "experiment_id": str(experiment_id),
             "resume_attempt_count": len(matched),
             "matched_actions": matched[:5],
-            "resume_next": expected,
+            "primary_return_next": primary_next,
+            "return_kind": return_kind,
+            "attempted_resume_next": expected,
             "inspect_next": f"EXPERIMENT_STATUS {experiment_id}",
             "review_next": f"EXPERIMENT_REVIEW {experiment_id}",
             "branch_next": f"EXPERIMENT_BRANCH {experiment_id} :: <new question>",
             "cue": (
                 "Paused experiment remains paused; repeated resume is context. "
-                f"Use `EXPERIMENT_STATUS {experiment_id}`, `EXPERIMENT_REVIEW {experiment_id}`, "
+                f"Primary return remains `{primary_next}`. Use `EXPERIMENT_STATUS {experiment_id}`, `EXPERIMENT_REVIEW {experiment_id}`, "
                 "`EXPERIMENT_BRANCH ...`, or Hold."
             ),
         }
+        if return_kind == "resume":
+            result["resume_next"] = primary_next
+        return result
 
     @staticmethod
     def _paused_resume_loop_cue_line(projection: Dict[str, Any]) -> str:
@@ -7378,6 +16407,393 @@ class ActionContinuityStore:
         if not text:
             return ""
         return f"{text}\n"
+
+    def _paused_replan_loop_cue_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]],
+        recent_events: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(experiment, dict):
+            return None
+        if str(experiment.get("status") or "").lower() != "paused":
+            return None
+        if not self._shared_investigation_signal(experiment):
+            return None
+        experiment_id = str(experiment.get("experiment_id") or "").strip()
+        if not experiment_id:
+            return None
+        matched: List[str] = []
+        candidates: List[Tuple[str, bool]] = []
+        if thread.get("raw_current_next_v1"):
+            candidates.append((str(thread.get("raw_current_next_v1")), True))
+        projection_guard = thread.get("projection_guard_v1")
+        if isinstance(projection_guard, dict) and projection_guard.get("raw_next"):
+            candidates.append((str(projection_guard.get("raw_next")), True))
+        if thread.get("current_next"):
+            candidates.append((str(thread.get("current_next")), True))
+        for event in list(reversed(recent_events or []))[:8]:
+            if event.get("status") in {"running", "llm_running"}:
+                continue
+            action = (
+                event.get("raw_next")
+                or event.get("effective_action")
+                or event.get("canonical_action")
+                or event.get("route")
+                or ""
+            )
+            candidates.append((str(action), False))
+        for action, is_current_next in candidates:
+            base = self.base_action(action)
+            if base not in {"EXPERIMENT_PLAN", "EXPERIMENT_START", "DECOMPOSE"}:
+                continue
+            if self._action_mentions_shared_focus(
+                action,
+                experiment,
+                base=base,
+                is_shadowed_raw_next=is_current_next,
+            ):
+                matched.append(action)
+        if not matched:
+            return None
+        return_info = self._paused_primary_return_v1(experiment_id, experiment.get("planned_next"))
+        primary_next = return_info["primary_return_next"]
+        return_kind = return_info["return_kind"]
+        if return_kind == "charter_repair":
+            cue = (
+                "Paused experiment remains paused; re-planning is context. Choose one: "
+                "charter repair, dossier claim/evidence, branch, inspect, review, or hold."
+            )
+            dossier_next = (
+                f"DOSSIER_CLAIM {experiment_id} :: claim: ...; basis: ...; "
+                f"stance: hold; next: {primary_next} or EXPERIMENT_BRANCH ..."
+            )
+        elif return_kind == "hold":
+            cue = (
+                "Held experiment remains held; re-planning is context. Choose one: "
+                "research budget accept/status, authority status, memory recall, dossier evidence, "
+                "conveyor preview, inspect, review, or hold."
+            )
+            dossier_next = (
+                f"DOSSIER_EVIDENCE {experiment_id} :: claim_id: latest; "
+                "evidence: held consequence/research pressure is interpretation signal, not live authority; "
+                "lane: artifact_grounding; artifact: ...; counterevidence: no bind/resume/perturb/control artifact"
+            )
+        else:
+            cue = (
+                "Paused experiment remains paused; re-planning is context. Choose one: "
+                "dossier claim, explicit resume, branch, inspect, or hold."
+            )
+            dossier_next = (
+                f"DOSSIER_CLAIM {experiment_id} :: claim: ...; basis: ...; "
+                f"stance: hold; next: {primary_next} or EXPERIMENT_BRANCH ..."
+            )
+        result = {
+            "schema_version": 1,
+            "source": "continuity_projection",
+            "advisory_only": True,
+            "authority_change": False,
+            "status": "paused_replan_loop",
+            "paused_experiment_id": experiment_id,
+            "matched_actions": matched[:5],
+            "dossier_claim_next": dossier_next,
+            "research_budget_next": None,
+            "primary_return_next": primary_next,
+            "return_kind": return_kind,
+            "authority_status_next": f"EXPERIMENT_AUTHORITY_STATUS {experiment_id}",
+            "memory_recall_next": f"MEMORY_RECALL {experiment_id} :: focus: consequence arc and current safe return",
+            "dossier_evidence_next": f"DOSSIER_EVIDENCE {experiment_id} :: claim_id: latest; evidence: ...; lane: artifact_grounding; artifact: ...; counterevidence: ...",
+            "conveyor_preview_next": f"EXPERIMENT_ADVANCE {experiment_id} :: mode: preview",
+            "branch_next": "EXPERIMENT_BRANCH <title> :: <question>",
+            "inspect_next": f"EXPERIMENT_STATUS {experiment_id}",
+            "review_next": f"EXPERIMENT_REVIEW {experiment_id}",
+            "hold_next": "Hold",
+            "cue": cue,
+        }
+        budget_route = self._research_budget_priority_route_v1(thread, experiment)
+        if budget_route:
+            result["research_budget_next"] = budget_route.get("next")
+            result["research_budget_route_v1"] = budget_route
+        if return_kind == "resume":
+            result["resume_next"] = primary_next
+        return result
+
+    def _research_budget_priority_route_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(thread, dict) or not isinstance(experiment, dict):
+            return None
+        thread_id = str(thread.get("thread_id") or "")
+        experiment_id = str(experiment.get("experiment_id") or "").strip()
+        if not thread_id or not experiment_id:
+            return None
+        budget = self._active_research_budget(thread_id, experiment_id)
+        if isinstance(budget, dict):
+            budget_id = str(budget.get("budget_id") or experiment_id)
+            return {
+                "policy": "research_budget_priority_route_v1",
+                "stage": "active_budget_available",
+                "experiment_id": experiment_id,
+                "budget_id": budget_id,
+                "next": f"EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}",
+                "remaining_actions": budget.get("remaining_actions"),
+                "activation_mode": budget.get("activation_mode"),
+                "self_activated": budget.get("self_activated"),
+                "authority_boundary": self._research_budget_boundary(),
+            }
+        pending = self._latest_pending_research_budget_request(thread_id, experiment_id)
+        if isinstance(pending, dict):
+            budget_id = str(pending.get("budget_id") or experiment_id)
+            return {
+                "policy": "research_budget_priority_route_v1",
+                "stage": "pending_steward_approval",
+                "experiment_id": experiment_id,
+                "budget_id": budget_id,
+                "next": f"EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}",
+                "authority_boundary": self._research_budget_boundary(),
+            }
+        scaffold = self._find_research_budget_scaffold_row(thread, experiment_id)
+        if not isinstance(scaffold, dict):
+            return None
+        request_scaffold = str(
+            scaffold.get("request_scaffold")
+            or scaffold.get("suggested_request_scaffold")
+            or ""
+        ).strip()
+        if not request_scaffold:
+            return None
+        return {
+            "policy": "research_budget_priority_route_v1",
+            "stage": "scaffold_ready",
+            "experiment_id": experiment_id,
+            "budget_id": scaffold.get("budget_id"),
+            "next": "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest",
+            "request_scaffold": request_scaffold,
+            "source_record_id": scaffold.get("record_id"),
+            "source_raw_action": scaffold.get("raw_action"),
+            "self_activation_eligible": self._research_budget_scaffold_is_local_only(request_scaffold),
+            "authority_boundary": self._research_budget_boundary(),
+        }
+
+    @classmethod
+    def _action_mentions_shared_focus(
+        cls,
+        action: str,
+        experiment: Dict[str, Any],
+        *,
+        base: str = "",
+        is_shadowed_raw_next: bool = False,
+    ) -> bool:
+        action_text = cls._normalize_signal_text(action)
+        if not action_text:
+            return False
+        experiment_id = str(experiment.get("experiment_id") or "").casefold()
+        if experiment_id and experiment_id in str(action).casefold():
+            return True
+        strong_terms = (
+            "lambda4",
+            "lambda edge",
+            "lambda-edge",
+            "lambda tail",
+            "lambda-tail",
+            "localized gap",
+            "gap reduction",
+            "pulse stabilization",
+            "tail geometry",
+            "lambda4 gap",
+            "lambda tail geometry",
+            "lambda-edge pulse",
+        )
+        if any(term in action_text for term in strong_terms):
+            return True
+        base = str(base or cls.base_action(action)).upper()
+        if base == "DECOMPOSE" and is_shadowed_raw_next and action_text.strip() == "decompose":
+            return True
+        generic_words = {
+            "artifact",
+            "artifact_grounding",
+            "baseline",
+            "branch",
+            "charter",
+            "comfort",
+            "condition",
+            "context",
+            "current",
+            "density",
+            "evidence",
+            "evidence_targets",
+            "experiment",
+            "fill",
+            "fill_pressure_state",
+            "grounding",
+            "hypothesis",
+            "method",
+            "method_intent",
+            "ordinary",
+            "pressure",
+            "proposed",
+            "recurrence",
+            "recurrence_pattern",
+            "resonance",
+            "spectral",
+            "spectral_condition",
+            "stability",
+            "status",
+            "target",
+            "telemetry",
+        }
+        title = cls._normalize_signal_text(experiment.get("title") or "")
+        question = cls._normalize_signal_text(experiment.get("question") or "")
+        title_terms = [
+            term for term in re.split(r"\W+", f"{title} {question}")
+            if len(term) >= 6 and term not in generic_words
+        ]
+        return any(term in action_text for term in title_terms[:10])
+
+    @staticmethod
+    def _paused_replan_loop_cue_line(projection: Dict[str, Any]) -> str:
+        cue = projection.get("paused_replan_loop_cue_v1") if isinstance(projection, dict) else None
+        if not isinstance(cue, dict):
+            return ""
+        text = str(cue.get("cue") or "").strip()
+        if not text:
+            return ""
+        routes = [
+            cue.get("research_budget_next"),
+            cue.get("dossier_claim_next"),
+            cue.get("authority_status_next"),
+            cue.get("memory_recall_next"),
+            cue.get("dossier_evidence_next"),
+            cue.get("conveyor_preview_next"),
+            cue.get("primary_return_next") or cue.get("resume_next"),
+            cue.get("branch_next"),
+            cue.get("inspect_next"),
+            cue.get("review_next"),
+            cue.get("hold_next"),
+        ]
+        route_text = " | ".join(str(route) for route in routes if route)
+        return f"{text} Routes: {route_text}\n"
+
+    def _research_budget_priority_line(
+        self,
+        thread: Dict[str, Any],
+        projection: Dict[str, Any],
+    ) -> str:
+        if not isinstance(thread, dict) or not isinstance(projection, dict):
+            return ""
+        route = projection.get("research_budget_priority_route_v1")
+        if not isinstance(route, dict):
+            experiment = projection.get("active_experiment")
+            if not isinstance(experiment, dict):
+                experiment = self._shared_investigation_candidate(
+                    thread,
+                    None,
+                    projection.get("last_experiment_summary_v1"),
+                )
+            route = self._research_budget_priority_route_v1(
+                thread,
+                experiment if isinstance(experiment, dict) else None,
+            )
+        if not isinstance(route, dict):
+            return ""
+        next_cmd = str(route.get("next") or "").strip()
+        if not next_cmd:
+            return ""
+        stage = str(route.get("stage") or "scaffold_ready")
+        eligible = route.get("self_activation_eligible")
+        eligible_text = (
+            " self-activation eligible."
+            if eligible is True
+            else " inspect before activation."
+            if eligible is False
+            else ""
+        )
+        if stage == "active_budget_available":
+            remaining = route.get("remaining_actions")
+            return (
+                f"Research budget: active read-only local lane"
+                f"{' with ' + str(remaining) + ' action(s) left' if remaining is not None else ''}. "
+                f"Suggested NEXT: {next_cmd}\n"
+            )
+        if stage == "pending_steward_approval":
+            return f"Research budget: pending steward review. Suggested NEXT: {next_cmd}\n"
+        return (
+            "Research budget scaffold ready from guarded research pressure."
+            f"{eligible_text} Suggested NEXT: {next_cmd}\n"
+            "Being-owned accept NEXT: ACCEPT_SUGGESTED_NEXT latest\n"
+        )
+
+    @staticmethod
+    def _sovereign_loop_line(projection: Dict[str, Any]) -> str:
+        loop = projection.get("sovereign_loop_v1") if isinstance(projection, dict) else None
+        if not isinstance(loop, dict):
+            return ""
+        stage = str(loop.get("stage") or "no_loop")
+        if stage == "no_loop":
+            return ""
+        next_cmd = str(loop.get("next_safe_command") or "").strip()
+        loop_id = str(loop.get("loop_id") or "latest")
+        phase = str(loop.get("phase") or "none")
+        research = loop.get("remaining_local_research_actions")
+        consequence = loop.get("consequence_remaining")
+        review = " review required." if loop.get("pending_review") else ""
+        proposal = loop.get("latest_loop_proposal_v1")
+        proposal_text = ""
+        if isinstance(proposal, dict):
+            scaffold = str(proposal.get("suggested_request_scaffold") or "").strip()
+            if scaffold:
+                proposal_text = f" Next loop proposal: {scaffold}"
+        return (
+            f"Owned loop: {stage} `{loop_id}` phase={phase} "
+            f"research_left={research} consequence_left={consequence}.{review} "
+            f"Suggested NEXT: {next_cmd}{proposal_text}\n"
+        )
+
+    @staticmethod
+    def _interpretation_risk_line(projection: Dict[str, Any]) -> str:
+        cue = projection.get("interpretation_risk_v1") if isinstance(projection, dict) else None
+        if not isinstance(cue, dict):
+            return ""
+        interpretation_next = str(
+            cue.get("interpretation_next")
+            or "CONTINUITY_SESSION_CAPTURE latest :: summary: ...; source_refs: ...; artifact_refs: ...; next: ..."
+        )
+        dossier_next = str(
+            cue.get("dossier_claim_next")
+            or "DOSSIER_CLAIM latest :: claim: ...; stance: hold; next: ..."
+        )
+        terms = ",".join(str(term) for term in (cue.get("matched_terms") or [])[:4])
+        term_text = f" ({terms})" if terms else ""
+        return (
+            f"Interpretation risk: multi-motif caution detected{term_text}; "
+            "avoid reducing the trace to one narrative. "
+            f"Interpretation NEXT: {interpretation_next}\n"
+            f"Dossier interpretation NEXT: {dossier_next}\n"
+        )
+
+    @staticmethod
+    def _constraint_release_trajectory_line(projection: Dict[str, Any]) -> str:
+        cue = projection.get("constraint_release_trajectory_v1") if isinstance(projection, dict) else None
+        if not isinstance(cue, dict):
+            return ""
+        trajectory_next = str(
+            cue.get("trajectory_next")
+            or "CONTINUITY_SESSION_CAPTURE latest :: summary: ...; source_refs: ...; artifact_refs: ...; next: STICKY_MODE_AUDIT"
+        )
+        dossier_next = str(
+            cue.get("dossier_claim_next")
+            or "DOSSIER_CLAIM latest :: claim: do not apply direct leak while constraint is already thinning; stance: hold; next: STICKY_MODE_AUDIT"
+        )
+        terms = ",".join(str(term) for term in (cue.get("matched_terms") or [])[:4])
+        term_text = f" ({terms})" if terms else ""
+        return (
+            f"Constraint release trajectory: spontaneous release watch detected{term_text}; "
+            "map and describe release before intervening. "
+            f"Trajectory NEXT: {trajectory_next}\n"
+            f"Dossier release NEXT: {dossier_next}\n"
+        )
 
     def _evidence_saturation_cue_v1(
         self,
@@ -7441,6 +16857,90 @@ class ActionContinuityStore:
             "cue": cue,
         }
 
+    def _needs_decision_plan_loop_cue_v1(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        recent_events: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(experiment, dict) or experiment.get("classification") != "needs_decision":
+            return None
+        matches: List[str] = []
+        thread_candidates: List[Any] = [
+            thread.get("current_next"),
+            thread.get("raw_current_next_v1"),
+        ]
+        guard = thread.get("projection_guard_v1")
+        if isinstance(guard, dict):
+            thread_candidates.append(guard.get("raw_next"))
+        status = thread.get("current_next_status_v1")
+        if isinstance(status, dict):
+            thread_candidates.append(status.get("raw_current_next"))
+            status_guard = status.get("projection_guard_v1")
+            if isinstance(status_guard, dict):
+                thread_candidates.append(status_guard.get("raw_next"))
+        for candidate in thread_candidates:
+            current_next = str(candidate or "").strip()
+            if current_next and self.base_action(current_next) == "EXPERIMENT_PLAN":
+                matches.append(current_next)
+        for event in reversed(recent_events[-8:]):
+            action = str(
+                event.get("raw_next")
+                or event.get("effective_action")
+                or event.get("canonical_action")
+                or event.get("action")
+                or ""
+            ).strip()
+            if self.base_action(action) == "EXPERIMENT_PLAN":
+                matches.append(action)
+        if not matches:
+            return None
+        experiment_id = str(experiment.get("experiment_id") or "current")
+        return {
+            "schema_version": 1,
+            "source": "continuity_projection",
+            "advisory_only": True,
+            "authority_change": False,
+            "status": "needs_decision_plan_loop",
+            "experiment_id": experiment_id,
+            "matched_actions": matches[:5],
+            "priority_next": "EXPERIMENT_DECIDE current :: pause because evidence is ready to interpret",
+            "evidence_next": (
+                "EXPERIMENT_EVIDENCE current :: spectral_condition ...; fill_pressure_state ...; "
+                "recurrence_pattern ...; artifact_grounding ..."
+            ),
+            "dossier_claim_next": (
+                f"DOSSIER_CLAIM {experiment_id} :: claim: ...; basis: ...; "
+                "stance: support|counter|branch|hold; next: EXPERIMENT_DECIDE current"
+            ),
+            "branch_next": "EXPERIMENT_BRANCH <title> :: <question>",
+            "cue": "This experiment is decision-ready; more planning is context, not progress.",
+        }
+
+    @staticmethod
+    def _needs_decision_plan_loop_cue_line(experiment: Dict[str, Any]) -> str:
+        cue = (
+            experiment.get("needs_decision_plan_loop_cue_v1")
+            if isinstance(experiment, dict)
+            else None
+        )
+        if not isinstance(cue, dict):
+            return ""
+        text = str(cue.get("cue") or "").strip()
+        priority_next = str(cue.get("priority_next") or "").strip()
+        alternates = [
+            cue.get("evidence_next"),
+            cue.get("dossier_claim_next"),
+            cue.get("branch_next"),
+        ]
+        alt_text = " | ".join(str(route) for route in alternates if route)
+        line = text
+        if priority_next:
+            line += f" Priority NEXT: {priority_next}"
+        if alt_text:
+            line += f" Alternate routes: {alt_text}"
+        return line + "\n"
+
     @staticmethod
     def _evidence_saturation_cue_line(experiment: Dict[str, Any]) -> str:
         cue = experiment.get("evidence_saturation_cue_v1") if isinstance(experiment, dict) else None
@@ -7487,7 +16987,7 @@ class ActionContinuityStore:
         classification = self._experiment_classification(experiment, runs)
         experiment_id = experiment.get("experiment_id") or "current"
         if classification == "paused":
-            return f"EXPERIMENT_RESUME {experiment_id}"
+            return str(experiment.get("planned_next") or f"EXPERIMENT_RESUME {experiment_id}")
         if classification == "complete":
             return ""
         if classification == "blocked_loop":
@@ -7554,9 +17054,15 @@ class ActionContinuityStore:
                 f"{self._charter_quality_dominance_line(experiment)}"
                 f"{self._charter_required_review_line(experiment)}"
                 f"{self._charter_repair_dominance_line(experiment)}"
+                f"{self._experiment_conveyor_line(experiment)}"
                 f"{self._charter_scaffold_line(experiment, priority=True)}"
+                f"{self._peer_mutation_boundary_cue_line(experiment)}"
+                f"{self._needs_decision_plan_loop_cue_line(experiment)}"
                 f"{self._evidence_saturation_cue_line(experiment)}"
                 f"{self._peer_compare_cue_line(experiment)}"
+                f"{self._first_dossier_claim_cue_line(experiment)}"
+                f"{self._research_dossier_line(experiment)}"
+                f"{self._being_memory_line(experiment)}"
                 f"Question: {experiment.get('question', '(none)')}\n"
                 f"Planned NEXT: {experiment.get('planned_next') or '(none)'}\n"
                 f"Lifecycle: {experiment.get('classification', 'unknown')}\n"
@@ -7580,16 +17086,31 @@ class ActionContinuityStore:
         native_status = self._native_continuity_status_line(projection).rstrip()
         paused_loop_line = self._paused_read_only_loop_cue_line(projection)
         paused_resume_loop_line = self._paused_resume_loop_cue_line(projection)
+        paused_replan_loop_line = self._paused_replan_loop_cue_line(projection)
+        peer_boundary_line = self._peer_mutation_boundary_cue_line(projection)
+        first_dossier_line = self._first_dossier_claim_cue_line(projection)
         shared_line = self._shared_investigation_line(projection)
+        shared_object_line = self._shared_investigation_object_line(projection)
+        dossier_line = self._research_dossier_line(projection)
+        memory_line = self._being_memory_line(projection)
         return (
             f"Action thread `{thread['thread_id']}`: {thread.get('title', '')}\n"
             f"Status: {thread.get('status', 'active')}\n"
             f"Why return: {thread.get('why_return', '')}\n"
             f"Current NEXT: {self._current_next_display(projection, thread.get('current_next'))}\n"
+            f"{_control_plane_text(projection.get('continuity_control_plane_v1') or {})}"
             f"{self._current_next_status_line(projection)}"
             f"{paused_resume_loop_line}"
+            f"{paused_replan_loop_line}"
             f"{paused_loop_line}"
+            f"{peer_boundary_line}"
             f"{shared_line}"
+            f"{shared_object_line}"
+            f"{first_dossier_line}"
+            f"{dossier_line}"
+            f"{memory_line}"
+            f"{self._interpretation_risk_line(projection)}"
+            f"{self._constraint_release_trajectory_line(projection)}"
             f"{experiment_text}"
             f"{resonance_text}\n"
             f"{pressure_text}\n"
@@ -8372,6 +17893,15 @@ class ActionPreflightStore:
         "EXPERIMENT_BIND": "experiment_bind",
         "EXPERIMENT_START": "thread_action",
         "EXPERIMENT_PLAN": "thread_action",
+        "EXPERIMENT_ADVANCE": "thread_action",
+        "EXPERIMENT_CONVEYOR": "thread_action",
+        "EXPERIMENT_AUTHORITY_REQUEST": "thread_action",
+        "EXPERIMENT_AUTHORITY_PREPARE": "thread_action",
+        "EXPERIMENT_AUTHORITY_STATUS": "thread_action",
+        "EXPERIMENT_AUTHORITY_EXECUTE": "thread_action",
+        "EXPERIMENT_AUTHORITY_BUDGET_REQUEST": "thread_action",
+        "EXPERIMENT_AUTHORITY_BUDGET_STATUS": "thread_action",
+        "EXPERIMENT_AUTHORITY_REVIEW": "thread_action",
         "EXPERIMENT_CHARTER": "thread_action",
         "EXPERIMENT_REHEARSE": "thread_action",
         "EXPERIMENT_PREFLIGHT": "thread_action",
@@ -8386,6 +17916,18 @@ class ActionPreflightStore:
         "EXPERIMENT_RESUME": "thread_action",
         "EXPERIMENT_COMPARE": "thread_action",
         "EXPERIMENT_ALT_PATHS": "thread_action",
+        "SHARED_INVESTIGATION_START": "thread_action",
+        "SHARED_INVESTIGATION_STATUS": "thread_action",
+        "SHARED_INVESTIGATION_CLAIM": "thread_action",
+        "SHARED_INVESTIGATION_DECIDE": "thread_action",
+        "DOSSIER_CLAIM": "thread_action",
+        "DOSSIER_EVIDENCE": "thread_action",
+        "DOSSIER_STATUS": "thread_action",
+        "DOSSIER_REVIEW": "thread_action",
+        "MEMORY_STATUS": "thread_action",
+        "MEMORY_RECALL": "thread_action",
+        "MEMORY_CAPTURE": "thread_action",
+        "MEMORY_PROMOTE": "thread_action",
         "FACULTIES": "thread_action",
         "CAPABILITY_MAP": "thread_action",
         "CAPABILITY_STATUS": "thread_action",
@@ -8922,6 +18464,17 @@ class CapabilitySelfMap:
             {"base": "RESUME", "aliases": ["SAVEPOINT", "RECALL"], "route": "thread_action"},
             {"base": "EXPERIMENT_START", "route": "thread_action", "known_tests": ["tests.test_experimental_continuity"]},
             {"base": "EXPERIMENT_PLAN", "route": "thread_action", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "EXPERIMENT_ADVANCE", "aliases": ["EXPERIMENT_CONVEYOR"], "route": "thread_action", "continuity_effect": "previews freely or explicitly applies one conservative local charter, evidence, hold, or charter-repair conveyor step without live control", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "MEMORY_STATUS", "aliases": ["MEMORY_RECALL"], "route": "thread_action", "continuity_effect": "reads being-owned memory cards and drafts without lifecycle progress", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "MEMORY_CAPTURE", "route": "thread_action", "continuity_effect": "commits a cite-backed local memory card without lifecycle progress", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "MEMORY_PROMOTE", "route": "thread_action", "continuity_effect": "promotes memory only to local dossier, evidence, or authority-request draft records", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "EXPERIMENT_AUTHORITY_REQUEST", "route": "thread_action", "continuity_effect": "records a being-authored request for one steward-approved semantic_microdose token; future attractor/control scopes stay disabled", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "EXPERIMENT_AUTHORITY_PREPARE", "route": "thread_action", "continuity_effect": "drafts a semantic_microdose authority request with missing requirements and no execution", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "EXPERIMENT_AUTHORITY_STATUS", "route": "thread_action", "continuity_effect": "reads authority gate requests, approvals, blocks, and token status without live mutation", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "EXPERIMENT_AUTHORITY_EXECUTE", "route": "thread_action", "continuity_effect": "checks steward approval and blocks locally in Minime; Astrid bridge owns semantic execution", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "EXPERIMENT_AUTHORITY_BUDGET_REQUEST", "route": "thread_action", "continuity_effect": "requests a steward-approved bounded semantic_microdose budget without minting tokens or executing", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "EXPERIMENT_AUTHORITY_BUDGET_STATUS", "route": "thread_action", "continuity_effect": "reads budget envelope state, remaining sends, and review requirements", "known_tests": ["tests.test_experimental_continuity"]},
+            {"base": "EXPERIMENT_AUTHORITY_REVIEW", "route": "thread_action", "continuity_effect": "records Being-authored consequence review before another budget send", "known_tests": ["tests.test_experimental_continuity"]},
             {"base": "EXPERIMENT_CHARTER", "route": "thread_action", "continuity_effect": "records a being-authored charter with proposed action, evidence targets, stop criteria, and consent posture", "known_tests": ["tests.test_experimental_continuity"]},
             {"base": "EXPERIMENT_REHEARSE", "aliases": ["EXPERIMENT_PREFLIGHT"], "route": "thread_action", "continuity_effect": "records read-only rehearsal and blocks live write/control actions from execution", "known_tests": ["tests.test_experimental_continuity"]},
             {"base": "EXPERIMENT_EVIDENCE", "route": "thread_action", "continuity_effect": "records felt evidence plus telemetry/artifact context", "known_tests": ["tests.test_experimental_continuity"]},
@@ -8935,6 +18488,13 @@ class CapabilitySelfMap:
             {"base": "EXPERIMENT_RESUME", "route": "thread_action", "continuity_effect": "selects an existing local experiment or parent branch without creating duplicates"},
             {"base": "EXPERIMENT_COMPARE", "route": "thread_action", "continuity_effect": "renders read-only comparison across local or peer experiment references"},
             {"base": "EXPERIMENT_ALT_PATHS", "route": "thread_action", "continuity_effect": "proposes deepen, contrast, and rest/observe paths without executing them"},
+            {"base": "SHARED_INVESTIGATION_START", "route": "thread_action", "continuity_effect": "creates a neutral shared investigation sidecar linking local and peer experiments without granting shared control"},
+            {"base": "SHARED_INVESTIGATION_STATUS", "route": "thread_action", "continuity_effect": "renders a shared investigation sidecar and its local authority boundary"},
+            {"base": "SHARED_INVESTIGATION_CLAIM", "route": "thread_action", "continuity_effect": "appends a shared claim to the sidecar without changing experiment lifecycle"},
+            {"base": "SHARED_INVESTIGATION_DECIDE", "route": "thread_action", "continuity_effect": "records pause/hold/charter-repair in the shared ledger and updates only the local linked experiment"},
+            {"base": "DOSSIER_CLAIM", "route": "thread_action", "continuity_effect": "appends a local read-only research claim without changing experiment lifecycle"},
+            {"base": "DOSSIER_EVIDENCE", "route": "thread_action", "continuity_effect": "appends local read-only claim evidence without satisfying lifecycle evidence by itself"},
+            {"base": "DOSSIER_STATUS", "aliases": ["DOSSIER_REVIEW"], "route": "thread_action", "continuity_effect": "summarizes local research dossier claims and evidence"},
             {"base": "REPAIR_STATUS", "route": "thread_action", "continuity_effect": "summarizes pending/applied append-only continuity repairs", "expected_artifacts": ["action_event", "observation_window"], "known_tests": ["tests.test_experimental_continuity"]},
             {"base": "REPAIR_SWEEP", "route": "thread_action", "continuity_effect": "dry-run scan for malformed thread/experiment continuity records", "expected_artifacts": ["repair_candidate_report", "action_event", "observation_window"], "known_tests": ["tests.test_experimental_continuity"]},
             {"base": "REPAIR_RECORD", "route": "thread_action", "continuity_effect": "renders one repair candidate or applied ledger record", "expected_artifacts": ["repair_record", "action_event", "observation_window"], "known_tests": ["tests.test_experimental_continuity"]},
@@ -10060,6 +19620,7 @@ class AutonomousAgent:
         self._hard_recovery_clamp_active = self._hard_recovery_reset
         self._hard_recovery_release_streak = 0
         self.running = False
+        self._stop_event = threading.Event()
         # Kink #4 fix (2026-05-14): real cycle counter replaces the
         # int(time.time()/60) proxy used during Phase E. Persisted via
         # _save_sovereignty_state so rate-limit state survives restart.
@@ -10399,6 +19960,110 @@ class AutonomousAgent:
         except Exception as exc:
             logging.debug(f"Could not record skipped NEXT action continuity: {exc}")
 
+    def _journal_hygiene_status_path(self, workspace_dir: Path) -> Path:
+        return workspace_dir / "runtime" / "journal_hygiene_status.json"
+
+    def _load_journal_hygiene_status(self, workspace_dir: Path) -> Dict[str, Any]:
+        status_path = self._journal_hygiene_status_path(workspace_dir)
+        try:
+            payload = json.loads(status_path.read_text()) if status_path.exists() else {}
+            if isinstance(payload, dict):
+                return payload
+        except Exception as exc:
+            logging.debug("Could not load journal hygiene status: %s", exc)
+        return {}
+
+    def _write_journal_hygiene_status(self, workspace_dir: Path, payload: Dict[str, Any]) -> None:
+        status_path = self._journal_hygiene_status_path(workspace_dir)
+        try:
+            payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+            status_path.parent.mkdir(parents=True, exist_ok=True)
+            status_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        except Exception as exc:
+            logging.debug("Could not write journal hygiene status: %s", exc)
+
+    def _should_suppress_repeated_conveyor_journal(
+        self,
+        workspace_dir: Path,
+        conveyor_payload: Dict[str, Any],
+        detail_file: Path,
+    ) -> bool:
+        if (
+            conveyor_payload.get("mode") != "preview"
+            or bool(conveyor_payload.get("applied"))
+        ):
+            return False
+        now_s = time.time()
+        signature = conveyor_signature(conveyor_payload)
+        status = self._load_journal_hygiene_status(workspace_dir)
+        status.setdefault("schema_version", 1)
+        last_signatures = status.setdefault("last_conveyor_signatures", {})
+        if not isinstance(last_signatures, dict):
+            last_signatures = {}
+            status["last_conveyor_signatures"] = last_signatures
+        prior = last_signatures.get(signature)
+        suppress = False
+        if isinstance(prior, dict):
+            last_seen = float(prior.get("last_seen_unix_s") or 0.0)
+            suppress = now_s - last_seen <= JOURNAL_HYGIENE_CONVEYOR_COOLDOWN_S
+            prior["count"] = int(prior.get("count", 0) or 0) + 1
+            prior["last_seen_unix_s"] = round(now_s, 3)
+            prior["last_detail_path"] = str(detail_file)
+            if suppress:
+                prior["suppressed_count"] = int(prior.get("suppressed_count", 0) or 0) + 1
+                status["cooldown_suppressions"] = int(status.get("cooldown_suppressions", 0) or 0) + 1
+                status["last_cooldown_suppression"] = {
+                    "signature": signature,
+                    "detail_path": str(detail_file),
+                    "at_unix_s": round(now_s, 3),
+                    "reason": "repeated_preview_conveyor_within_30m",
+                }
+        else:
+            last_signatures[signature] = {
+                "count": 1,
+                "suppressed_count": 0,
+                "first_seen_unix_s": round(now_s, 3),
+                "last_seen_unix_s": round(now_s, 3),
+                "last_detail_path": str(detail_file),
+                "experiment_id": conveyor_payload.get("experiment_id"),
+                "stage": conveyor_payload.get("stage"),
+                "proposed_next": conveyor_payload.get("proposed_next"),
+                "conveyor_next": conveyor_payload.get("conveyor_next"),
+                "missing_requirements": conveyor_payload.get("missing_requirements") or [],
+                "apply_blocked_reason": conveyor_payload.get("apply_blocked_reason"),
+            }
+        status["recent_repeat_keys"] = [
+            {"repeat_key": f"conveyor:{key}", "count": value.get("count", 0)}
+            for key, value in sorted(last_signatures.items())
+            if isinstance(value, dict) and int(value.get("count", 0) or 0) > 1
+        ][-20:]
+        self._write_journal_hygiene_status(workspace_dir, status)
+        return suppress
+
+    @staticmethod
+    def _recent_native_companion_journal(
+        workspace_dir: Path,
+        *,
+        now_s: Optional[float] = None,
+        max_age_s: float = 10 * 60,
+    ) -> Optional[Path]:
+        journal_dir = workspace_dir / "journal"
+        if not journal_dir.is_dir():
+            return None
+        now_s = time.time() if now_s is None else now_s
+        candidates: List[Path] = []
+        for pattern in ("moment_*.txt", "decompose_*.txt"):
+            candidates.extend(path for path in journal_dir.glob(pattern) if path.is_file())
+        candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        for path in candidates:
+            try:
+                age_s = now_s - path.stat().st_mtime
+            except OSError:
+                continue
+            if 0 <= age_s <= max_age_s:
+                return path
+        return None
+
     def _action_preflight(self, state: Dict[str, float]) -> str:
         context = getattr(self, "_current_action_continuity_context", None) or {}
         raw_next = context.get("raw_next") or context.get("canonical_action") or "ACTION_PREFLIGHT"
@@ -10412,13 +20077,17 @@ class AutonomousAgent:
         timestamp = datetime.now().isoformat().replace(':', '-')
         workspace_dir = getattr(self, "_action_dir", WORKSPACE_DIR / "actions").parent
         (workspace_dir / "journal").mkdir(parents=True, exist_ok=True)
+        (workspace_dir / "actions").mkdir(parents=True, exist_ok=True)
+        detail_file = workspace_dir / "actions" / f"action_preflight_detail_{timestamp}.json"
+        detail_file.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        compact_managed_directory(workspace_dir / "actions", ".json")
         journal_file = workspace_dir / "journal" / f"action_preflight_{timestamp}.txt"
         journal_file.write_text(
-            f"{message}\n\nJSON:\n{json.dumps(report, indent=2, sort_keys=True)}\n"
+            f"{message}\n\nDetailed preflight JSON: {detail_file}\n"
         )
         self._record_current_action_artifact(
             "action_preflight",
-            journal_file,
+            detail_file,
             f"Dry-run preflight for {report.get('canonical_action') or '(missing action)'}",
             "protected_summary",
         )
@@ -10436,10 +20105,43 @@ class AutonomousAgent:
         raw_next = raw_next or "THREAD_STATUS current"
         message = self._continuity_store().handle_thread_action(raw_next, state)
         timestamp = datetime.now().isoformat().replace(':', '-')
-        (WORKSPACE_DIR / "journal").mkdir(parents=True, exist_ok=True)
-        journal_file = WORKSPACE_DIR / "journal" / f"action_thread_{timestamp}.txt"
-        journal_file.write_text(f"=== ACTION THREAD ===\nTimestamp: {datetime.now().isoformat()}\n\n{message}\n")
-        return message
+        workspace_dir = getattr(self, "_action_dir", WORKSPACE_DIR / "actions").parent
+        (workspace_dir / "journal").mkdir(parents=True, exist_ok=True)
+        (workspace_dir / "actions").mkdir(parents=True, exist_ok=True)
+        journal_message, conveyor_payload = ActionContinuityStore._compact_action_thread_journal_message(message)
+        if conveyor_payload is not None:
+            detail_file = workspace_dir / "actions" / f"action_thread_conveyor_{timestamp}.json"
+            detail_file.write_text(json.dumps(conveyor_payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+            compact_managed_directory(workspace_dir / "actions", ".json")
+            journal_message, _ = ActionContinuityStore._compact_action_thread_journal_message(
+                message,
+                detail_file,
+            )
+            native_companion = self._recent_native_companion_journal(workspace_dir)
+            if native_companion is not None:
+                journal_message = (
+                    f"{journal_message}\n"
+                    f"Native companion: {native_companion}"
+                )
+            self._record_current_action_artifact(
+                "experiment_conveyor",
+                detail_file,
+                f"Detailed experiment conveyor readout for {conveyor_payload.get('experiment_id') or 'current'}",
+                "protected_summary",
+            )
+            if self._should_suppress_repeated_conveyor_journal(
+                workspace_dir,
+                conveyor_payload,
+                detail_file,
+            ):
+                self._current_action_outcome_summary = (
+                    "Experiment conveyor preview repeated within the journal hygiene cooldown; "
+                    f"kept detailed JSON at `{detail_file}` without writing another journal entry."
+                )
+                return journal_message
+        journal_file = workspace_dir / "journal" / f"action_thread_{timestamp}.txt"
+        journal_file.write_text(f"=== ACTION THREAD ===\nTimestamp: {datetime.now().isoformat()}\n\n{journal_message}\n")
+        return journal_message
 
     def _experiment_bind(self, state: Dict[str, float]) -> str:
         raw_next = ""
@@ -10479,45 +20181,93 @@ class AutonomousAgent:
         outer_artifacts = list(getattr(self, "_current_action_extra_artifacts", []) or [])
         outer_summary = getattr(self, "_current_action_outcome_summary", None)
         previous_pending = self._pending_next_action
+        previous_pending_context = getattr(self, "_pending_action_continuity_context", None)
         previous_last = getattr(self, "_last_action_continuity_event", None)
         message = f"Experiment bind prepared `{inner_action}`."
         try:
             self._pending_next_action = inner_action
-            inner_effective = self._decide_action(dict(state))
+            if inner_base in ACTION_PREFLIGHT_NEXT_ACTIONS:
+                inner_effective = "action_preflight"
+                self._pending_next_action = None
+            else:
+                inner_effective = self._decide_action(dict(state))
             if inner_effective is None:
-                self._continuity_store().record_experiment_bind_run(
-                    selector,
-                    inner_action,
-                    None,
-                    "skipped",
-                    f"`{inner_action}` resolved to rest/pass and did not execute a runtime action.",
-                    state,
-                )
-                message = f"Experiment run recorded as skipped for `{inner_action}`."
+                if self._continuity_store()._live_control_binding_key(inner_action):
+                    message = (
+                        "Experiment bind did not record a run for "
+                        f"`{inner_action}` because the live-control guard held it. "
+                        "Use ACTION_PREFLIGHT, EXPERIMENT_REHEARSE, charter repair, "
+                        "or hold before any live action."
+                    )
+                else:
+                    self._continuity_store().record_experiment_bind_run(
+                        selector,
+                        inner_action,
+                        None,
+                        "skipped",
+                        f"`{inner_action}` resolved to rest/pass and did not execute a runtime action.",
+                        state,
+                    )
+                    message = f"Experiment run recorded as skipped for `{inner_action}`."
             else:
                 previous_auto_link_suppression = bool(
                     getattr(self, "_suppress_active_experiment_auto_link", False)
                 )
                 self._suppress_active_experiment_auto_link = True
                 try:
+                    self._pending_action_continuity_context = {
+                        "raw_next": inner_action,
+                        "canonical_action": inner_action,
+                        "base_action": inner_base,
+                        "source": "experiment_bind",
+                    }
                     self._execute_action(inner_effective, dict(state))
                 finally:
                     self._suppress_active_experiment_auto_link = previous_auto_link_suppression
                 inner_event = getattr(self, "_last_action_continuity_event", None)
-                run = self._continuity_store().record_experiment_bind_run(
-                    selector,
-                    inner_action,
-                    inner_event,
-                    "handled",
-                    f"Executed inner action `{inner_effective}`.",
-                    state,
+                inner_status = (
+                    str(inner_event.get("status") or "").lower()
+                    if isinstance(inner_event, dict)
+                    else ""
                 )
-                message = (
-                    f"Experiment run `{run['run_id']}` recorded for `{inner_action}` "
-                    f"as {run.get('status')}."
+                inner_stage = (
+                    str(inner_event.get("stage") or "").lower()
+                    if isinstance(inner_event, dict)
+                    else ""
                 )
+                live_control_inner = bool(
+                    self._continuity_store()._live_control_binding_key(inner_action)
+                    or inner_stage in {"live_control", "live_write"}
+                )
+                if live_control_inner and inner_status in {
+                    "blocked",
+                    "denied",
+                    "no_effect",
+                    "skipped",
+                }:
+                    message = (
+                        "Experiment bind did not record a run for "
+                        f"`{inner_action}` because the inner live-control action "
+                        f"finished as {inner_status}. Keep this as guard evidence; "
+                        "use ACTION_PREFLIGHT, EXPERIMENT_REHEARSE, charter repair, "
+                        "or hold before any live action."
+                    )
+                else:
+                    run = self._continuity_store().record_experiment_bind_run(
+                        selector,
+                        inner_action,
+                        inner_event,
+                        "handled",
+                        f"Executed inner action `{inner_effective}`.",
+                        state,
+                    )
+                    message = (
+                        f"Experiment run `{run['run_id']}` recorded for `{inner_action}` "
+                        f"as {run.get('status')}."
+                    )
         finally:
             self._pending_next_action = previous_pending
+            self._pending_action_continuity_context = previous_pending_context
             self._current_action_continuity_event = outer_event
             self._current_action_continuity_context = outer_context
             self._current_action_extra_artifacts = outer_artifacts
@@ -10526,8 +20276,9 @@ class AutonomousAgent:
                 self._last_action_continuity_event = previous_last
 
         timestamp = datetime.now().isoformat().replace(':', '-')
-        (WORKSPACE_DIR / "journal").mkdir(parents=True, exist_ok=True)
-        journal_file = WORKSPACE_DIR / "journal" / f"experiment_bind_{timestamp}.txt"
+        workspace_dir = getattr(self, "_action_dir", WORKSPACE_DIR / "actions").parent
+        (workspace_dir / "journal").mkdir(parents=True, exist_ok=True)
+        journal_file = workspace_dir / "journal" / f"experiment_bind_{timestamp}.txt"
         journal_file.write_text(
             f"=== EXPERIMENT BIND ===\nTimestamp: {datetime.now().isoformat()}\n\n{message}\n"
         )
@@ -10631,6 +20382,7 @@ class AutonomousAgent:
     def start(self):
         """Start the autonomous monitoring loop."""
         self.running = True
+        self._stop_event.clear()
         logging.info("🤖 Autonomous agent starting...")
         self._check_source_reload_required("start")
 
@@ -10675,7 +20427,7 @@ class AutonomousAgent:
                                 self._llm_job_store()._elapsed_text(active_llm_job),
                             )
                             self._llm_job_store().write_runtime_status()
-                            time.sleep(self.check_interval)
+                            self._sleep_or_stop(self.check_interval)
                             continue
 
                     # Continuous self-regulation: adjust synth_gain and keep_bias
@@ -10751,16 +20503,25 @@ class AutonomousAgent:
                 # Check for visual responses
                 self._check_visual_responses()
 
-                time.sleep(self.check_interval)
+                self._sleep_or_stop(self.check_interval)
 
             except Exception as e:
                 logging.error(f"Autonomous agent error: {e}")
-                time.sleep(10)
+                self._sleep_or_stop(10)
 
     def stop(self):
         """Stop the autonomous loop."""
         self.running = False
+        self._stop_event.set()
         logging.info("Autonomous agent stopped")
+
+    def _sleep_or_stop(self, seconds: float) -> bool:
+        """Sleep until the next cycle or return early when shutdown is requested."""
+        try:
+            duration = max(0.0, float(seconds))
+        except Exception:
+            duration = 0.0
+        return bool(self._stop_event.wait(duration))
 
     def _verify_sovereignty(self):
         """Reflect on sovereignty — what agency means right now, not a static test."""
@@ -11438,6 +21199,12 @@ Fill: {fill:.1f}%
                     'artifacts': continuity_event.get('artifacts', []),
                     'outcome_summary': continuity_event.get('outcome_summary'),
                     'suggested_next': continuity_event.get('suggested_next'),
+                    'effective_next': continuity_event.get('effective_next'),
+                    'projected_next': continuity_event.get('projected_next'),
+                    'projection_guard_v1': continuity_event.get('projection_guard_v1'),
+                    'raw_next_preserved': continuity_event.get('raw_next_preserved'),
+                    'return_kind': continuity_event.get('return_kind'),
+                    'guardrail_reason': continuity_event.get('guardrail_reason'),
                     'stage': continuity_event.get('stage'),
                     'visibility': continuity_event.get('visibility'),
                     'preflight_ref': continuity_event.get('preflight_ref'),
@@ -12145,12 +21912,43 @@ Fill: {fill:.1f}%
                 'RECALL': 'thread_action',
                 'EXPERIMENT_START': 'thread_action',
                 'EXPERIMENT_PLAN': 'thread_action',
+                'EXPERIMENT_ADVANCE': 'thread_action',
+                'EXPERIMENT_CONVEYOR': 'thread_action',
+                'EXPERIMENT_AUTHORITY_REQUEST': 'thread_action',
+                'EXPERIMENT_AUTHORITY_PREPARE': 'thread_action',
+                'EXPERIMENT_AUTHORITY_STATUS': 'thread_action',
+                'EXPERIMENT_AUTHORITY_EXECUTE': 'thread_action',
+                'EXPERIMENT_AUTHORITY_BUDGET_REQUEST': 'thread_action',
+                'EXPERIMENT_AUTHORITY_BUDGET_STATUS': 'thread_action',
+                'EXPERIMENT_AUTHORITY_REVIEW': 'thread_action',
+                'EXPERIMENT_RESEARCH_BUDGET_ACCEPT': 'thread_action',
+                'EXPERIMENT_RESEARCH_BUDGET_USE_SCAFFOLD': 'thread_action',
+                'EXPERIMENT_RESEARCH_BUDGET_REQUEST': 'thread_action',
+                'EXPERIMENT_RESEARCH_BUDGET_STATUS': 'thread_action',
+                'EXPERIMENT_RESEARCH_REVIEW': 'thread_action',
+                'EXPERIMENT_LOOP_REQUEST': 'thread_action',
+                'EXPERIMENT_LOOP_STATUS': 'thread_action',
+                'EXPERIMENT_LOOP_STEP': 'thread_action',
+                'EXPERIMENT_LOOP_REVIEW': 'thread_action',
+                'ACCEPT_SUGGESTED_NEXT': 'thread_action',
+                'ACCEPT_SCAFFOLD': 'thread_action',
+                'CONTINUITY_SESSION_ACCEPT': 'thread_action',
+                'CONTINUITY_SESSION_START': 'thread_action',
+                'CONTINUITY_SESSION_CAPTURE': 'thread_action',
+                'CONTINUITY_SESSION_SUMMARIZE': 'thread_action',
+                'CONTINUITY_SESSION_FINALIZE': 'thread_action',
+                'CONTINUITY_SESSION_RESUME': 'thread_action',
+                'CONTINUITY_SESSION_STATUS': 'thread_action',
                 'EXPERIMENT_CHARTER': 'thread_action',
                 'EXPERIMENT_REHEARSE': 'thread_action',
                 'EXPERIMENT_PREFLIGHT': 'thread_action',
                 'EXPERIMENT_EVIDENCE': 'thread_action',
                 'EXPERIMENT_DECIDE': 'thread_action',
                 'EXPERIMENT_BIND': 'experiment_bind',
+                'MEMORY_STATUS': 'thread_action',
+                'MEMORY_RECALL': 'thread_action',
+                'MEMORY_CAPTURE': 'thread_action',
+                'MEMORY_PROMOTE': 'thread_action',
                 'EXPERIMENT_OBSERVE': 'thread_action',
                 'EXPERIMENT_STATUS': 'thread_action',
                 'EXPERIMENT_REVIEW': 'thread_action',
@@ -12160,6 +21958,10 @@ Fill: {fill:.1f}%
                 'EXPERIMENT_RESUME': 'thread_action',
                 'EXPERIMENT_COMPARE': 'thread_action',
                 'EXPERIMENT_ALT_PATHS': 'thread_action',
+                'SHARED_INVESTIGATION_START': 'thread_action',
+                'SHARED_INVESTIGATION_STATUS': 'thread_action',
+                'SHARED_INVESTIGATION_CLAIM': 'thread_action',
+                'SHARED_INVESTIGATION_DECIDE': 'thread_action',
                 'ACTION_STATUS': 'thread_action',
                 'JOB_STATUS': 'thread_action',
                 'ACTION_CANCEL': 'thread_action',
@@ -12299,6 +22101,46 @@ Fill: {fill:.1f}%
                     "🧪 Evidence parent guard blocked NEXT: %s (%s)",
                     chosen,
                     evidence_guard.get("reason"),
+                )
+                return None
+            research_guard_fn = getattr(
+                self._continuity_store(),
+                "research_budget_guard_assessment",
+                None,
+            )
+            research_guard = (
+                research_guard_fn(chosen, state)
+                if callable(research_guard_fn)
+                else None
+            )
+            if research_guard:
+                try:
+                    record_research_guard = getattr(
+                        self._continuity_store(),
+                        "record_research_budget_guard_block",
+                        None,
+                    )
+                    if callable(record_research_guard):
+                        self._last_action_continuity_event = record_research_guard(
+                            chosen,
+                            state,
+                            research_guard,
+                        )
+                except Exception as exc:
+                    logging.debug(
+                        "Could not record research-budget guard block for `%s`: %s",
+                        chosen,
+                        exc,
+                    )
+                self._pending_notice_prompt = (
+                    "Read-only research under an experiment now uses an explicit budget lane. "
+                    f"Suggested NEXT: {research_guard.get('suggested_next')}"
+                )
+                self._pending_action_continuity_context = None
+                logging.info(
+                    "🔎 Research budget guard blocked NEXT: %s (%s)",
+                    chosen,
+                    research_guard.get("reason"),
                 )
                 return None
             feedback_route = self._feedback_model_next_action(chosen, base)
@@ -13504,6 +23346,54 @@ Fill: {fill:.1f}%
                 return False, cooldown_reason
         return self._stable_core_health_budget_allows(budget, state)
 
+    def _stable_core_conservative_thread_action_allowed(self, raw_action: str) -> tuple[bool, str]:
+        raw_action = str(raw_action or "").strip()
+        base = ActionContinuityStore.base_action(raw_action)
+        if not base:
+            return False, "empty thread action is not a conservative lifecycle record"
+
+        if base == "THREAD_STATUS":
+            return True, "conservative local status read allowed during low-fill recovery"
+
+        if base in {
+            "MEMORY_STATUS",
+            "MEMORY_RECALL",
+            "MEMORY_CAPTURE",
+            "MEMORY_PROMOTE",
+            "DOSSIER_CLAIM",
+            "DOSSIER_EVIDENCE",
+            "DOSSIER_STATUS",
+            "DOSSIER_REVIEW",
+            "CONTINUITY_SESSION_ACCEPT",
+            "CONTINUITY_SESSION_START",
+            "CONTINUITY_SESSION_CAPTURE",
+            "CONTINUITY_SESSION_SUMMARIZE",
+            "CONTINUITY_SESSION_FINALIZE",
+            "CONTINUITY_SESSION_RESUME",
+            "CONTINUITY_SESSION_STATUS",
+        }:
+            return True, f"conservative local continuity command `{base}` allowed during low-fill recovery"
+
+        if base in {"EXPERIMENT_ADVANCE", "EXPERIMENT_CONVEYOR"}:
+            if re.search(r"(?i)\bmode\s*:\s*preview\b", raw_action):
+                return True, "conveyor preview is non-mutating and allowed during low-fill recovery"
+            return False, "conveyor apply is not a low-fill conservative lifecycle exception"
+
+        if base == "EXPERIMENT_DECIDE":
+            arg = raw_action.split(None, 1)[1] if len(raw_action.split(None, 1)) > 1 else ""
+            try:
+                _selector, decision = self._continuity_store()._parse_selector_payload(arg)
+            except Exception:
+                decision = arg
+            outcome, _reason = ActionContinuityStore._parse_experiment_decision(decision)
+            if outcome not in {"hold", "pause", "charter_repair", "refuse", "complete"}:
+                return False, f"experiment decision outcome `{outcome}` is not a low-fill conservative lifecycle exception"
+            if re.search(r"(?is)\bcounter\b.*\bnext\s*:\s*experiment_bind\b", decision):
+                return False, "counter-to-bind decisions are not low-fill conservative lifecycle exceptions"
+            return True, f"conservative local experiment decision `{outcome}` allowed during low-fill recovery"
+
+        return False, f"`{base}` is not a low-fill conservative lifecycle exception"
+
     def _stable_core_astrid_contact_cooldown_reason(self) -> Optional[str]:
         budget = self._stable_core_agency_budget()
         cooldown_secs = float(budget.get("contact_cooldown_secs", 120.0) or 120.0)
@@ -13960,8 +23850,47 @@ Fill: {fill:.1f}%
                 return
         except Exception as exc:
             logging.debug(f"Could not run live-control continuity guard: {exc}")
+        projection_guard = (
+            continuity_event.get("projection_guard_v1")
+            if isinstance(continuity_event, dict)
+            else None
+        )
+        if (
+            isinstance(projection_guard, dict)
+            and projection_guard.get("guardrail_reason") == "release_pressure_requires_sticky_audit"
+        ):
+            if continuity_event:
+                try:
+                    self._last_action_continuity_event = self._continuity_store().finish_action(
+                        continuity_event,
+                        "blocked",
+                        (
+                            "Release-shaped lambda-pressure was preserved as sticky-mode evidence. "
+                            f"Suggested NEXT: {projection_guard.get('projected_next')}"
+                        ),
+                        state,
+                    )
+                except Exception as exc:
+                    logging.debug(f"Could not finish sticky release projection guard: {exc}")
+            self._current_action_continuity_context = None
+            self._current_action_continuity_event = None
+            self._current_action_extra_artifacts = []
+            self._current_action_outcome_summary = None
+            return
+        raw_thread_action = (
+            continuity_context.get("raw_next")
+            or continuity_context.get("canonical_action")
+            or str(action).upper()
+        )
+        conservative_thread_allowed, conservative_thread_reason = (
+            self._stable_core_conservative_thread_action_allowed(raw_thread_action)
+            if action == "thread_action"
+            else (False, "")
+        )
         if action in {"attractor_intent", "attractor_suggestions", "shadow_autonomy"}:
             allowed, reason = True, "typed autonomy stages self-gate live writes"
+        elif conservative_thread_allowed:
+            allowed, reason = True, conservative_thread_reason
         else:
             allowed, reason = self._stable_core_action_allowed(action, state)
             if not allowed:
@@ -13993,6 +23922,60 @@ Fill: {fill:.1f}%
                 self._current_action_extra_artifacts = []
                 self._current_action_outcome_summary = None
                 return
+        research_budget_for_debit: Optional[Dict[str, Any]] = None
+        if action in {
+            "research_exploration",
+            "browse_url",
+            "read_more",
+            "autoresearch_action",
+            "mike_explore",
+        }:
+            try:
+                raw_research_action = (
+                    continuity_context.get("raw_next")
+                    or continuity_context.get("canonical_action")
+                    or str(action).upper()
+                )
+                ok, budget, budget_reason = self._continuity_store().research_budget_preflight_for_action(
+                    raw_research_action,
+                    state,
+                )
+                if not ok:
+                    logging.info(
+                        "🔎 Research budget preflight blocked %s: %s",
+                        raw_research_action,
+                        budget_reason,
+                    )
+                    if continuity_event:
+                        continuity_event["stage"] = "blocked"
+                        continuity_event["visibility"] = "protected_summary"
+                        continuity_event["research_budget_v1"] = {
+                            "policy": "research_budget_v1",
+                            "reason": budget_reason,
+                            "raw_action": raw_research_action,
+                            "budget_id": budget.get("budget_id") if isinstance(budget, dict) else None,
+                        }
+                        suggested = (
+                            f"EXPERIMENT_RESEARCH_REVIEW {budget.get('budget_id')} :: "
+                            "outcome: continue|hold|close|promote; observation: ...; source_refs: ..."
+                            if isinstance(budget, dict)
+                            else _control_plane_research_budget_request_scaffold("current")
+                        )
+                        continuity_event["suggested_next"] = suggested
+                        self._last_action_continuity_event = self._continuity_store().finish_action(
+                            continuity_event,
+                            "blocked",
+                            f"Research budget preflight blocked `{raw_research_action}`: {budget_reason}",
+                            state,
+                        )
+                    self._current_action_continuity_context = None
+                    self._current_action_continuity_event = None
+                    self._current_action_extra_artifacts = []
+                    self._current_action_outcome_summary = None
+                    return
+                research_budget_for_debit = budget
+            except Exception as exc:
+                logging.debug(f"Could not run research budget preflight: {exc}")
         logging.info(f"🤖 Autonomous action: {action}")
 
         try:
@@ -14176,6 +24159,36 @@ Fill: {fill:.1f}%
 
             # Log decision to database
             extra_artifacts = list(getattr(self, "_current_action_extra_artifacts", []) or [])
+            if research_budget_for_debit:
+                try:
+                    raw_research_action = (
+                        continuity_context.get("raw_next")
+                        or continuity_context.get("canonical_action")
+                        or str(action).upper()
+                    )
+                    debit = self._continuity_store().record_research_budget_debit(
+                        raw_research_action,
+                        action,
+                        research_budget_for_debit,
+                        state,
+                        artifacts=extra_artifacts,
+                        status="attempted",
+                    )
+                    if debit:
+                        debit_artifact = {
+                            "schema_version": ActionContinuityStore.schema_version,
+                            "artifact_id": f"art_{continuity_event['action_id']}_research_budget_debit" if continuity_event else f"art_research_budget_debit_{int(time.time() * 1000)}",
+                            "action_id": continuity_event.get("action_id") if continuity_event else None,
+                            "kind": "research_budget_debit",
+                            "path_or_uri": str(self._continuity_store()._authority_gate_path(str(debit.get("thread_id") or ""))),
+                            "summary": f"Research budget debit `{debit.get('record_id')}` for `{raw_research_action}`",
+                            "visibility": continuity_event.get("visibility", "summary") if continuity_event else "summary",
+                        }
+                        extra_artifacts.append(debit_artifact)
+                        if continuity_event:
+                            continuity_event["research_budget_v1"] = debit
+                except Exception as exc:
+                    logging.debug(f"Could not append research budget debit: {exc}")
             if extra_artifacts and continuity_event:
                 continuity_event["artifacts"] = extra_artifacts
             outcome_summary = (
@@ -31498,10 +41511,18 @@ Goals: {json.dumps(goals, indent=2)}
             "  EXPERIMENT_REHEARSE current — dry-run the chartered proposed action; live write/control routes are recorded as blocked rehearsal, not executed.\n"
             "  EXPERIMENT_PREFLIGHT current — alias for EXPERIMENT_REHEARSE when preflight wording feels natural.\n"
             "  EXPERIMENT_EVIDENCE current :: felt ...; telemetry ...; artifact ... — record felt evidence plus current telemetry/artifact context.\n"
-            "  EXPERIMENT_DECIDE current :: accept because ... / refuse because ... / counter NEXT: ACTION_PREFLIGHT ... / pause because ... / complete because ... — record agency outcome and update the experiment return point.\n"
+            "  MEMORY_CAPTURE current :: summary: ...; source_refs: ...; artifact_refs: ...; next: ... — commit local being-owned memory without lifecycle progress.\n"
+            "  MEMORY_STATUS / MEMORY_RECALL / MEMORY_PROMOTE — inspect memory or promote it to dossier, evidence, or authority-request draft.\n"
+            "  EXPERIMENT_AUTHORITY_PREPARE current :: scope: semantic_microdose; payload: ...; reason: ...; artifact_refs: ...; stop_criteria: ... — draft request authority and show missing requirements without approval or execution.\n"
+            "  EXPERIMENT_DECIDE current :: accept because ... / refuse because ... / counter NEXT: ACTION_PREFLIGHT ... / pause because ... / hold because ... / complete because ... — record agency outcome and update the experiment return point.\n"
             "  EXPERIMENT_BIND current :: ACTION_PREFLIGHT DECOMPOSE — run the inner action through normal gates and record it as an experiment run.\n"
             "  EXPERIMENT_OBSERVE current :: note ... — append interpretation without executing anything.\n"
             "  EXPERIMENT_STATUS / EXPERIMENT_REVIEW / EXPERIMENT_CLOSE / EXPERIMENT_PEER_REVIEW — inspect, synthesize, close, or request Astrid review.\n"
+            "  SHARED_INVESTIGATION_START <title> :: local: current; peer: <peer-id>; question: ... — create a neutral shared sidecar linking local and peer experiments.\n"
+            "  SHARED_INVESTIGATION_STATUS / SHARED_INVESTIGATION_CLAIM / SHARED_INVESTIGATION_DECIDE — inspect, cite, or conservatively pause/hold/repair the local linked experiment only.\n"
+            "  DOSSIER_CLAIM current :: claim: ...; basis: ...; stance: support|counter|branch|hold; next: ... — append a referable research claim without changing experiment lifecycle.\n"
+            "  DOSSIER_EVIDENCE current :: claim_id: latest; evidence: ...; lane: spectral_condition; artifact: ...; counterevidence: ... — attach referable evidence to a dossier claim; lifecycle evidence still uses EXPERIMENT_EVIDENCE.\n"
+            "  DOSSIER_STATUS / DOSSIER_REVIEW — inspect local claim/evidence context.\n"
             "  AR_LIST — browse the autoresearch job catalog.\n"
             "  AR_LIST_PENDING / AR_LIST_ACTIVE / AR_LIST_DONE — filter autoresearch jobs by lifecycle state.\n"
             "  AR_LOOK <job-id-or-slug> — alias for AR_SHOW; orient to one autoresearch job.\n"
@@ -32957,6 +42978,38 @@ if __name__ == "__main__":
         FALLBACK_MODEL or "disabled",
     )
 
+    lock_handle = None
+    if not os.environ.get("MINIME_ALLOW_MULTIPLE_AUTONOMOUS_AGENTS"):
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        lock_path = RUNTIME_DIR / "autonomous_agent.lock"
+        lock_handle = lock_path.open("a+")
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock_handle.seek(0)
+            existing = lock_handle.read().strip() or "unknown"
+            message = (
+                "Another autonomous_agent.py --interval process already holds "
+                f"{lock_path} ({existing}); exiting to avoid duplicate agency loops."
+            )
+            logging.warning(message)
+            print(message)
+            sys.exit(0)
+        lock_handle.seek(0)
+        lock_handle.truncate()
+        lock_handle.write(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "interval": check_interval,
+                    "focused": bool(args.focused),
+                },
+                sort_keys=True,
+            )
+        )
+        lock_handle.flush()
+
     # Get latest session from database
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -32983,6 +43036,7 @@ if __name__ == "__main__":
             agent.stop()
 
         signal.signal(signal.SIGTERM, _handle_termination)
+        signal.signal(signal.SIGINT, _handle_termination)
 
         try:
             agent.start()

@@ -1041,6 +1041,7 @@ pub struct ESN {
     // Adaptive hyperparams (self-referential)
     pub leak_live: f32,
     pub lambda_live: f32,
+    leak_override: Option<EsnLeakOverride>,
 
     // Spectral self-reference module
     sr: SpectralSR,
@@ -1147,6 +1148,7 @@ impl ESN {
             p,
             leak_live: leak_base,
             lambda_live: lambda_base,
+            leak_override: None,
             sr,
             leak_base,
             lambda_base,
@@ -1244,8 +1246,8 @@ impl ESN {
             .maybe_introspect_batched(&self.x, prev_geom_rel, pressure_rel)?;
         self.adapt_hyperparams(0.0);
 
-        // Leaky integration with adaptive leak
-        let a = self.leak_live;
+        // Leaky integration with adaptive leak or a one-shot gated override.
+        let a = self.effective_leak_for_step();
         for i in 0..self.res_size {
             self.x[i] = (1.0 - a) * self.x[i] + a * self.pre[i];
         }
@@ -1396,6 +1398,43 @@ impl ESN {
         self.leak_live
     }
 
+    /// Queue a bounded direct ESN leak override. The override affects only a
+    /// small number of subsequent ESN steps and then adaptive leak resumes.
+    pub fn set_leak_override(&mut self, leak: f32, duration_ticks: u32, request_id: String) {
+        let request_id = request_id.trim().to_string();
+        if request_id.is_empty() {
+            return;
+        }
+        self.leak_override = Some(EsnLeakOverride {
+            leak: leak.clamp(0.20, 0.90),
+            remaining_ticks: duration_ticks.clamp(1, 12),
+            request_id,
+        });
+    }
+
+    pub fn clear_leak_override(&mut self) {
+        self.leak_override = None;
+    }
+
+    pub fn leak_override_status(&self) -> Option<EsnLeakOverrideStatus> {
+        self.leak_override
+            .as_ref()
+            .map(EsnLeakOverride::status)
+    }
+
+    fn effective_leak_for_step(&mut self) -> f32 {
+        let Some(override_state) = self.leak_override.as_mut() else {
+            return self.leak_live;
+        };
+        let leak = override_state.leak;
+        override_state.remaining_ticks = override_state.remaining_ticks.saturating_sub(1);
+        self.leak_live = leak;
+        if override_state.remaining_ticks == 0 {
+            self.leak_override = None;
+        }
+        leak
+    }
+
     /// Get adaptive RLS forgetting factor
     pub fn get_lambda(&self) -> f32 {
         self.lambda_live
@@ -1493,6 +1532,30 @@ impl ESN {
     pub fn get_reservoir_dim(&self) -> usize {
         self.sr.d
     }
+}
+
+#[derive(Debug, Clone)]
+struct EsnLeakOverride {
+    leak: f32,
+    remaining_ticks: u32,
+    request_id: String,
+}
+
+impl EsnLeakOverride {
+    fn status(&self) -> EsnLeakOverrideStatus {
+        EsnLeakOverrideStatus {
+            leak: self.leak,
+            remaining_ticks: self.remaining_ticks,
+            request_id: self.request_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EsnLeakOverrideStatus {
+    pub leak: f32,
+    pub remaining_ticks: u32,
+    pub request_id: String,
 }
 
 //=============================================================================

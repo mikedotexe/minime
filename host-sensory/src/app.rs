@@ -17,6 +17,9 @@ use crate::{
     video::{save_jpeg, VideoEngine},
 };
 
+const DEFAULT_AUDIO_STATUS_GRACE_MS: u64 = 2_000;
+const DEFAULT_VIDEO_STATUS_GRACE_MS: u64 = 5_000;
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 #[value(rename_all = "lower")]
 pub enum SourceModeArg {
@@ -282,9 +285,13 @@ impl SourceState {
         let camera_status = read_json::<CameraStatus>(&paths.camera_status_path);
         let now = now_ms();
 
-        let audio_fresh = mic_status
-            .as_ref()
-            .map_or(false, |status| now.saturating_sub(status.ts_ms) <= 2_000);
+        let audio_fresh = mic_status.as_ref().map_or(false, |status| {
+            now.saturating_sub(status.ts_ms)
+                <= status_grace_ms(
+                    status.chunk_health_grace_secs,
+                    DEFAULT_AUDIO_STATUS_GRACE_MS,
+                )
+        });
         let audio_good_streak = mic_status.as_ref().map_or(0, |status| status.good_streak);
         let audio_silence_streak = mic_status
             .as_ref()
@@ -316,9 +323,13 @@ impl SourceState {
         self.audio_physical_healthy =
             audio_fresh && audio_reported_healthy && audio_silence_streak < 30;
 
-        let video_fresh = camera_status
-            .as_ref()
-            .map_or(false, |status| now.saturating_sub(status.ts_ms) <= 5_000);
+        let video_fresh = camera_status.as_ref().map_or(false, |status| {
+            now.saturating_sub(status.ts_ms)
+                <= status_grace_ms(
+                    status.frame_health_grace_secs,
+                    DEFAULT_VIDEO_STATUS_GRACE_MS,
+                )
+        });
         let video_reported_healthy = camera_status
             .as_ref()
             .map_or(false, |status| status.healthy);
@@ -383,6 +394,14 @@ impl SourceState {
             },
         )
     }
+}
+
+fn status_grace_ms(seconds: Option<f32>, default_ms: u64) -> u64 {
+    seconds
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| Duration::from_secs_f32(value).as_millis())
+        .and_then(|millis| u64::try_from(millis).ok())
+        .unwrap_or(default_ms)
 }
 
 #[derive(Serialize)]
@@ -495,6 +514,7 @@ mod tests {
                 good_streak: 10,
                 chunk_count: 10,
                 healthy: true,
+                chunk_health_grace_secs: None,
             },
         )
         .unwrap();
@@ -517,6 +537,7 @@ mod tests {
                 good_streak: 40,
                 chunk_count: 10,
                 healthy: false,
+                chunk_health_grace_secs: None,
             },
         )
         .unwrap();
@@ -539,6 +560,7 @@ mod tests {
                 ts_ms: now_ms(),
                 frame_count: 10,
                 healthy: false,
+                frame_health_grace_secs: None,
             },
         )
         .unwrap();
@@ -564,6 +586,7 @@ mod tests {
                     ts_ms: now_ms(),
                     frame_count: frame,
                     healthy: true,
+                    frame_health_grace_secs: None,
                 },
             )
             .unwrap();
@@ -571,6 +594,29 @@ mod tests {
         }
 
         assert_eq!(state.video_source, SourceKind::Physical);
+    }
+
+    #[test]
+    fn auto_mode_uses_reported_camera_grace_for_slow_cadence() {
+        let temp = tempfile_dir("video-slow-grace");
+        let paths = runtime_paths(&temp);
+        paths.ensure().unwrap();
+        let mut state = SourceState::new(SensoryMode::Auto);
+        write_json_atomic(
+            &paths.camera_status_path,
+            &CameraStatus {
+                ts_ms: now_ms().saturating_sub(6_000),
+                frame_count: 10,
+                healthy: true,
+                frame_health_grace_secs: Some(15.0),
+            },
+        )
+        .unwrap();
+        state.refresh(SensoryMode::Auto, &paths);
+
+        assert_eq!(state.video_source, SourceKind::Physical);
+        assert!(state.video_physical_healthy);
+        assert_eq!(state.video_reason, "camera healthy");
     }
 
     fn tempfile_dir(name: &str) -> PathBuf {

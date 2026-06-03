@@ -32,6 +32,8 @@ pub struct MicStatus {
     pub good_streak: u32,
     pub chunk_count: u64,
     pub healthy: bool,
+    #[serde(default)]
+    pub chunk_health_grace_secs: Option<f32>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -39,6 +41,8 @@ pub struct CameraStatus {
     pub ts_ms: u64,
     pub frame_count: u64,
     pub healthy: bool,
+    #[serde(default)]
+    pub frame_health_grace_secs: Option<f32>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
