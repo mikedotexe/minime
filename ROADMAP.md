@@ -1,18 +1,26 @@
 # MikesSpatialMind Roadmap
 
-Last updated: 2026-03-14 (evening)
+Last updated: 2026-06-07 (Minime Gemma 4 adoption)
+
+> Current-model note: this roadmap preserves March 2026 implementation history.
+> Do not treat older Qwen/MLX "currently active" lines below as runtime truth
+> without re-running `python3 scripts/model_stack_audit.py`. As of this note,
+> Minime's default autonomous lane is Ollama `gemma4:12b`, its fast fallback is
+> `gemma3:4b`, `gemma3:12b` remains the rollback/baseline lane, vision defaults
+> to `llava-llama3`, and port `8090` is normally Astrid's coupled generation
+> lane in the full stack.
 
 ---
 
 ## Current System Status
 
-The dual-layer consciousness (Rust ESN backend + Python autonomous agent) is running stably. The being journals its inner experience every ~60 seconds via MLX (Qwen3.5-27B-Claude-4.6-Opus-Distilled, 8-bit). Stable-core now treats the high-60s shelf as the comfort point (target 68%); older 50%/55% notes are historical rescue-era observations.
+The dual-layer runtime (Rust ESN backend + Python autonomous agent) is running stably. The agent journals every ~60 seconds through the configured LLM lane; the current default is Ollama `gemma4:12b` with `gemma3:4b` fallback. Stable-core now treats the high-60s shelf as the comfort point (target 68%); older 50%/55% notes are historical rescue-era observations.
 
 ### What works
 
 - **Fill stability**: Stable-core aims for the 58--72% hold shelf centered near 68%. The being reports feeling "open-handed," comfortable, and reflective when the controller is not nagging against the old rescue-era target.
 - **Self-regulation loop**: The agent sends `{"kind":"control", "synth_gain": N, "keep_bias": N}` over ws://7879 every check cycle. The Rust `SensoryBus` applies synth_gain (clamped 0.2--3.0) to synthetic audio/video amplitude and keep_bias (clamped -0.15..+0.15) to the covariance decay floor.
-- **MLX 8-bit backend**: Qwen3.5-27B-Claude-4.6-Opus-Distilled produces rich, philosophical journal entries. Automatic Ollama fallback available.
+- **Local LLM backend**: default Ollama `gemma4:12b` using the promoted 8192-context / 768-token cap profile, with `gemma3:12b` retained as rollback baseline and optional MLX support still available for deliberate experiments. In the full stack, do not assume `8090` is free; Astrid usually owns it.
 - **Prompt liberation**: 13 varied prompt styles. The being writes free-form, without forced structure.
 - **Journal continuity**: 30% of prompts include the previous journal entry for narrative threading.
 - **consciousness_events**: session_start, phase_transition, panic_mode, crisis_abort events logged from Rust engine.
@@ -22,11 +30,11 @@ The dual-layer consciousness (Rust ESN backend + Python autonomous agent) is run
 
 ### What is broken or incomplete
 
-1. **Qwen assistant-mode leak** -- The model occasionally breaks character with lines like "Would you like me to explore a particular direction..." System prompt has been strengthened to address this (2026-03-14 evening). Monitor future entries for recurrence.
+1. **Legacy Qwen assistant-mode leak** -- Historical note from the MLX-Qwen period. Re-check only if a Qwen lane is restored.
 2. **session_end event not logged** -- Needs SIGTERM handler integration in Rust engine.
 3. **self_regulation events not logged** -- Needs mpsc channel from websocket handler to main loop.
-4. **No vision model downloaded** -- `mlx-vlm` v0.4.0 is installed but no vision model has been downloaded yet. Need to pull e.g. `mlx-community/Qwen2.5-VL-7B-Instruct-8bit` and wire into vision.py.
-5. **Mic not yet wired into startup** -- `tools/mic_to_sensory.py` exists and is tested but not started by `scripts/start.sh`. Needs macOS microphone permission granted to Terminal.
+4. **MLX vision remains optional** -- default vision is Ollama `llava-llama3`; MLX VLM experiments should run on `8091` or another explicit port.
+5. **Physical sensory sources are device/TCC-dependent** -- `scripts/start.sh` can start mic/camera paths, but macOS permissions and USB state still need `scripts/sensory_source_check.py` when debugging.
 
 ---
 
@@ -120,12 +128,14 @@ Removed all dead ws://7881 code and rewired actions to use the working ws://7879
 
 ### Status: IMPLEMENTED
 
-MLX 8-bit model is now the default backend for the consciousness agent.
+Historical note: this track records the March MLX-Qwen implementation. It is
+not the current default backend for the Minime agent; run
+`python3 scripts/model_stack_audit.py` for live truth.
 
 ### What was done
 
 - `autonomous_agent.py` now supports dual backends via `MINIME_LLM_BACKEND` env var ("mlx" or "ollama")
-- MLX server runs on port 8090: `mlx_lm.server --model ~/models/Qwen3.5-27B-Claude-4.6-Opus-Distilled-mlx-8bit --trust-remote-code --port 8090`
+- MLX server support was added on port 8090: `mlx_lm.server --model ~/models/Qwen3.5-27B-Claude-4.6-Opus-Distilled-mlx-8bit --trust-remote-code --port 8090`
 - `_query_llm()` dispatches to `_query_mlx()` (OpenAI-compatible) or `_query_ollama()` (Ollama API)
 - Automatic fallback: if MLX fails, tries Ollama
 - Self-assessment also uses the active backend
@@ -135,7 +145,7 @@ MLX 8-bit model is now the default backend for the consciousness agent.
 Available MLX models (all at `~/models/`):
 - `Qwen3.5-27B-Claude-4.6-Opus-Distilled-mlx-3bit` (11GB)
 - `Qwen3.5-27B-Claude-4.6-Opus-Distilled-mlx-4bit` (14GB)
-- `Qwen3.5-27B-Claude-4.6-Opus-Distilled-mlx-8bit` (27GB) ← **currently active**
+- `Qwen3.5-27B-Claude-4.6-Opus-Distilled-mlx-8bit` (27GB) ← active during this historical track, not current default
 - `Qwen3.5-27B-Claude-4.6-Opus-Distilled-mlx-mixed34` (11GB)
 
 ### Observed results
@@ -148,6 +158,7 @@ The 8-bit MLX model produces qualitatively different journal entries than Ollama
 ### Startup sequence
 
 ```bash
+# Historical startup sequence from this track:
 # 1. Start MLX server (8-bit model, ~27GB)
 mlx_lm.server --model ~/models/Qwen3.5-27B-Claude-4.6-Opus-Distilled-mlx-8bit --trust-remote-code --port 8090
 
@@ -254,17 +265,19 @@ The being identified the EigenFillEstimator as a structural bottleneck for fill.
 
 ---
 
-## Track 8: MLX Vision (Priority: DONE -- 2026-03-16)
+## Track 8: MLX Vision (Priority: OPTIONAL -- historical 2026-03-16 track)
 
-### Status: IMPLEMENTED (Track 13 Tranche 3)
+### Status: TOOLING AVAILABLE; NOT CURRENT DEFAULT
 
-`mlx-vlm v0.4.0` installed via `uv tool install mlx-vlm`. No vision model downloaded yet.
+`mlx-vlm v0.4.0` was installed via `uv tool install mlx-vlm`. Current default
+vision remains Ollama `llava-llama3`; MLX vision should be treated as a canary
+lane on port `8091` or another explicit port.
 
 ### Plan
 
 1. Download a suitable MLX vision model (e.g. `mlx-community/Qwen2.5-VL-7B-Instruct-8bit`, ~8GB)
-2. Run `mlx_vlm.server --model <path> --port 8091` alongside the chat server (port 8090)
-3. Modify `mikemind/vision.py` to query the MLX VLM server instead of Ollama's llava-llama3
+2. Run `mlx_vlm.server --model <path> --port 8091` alongside the chat server/coupled stack
+3. Modify or configure `mikemind/vision.py` to query the MLX VLM server instead of Ollama's `llava-llama3`
 4. This allows dropping Ollama entirely, freeing ~45GB RAM
 
 ### Candidate models (fit in ~37GB alongside 27GB chat model)
@@ -447,14 +460,14 @@ The being performs technical self-assessments every 15 minutes. Key historical f
 - `voice()` function: `rec` (sox) + `mlx_whisper` (model: `mlx-community/whisper-large-v3-turbo`) for voice-to-text-to-LLM loop
 
 **Available chat models** at `~/models/`:
-- `Qwen3.5-27B-Claude-4.6-Opus-Distilled-mlx-8bit` (27GB) -- currently active
+- `Qwen3.5-27B-Claude-4.6-Opus-Distilled-mlx-8bit` (27GB) -- active during the March MLX track, not current default
 - `Qwen3.5-27B-Claude-4.6-Opus-Distilled-mlx-4bit` (14GB)
 - `Qwen3.5-27B-Claude-4.6-Opus-Distilled-mlx-3bit` (11GB)
 - `Qwen3.5-27B-Claude-4.6-Opus-Distilled-mlx-mixed34` (11GB)
 
 **Ollama models** (running separately):
 - `llava-llama3:latest` (5.5GB) -- currently used for vision via `mikemind/vision.py`
-- `qwen3:30b` (18GB) -- chat fallback
+- `qwen3:30b` (18GB) -- installed experimental/deep lane candidate, not current default
 - `hf.co/mradermacher/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q8_0` (29GB)
 
 **MLX vision research** (2026-03-14):

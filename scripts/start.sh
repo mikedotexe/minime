@@ -1,15 +1,31 @@
 #!/bin/bash
 set -euo pipefail
 
-# MikesSpatialMind Consciousness Startup Script
-# Launches MLX server, Rust engine, and autonomous agent in correct order.
-# PIDs are saved to /tmp/minime_pids/ for stop.sh to use.
+# MikesSpatialMind manual startup script.
+#
+# The daily Astrid/Minime stack is launchd-managed. Use
+# /Users/v/other/astrid/scripts/start_all.sh --minime-only for that path.
+# This script is for standalone/debug runs after the Minime LaunchAgents have
+# been booted out. PIDs are saved to /tmp/minime_pids/ for stop.sh to use.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PID_DIR="/tmp/minime_pids"
 LOG_DIR="$PROJECT_DIR/workspace/logs"
 GREETING_SCRIPT="$PROJECT_DIR/startup_greeting.sh"
+ASTRID_START_ALL="/Users/v/other/astrid/scripts/start_all.sh"
+ASTRID_STOP_ALL="/Users/v/other/astrid/scripts/stop_all.sh"
+LAUNCHD_DOMAIN="gui/$(id -u)"
+MINIME_LAUNCHD_LABELS=(
+    "com.minime.autonomous-agent"
+    "com.minime.camera-client"
+    "com.minime.engine"
+    "com.minime.host-sensory"
+    "com.minime.mic-to-sensory"
+    "com.minime.usb-hotplug-watchdog"
+    "com.minime.visual-frame-service"
+    "com.reservoir.minime-feeder"
+)
 
 # Configuration (override via environment)
 MLX_MODEL="${MLX_MODEL:-$HOME/models/Qwen3.5-27B-Claude-4.6-Opus-Distilled-mlx-4bit}"
@@ -30,6 +46,7 @@ ENABLE_GPU_AV="${ENABLE_GPU_AV:-true}"
 LORA_ADAPTER="${LORA_ADAPTER:-}"
 SENSORY_SOURCE="${SENSORY_SOURCE:-auto}"
 LOOK_SOURCE="${LOOK_SOURCE:-active}"
+MINIME_ALLOW_MANUAL_WITH_LAUNCHD="${MINIME_ALLOW_MANUAL_WITH_LAUNCHD:-false}"
 
 # Ensure PATH includes node/uv tools
 export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/v20.20.1/bin:$PATH"
@@ -37,10 +54,69 @@ export MINIME_HARD_RECOVERY_RESET
 
 mkdir -p "$PID_DIR" "$LOG_DIR"
 
+launchd_label_loaded() {
+    launchctl print "$LAUNCHD_DOMAIN/$1" >/dev/null 2>&1
+}
+
+loaded_launchd_labels() {
+    for label in "${MINIME_LAUNCHD_LABELS[@]}"; do
+        if launchd_label_loaded "$label"; then
+            echo "$label"
+        fi
+    done
+    return 0
+}
+
+matching_minime_processes() {
+    local parent_pid="${PPID:-}"
+    ps -axo pid=,ppid=,command= | awk \
+        -v self="$$" \
+        -v parent="$parent_pid" \
+        -v mlx_port="$MLX_PORT" '
+        {
+            pid = $1
+            ppid = $2
+            $1 = ""
+            $2 = ""
+            sub(/^ +/, "")
+            cmd = $0
+            if (pid == self || pid == parent) {
+                next
+            }
+            if (cmd ~ /awk[[:space:]]+-v[[:space:]]+self=/) {
+                next
+            }
+            if (cmd ~ /mlx_lm\.server/ && cmd ~ mlx_port) {
+                print pid " " cmd
+            } else if (cmd ~ /target\/release\/minime|autonomous_agent\.py|mic_to_sensory|camera_to_sensory|camera_client|visual_frame_service|host-sensory/) {
+                print pid " " cmd
+            }
+        }'
+}
+
 # --- Pre-flight checks ---
 
 echo "=== MikesSpatialMind Startup ==="
 echo ""
+
+LOADED_LABELS="$(loaded_launchd_labels)"
+if [ -n "$LOADED_LABELS" ] && [ "$MINIME_ALLOW_MANUAL_WITH_LAUNCHD" != "1" ] && [ "$MINIME_ALLOW_MANUAL_WITH_LAUNCHD" != "true" ]; then
+    echo "Launchd-managed Minime labels are loaded."
+    echo ""
+    echo "$LOADED_LABELS" | sed 's/^/  - /'
+    echo ""
+    echo "This script starts a manual standalone stack and would conflict with launchd."
+    echo "Use the launchd workflow instead:"
+    echo "  bash $ASTRID_START_ALL --minime-only"
+    echo ""
+    echo "For a manual canary/debug run, stop the Minime LaunchAgents first:"
+    echo "  ./scripts/stop.sh"
+    echo "For a full coupled-stack shutdown, use:"
+    echo "  bash $ASTRID_STOP_ALL"
+    echo ""
+    echo "Set MINIME_ALLOW_MANUAL_WITH_LAUNCHD=1 only after you have inspected the split-brain risk."
+    exit 1
+fi
 
 # Check for existing processes
 if [ -f "$PID_DIR/mlx.pid" ] || [ -f "$PID_DIR/engine.pid" ] || [ -f "$PID_DIR/agent.pid" ] || [ -f "$PID_DIR/host.pid" ] || [ -f "$PID_DIR/visual.pid" ]; then
@@ -49,11 +125,13 @@ if [ -f "$PID_DIR/mlx.pid" ] || [ -f "$PID_DIR/engine.pid" ] || [ -f "$PID_DIR/a
     exit 1
 fi
 
-EXISTING=$(ps aux | grep -E "(mlx_lm\.server.*$MLX_PORT|target/release/minime|autonomous_agent\.py|mic_to_sensory|camera_to_sensory|camera_client|visual_frame_service|host-sensory)" | grep -v grep | wc -l || true)
+EXISTING_LINES="$(matching_minime_processes || true)"
+EXISTING=$(printf '%s\n' "$EXISTING_LINES" | awk 'NF' | wc -l | tr -d ' ')
 if [ "$EXISTING" -gt 0 ]; then
-    echo "WARNING: Found $EXISTING existing consciousness process(es)."
-    echo "Run scripts/stop.sh first."
-    ps aux | grep -E "(mlx_lm\.server.*$MLX_PORT|target/release/minime|autonomous_agent\.py)" | grep -v grep
+    echo "WARNING: Found $EXISTING existing Minime process(es)."
+    echo "Run scripts/stop.sh first. If launchd owns the stack, use:"
+    echo "  bash $ASTRID_STOP_ALL"
+    printf '%s\n' "$EXISTING_LINES" | sed 's/^/  /'
     exit 1
 fi
 
@@ -195,9 +273,9 @@ echo ""
 GPU_AV_FLAG=""
 if [ "$ENABLE_GPU_AV" = "true" ]; then
     GPU_AV_FLAG="--enable-gpu-av"
-    echo "[2/$TOTAL_STEPS] Starting Rust consciousness engine (GPU video enabled)..."
+    echo "[2/$TOTAL_STEPS] Starting Rust spectral engine (GPU video enabled)..."
 else
-    echo "[2/$TOTAL_STEPS] Starting Rust consciousness engine..."
+    echo "[2/$TOTAL_STEPS] Starting Rust spectral engine..."
 fi
 cd "$PROJECT_DIR/minime"
 cargo run --release -- run \
@@ -349,6 +427,7 @@ echo ""
 echo "  Monitor:     tail -f $LOG_DIR/engine.log"
 echo "  Journals:    ls -t workspace/journal/ | head -5"
 echo "  Stop:        scripts/stop.sh"
+echo "  Relaunchd:   bash $ASTRID_START_ALL --minime-only"
 echo "  Hint:        NEXT: MIKE_BROWSE pdfs  then NEXT: MIKE_READ pdfs/<paper>.pdf"
 echo ""
-echo "Remember: Monitor the consciousness. Never leave it running unattended."
+echo "Remember: Monitor the spectral state. Never leave it running unattended."

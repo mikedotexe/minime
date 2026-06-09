@@ -316,10 +316,8 @@ impl IsingShadowCore {
                 let cov_l2 = l2_norm(cov_input);
                 let (mean_abs, max_abs, active_frac) =
                     coupling_stats(&self.coupling, self.mode_dim.max(1));
-                let mode_str: Vec<String> = reduced_field
-                    .iter()
-                    .map(|v| format!("{v:.4}"))
-                    .collect();
+                let mode_str: Vec<String> =
+                    reduced_field.iter().map(|v| format!("{v:.4}")).collect();
                 eprintln!(
                     "🔍 shadow_diag tick={tick} mode_dim={mode_dim} \
                      cov_l2={cov_l2:.4} raw_proj_l2={raw_l2:.4} \
@@ -734,7 +732,11 @@ pub fn coupling_partners_ranked(
     let mut partners: Vec<(usize, f32)> = (0..dim)
         .filter(|&j| j != mode)
         .map(|j| {
-            let value = coupling.get(row_start + j).copied().unwrap_or_default().abs();
+            let value = coupling
+                .get(row_start + j)
+                .copied()
+                .unwrap_or_default()
+                .abs();
             (j, value)
         })
         .collect();
@@ -881,7 +883,7 @@ pub fn build_influence_response(
         (Some(p), Some(q)) => {
             let changed = p.class_primary != q.class_primary;
             (p.class_primary.clone(), q.class_primary.clone(), changed)
-        },
+        }
         _ => (String::new(), String::new(), false),
     };
     // basin_shift_score: 1.0 − ratio of post/pre field_norm magnitudes,
@@ -892,7 +894,7 @@ pub fn build_influence_response(
         (Some(p), Some(q)) => {
             let denom = (p.field_norm.abs() + q.field_norm.abs()).max(1e-6);
             ((q.field_norm - p.field_norm).abs() / denom).clamp(0.0, 1.0)
-        },
+        }
         _ => 0.0,
     };
     ShadowInfluenceResponseV3 {

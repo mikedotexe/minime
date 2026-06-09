@@ -2,6 +2,13 @@
 
 Generated: 2026-03-16
 
+Historical note (2026-06-07): the Metal-buffer analysis below is still useful,
+but the Python model-routing table reflects the March MLX-Qwen period. Current
+runtime truth should be checked with `python3 scripts/model_stack_audit.py`.
+The default Minime autonomous lane is Ollama `gemma4:12b` with `gemma3:4b`
+fallback; `gemma3:12b` remains the rollback/baseline lane and MLX remains an
+optional/canary backend.
+
 ## 1. Metal Buffer Allocations
 
 ### Long-Lived Buffers (allocated once, persist for engine lifetime)
@@ -67,8 +74,8 @@ MLX comparison: batches 20-50 kernels per commit. Minime should batch rank1_ewma
 
 | Component | File | Current Backend | MLX Status | Work Needed |
 |-----------|------|-----------------|------------|-------------|
-| Chat (autonomous) | `autonomous_agent.py` | MLX (port 8090) | **WORKING** | None |
-| Chat (interactive) | `mikemind/llm_engine.py` | Ollama only | **MISSING** | Add `_generate_mlx()` + backend param |
+| Chat (autonomous) | `autonomous_agent.py` | Ollama `gemma4:12b` by default, optional MLX | **WORKING** | Use audit before changing backend |
+| Chat (interactive) | `mikemind/llm_engine.py` | Ollama by default, MLX-first when available unless forced | **PARTIAL** | Keep port ownership explicit |
 | Vision | `mikemind/vision.py` | Ollama LLaVA | **MISSING** | Add MLX VLM backend (port 8091) |
 | Embeddings | `mikemind/config.py` | Ollama `/api/embeddings` | **MISSING** | Add MLX `/v1/embeddings` backend |
 | Speech-to-text | `tools/mic_to_sensory.py` | mlx_whisper CLI | **PARTIAL** | Wire into startup, write transcriptions to file |
@@ -76,10 +83,10 @@ MLX comparison: batches 20-50 kernels per commit. Minime should batch rank1_ewma
 
 ### Startup Script Status (`scripts/start.sh`)
 
-- MLX chat server: Started (port 8090)
-- Whisper: Conditional (`ENABLE_WHISPER`), flag exists but whisper transcriptions not written to file
-- MLX vision server: **NOT STARTED** - no `MLX_VISION_PORT` or `ENABLE_MLX_VISION`
-- LoRA adapter: **NOT PASSED** - no `--adapter-path` support
+- MLX chat server: optional; `MINIME_LLM_BACKEND=ollama` is the default.
+- Whisper: conditional (`ENABLE_WHISPER`).
+- MLX vision server: optional (`ENABLE_MLX_VISION`, `MLX_VISION_PORT`, `MLX_VISION_MODEL`).
+- LoRA adapter: optional (`LORA_ADAPTER`) in `scripts/start.sh`.
 
 ## 4. MLX Patterns Not Yet Applied to Rust Metal Layer
 

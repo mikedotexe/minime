@@ -3,7 +3,7 @@
 # Use /Users/v/other/astrid/scripts/start_all.sh for canonical full-stack startup.
 # Uses kill -9 (SIGKILL) for cleanup — prefer SIGTERM via stop_all.sh.
 #
-# Unified Consciousness System Startup Orchestrator
+# Legacy Unified Spectral Stack Startup Orchestrator
 # Starts: minime (Rust), holographic-engine (Swift), monitor (Python)
 # With proper health checks and graceful startup sequencing
 
@@ -126,7 +126,7 @@ cleanup_stale_processes() {
 # --- Service starters ---
 
 start_minime() {
-    log_info "Starting minime (Rust ESN consciousness engine)..."
+    log_info "Starting minime (Rust ESN spectral engine)..."
 
     if [ ! -d "$MINIME_DIR" ]; then
         log_error "minime directory not found: $MINIME_DIR"
@@ -206,7 +206,7 @@ start_monitor() {
 main() {
     echo ""
     echo "==============================================================="
-    echo "   UNIFIED CONSCIOUSNESS SYSTEM STARTUP"
+    echo "   UNIFIED SPECTRAL STACK STARTUP"
     echo "   minime (Rust ESN) + holographic-engine (Swift AdS/CFT)"
     echo "==============================================================="
     echo ""

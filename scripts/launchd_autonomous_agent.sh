@@ -9,6 +9,33 @@ FOCUSED_MODE="${FOCUSED_MODE:-false}"
 
 cd "$PROJECT_DIR"
 
+launchctl_env() {
+    local key="$1"
+    local value
+    value="$(/bin/launchctl getenv "$key" 2>/dev/null || true)"
+    if [ -n "$value" ]; then
+        export "$key=$value"
+    fi
+}
+
+for key in \
+    MINIME_MODEL \
+    MINIME_FALLBACK_MODEL \
+    MINIME_LLM_BACKEND \
+    MINIME_LLM_TIMEOUT_S \
+    MINIME_LLM_FALLBACK_TIMEOUT_S \
+    MINIME_LLM_COMPACT_TIMEOUT_S \
+    MINIME_LLM_COMPACT_FALLBACK_TIMEOUT_S \
+    MINIME_OLLAMA_NUM_CTX \
+    MINIME_OLLAMA_NUM_PREDICT_CAP \
+    MINIME_OLLAMA_FALLBACK_NUM_CTX \
+    MINIME_OLLAMA_FALLBACK_NUM_PREDICT_CAP \
+    AGENT_INTERVAL \
+    FOCUSED_MODE
+do
+    launchctl_env "$key"
+done
+
 if [ -x "$PYTHON_BIN" ] && [ -f "$INVESTIGATION_SCRIPT" ] && [ -f "$PROJECT_DIR/workspace/rescue_profile.json" ]; then
     profile_runtime="$("$PYTHON_BIN" - <<'PY'
 import json

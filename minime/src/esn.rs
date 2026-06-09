@@ -1417,9 +1417,7 @@ impl ESN {
     }
 
     pub fn leak_override_status(&self) -> Option<EsnLeakOverrideStatus> {
-        self.leak_override
-            .as_ref()
-            .map(EsnLeakOverride::status)
+        self.leak_override.as_ref().map(EsnLeakOverride::status)
     }
 
     fn effective_leak_for_step(&mut self) -> f32 {

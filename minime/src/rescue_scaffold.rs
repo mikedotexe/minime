@@ -1000,17 +1000,17 @@ pub fn stable_core_scaffold_activation_delay_reason(
     live_audio_divisor: u32,
     live_video_divisor: u32,
 ) -> &'static str {
-    if semantic_active {
-        return "semantic_active";
-    }
-    if live_audio_divisor != 0 || live_video_divisor != 0 {
-        return "live_intake_enabled";
-    }
     if matches!(stage, OverfillStage::Bootstrap | OverfillStage::Recovery)
         && fill_pct.is_finite()
         && fill_pct < STABLE_CORE_SCAFFOLD_LOW_FILL_REACTIVATION_PCT
     {
         return "protective_low_fill_candidate";
+    }
+    if semantic_active {
+        return "semantic_active";
+    }
+    if live_audio_divisor != 0 || live_video_divisor != 0 {
+        return "live_intake_enabled";
     }
     if fill_pct >= STABILITY_PI_REENTRY_ELEVATED_FILL_PCT && fill_slope_pct_per_sec > 0.0 {
         return "protective_high_fill_candidate";
@@ -2336,6 +2336,28 @@ mod tests {
         );
         assert_eq!(
             stable_core_scaffold_activation_delay_reason(
+                OverfillStage::Bootstrap,
+                11.0,
+                0.0,
+                true,
+                0,
+                0,
+            ),
+            "protective_low_fill_candidate"
+        );
+        assert_eq!(
+            stable_core_scaffold_activation_delay_reason(
+                OverfillStage::Hold,
+                62.0,
+                0.0,
+                true,
+                0,
+                0,
+            ),
+            "semantic_active"
+        );
+        assert_eq!(
+            stable_core_scaffold_activation_delay_reason(
                 OverfillStage::Hold,
                 57.9,
                 0.0,
@@ -2453,6 +2475,12 @@ mod tests {
         let mut low_fill = StableCoreRestartGate::new(1_000);
         let activation =
             low_fill.evaluate_activation(OverfillStage::Bootstrap, 34.0, 0.0, false, 0, 0);
+        assert!(activation.activate);
+        assert_eq!(activation.reason, "protective_low_fill_activated");
+
+        let mut semantic_low_fill = StableCoreRestartGate::new(1_000);
+        let activation =
+            semantic_low_fill.evaluate_activation(OverfillStage::Bootstrap, 11.0, 0.0, true, 0, 0);
         assert!(activation.activate);
         assert_eq!(activation.reason, "protective_low_fill_activated");
     }

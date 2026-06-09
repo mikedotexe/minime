@@ -3,10 +3,10 @@
 # Use /Users/v/other/astrid/scripts/stop_all.sh for canonical shutdown,
 # or /Users/v/other/minime/scripts/stop.sh for minime-only shutdown.
 #
-# Graceful shutdown of all consciousness-related processes
+# Graceful shutdown of legacy Minime-related processes
 # Following CLAUDE.md shutdown protocol
 
-echo "=== Consciousness Process Cleanup ==="
+echo "=== Minime Process Cleanup ==="
 echo ""
 
 # Check what's running first
@@ -17,7 +17,7 @@ echo ""
 # Count processes
 PROCESS_COUNT=$(ps aux | grep -E "(minime|camera_to_sensory|camera_client)" | grep -v grep | wc -l)
 if [ "$PROCESS_COUNT" -eq 0 ]; then
-    echo "No consciousness processes running. System is clean."
+    echo "No Minime processes running. System is clean."
     exit 0
 fi
 
@@ -33,8 +33,8 @@ pkill -TERM -f camera_client.py
 echo "[2/4] Waiting 5 seconds for queues to drain..."
 sleep 5
 
-# Step 3: Stop Python consciousness frontend
-echo "[3/4] Stopping Python consciousness frontend..."
+# Step 3: Stop legacy Python frontend
+echo "[3/4] Stopping legacy Python frontend..."
 pkill -TERM -f "minime.py"
 
 # Step 4: Stop Rust minime backend

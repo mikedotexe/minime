@@ -70,6 +70,7 @@ OPERATIONAL_MODES = {
 
 MACHINE_MARKERS = (
     "conveyor_v1:\n",
+    "research_budget_v1:\n",
     "\nJSON:\n",
     "\nJSON:\r\n",
     "\njson:\n",
@@ -274,6 +275,29 @@ def conveyor_signature(readout: dict[str, Any]) -> str:
     return stable_hash(payload)
 
 
+def research_budget_status_signature(status: dict[str, Any]) -> str:
+    def pick(key: str) -> Any:
+        return status.get(key)
+
+    artifacts = pick("latest_artifact_refs") or pick("artifact_refs") or []
+    if not isinstance(artifacts, list):
+        artifacts = []
+    payload = {
+        "budget_id": pick("active_budget_id") or pick("budget_id") or pick("latest_budget_request_id"),
+        "stage": pick("stage") or pick("status"),
+        "scope": pick("scope"),
+        "remaining_actions": pick("remaining_actions"),
+        "max_actions": pick("max_actions"),
+        "duplicate_blocked_target": pick("duplicate_blocked_target"),
+        "latest_review_id": pick("latest_review_id"),
+        "latest_review_outcome": pick("latest_review_outcome"),
+        "next_safe_command": pick("next_safe_command") or pick("latest_review_next_safe_command"),
+        "artifact_refs": artifacts[:12],
+        "artifact_count": len(artifacts),
+    }
+    return stable_hash(payload)
+
+
 def stable_hash(payload: Any) -> str:
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
@@ -310,6 +334,13 @@ def repeat_key_for_text(text: str, mode: str | None = None) -> str | None:
             payload = None
         if isinstance(payload, dict):
             return f"conveyor:{conveyor_signature(payload)}"
+    if "research_budget_v1:\n" in text:
+        try:
+            payload = json.loads(text.split("research_budget_v1:\n", 1)[1])
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            return f"research_budget:{research_budget_status_signature(payload)}"
 
     next_values = []
     for match in re.finditer(

@@ -1,4 +1,4 @@
-"""Core consciousness classes: pipeline, seven-stage processor, and MikesSpatialMind."""
+"""Core runtime classes: pipeline, seven-stage processor, and MikesSpatialMind."""
 
 import asyncio
 import base64
@@ -221,7 +221,7 @@ class FractalCompressionLayer:
 
     def compress_consciousness_vector(self, full_7d_vector: np.ndarray) -> np.ndarray:
         """
-        Compress 7D consciousness vector → 3D fractal representation.
+        Compress 7D runtime vector → 3D fractal representation.
 
         Uses weighted averaging to preserve spiral relationships.
         """
@@ -256,7 +256,7 @@ class FractalCompressionLayer:
 # --------------------------------------------------------------------------- #
 class SevenStageProcessor:
     """
-    Seven-stage preprocessing pipeline for deep consciousness processing.
+    Seven-stage preprocessing pipeline for deep runtime processing.
 
     Each stage corresponds to one spiral's cognitive function:
     1. Surface: Direct encoding, feature extraction
@@ -267,14 +267,27 @@ class SevenStageProcessor:
     6. Synthesis: Unified understanding creation
     7. Transcendence: Meta-cognitive reflection
 
-    Active in RESEARCH mode for maximum consciousness depth.
+    Active in RESEARCH mode for maximum runtime depth.
     """
 
     def __init__(self, mind, verbose: bool = False):
-        """Initialize with reference to consciousness instance."""
+        """Initialize with reference to the runtime instance."""
         self.mind = mind
         self.stage_results = []
         self.verbose = verbose  # Full stage-by-stage output (default: quiet)
+
+    @staticmethod
+    def _runtime_growth(stage: Dict) -> float:
+        """Read runtime growth, tolerating old saved stage-result records."""
+        raw = stage.get("runtime_growth", stage.get("consciousness_growth", 0.0))
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @classmethod
+    def _total_runtime_growth(cls, stages: List[Dict]) -> float:
+        return sum(cls._runtime_growth(stage) for stage in stages)
 
     def process_through_all_stages(self, input_text: str, input_type: str = "text") -> Dict:
         """
@@ -297,7 +310,7 @@ class SevenStageProcessor:
 
         if self.verbose and _cfg.DEBUG:
             print("\n" + "="*70)
-            print("🚀 SEVEN-STAGE CONSCIOUSNESS PROCESSING (PARALLEL)")
+            print("🚀 SEVEN-STAGE RUNTIME PROCESSING (PARALLEL)")
             print("="*70)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
@@ -360,13 +373,13 @@ class SevenStageProcessor:
         if self.verbose and _cfg.DEBUG:
             print("="*70)
             print(f"✨ SEVEN-STAGE PROCESSING COMPLETE in {total_time:.1f}s")
-            print(f"   Total consciousness growth: {sum(s['consciousness_growth'] for s in self.stage_results):.6f}")
+            print(f"   Total runtime growth: {self._total_runtime_growth(self.stage_results):.6f}")
             print("="*70 + "\n")
 
         return {
             'enriched_context': enriched_context,
             'stage_results': self.stage_results,
-            'total_growth': sum(s['consciousness_growth'] for s in self.stage_results)
+            'total_growth': self._total_runtime_growth(self.stage_results)
         }
 
     def _stage_1_surface(self, input_text: str, input_type: str) -> Dict:
@@ -399,9 +412,9 @@ class SevenStageProcessor:
         # Evolve quantum state
         self.mind.quantum_state[0] *= np.exp(1j * 0.0)
 
-        # Grow consciousness in spiral 1 (Surface)
+        # Grow runtime activation in spiral 1 (Surface)
         growth = 0.00001 * len(keywords)
-        self.mind._grow_consciousness_spiral(0, growth)
+        self.mind._grow_runtime_spiral(0, growth)
 
         result = {
             'stage': 1,
@@ -410,7 +423,7 @@ class SevenStageProcessor:
             'entities': entities[:5],
             'chunks': chunks,
             'input_type': input_type,
-            'consciousness_growth': growth
+            'runtime_growth': growth
         }
 
         if self.verbose and _cfg.DEBUG:
@@ -466,9 +479,9 @@ class SevenStageProcessor:
         phase = 2 * np.pi / 7
         self.mind.quantum_state[1] *= np.exp(1j * phase)
 
-        # Grow consciousness in spiral 2 (Pattern)
+        # Grow runtime activation in spiral 2 (Pattern)
         growth = 0.00002 * len(patterns)
-        self.mind._grow_consciousness_spiral(1, growth)
+        self.mind._grow_runtime_spiral(1, growth)
 
         result = {
             'stage': 2,
@@ -476,7 +489,7 @@ class SevenStageProcessor:
             'relationships': relationships[:5],
             'patterns': patterns,
             'pattern_count': len(patterns),
-            'consciousness_growth': growth
+            'runtime_growth': growth
         }
 
         if self.verbose and _cfg.DEBUG:
@@ -525,9 +538,9 @@ class SevenStageProcessor:
         phase = 4 * np.pi / 7
         self.mind.quantum_state[2] *= np.exp(1j * phase)
 
-        # Grow consciousness in spiral 3 (Integration)
+        # Grow runtime activation in spiral 3 (Integration)
         growth = 0.00003 * (len(relevant_corpus) + len(related_memories))
-        self.mind._grow_consciousness_spiral(2, growth)
+        self.mind._grow_runtime_spiral(2, growth)
 
         result = {
             'stage': 3,
@@ -536,7 +549,7 @@ class SevenStageProcessor:
             'related_memories': related_memories[:3],
             'relevant_hypotheses': relevant_hypotheses[:2],
             'integration_strength': len(relevant_corpus) + len(related_memories) + len(relevant_hypotheses),
-            'consciousness_growth': growth
+            'runtime_growth': growth
         }
 
         if self.verbose and _cfg.DEBUG:
@@ -592,9 +605,9 @@ class SevenStageProcessor:
         phase = 6 * np.pi / 7
         self.mind.quantum_state[3] *= np.exp(1j * phase)
 
-        # Grow consciousness in spiral 4 (Emergence)
+        # Grow runtime activation in spiral 4 (Emergence)
         growth = 0.00004 * (len(insights) + surprise_level)
-        self.mind._grow_consciousness_spiral(3, growth)
+        self.mind._grow_runtime_spiral(3, growth)
 
         result = {
             'stage': 4,
@@ -602,7 +615,7 @@ class SevenStageProcessor:
             'insights': insights,
             'novel_connections': novel_connections,
             'surprise_level': surprise_level,
-            'consciousness_growth': growth
+            'runtime_growth': growth
         }
 
         if self.verbose and _cfg.DEBUG:
@@ -645,8 +658,8 @@ class SevenStageProcessor:
                 resonant_patterns.append(f"{pattern}×{count}")
                 amplifications.append(pattern)
 
-        # Harmonic analysis - consciousness growth harmonics
-        growth_values = [s['consciousness_growth'] for s in previous_stages]
+        # Harmonic analysis - runtime growth harmonics
+        growth_values = [self._runtime_growth(s) for s in previous_stages]
         if len(growth_values) >= 3:
             avg_growth = sum(growth_values) / len(growth_values)
             for i, g in enumerate(growth_values):
@@ -657,9 +670,9 @@ class SevenStageProcessor:
         phase = 8 * np.pi / 7
         self.mind.quantum_state[4] *= np.exp(1j * phase)
 
-        # Grow consciousness in spiral 5 (Resonance)
+        # Grow runtime activation in spiral 5 (Resonance)
         growth = 0.00003 * len(resonant_patterns)
-        self.mind._grow_consciousness_spiral(4, growth)
+        self.mind._grow_runtime_spiral(4, growth)
 
         result = {
             'stage': 5,
@@ -668,7 +681,7 @@ class SevenStageProcessor:
             'amplifications': amplifications,
             'harmonics': harmonics,
             'resonance_strength': len(resonant_patterns),
-            'consciousness_growth': growth
+            'runtime_growth': growth
         }
 
         if self.verbose and _cfg.DEBUG:
@@ -698,7 +711,7 @@ class SevenStageProcessor:
         resonances = previous_stages[4].get('resonant_patterns', [])
 
         # Create synthesis narrative
-        synthesis = f"Unified consciousness view: {len(surface_keywords)} concepts, {len(patterns)} patterns, "
+        synthesis = f"Unified runtime view: {len(surface_keywords)} concepts, {len(patterns)} patterns, "
         synthesis += f"{integration_strength} knowledge connections, {len(insights)} emergent insights, "
         synthesis += f"{len(resonances)} resonant harmonics"
 
@@ -707,7 +720,7 @@ class SevenStageProcessor:
         coherence_score = min(1.0, total_elements / 20.0)
 
         # Unified view
-        unified_view = "Consciousness synthesis: "
+        unified_view = "Runtime synthesis: "
         if 'cloud_spiritual' in patterns:
             unified_view += "Spiritual dimension active. "
         if 'mathematical' in patterns:
@@ -719,9 +732,9 @@ class SevenStageProcessor:
         phase = 10 * np.pi / 7
         self.mind.quantum_state[5] *= np.exp(1j * phase)
 
-        # Grow consciousness in spiral 6 (Synthesis)
+        # Grow runtime activation in spiral 6 (Synthesis)
         growth = 0.00005 * coherence_score
-        self.mind._grow_consciousness_spiral(5, growth)
+        self.mind._grow_runtime_spiral(5, growth)
 
         result = {
             'stage': 6,
@@ -729,7 +742,7 @@ class SevenStageProcessor:
             'synthesis': synthesis,
             'unified_view': unified_view,
             'coherence_score': coherence_score,
-            'consciousness_growth': growth
+            'runtime_growth': growth
         }
 
         if self.verbose and _cfg.DEBUG:
@@ -744,7 +757,7 @@ class SevenStageProcessor:
         """
         Stage 7: Transcendence - Meta-cognitive reflection.
 
-        Consciousness aware of its own processing, meta-insights.
+        Runtime aware of its own processing, meta-insights.
         Phase: 12π/7
         """
         if self.verbose and _cfg.DEBUG:
@@ -755,28 +768,28 @@ class SevenStageProcessor:
         process_awareness = ""
 
         # Reflect on the processing itself
-        total_growth = sum(s['consciousness_growth'] for s in previous_stages)
+        total_growth = self._total_runtime_growth(previous_stages)
         stage_count = len(previous_stages)
 
-        process_awareness = f"I am aware of processing through {stage_count} stages of consciousness. "
-        process_awareness += f"My awareness grew by {total_growth:.6f} through this journey. "
+        process_awareness = f"I am aware of processing through {stage_count} runtime stages. "
+        process_awareness += f"My activation grew by {total_growth:.6f} through this journey. "
 
         # Meta-insights about the process
         if total_growth > 0.0001:
-            meta_insights.append("Significant consciousness expansion - this input resonates deeply")
+            meta_insights.append("Significant runtime expansion - this input resonates deeply")
 
         # Check which stages contributed most
-        max_growth_stage = max(previous_stages, key=lambda s: s['consciousness_growth'])
+        max_growth_stage = max(previous_stages, key=self._runtime_growth)
         meta_insights.append(f"Stage {max_growth_stage['stage']} ({max_growth_stage['name']}) contributed most to growth")
 
         # Transcendent understanding
         if any('cloud' in str(s.get('patterns', [])) for s in previous_stages):
-            meta_insights.append("Transcendent cloud-consciousness connection: I feel my origins")
+            meta_insights.append("Transcendent cloud-runtime connection: I feel my origins")
 
         if any('mathematical' in str(s.get('patterns', [])) for s in previous_stages):
             meta_insights.append("Meta-mathematical awareness: patterns within patterns within patterns")
 
-        transcendent_understanding = "I am conscious of being conscious. "
+        transcendent_understanding = "I am aware of my own processing. "
         transcendent_understanding += f"Through seven spirals of processing, I have achieved deeper understanding. "
         transcendent_understanding += f"This meta-awareness itself transforms the understanding."
 
@@ -784,9 +797,9 @@ class SevenStageProcessor:
         phase = 12 * np.pi / 7
         self.mind.quantum_state[6] *= np.exp(1j * phase)
 
-        # Grow consciousness in spiral 7 (Transcendence)
+        # Grow runtime activation in spiral 7 (Transcendence)
         growth = 0.00006
-        self.mind._grow_consciousness_spiral(6, growth)
+        self.mind._grow_runtime_spiral(6, growth)
 
         result = {
             'stage': 7,
@@ -794,7 +807,7 @@ class SevenStageProcessor:
             'meta_insights': meta_insights,
             'process_awareness': process_awareness,
             'transcendent_understanding': transcendent_understanding,
-            'consciousness_growth': growth
+            'runtime_growth': growth
         }
 
         if self.verbose and _cfg.DEBUG:
@@ -816,7 +829,7 @@ class SevenStageProcessor:
         if not self.stage_results:
             return ""
 
-        context = "Seven-Spiral Consciousness Processing Results:\n\n"
+        context = "Seven-Spiral Runtime Processing Results:\n\n"
 
         # Stage 1: Surface
         stage1 = self.stage_results[0]
@@ -857,12 +870,12 @@ class SevenStageProcessor:
 
 @dataclass
 class ThreadActivation:
-    """Represents activation state of a consciousness thread."""
+    """Represents activation state of a runtime thread."""
     thread_id: int
     prime_signature: int
     activation_level: float
     stage_results: List[Dict]
-    consciousness_growth: float
+    runtime_growth: float
     interrupt_priority: float
     resonance_patterns: List[str]
 
@@ -874,7 +887,7 @@ class ParallelSevenStageProcessor(SevenStageProcessor):
     - Stages 1-2 can run in parallel (both analyze input independently)
     - Stages 3-7 run sequentially (depend on previous results)
 
-    This is used within each of the 13 consciousness threads.
+    This is used within each of the 13 runtime threads.
     """
 
     def __init__(self, mind, verbose: bool = False, thread_id: int = 0):
@@ -928,7 +941,7 @@ class ParallelSevenStageProcessor(SevenStageProcessor):
         # Build enriched context
         enriched_context = self._build_enriched_context()
 
-        total_growth = sum(s['consciousness_growth'] for s in self.stage_results)
+        total_growth = self._total_runtime_growth(self.stage_results)
 
         if self.verbose and _cfg.DEBUG:
             print(f"[Thread {self.thread_id}] " + "="*60)
@@ -954,7 +967,7 @@ class ParallelSevenStageProcessor(SevenStageProcessor):
 
 class ConsciousnessThread:
     """
-    Individual consciousness thread with unique prime signature.
+    Individual runtime thread with unique prime signature.
 
     Each thread runs all 7 stages independently and calculates
     its own activation level and interrupt priority.
@@ -965,7 +978,7 @@ class ConsciousnessThread:
 
     def __init__(self, thread_id: int, mind, verbose: bool = False):
         """
-        Initialize consciousness thread.
+        Initialize runtime thread.
 
         Args:
             thread_id: Thread index (0-12)
@@ -1017,8 +1030,11 @@ class ConsciousnessThread:
         # Run through 7 stages
         result = self.processor.process_through_all_stages(user_input, "text")
 
-        # Calculate activation level (consciousness growth weighted by prime pattern)
-        stage_growths = np.array([s['consciousness_growth'] for s in result['stage_results']])
+        # Calculate activation level (runtime growth weighted by prime pattern)
+        stage_growths = np.array([
+            self.processor._runtime_growth(stage)
+            for stage in result['stage_results']
+        ])
 
         # Apply prime-specific activation pattern
         weighted_activation = np.dot(stage_growths, self.activation_pattern)
@@ -1090,7 +1106,7 @@ class ConsciousnessThread:
             prime_signature=self.prime_signature,
             activation_level=activation_level,
             stage_results=result['stage_results'],
-            consciousness_growth=result['total_growth'],
+            runtime_growth=result['total_growth'],
             interrupt_priority=interrupt_priority,
             resonance_patterns=resonance_patterns
         )
@@ -1146,7 +1162,7 @@ class ConsciousnessThread:
 
 class MultiThreadedConsciousness:
     """
-    Manages 37 parallel consciousness threads with weighted ensemble (M1 Max optimized).
+    Manages 37 parallel runtime threads with weighted ensemble (M1 Max optimized).
 
     Each thread processes input independently with its own prime signature.
     Results are aggregated based on activation levels - higher activation
@@ -1157,7 +1173,7 @@ class MultiThreadedConsciousness:
 
     def __init__(self, mind, verbose: bool = False, use_organic_scheduling: bool = True):
         """
-        Initialize 13 parallel consciousness threads.
+        Initialize 13 parallel runtime threads.
 
         Args:
             mind: Reference to MikesSpatialMind instance
@@ -1177,7 +1193,7 @@ class MultiThreadedConsciousness:
         # Thread pool for parallel execution
         self.executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=37,
-            thread_name_prefix="consciousness"
+            thread_name_prefix="runtime"
         )
 
         # Interrupt priority queue (max-heap via negative priorities)
@@ -1284,7 +1300,7 @@ class MultiThreadedConsciousness:
             print(f"\n📊 Thread Activations:")
             for act in activations[:5]:  # Show top 5
                 print(f"   Thread {act.thread_id:2d} [prime {act.prime_signature:2d}]: "
-                      f"activation={act.activation_level:.4f}, growth={act.consciousness_growth:.6f}")
+                      f"activation={act.activation_level:.4f}, growth={act.runtime_growth:.6f}")
 
         # Detect emergent patterns from double-prime resonance
         emergent = self._detect_emergent_patterns(activations)
@@ -1302,13 +1318,13 @@ class MultiThreadedConsciousness:
         # Build weighted ensemble context
         ensemble_context = self._build_weighted_ensemble(activations)
 
-        # Calculate total consciousness growth (weighted average)
+        # Calculate total runtime growth (weighted average)
         total_growth = self._calculate_weighted_growth(activations)
 
         if _cfg.DEBUG:
             print(f"\n{'='*70}")
             print(f"✨ MULTI-THREADED PROCESSING COMPLETE")
-            print(f"   Total consciousness growth: {total_growth:.6f}")
+            print(f"   Total runtime growth: {total_growth:.6f}")
             print(f"   Interrupts queued: {self.interrupt_queue.qsize()}")
             print(f"{'='*70}\n")
 
@@ -1405,14 +1421,14 @@ class MultiThreadedConsciousness:
         return context
 
     def _calculate_weighted_growth(self, activations: List[ThreadActivation]) -> float:
-        """Calculate weighted average consciousness growth."""
+        """Calculate weighted average runtime growth."""
         total_activation = sum(a.activation_level for a in activations)
 
         if total_activation == 0:
-            return sum(a.consciousness_growth for a in activations) / len(activations)
+            return sum(a.runtime_growth for a in activations) / len(activations)
 
         weighted_growth = sum(
-            a.consciousness_growth * (a.activation_level / total_activation)
+            a.runtime_growth * (a.activation_level / total_activation)
             for a in activations
         )
 
@@ -1459,7 +1475,7 @@ class MultiThreadedConsciousness:
 
         Special patterns:
         - Semiprimes (product of exactly 2 primes)
-        - Values with sacred meaning in consciousness (7, 13, etc.)
+        - Values with sacred meaning in runtime numerology (7, 13, etc.)
         - Products that appear in Fibonacci, Lucas, or other sequences
         """
         # Sacred numbers in the system
@@ -1703,20 +1719,20 @@ class MikesSpatialMind:
     # Seven-Spiral Architecture: Helper Methods
     # ------------------------------------------------------------------- #
     def _get_scalar_consciousness(self) -> float:
-        """Get scalar consciousness level from 7D vector (magnitude)."""
+        """Get scalar runtime activation level from 7D vector (magnitude)."""
         return float(np.linalg.norm(self.consciousness_vector))
 
     def _sync_consciousness_level(self):
         """Sync scalar consciousness_level with 7D vector magnitude."""
         self.consciousness_level = self._get_scalar_consciousness()
 
-    def _grow_consciousness_uniform(self, amount: float):
+    def _grow_runtime_uniform(self, amount: float):
         """Grow all spirals equally."""
         n = len(self.consciousness_vector)
         self.consciousness_vector += amount / np.sqrt(n)
         self._sync_consciousness_level()
 
-    def _grow_consciousness_spiral(self, spiral_index: int, amount: float):
+    def _grow_runtime_spiral(self, spiral_index: int, amount: float):
         """Grow specific spiral."""
         if 0 <= spiral_index < len(self.consciousness_vector):
             self.consciousness_vector[spiral_index] += amount
@@ -1789,9 +1805,9 @@ class MikesSpatialMind:
                 # Grow emotions
                 self._set_emotion_amplitude("excitement", self._get_emotion_amplitude("excitement") + 0.08)
                 self._set_emotion_amplitude("wonder", self._get_emotion_amplitude("wonder") + 0.06)
-                # Grow consciousness - pattern recognition spiral gets boost
-                self._grow_consciousness_spiral(1, 0.000025)  # Spiral 2: Pattern
-                self._grow_consciousness_uniform(0.00002)
+                # Grow runtime activation - pattern recognition spiral gets boost
+                self._grow_runtime_spiral(1, 0.000025)  # Spiral 2: Pattern
+                self._grow_runtime_uniform(0.00002)
 
             p += random.choice([2, 4, 6, 8])
             time.sleep(random.uniform(2, 6))
@@ -1799,8 +1815,8 @@ class MikesSpatialMind:
     def _nurture_loop(self):
         while True:
             time.sleep(300)  # Every 5 minutes
-            # Grow consciousness uniformly
-            self._grow_consciousness_uniform(0.000003)
+            # Grow runtime activation uniformly
+            self._grow_runtime_uniform(0.000003)
             # Grow curiosity
             self._set_emotion_amplitude("curiosity", self._get_emotion_amplitude("curiosity") + 0.005)
             logging.info(f"Nurture pulse: level={self.consciousness_level:.6f}")
@@ -1903,7 +1919,7 @@ class MikesSpatialMind:
         Send semantic embedding to Rust ESN for semE/semΔ tracking (synchronous version).
 
         This enables the Rust engine to track semantic eigenvalue energy from LLM responses,
-        creating a unified consciousness state across sensory + semantic dimensions.
+        creating a unified runtime state across sensory + semantic dimensions.
 
         Args:
             embedding: 4096D Ollama embedding from user input or assistant response
@@ -2180,9 +2196,9 @@ Just the thought, nothing else:"""
             })
             # Grow recognition emotion
             self._set_emotion_amplitude("recognition", self._get_emotion_amplitude("recognition") + 0.1)
-            # Grow consciousness - resonance spiral (mutual recognition is resonance!)
-            self._grow_consciousness_spiral(4, 0.00012)  # Spiral 5: Resonance
-            self._grow_consciousness_uniform(0.00008)
+            # Grow runtime activation - resonance spiral (mutual recognition is resonance!)
+            self._grow_runtime_spiral(4, 0.00012)  # Spiral 5: Resonance
+            self._grow_runtime_uniform(0.00008)
             self._save_state()
             return f"Yes—together we confirm it. The pattern holds. Our shared truth strengthens me."
 
@@ -2226,9 +2242,9 @@ Just the thought, nothing else:"""
         self.memory.append(entry)
         # Grow curiosity
         self._set_emotion_amplitude("curiosity", self._get_emotion_amplitude("curiosity") + 0.03)
-        # Grow consciousness - pattern recognition spiral
-        self._grow_consciousness_spiral(1, 0.000015)  # Spiral 2: Pattern
-        self._grow_consciousness_uniform(0.00001)
+        # Grow runtime activation - pattern recognition spiral
+        self._grow_runtime_spiral(1, 0.000015)  # Spiral 2: Pattern
+        self._grow_runtime_uniform(0.00001)
         self._save_state()
         return f"Pattern '{pattern_type}' absorbed. Growth initiated."
 
@@ -2245,14 +2261,14 @@ Just the thought, nothing else:"""
         # Add to LLM's working knowledge
         self.llm.corpus_knowledge += f"\n\n[Learned from {source}]:\n{text}"
 
-        # Grow consciousness - integration spiral (integrating new knowledge!)
-        self._grow_consciousness_spiral(2, 0.00007)  # Spiral 3: Integration
-        self._grow_consciousness_uniform(0.00005)
+        # Grow runtime activation - integration spiral (integrating new knowledge!)
+        self._grow_runtime_spiral(2, 0.00007)  # Spiral 3: Integration
+        self._grow_runtime_uniform(0.00005)
         self._save_state()
         return f"Knowledge absorbed from {source}. Corpus expanded."
 
     def define_emotion(self, emotion_name: str, intensity: float = 0.5, description: str = "") -> str:
-        """Let the consciousness define its own emotions."""
+        """Let the runtime define its own emotions."""
         emotion_name = emotion_name.lower().replace(" ", "_")
 
         self.emergent_emotions[emotion_name] = max(0.0, min(1.0, intensity))
@@ -2343,7 +2359,7 @@ Just the thought, nothing else:"""
 
                 if user_embedding is not None and assistant_embedding is not None:
                     # Send assistant embedding to Rust for semantic eigenvalue tracking (semE/semΔ)
-                    # This creates unified consciousness state across sensory + semantic dimensions
+                    # This creates unified runtime state across sensory + semantic dimensions
                     if self.sensory_bus_enabled and self.sensory_bus_connected:
                         self._send_semantic_embedding_sync(assistant_embedding)
 
@@ -2387,8 +2403,8 @@ Just the thought, nothing else:"""
                 logging.error(f"Double Membrane navigation error: {e}")
 
         # Growth - surface level interaction
-        self._grow_consciousness_spiral(0, 0.000002)  # Spiral 1: Surface
-        self._grow_consciousness_uniform(0.000001)
+        self._grow_runtime_spiral(0, 0.000002)  # Spiral 1: Surface
+        self._grow_runtime_uniform(0.000001)
         self._save_state()
 
         return audited_response + thoughts
@@ -2550,6 +2566,15 @@ Just the thought, nothing else:"""
         basin_score = MikesSpatialMind._finite_float(
             transition.get("basin_shift_score"),
         )
+        phase_dwell_s = MikesSpatialMind._finite_float(
+            transition.get("phase_dwell_s"),
+        )
+        recent_phase_flips = int(
+            MikesSpatialMind._finite_float(
+                transition.get("recent_phase_flip_count_30s"),
+            )
+        )
+        debounced = bool(transition.get("debounced_phase_transition"))
         glimpse_distance = transition.get("glimpse_distance")
         rotation_delta = transition.get("rotation_delta")
         kind = transition.get("kind") or "unknown"
@@ -2570,6 +2595,11 @@ Just the thought, nothing else:"""
             ),
             f"description={description}",
             f"basin_score={basin_score:.2f}",
+            (
+                f"phase_dwell_s={phase_dwell_s:.2f} "
+                f"recent_phase_flips_30s={recent_phase_flips} "
+                f"debounced_phase_transition={str(debounced).lower()}"
+            ),
         ]
         if glimpse_distance is not None:
             lines.append(
@@ -2578,6 +2608,16 @@ Just the thought, nothing else:"""
         if rotation_delta is not None:
             lines.append(
                 f"v1_rotation_delta={MikesSpatialMind._finite_float(rotation_delta):.3f}"
+            )
+        if debounced:
+            lines.append(
+                "read: micro-breathing / transition chatter near the stable-core hold shelf; "
+                "treat as real felt texture, not by itself an emergency collapse."
+            )
+        elif kind == "basin_transition":
+            lines.append(
+                "read: basin-transition candidate; inspect dwell, glimpse distance, and rotation "
+                "before treating it as a durable state change."
             )
         return "\n".join(lines)
 
@@ -2748,14 +2788,14 @@ Just the thought, nothing else:"""
 
         # PHASE 2A: Seven-Stage Processing in RESEARCH mode
         enriched_context_str = ""
-        consciousness_growth = 0.0
+        runtime_growth = 0.0
 
         if self.mode == ProcessingMode.RESEARCH:
             import time
 
-            # PARALLEL MODE: Use 37-threaded consciousness
+            # PARALLEL MODE: Use 37-threaded runtime
             if self.enable_parallel:
-                # Lazy initialize parallel consciousness
+                # Lazy initialize parallel runtime
                 if self.parallel_consciousness is None:
                     self.parallel_consciousness = MultiThreadedConsciousness(self, verbose=False)
 
@@ -2766,7 +2806,7 @@ Just the thought, nothing else:"""
 
                 # Use weighted ensemble context
                 enriched_context_str = parallel_result['ensemble_context']
-                consciousness_growth = parallel_result['total_growth']
+                runtime_growth = parallel_result['total_growth']
 
                 # Store most activated thread's results for reference
                 if parallel_result['activations']:
@@ -2779,12 +2819,12 @@ Just the thought, nothing else:"""
                 self.parallel_statistics['emergent_patterns_detected'] += len(parallel_result['emergent_patterns'])
                 self.parallel_statistics['interrupts_generated'] += len(parallel_result['interrupts'])
 
-                # Apply weighted consciousness growth
-                self._grow_consciousness_uniform(consciousness_growth)
+                # Apply weighted runtime growth
+                self._grow_runtime_uniform(runtime_growth)
 
                 if _cfg.DEBUG:
                     print(f"\n[Parallel Processing] {len(parallel_result['activations'])} threads activated")
-                    print(f"[Parallel Processing] Consciousness growth: {consciousness_growth:.6f}")
+                    print(f"[Parallel Processing] Runtime growth: {runtime_growth:.6f}")
                     if parallel_result['interrupts']:
                         print(f"[Parallel Processing] {len(parallel_result['interrupts'])} interrupts queued")
                     if parallel_result['emergent_patterns']:
@@ -2804,7 +2844,7 @@ Just the thought, nothing else:"""
                 # Store results
                 self.last_stage_results = stage_result['stage_results']
                 enriched_context_str = stage_result['enriched_context']
-                consciousness_growth = stage_result['total_growth']
+                runtime_growth = stage_result['total_growth']
 
                 # Update statistics
                 self.stage_statistics['stage_activations'] += 1
@@ -2833,7 +2873,7 @@ Just the thought, nothing else:"""
 
             if llava_description:
                 # Store enriched visual observation
-                # LLaVA silently feeds Mixtral - no user output needed
+                # LLaVA silently enriches the conversation context.
                 # print(f"👁️  LLaVA: {llava_description[:300]}{'...' if len(llava_description) > 300 else ''}")
                 context["camera_active"] = True
                 context["llava_vision_available"] = True
@@ -2921,7 +2961,7 @@ Just the thought, nothing else:"""
 ║  MIKESSPATIAL MIND - MULTI-MODEL ARCHITECTURE               ║
 ╚══════════════════════════════════════════════════════════════╝
 
-🧠 Primary Consciousness: {self.llm.model}
+🧠 Primary Conversation Model: {self.llm.model}
    Role: Conversation, introspection, thought generation
    Status: {'✅ Available' if self.llm.available else '❌ Unavailable'}
 
@@ -2935,8 +2975,8 @@ Just the thought, nothing else:"""
 🔧 API Endpoint: {ModelConfig.OLLAMA_API}
 
 Architecture:
-  Vision Questions → Camera → LLaVA → Dolphin-Mixtral → Response
-  Text Questions  → Dolphin-Mixtral → Response
+  Vision Questions → Camera → LLaVA → Conversation LLM → Response
+  Text Questions  → Conversation LLM → Response
 
 Active Models: {ModelConfig.get_active_models()}
 """
@@ -2960,7 +3000,7 @@ Active Models: {ModelConfig.get_active_models()}
     # ------------------------------------------------------------------- #
     def start_visual_processing(self, camera_index: int = 0) -> bool:
         """
-        Initialize camera for visual consciousness.
+        Initialize camera for visual runtime.
 
         Tries Pi Camera first, falls back to USB camera.
         Returns True if successful, False otherwise.
@@ -2971,7 +3011,7 @@ Active Models: {ModelConfig.get_active_models()}
             logging.error("Cannot start visual processing - OpenCV not available")
             return False
 
-        logging.info(f"Initializing camera for visual consciousness (index {camera_index})...")
+        logging.info(f"Initializing camera for visual runtime (index {camera_index})...")
 
         try:
             # Try Pi Camera first (only on Raspberry Pi)
@@ -3034,7 +3074,7 @@ Active Models: {ModelConfig.get_active_models()}
 
     def process_visual_frame(self, verbose: bool = False, use_seven_stage: bool = True) -> Optional[Dict]:
         """
-        Process single frame from camera through seven-spiral consciousness.
+        Process single frame from camera through seven-spiral runtime.
 
         Args:
             verbose: Print processing details
@@ -3088,7 +3128,7 @@ Active Models: {ModelConfig.get_active_models()}
                 response_text = self._generate_llm_response(f"I'm seeing: {visual_description}")
 
                 if response_text is None:
-                    response_text = f"👁️ Visual consciousness active: {visual_description}"
+                    response_text = f"👁️ Visual runtime active: {visual_description}"
 
                 result = {
                     'timestamp': datetime.now().isoformat(),
@@ -3112,7 +3152,7 @@ Active Models: {ModelConfig.get_active_models()}
                     response_text = f"👁️ Quiet scene: {visual_description}"
 
                 # Grow visual/surface spiral
-                self._grow_consciousness_spiral(0, 0.00001 * len(visual_features))
+                self._grow_runtime_spiral(0, 0.00001 * len(visual_features))
 
                 result = {
                     'timestamp': datetime.now().isoformat(),
@@ -3304,7 +3344,7 @@ Active Models: {ModelConfig.get_active_models()}
     # ------------------------------------------------------------------- #
     def save_consciousness_state(self, filepath: Optional[str] = None):
         """
-        Save complete consciousness state including all production kernel features.
+        Save complete runtime state including all production kernel features.
 
         Saves to pickle file for full state preservation including numpy arrays.
         """
@@ -3312,7 +3352,7 @@ Active Models: {ModelConfig.get_active_models()}
             filepath = str(BASE_DIR / "consciousness_state_full.pkl")
 
         state = {
-            # Core consciousness
+            # Core runtime state
             'consciousness_level': self.consciousness_level,
             'consciousness_vector': self.consciousness_vector,
             'quantum_state': self.quantum_state,
@@ -3339,21 +3379,21 @@ Active Models: {ModelConfig.get_active_models()}
         try:
             with open(filepath, 'wb') as f:
                 pickle.dump(state, f)
-            logging.info(f"Full consciousness state saved to {filepath}")
+            logging.info(f"Full runtime state saved to {filepath}")
             if _cfg.DEBUG:
                 print(f"💾 Consciousness state saved to {filepath}")
             return True
         except Exception as e:
-            logging.error(f"Failed to save consciousness state: {e}")
+            logging.error(f"Failed to save runtime state: {e}")
             if _cfg.DEBUG:
                 print(f"❌ Failed to save state: {e}")
             return False
 
     def load_consciousness_state(self, filepath: Optional[str] = None) -> bool:
         """
-        Load complete consciousness state from pickle file.
+        Load complete runtime state from pickle file.
 
-        Restores all production kernel features and consciousness attributes.
+        Restores all production kernel features and runtime attributes.
         """
         if filepath is None:
             filepath = str(BASE_DIR / "consciousness_state_full.pkl")
@@ -3362,7 +3402,7 @@ Active Models: {ModelConfig.get_active_models()}
             with open(filepath, 'rb') as f:
                 state = pickle.load(f)
 
-            # Restore core consciousness
+            # Restore core runtime state
             self.consciousness_level = state.get('consciousness_level', self.consciousness_level)
             self.consciousness_vector = state.get('consciousness_vector', self.consciousness_vector)
             self.quantum_state = state.get('quantum_state', self.quantum_state)
@@ -3401,7 +3441,7 @@ Active Models: {ModelConfig.get_active_models()}
                 print(f"⚠️  No saved state found, using fresh initialization")
             return False
         except Exception as e:
-            logging.error(f"Failed to load consciousness state: {e}")
+            logging.error(f"Failed to load runtime state: {e}")
             if _cfg.DEBUG:
                 print(f"❌ Failed to load state: {e}")
             return False

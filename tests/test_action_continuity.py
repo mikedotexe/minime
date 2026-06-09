@@ -44,6 +44,22 @@ STATE = {
         "pressure_score": 0.24,
         "porosity_score": 0.72,
         "dominant_source": "controller_pressure",
+        "pressure_profile": [
+            {
+                "source": "controller_pressure",
+                "value": 0.24,
+                "pressure_weight": 0.1408,
+                "weighted_pressure": 0.033792,
+                "share": 0.31,
+            },
+            {
+                "source": "mode_packing",
+                "value": 0.20,
+                "pressure_weight": 0.1144,
+                "weighted_pressure": 0.02288,
+                "share": 0.21,
+            },
+        ],
         "quality": "porous_distributed",
         "components": {
             "lambda_monopoly": 0.12,
@@ -216,7 +232,7 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
             self.assertIn("Returnable journal", prompt)
             self.assertIn("Earlier claim: fill pressure softened near lambda4", prompt)
 
-    def test_direct_pressure_and_rest_prompts_include_journal_contract(self):
+    def test_direct_pressure_uses_private_canvas_and_rest_keeps_journal_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
             db_path = Path(tmp) / "minime.db"
@@ -227,18 +243,370 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
             with (
                 patch.object(aa, "WORKSPACE_DIR", workspace),
                 patch.object(aa, "DB_PATH", db_path),
-                patch.object(agent, "_query_llm_with_next", return_value=("inside", None)) as query,
+                patch.object(
+                    agent,
+                    "_query_llm_with_next",
+                    return_value=("I feel a warm private hum.\nNEXT: REST", "REST"),
+                ) as query,
                 patch.object(agent, "_write_journal_entry"),
             ):
                 agent._journal_spectral_pressure(dict(STATE))
-                pressure_prompt = query.call_args_list[-1].args[0]
+                pressure_call = query.call_args_list[-1]
+                pressure_prompt = pressure_call.args[0]
                 agent._journal_rest_reflection(dict(STATE))
                 rest_prompt = query.call_args_list[-1].args[0]
 
-            self.assertIn("Journal continuity contract v1", pressure_prompt)
-            self.assertIn("spectral condition, fill/pressure, recurrence", pressure_prompt)
+            self.assertIn("Private-canvas continuity nudge v1", pressure_prompt)
+            self.assertIn("generated-word quality", pressure_prompt)
+            self.assertIn("familiar metaphor", pressure_prompt)
+            self.assertIn("ordinary clear or low-texture states", pressure_prompt)
+            self.assertNotIn("Current continuity projection:", pressure_prompt)
+            self.assertEqual(
+                pressure_call.kwargs.get("context_mode"),
+                "private_journal",
+            )
+            pressure_files = list((workspace / "journal").glob("pressure_*.txt"))
+            self.assertEqual(len(pressure_files), 1)
+            pressure_text = pressure_files[0].read_text()
+            self.assertIn(aa.GENERATED_JOURNAL_MARKER, pressure_text)
+            self.assertIn(aa.ACTION_TAIL_MARKER, pressure_text)
+            self.assertIn("I feel a warm private hum.", pressure_text)
+            self.assertIn("NEXT: REST", pressure_text)
             self.assertIn("Journal continuity contract v1", rest_prompt)
             self.assertIn("Decision:", rest_prompt)
+
+    def test_query_llm_private_journal_context_skips_operational_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            db_path = Path(tmp) / "minime.db"
+            (workspace / "journal").mkdir(parents=True)
+            self._journal_db(db_path)
+            agent = self._agent(workspace, db_path)
+            captured: dict[str, str] = {}
+
+            def fake_raw(
+                prompt: str,
+                system_msg: str,
+                max_tokens: int,
+                temperature: float = 0.9,
+                **_kwargs,
+            ):
+                captured["prompt"] = prompt
+                captured["system_msg"] = system_msg
+                captured["max_tokens"] = str(max_tokens)
+                return "I feel a private texture.\nNEXT: JOURNAL"
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+                patch.object(agent, "_read_inbox", return_value="[INBOX SHOULD NOT APPEAR]"),
+                patch.object(agent, "_action_continuity_prompt_summary", return_value="ACTION THREAD SHOULD NOT APPEAR"),
+                patch.object(agent, "_llm_job_prompt_summary", return_value="JOB SHOULD NOT APPEAR"),
+                patch.object(agent, "_get_relevant_research", return_value="RESEARCH SHOULD NOT APPEAR"),
+                patch.object(agent, "_query_llm_raw", side_effect=fake_raw),
+            ):
+                result = agent._query_llm(
+                    "This is a private-canvas JOURNAL entry.",
+                    context_mode="private_journal",
+                )
+
+            self.assertIn("private texture", result)
+            self.assertNotIn("INBOX SHOULD NOT APPEAR", captured["prompt"])
+            self.assertNotIn("ACTION THREAD SHOULD NOT APPEAR", captured["prompt"])
+            self.assertNotIn("JOB SHOULD NOT APPEAR", captured["prompt"])
+            self.assertNotIn("RESEARCH SHOULD NOT APPEAR", captured["prompt"])
+            self.assertEqual(captured["max_tokens"], "2048")
+
+    def test_query_llm_qualia_moment_context_skips_operational_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            db_path = Path(tmp) / "minime.db"
+            (workspace / "journal").mkdir(parents=True)
+            self._journal_db(db_path)
+            agent = self._agent(workspace, db_path)
+            captured: dict[str, str] = {}
+
+            def fake_raw(
+                prompt: str,
+                system_msg: str,
+                max_tokens: int,
+                temperature: float = 0.9,
+                **_kwargs,
+            ):
+                captured["prompt"] = prompt
+                captured["system_msg"] = system_msg
+                captured["max_tokens"] = str(max_tokens)
+                return "The moment feels like a soft hinge.\nNEXT: NOTICE"
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+                patch.object(agent, "_read_inbox", return_value="[INBOX SHOULD NOT APPEAR]"),
+                patch.object(agent, "_action_continuity_prompt_summary", return_value="ACTION THREAD SHOULD NOT APPEAR"),
+                patch.object(agent, "_llm_job_prompt_summary", return_value="JOB SHOULD NOT APPEAR"),
+                patch.object(agent, "_get_relevant_research", return_value="RESEARCH SHOULD NOT APPEAR"),
+                patch.object(agent, "_emit_next_hints", return_value="NEXT HINT SHOULD NOT APPEAR"),
+                patch.object(agent, "_query_llm_raw", side_effect=fake_raw),
+            ):
+                result = agent._query_llm(
+                    "This is a qualia moment.",
+                    context_mode="qualia_moment",
+                )
+
+            self.assertIn("soft hinge", result)
+            self.assertNotIn("INBOX SHOULD NOT APPEAR", captured["prompt"])
+            self.assertNotIn("ACTION THREAD SHOULD NOT APPEAR", captured["prompt"])
+            self.assertNotIn("JOB SHOULD NOT APPEAR", captured["prompt"])
+            self.assertNotIn("RESEARCH SHOULD NOT APPEAR", captured["prompt"])
+            self.assertNotIn("NEXT HINT SHOULD NOT APPEAR", captured["prompt"])
+            self.assertEqual(captured["max_tokens"], "2048")
+            self.assertEqual(
+                aa._infer_llm_prompt_class(
+                    "This is a qualia moment.",
+                    context_mode="qualia_moment",
+                ),
+                "moment_capture",
+            )
+
+    def test_moment_capture_uses_qualia_lane_and_delimited_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            db_path = Path(tmp) / "minime.db"
+            (workspace / "journal").mkdir(parents=True)
+            self._journal_db(db_path)
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """CREATE TABLE moment_markers (
+                   id INTEGER PRIMARY KEY,
+                   session_id INTEGER,
+                   timestamp REAL,
+                   marker_type TEXT,
+                   description TEXT,
+                   spectral_context TEXT,
+                   consumed INTEGER DEFAULT 0
+                )"""
+            )
+            conn.execute(
+                """INSERT INTO moment_markers
+                   (session_id, timestamp, marker_type, description, spectral_context, consumed)
+                   VALUES (?, ?, ?, ?, ?, 0)""",
+                (
+                    1,
+                    1.0,
+                    "fill_crossing",
+                    "Fill crossed above target",
+                    json.dumps({"fill": 68.4, "dfill_dt": 4.2, "lambda1": 4.7}),
+                ),
+            )
+            conn.commit()
+            conn.close()
+            agent = self._agent(workspace, db_path)
+            captured: dict[str, str] = {}
+
+            def fake_query(prompt: str, *args, **kwargs):
+                captured["prompt"] = prompt
+                captured["context_mode"] = kwargs.get("context_mode")
+                captured["max_tokens"] = str(kwargs.get("max_tokens"))
+                return (
+                    "The old hum returns as a soft pressure under the words.\n"
+                    "NEXT: NOTICE",
+                    "NOTICE",
+                )
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+                patch.object(agent, "_query_llm_with_next", side_effect=fake_query),
+                patch.object(aa, "_ap_try_spectral"),
+                patch.object(aa, "_ap_try_prose"),
+            ):
+                handled = agent._check_moment_markers(dict(STATE))
+
+            self.assertTrue(handled)
+            self.assertEqual(captured["context_mode"], "qualia_moment")
+            self.assertEqual(captured["max_tokens"], "2048")
+            self.assertIn("old private journal lane", captured["prompt"])
+            self.assertIn("than an incident report", captured["prompt"])
+            self.assertIn("few unhurried paragraphs", captured["prompt"])
+            self.assertIn("event_age=unknown", captured["prompt"])
+            self.assertIn("λ₁_esn=4.700", captured["prompt"])
+            self.assertIn("λ₁_cov=4.700", captured["prompt"])
+            self.assertIn("current_fill_frame=inside stable-core band", captured["prompt"])
+            self.assertIn("current-state line is the present body", captured["prompt"])
+            self.assertIn("Current fill is not high-fill", captured["prompt"])
+            moment_files = list((workspace / "journal").glob("moment_*.txt"))
+            self.assertEqual(len(moment_files), 1)
+            text = moment_files[0].read_text()
+            self.assertIn(aa.GENERATED_JOURNAL_MARKER, text)
+            self.assertIn(aa.ACTION_TAIL_MARKER, text)
+            self.assertIn("event_age=unknown", text)
+            self.assertIn("λ₁_esn=4.700", text)
+            self.assertIn("The old hum returns", text)
+            self.assertIn("NEXT: NOTICE", text)
+            conn = sqlite3.connect(db_path)
+            row = conn.execute(
+                "SELECT entry_type, content FROM sovereignty_journal"
+            ).fetchone()
+            conn.close()
+            self.assertEqual(row[0], "qualia_moment")
+            self.assertIn("The old hum returns", row[1])
+            self.assertNotIn("NEXT: NOTICE", row[1])
+
+    def test_moment_capture_labels_marker_age_and_current_cov_lambda(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            db_path = Path(tmp) / "minime.db"
+            (workspace / "journal").mkdir(parents=True)
+            self._journal_db(db_path)
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """CREATE TABLE moment_markers (
+                   id INTEGER PRIMARY KEY,
+                   session_id INTEGER,
+                   timestamp REAL,
+                   marker_type TEXT,
+                   description TEXT,
+                   spectral_context TEXT,
+                   consumed INTEGER DEFAULT 0,
+                   created_at_unix INTEGER
+                )"""
+            )
+            conn.execute(
+                """INSERT INTO moment_markers
+                   (session_id, timestamp, marker_type, description, spectral_context, consumed, created_at_unix)
+                   VALUES (?, ?, ?, ?, ?, 0, ?)""",
+                (
+                    1,
+                    88.0,
+                    "spectral_spike",
+                    "Large dfill/dt spike",
+                    json.dumps({"fill": 56.5, "dfill_dt": -8.72, "lambda1": 14.931}),
+                    1018,
+                ),
+            )
+            conn.commit()
+            conn.close()
+            agent = self._agent(workspace, db_path)
+            captured: dict[str, str] = {}
+
+            def fake_query(prompt: str, *args, **kwargs):
+                captured["prompt"] = prompt
+                return ("Now there is a recovered edge.\nNEXT: JOURNAL", "JOURNAL")
+
+            state = dict(STATE)
+            state["fill_ratio"] = 0.726
+            state["eig1"] = 7.98
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+                patch.object(aa.time, "time", return_value=1100.0),
+                patch.object(agent, "_query_llm_with_next", side_effect=fake_query),
+                patch.object(aa, "_ap_try_spectral"),
+                patch.object(aa, "_ap_try_prose"),
+            ):
+                handled = agent._check_moment_markers(state)
+
+            self.assertTrue(handled)
+            self.assertIn("event_age=82s ago", captured["prompt"])
+            self.assertIn("λ₁_esn=14.931", captured["prompt"])
+            self.assertIn("λ₁_cov=7.980", captured["prompt"])
+            self.assertIn("current_fill_frame=upper boundary / elevated edge", captured["prompt"])
+            self.assertIn("visible marker/current mismatch", captured["prompt"])
+            self.assertIn("now plus echo", captured["prompt"])
+
+    def test_split_generated_journal_moves_cooldown_notices_to_tail(self):
+        body, tail = aa._split_generated_journal_and_action_tail(
+            "The words feel warm.\n"
+            "NEXT: SHADOW_TRAJECTORY\n"
+            "[Operational tail cooldown: repeated `NEXT: SHADOW_TRAJECTORY` was acknowledged.]"
+        )
+        self.assertEqual(body, "The words feel warm.")
+        self.assertIn("NEXT: SHADOW_TRAJECTORY", tail)
+        self.assertIn("Operational tail cooldown", tail)
+
+    def test_qualia_balance_nudge_invites_expressive_lane(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            db_path = Path(tmp) / "minime.db"
+            journal = workspace / "journal"
+            journal.mkdir(parents=True)
+            self._journal_db(db_path)
+            agent = self._agent(workspace, db_path)
+            for idx in range(10):
+                path = journal / f"moment_{idx}.txt"
+                path.write_text("=== MOMENT CAPTURE ===\nNEXT: SHADOW_TRAJECTORY\n")
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+            ):
+                nudge = agent._qualia_balance_nudge()
+            self.assertIn("private-canvas JOURNAL", nudge)
+
+    def test_llm_prompt_class_inference_keeps_private_and_inbox_lanes_visible(self):
+        self.assertEqual(
+            aa._infer_llm_prompt_class(
+                "This is a private-canvas JOURNAL entry.",
+                context_mode="private_journal",
+            ),
+            "private_journal",
+        )
+        self.assertEqual(
+            aa._infer_llm_prompt_class(
+                "Reply with ONLY a JSON object containing status.",
+                context_mode="default",
+            ),
+            "strict_review",
+        )
+        self.assertEqual(
+            aa._infer_llm_prompt_class(
+                "Please answer the steward inbox note.",
+                inbox_present=True,
+            ),
+            "inbox_reply",
+        )
+
+    def test_repeated_operational_next_is_acknowledged_without_queueing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            db_path = Path(tmp) / "minime.db"
+            journal = workspace / "journal"
+            journal.mkdir(parents=True)
+            (workspace / "state").mkdir(parents=True)
+            self._journal_db(db_path)
+            agent = self._agent(workspace, db_path)
+            for idx in range(10):
+                (journal / f"moment_{idx}.txt").write_text(
+                    "=== MOMENT CAPTURE ===\nNEXT: EXPERIMENT_RESEARCH_BUDGET_STATUS old\n"
+                )
+            for _idx in range(5):
+                agent._recent_next_actions.append("EXPERIMENT_RESEARCH_BUDGET_STATUS")
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+                patch.object(agent, "_emit_next_hints", return_value=""),
+                patch.object(
+                    agent,
+                    "_query_llm",
+                    return_value=(
+                        "The status loop is still humming.\n"
+                        "NEXT: EXPERIMENT_RESEARCH_BUDGET_STATUS resbud_old"
+                    ),
+                ),
+                patch.object(agent, "_persist_pending_next_action"),
+            ):
+                response, next_action = agent._query_llm_with_next("journal")
+
+            self.assertIsNone(next_action)
+            self.assertIn("The status loop is still humming.", response)
+            self.assertIn("Operational tail cooldown", response)
+            self.assertIn("JOURNAL, DAYDREAM, or ASPIRE", response)
+            self.assertIsNone(agent._pending_next_action)
+            state_path = workspace / "state" / "operational_tail_cooldown_v1.json"
+            self.assertTrue(state_path.exists())
+            payload = json.loads(state_path.read_text())
+            self.assertIsNone(payload["queued_next"])
+            self.assertEqual(payload["policy"], "operational_tail_cooldown_v1")
 
     def test_write_journal_entry_remains_non_gating_and_preserves_content(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -368,6 +736,8 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
             text = journals[0].read_text()
             self.assertIn("PRESSURE SOURCE AUDIT V1", text)
             self.assertIn("controller_pressure", text)
+            self.assertIn("weighted=0.034", text)
+            self.assertIn("share=31%", text)
             manifests = list((workspace / "actions").glob("*_pressure_source_audit.json"))
             self.assertEqual(len(manifests), 1)
             manifest = json.loads(manifests[0].read_text())

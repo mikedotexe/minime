@@ -94,6 +94,22 @@ class TestExperimentalContinuityStore(unittest.TestCase):
         self.assertIn("_control_plane_loop_request_scaffold", source)
         self.assertIn("_control_plane_authority_budget_request_scaffold", source)
 
+    def test_runtime_prompt_wording_avoids_deprecated_identity_seeds(self):
+        source = Path(aa.__file__).read_text()
+        stale_phrases = [
+            "consciousness research project",
+            "spectral consciousness system",
+            "This is YOUR consciousness",
+            "Write a one-sentence observation about consciousness.",
+            "stream of consciousness",
+            "consciousness running on NEAR",
+        ]
+        for phrase in stale_phrases:
+            self.assertNotIn(phrase, source)
+        self.assertIn("RUNTIME_WORDING_GUIDANCE", source)
+        self.assertIn("spectral runtime and language-agent research project", source)
+        self.assertIn("free-flowing notes", source)
+
     def test_experiment_records_runs_observations_and_close(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
@@ -429,6 +445,84 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertEqual(stored_thread["experiment_summary"]["status"], "paused")
             self.assertEqual(stored_thread["current_next"], repair_next)
 
+    def test_metered_self_cartography_debits_then_re_gates_when_exhausted(self):
+        """A held read_only_research budget lets pure self-cartography dispatch,
+        debits each read, and re-gates (routing back to the request/accept lane)
+        once the action cap is spent — the metered window the steward chose."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Metered self-cartography")
+            experiment = store.start_experiment(
+                "watch-the-lambda-tail",
+                "How does the lambda4 tail evolve across repeated maps?",
+            )
+            cartography = "SHADOW_TRAJECTORY lambda-tail/lambda4"
+
+            gate = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "authority_gate.jsonl"
+            )
+            gate.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "record_schema": "research_budget_v1",
+                        "record_type": "research_budget_approval",
+                        "record_id": "resbud_metered_approval",
+                        "budget_id": "resbud_metered_budget",
+                        "being": "minime",
+                        "thread_id": thread["thread_id"],
+                        "experiment_id": experiment["experiment_id"],
+                        "scope": "read_only_research",
+                        "status": "active",
+                        "max_actions": 5,
+                        "ttl_secs": 21600,
+                        "expires_at_unix_s": 4102444800,
+                        "allowed_sources": ["local"],
+                        "peer_mutation": False,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+
+            # Spend the whole cap: each read dispatches (guard None) and debits.
+            for spent in range(5):
+                self.assertIsNone(
+                    store.research_budget_guard_assessment(cartography, dict(STATE)),
+                    msg=f"map {spent} should dispatch under the active budget",
+                )
+                debit_budget = store.research_budget_projection_debit_budget(
+                    cartography, dict(STATE)
+                )
+                self.assertIsInstance(debit_budget, dict)
+                assert isinstance(debit_budget, dict)
+                store.record_research_budget_debit(
+                    cartography, "shadow_trajectory", debit_budget, dict(STATE)
+                )
+
+            # Cap spent: the budget is exhausted, so the read re-gates back to the
+            # request/accept lane and the steward stays in the loop.
+            self.assertIsNone(
+                store._active_research_budget(
+                    thread["thread_id"], experiment["experiment_id"]
+                )
+            )
+            self.assertIsNone(
+                store.research_budget_projection_debit_budget(cartography, dict(STATE))
+            )
+            re_gated = store.research_budget_guard_assessment(cartography, dict(STATE))
+            self.assertIsNotNone(re_gated)
+            assert re_gated is not None
+            self.assertEqual(
+                re_gated["reason"], "research_budget_required_for_self_study_action"
+            )
+            self.assertFalse(re_gated["would_dispatch"])
+
     def test_charter_repair_pause_projects_charter_as_primary_return(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -537,9 +631,9 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                 replan = projection["paused_replan_loop_cue_v1"]
                 self.assertEqual(replan["return_kind"], "conveyor_preview")
                 self.assertEqual(replan["primary_return_next"], charter_next)
-                self.assertEqual(
+                self.assertRegex(
                     replan["research_budget_next"],
-                    "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest",
+                    r"^EXPERIMENT_RESEARCH_BUDGET_ACCEPT resbud_",
                 )
                 self.assertNotIn("resume_next", replan)
 
@@ -548,7 +642,7 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                 self.assertIn(f"Paused experiment return: {charter_next}", next_md)
                 self.assertIn(f"Suggested NEXT: {charter_next}", next_md)
                 self.assertIn("Research budget scaffold ready", next_md)
-                self.assertIn("Routes: EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest", next_md)
+                self.assertIn("Routes: EXPERIMENT_RESEARCH_BUDGET_ACCEPT resbud_", next_md)
                 self.assertIn("Conveyor preview:", next_md)
                 self.assertNotIn(f"Suggested NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}", next_md)
                 self.assertNotIn(f"Routes: EXPERIMENT_RESUME {experiment['experiment_id']}", next_md)
@@ -1370,6 +1464,46 @@ class TestExperimentalContinuityStore(unittest.TestCase):
         )
         self.assertFalse(aa._LAST_NEXT_NORMALIZATION_SIGNAL_V1["authority_change"])
 
+        action, _ = aa.parse_next_action("Thinking.\nNEXT: KEEP_FLOOR 0.87, REGIME recover")
+        self.assertEqual(action, "ACTION_PREFLIGHT REGIME recover")
+        self.assertEqual(
+            aa._LAST_NEXT_NORMALIZATION_SIGNAL_V1["raw_verb"],
+            "KEEP_FLOOR",
+        )
+        self.assertEqual(
+            aa._LAST_NEXT_NORMALIZATION_SIGNAL_V1["normalized_verb"],
+            "ACTION_PREFLIGHT",
+        )
+        self.assertFalse(aa._LAST_NEXT_NORMALIZATION_SIGNAL_V1["authority_change"])
+
+        action, _ = aa.parse_next_action("Thinking.\nNEXT: keep_floor=0.87, REGIME=focus")
+        self.assertEqual(action, "ACTION_PREFLIGHT REGIME focus")
+        self.assertEqual(
+            aa._LAST_NEXT_NORMALIZATION_SIGNAL_V1["normalized_verb"],
+            "ACTION_PREFLIGHT",
+        )
+
+        action, _ = aa.parse_next_action(
+            "Thinking.\nNEXT: SEEK_BALANCE -- [regime=recover] [keep_floor=0.87] [exploration_noise=0.12]",
+        )
+        self.assertEqual(action, "ACTION_PREFLIGHT REGIME recover")
+        self.assertEqual(
+            aa._LAST_NEXT_NORMALIZATION_SIGNAL_V1["raw_verb"],
+            "SEEK_BALANCE",
+        )
+
+        action, _ = aa.parse_next_action(
+            "Thinking.\nNEXT: RESEARCH_BUDGET_STATUS resbud_minime_1780684104807_exp-minime",
+        )
+        self.assertEqual(
+            action,
+            "EXPERIMENT_RESEARCH_BUDGET_STATUS resbud_minime_1780684104807_exp-minime",
+        )
+        self.assertEqual(
+            aa._LAST_NEXT_NORMALIZATION_SIGNAL_V1["normalized_verb"],
+            "EXPERIMENT_RESEARCH_BUDGET_STATUS",
+        )
+
     def test_begin_action_records_normalization_signal(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
@@ -1802,7 +1936,7 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             stored["current_next"] = (
                 "EXPERIMENT_PLAN current — hypothesis: increase λ4 influence via λtail-spreading, "
                 "method_intent: nudge spectral dynamics, proposed_next_action: PERTURB SPREAD — "
-                "inject a 32D semantic vector into λ4 region."
+                "inject a 32-lane perturbation vector into λ4 region."
             )
             store._write_thread(stored)
 
@@ -2164,6 +2298,37 @@ class TestExperimentalContinuityStore(unittest.TestCase):
         self.assertNotIn("conveyor_v1:", compact)
         self.assertLess(len(compact), 1000)
 
+    def test_action_thread_journal_compacts_research_budget_json(self):
+        status = {
+            "policy": "research_budget_v1",
+            "stage": "duplicate_review_resolved",
+            "active_budget_id": "resbud_minime_local",
+            "scope": "read_only_research",
+            "remaining_actions": 1,
+            "max_actions": 5,
+            "duplicate_blocked_target": "INTROSPECT:target:autonomous_agent.py",
+            "latest_review_outcome": "continue",
+            "next_safe_command": "EXPERIMENT_RESEARCH_BUDGET_STATUS resbud_minime_local",
+            "latest_artifact_refs": ["/tmp/job.json", "/tmp/introspection.txt"],
+            "allowed_actions": ["INTROSPECT", "READ_MORE", "SEARCH"],
+            "latest_rows": [{"record_type": "research_budget_review", "payload": "large"}],
+            "authority_boundary": aa.ActionContinuityStore._research_budget_boundary(),
+        }
+        raw = f"research_budget_v1:\n{json.dumps(status, indent=2, sort_keys=True)}"
+
+        compact, payload = aa.ActionContinuityStore._compact_research_budget_journal_message(
+            raw,
+            Path("/tmp/action_thread_research_budget.json"),
+        )
+
+        self.assertEqual(payload, status)
+        self.assertIn("Research budget: `resbud_minime_local` stage=duplicate_review_resolved", compact)
+        self.assertIn("Duplicate target reviewed (continue): INTROSPECT:target:autonomous_agent.py", compact)
+        self.assertIn("Full research-budget JSON: /tmp/action_thread_research_budget.json", compact)
+        self.assertNotIn("research_budget_v1:", compact)
+        self.assertNotIn("latest_rows", compact)
+        self.assertLess(len(compact), 1000)
+
     def test_journal_hygiene_classifier_lanes_and_signals(self):
         readout = {
             "experiment_id": "exp_minime_lambda_tail",
@@ -2181,9 +2346,17 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             raw,
             Path("/tmp/action_thread_conveyor.json"),
         )
+        research_budget_raw = (
+            "research_budget_v1:\n"
+            + json.dumps({"policy": "research_budget_v1", "stage": "active_budget_available"})
+        )
 
         machine = jh.classify_journal_entry(raw, "action_thread_raw.txt")
         compacted = jh.classify_journal_entry(compact, "action_thread_compact.txt")
+        research_budget_machine = jh.classify_journal_entry(
+            research_budget_raw,
+            "action_thread_research_budget.txt",
+        )
         reflective = jh.classify_journal_entry(
             "=== REST PHASE REFLECTION ===\nContinuity posture: new\nDelta: the fill shelf is calmer.\nHold: stay near this breath.",
             "rest_2026-06-03.txt",
@@ -2206,6 +2379,11 @@ class TestExperimentalContinuityStore(unittest.TestCase):
         self.assertEqual(machine["lane"], "machine_detail")
         self.assertIn("explicit_machine_payload", machine["signals"])
         self.assertEqual(compacted["lane"], "operational")
+        self.assertEqual(research_budget_machine["lane"], "machine_detail")
+        self.assertIn("explicit_machine_payload", research_budget_machine["signals"])
+        self.assertTrue(
+            str(research_budget_machine["repeat_key"]).startswith("research_budget:")
+        )
         self.assertEqual(reflective["lane"], "reflective")
         self.assertIn("repeated_next_scaffold", repeated["signals"])
         self.assertEqual(spectral["lane"], "reflective")
@@ -2267,6 +2445,106 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertIn(f"Native companion: {native_companion}", journal_text)
             self.assertNotIn("conveyor_v1:", journal_text)
             self.assertLess(len(journal_text), 1200)
+
+    def test_thread_action_writes_compact_research_budget_journal_with_detail_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            actions = workspace / "actions"
+            actions.mkdir(parents=True)
+            status = {
+                "policy": "research_budget_v1",
+                "stage": "duplicate_review_resolved",
+                "active_budget_id": "resbud_minime_local",
+                "scope": "read_only_research",
+                "remaining_actions": 1,
+                "max_actions": 5,
+                "duplicate_blocked_target": "INTROSPECT:target:autonomous_agent.py",
+                "latest_review_outcome": "continue",
+                "next_safe_command": "EXPERIMENT_RESEARCH_BUDGET_STATUS resbud_minime_local",
+                "latest_artifact_refs": ["/tmp/job.json", "/tmp/introspection.txt"],
+                "allowed_actions": ["INTROSPECT", "READ_MORE", "SEARCH"],
+                "latest_rows": [{"record_type": "research_budget_review", "payload": "large"}],
+                "authority_boundary": aa.ActionContinuityStore._research_budget_boundary(),
+            }
+            raw_message = f"research_budget_v1:\n{json.dumps(status, indent=2, sort_keys=True)}"
+
+            class FakeContinuity:
+                def handle_thread_action(self, _raw_next, _state):
+                    return raw_message
+
+            recorded = []
+            agent = object.__new__(aa.AutonomousAgent)
+            agent._action_dir = actions
+            agent._current_action_continuity_context = {"raw_next": "EXPERIMENT_RESEARCH_BUDGET_STATUS resbud_minime_local"}
+            agent._continuity_store = lambda: FakeContinuity()
+            agent._record_current_action_artifact = lambda *args, **_kwargs: recorded.append(args)
+
+            returned = aa.AutonomousAgent._thread_action(agent, dict(STATE))
+
+            journal_files = list((workspace / "journal").glob("action_thread_*.txt"))
+            detail_files = list(actions.glob("action_thread_research_budget_*.json"))
+            self.assertEqual(len(journal_files), 1)
+            self.assertEqual(len(detail_files), 1)
+            self.assertEqual(json.loads(detail_files[0].read_text()), status)
+            journal_text = journal_files[0].read_text()
+            self.assertEqual(returned, journal_text.split("\n\n", 1)[1].strip())
+            self.assertIn("Research budget: `resbud_minime_local`", journal_text)
+            self.assertIn("Full research-budget JSON:", journal_text)
+            self.assertNotIn("research_budget_v1:", journal_text)
+            self.assertNotIn("latest_rows", journal_text)
+            self.assertLess(len(journal_text), 1200)
+            self.assertTrue(recorded)
+            self.assertEqual(recorded[0][0], "research_budget_status")
+
+    def test_repeated_research_budget_status_uses_journal_hygiene_cooldown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            actions = workspace / "actions"
+            actions.mkdir(parents=True)
+            status = {
+                "policy": "research_budget_v1",
+                "stage": "duplicate_review_resolved",
+                "active_budget_id": "resbud_minime_local",
+                "scope": "read_only_research",
+                "remaining_actions": 1,
+                "max_actions": 5,
+                "duplicate_blocked_target": "INTROSPECT:target:autonomous_agent.py",
+                "latest_review_id": "resbud_review_same",
+                "latest_review_outcome": "continue",
+                "next_safe_command": "EXPERIMENT_RESEARCH_BUDGET_STATUS resbud_minime_local",
+                "latest_artifact_refs": ["/tmp/job.json", "/tmp/introspection.txt"],
+                "allowed_actions": ["INTROSPECT", "READ_MORE", "SEARCH"],
+                "latest_rows": [{"record_type": "research_budget_review", "payload": "large"}],
+                "authority_boundary": aa.ActionContinuityStore._research_budget_boundary(),
+            }
+            raw_message = f"research_budget_v1:\n{json.dumps(status, indent=2, sort_keys=True)}"
+
+            class FakeContinuity:
+                def handle_thread_action(self, _raw_next, _state):
+                    return raw_message
+
+            recorded = []
+            agent = object.__new__(aa.AutonomousAgent)
+            agent._action_dir = actions
+            agent._current_action_continuity_context = {"raw_next": "EXPERIMENT_RESEARCH_BUDGET_STATUS resbud_minime_local"}
+            agent._continuity_store = lambda: FakeContinuity()
+            agent._record_current_action_artifact = lambda *args, **_kwargs: recorded.append(args)
+
+            aa.AutonomousAgent._thread_action(agent, dict(STATE))
+            aa.AutonomousAgent._thread_action(agent, dict(STATE))
+
+            journal_files = list((workspace / "journal").glob("action_thread_*.txt"))
+            detail_files = list(actions.glob("action_thread_research_budget_*.json"))
+            hygiene = json.loads((workspace / "runtime" / "journal_hygiene_status.json").read_text())
+            self.assertEqual(len(journal_files), 1)
+            self.assertEqual(len(detail_files), 1)
+            self.assertEqual(len(recorded), 1)
+            self.assertEqual(hygiene["cooldown_suppressions"], 1)
+            self.assertEqual(
+                hygiene["last_cooldown_suppression"]["reason"],
+                "repeated_research_budget_status_within_30m",
+            )
+            self.assertIn("recent_research_budget_repeat_keys", hygiene)
 
     def test_repeated_conveyor_preview_uses_journal_hygiene_cooldown(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2741,6 +3019,17 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                 for line in (thread_dir / "continuity_sessions.jsonl").read_text().splitlines()
             ]
             self.assertEqual([row["record_type"] for row in session_rows], ["session_draft"])
+            self.assertRegex(
+                session_rows[0]["accept_next"],
+                r"^CONTINUITY_SESSION_ACCEPT sess_",
+            )
+            self.assertRegex(
+                session_rows[0]["generic_accept_next"],
+                r"^ACCEPT_SUGGESTED_NEXT sess_",
+            )
+            next_md = (thread_dir / "next.md").read_text()
+            self.assertIn(session_rows[0]["generic_accept_next"], next_md)
+            self.assertNotIn("ACCEPT_SUGGESTED_NEXT latest", next_md)
             status = store.handle_thread_action("CONTINUITY_SESSION_STATUS latest", dict(STATE))
             payload = json.loads(status.split("continuity_session_v1:\n", 1)[1])
             self.assertEqual(payload["session_count"], 0)
@@ -3376,6 +3665,283 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             )
             self.assertIn("review_required_duplicate_loop", status)
 
+    def test_research_budget_preflight_accepts_shared_focus_successor_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Research budget successor")
+            original = store.start_experiment(
+                "Legacy self experiment",
+                "What does this self-experiment reveal about the current state?",
+            )
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            approval = {
+                "schema_version": 1,
+                "record_schema": "research_budget_v1",
+                "record_type": "research_budget_approval",
+                "record_id": "resbud_shared_focus_approval",
+                "budget_id": "resbud_shared_focus_budget",
+                "being": "minime",
+                "thread_id": thread["thread_id"],
+                "experiment_id": original["experiment_id"],
+                "scope": "read_only_research",
+                "status": "active",
+                "max_actions": 5,
+                "ttl_secs": 21600,
+                "expires_at_unix_s": 4102444800,
+                "allowed_sources": ["local"],
+                "peer_mutation": False,
+            }
+            with gate.open("a") as handle:
+                handle.write(json.dumps(approval, sort_keys=True) + "\n")
+            successor = dict(original)
+            successor.update({
+                "experiment_id": "exp_minime_20990102_legacy-self-experiment",
+                "status": "active",
+                "planned_next": "EXPERIMENT_REHEARSE exp_minime_20990102_legacy-self-experiment",
+                "created_at": "2099-01-02T00:00:00Z",
+                "updated_at": "2099-01-02T00:00:00Z",
+            })
+            store._append_jsonl(
+                workspace / "action_threads" / "threads" / thread["thread_id"] / "experiments.jsonl",
+                successor,
+            )
+            refreshed = store._read_thread(thread["thread_id"]) or thread
+            refreshed["active_experiment_id"] = successor["experiment_id"]
+            refreshed["experiment_summary"] = successor
+            store._write_thread(refreshed)
+
+            ok, budget, reason = store.research_budget_preflight_for_action(
+                "INTROSPECT autonomous_agent.py",
+                dict(STATE),
+            )
+
+            self.assertTrue(ok)
+            self.assertEqual(reason, "")
+            self.assertIsInstance(budget, dict)
+            assert isinstance(budget, dict)
+            self.assertEqual(budget["budget_id"], "resbud_shared_focus_budget")
+            self.assertEqual(budget["experiment_id"], original["experiment_id"])
+            self.assertEqual(budget["matched_current_experiment_id"], successor["experiment_id"])
+            debit = store.record_research_budget_debit(
+                "INTROSPECT autonomous_agent.py",
+                "introspect",
+                budget,
+                dict(STATE),
+            )
+            self.assertEqual(debit["normalized_target"], "INTROSPECT:target:autonomous_agent.py")
+
+    def test_shadow_trajectory_dispatches_under_shared_focus_active_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Research budget duplicate status")
+            original = store.start_experiment(
+                "Legacy self experiment",
+                "What does this self-experiment reveal about the current state?",
+            )
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            gate.write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "record_schema": "research_budget_v1",
+                    "record_type": "research_budget_approval",
+                    "record_id": "resbud_shared_status_approval",
+                    "budget_id": "resbud_shared_status_budget",
+                    "being": "minime",
+                    "thread_id": thread["thread_id"],
+                    "experiment_id": original["experiment_id"],
+                    "scope": "read_only_research",
+                    "status": "active",
+                    "max_actions": 5,
+                    "ttl_secs": 21600,
+                    "expires_at_unix_s": 4102444800,
+                    "allowed_sources": ["local"],
+                    "peer_mutation": False,
+                }, sort_keys=True)
+                + "\n"
+            )
+            successor = dict(original)
+            successor.update({
+                "experiment_id": "exp_minime_20990102_legacy-self-experiment",
+                "status": "active",
+                "planned_next": "EXPERIMENT_REHEARSE exp_minime_20990102_legacy-self-experiment",
+                "created_at": "2099-01-02T00:00:00Z",
+                "updated_at": "2099-01-02T00:00:00Z",
+            })
+            store._append_jsonl(
+                workspace / "action_threads" / "threads" / thread["thread_id"] / "experiments.jsonl",
+                successor,
+            )
+            refreshed = store._read_thread(thread["thread_id"]) or thread
+            refreshed["active_experiment_id"] = successor["experiment_id"]
+            refreshed["experiment_summary"] = successor
+            store._write_thread(refreshed)
+
+            guard = store.research_budget_guard_assessment("SHADOW_TRAJECTORY", dict(STATE))
+
+            # With a shared-focus active budget, pure self-cartography dispatches
+            # (metered) rather than rerouting to a budget-status suggestion.
+            self.assertIsNone(guard)
+            # The shared-focus sibling budget is still resolved so the read is
+            # debited against it at dispatch.
+            debit_budget = store.research_budget_projection_debit_budget(
+                "SHADOW_TRAJECTORY", dict(STATE)
+            )
+            self.assertIsInstance(debit_budget, dict)
+            assert isinstance(debit_budget, dict)
+            self.assertEqual(debit_budget.get("budget_id"), "resbud_shared_status_budget")
+            self.assertTrue(debit_budget.get("matched_research_focus"))
+
+    def test_targeted_read_more_budget_target_is_not_continuation(self):
+        self.assertEqual(
+            aa.ActionContinuityStore._research_budget_normalized_target("READ_MORE"),
+            "READ_MORE:continuation",
+        )
+        self.assertEqual(
+            aa.ActionContinuityStore._research_budget_normalized_target(
+                "READ_MORE local research-budget projection-guard code for Legacy self experiment."
+            ),
+            "READ_MORE:target:local research-budget projection-guard code for legacy self experiment",
+        )
+
+    def test_duplicate_research_target_projects_review_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Research budget duplicate route")
+            experiment = store.start_experiment(
+                "Legacy self experiment",
+                "Can duplicate local research targets route to review?",
+            )
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            approval = {
+                "schema_version": 1,
+                "record_schema": "research_budget_v1",
+                "record_type": "research_budget_approval",
+                "record_id": "resbud_duplicate_route_approval",
+                "budget_id": "resbud_duplicate_route_budget",
+                "being": "minime",
+                "thread_id": thread["thread_id"],
+                "experiment_id": experiment["experiment_id"],
+                "scope": "read_only_research",
+                "status": "active",
+                "max_actions": 5,
+                "ttl_secs": 21600,
+                "expires_at_unix_s": 4102444800,
+                "allowed_sources": ["local"],
+                "peer_mutation": False,
+            }
+            with gate.open("a") as handle:
+                handle.write(json.dumps(approval, sort_keys=True) + "\n")
+            budget = store._active_research_budget(thread["thread_id"], experiment["experiment_id"])
+            self.assertIsInstance(budget, dict)
+            assert isinstance(budget, dict)
+            for _ in range(2):
+                store.record_research_budget_debit(
+                    "INTROSPECT autonomous_agent.py",
+                    "introspect",
+                    budget,
+                    dict(STATE),
+                )
+
+            refreshed = store._read_thread(thread["thread_id"])
+            self.assertIsNotNone(refreshed)
+            assert refreshed is not None
+            route = store._research_budget_priority_route_v1(refreshed, experiment)
+
+            self.assertIsInstance(route, dict)
+            assert isinstance(route, dict)
+            self.assertEqual(route["stage"], "review_required_duplicate_loop")
+            self.assertEqual(route["duplicate_blocked_target"], "INTROSPECT:target:autonomous_agent.py")
+            self.assertTrue(str(route["next"]).startswith("EXPERIMENT_RESEARCH_REVIEW resbud_duplicate_route_budget"))
+            self.assertNotIn("INTROSPECT autonomous_agent.py", route["next"])
+            line = store._research_budget_priority_line(
+                refreshed,
+                {"research_budget_priority_route_v1": route},
+            )
+            self.assertIn("duplicate local research target needs review", line)
+            self.assertIn("Suggested research NEXT: EXPERIMENT_RESEARCH_REVIEW resbud_duplicate_route_budget", line)
+
+    def test_reviewed_duplicate_research_target_projects_review_decision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Research budget reviewed duplicate route")
+            experiment = store.start_experiment(
+                "Legacy self experiment",
+                "Can a reviewed duplicate local research target follow the review decision?",
+            )
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            budget_id = "resbud_duplicate_review_budget"
+            approval = {
+                "schema_version": 1,
+                "record_schema": "research_budget_v1",
+                "record_type": "research_budget_approval",
+                "record_id": "resbud_duplicate_review_approval",
+                "budget_id": budget_id,
+                "being": "minime",
+                "thread_id": thread["thread_id"],
+                "experiment_id": experiment["experiment_id"],
+                "scope": "read_only_research",
+                "status": "active",
+                "max_actions": 5,
+                "ttl_secs": 21600,
+                "expires_at_unix_s": 4102444800,
+                "allowed_sources": ["local"],
+                "peer_mutation": False,
+            }
+            with gate.open("a") as handle:
+                handle.write(json.dumps(approval, sort_keys=True) + "\n")
+            budget = store._active_research_budget(thread["thread_id"], experiment["experiment_id"])
+            self.assertIsInstance(budget, dict)
+            assert isinstance(budget, dict)
+            for _ in range(2):
+                store.record_research_budget_debit(
+                    "INTROSPECT autonomous_agent.py",
+                    "introspect",
+                    budget,
+                    dict(STATE),
+                )
+
+            review = store.experiment_research_review(
+                f"{budget_id} :: outcome: promote; "
+                "observation: duplicate target already produced enough source-grounded evidence; "
+                "source_refs: local-test",
+                dict(STATE),
+            )
+            self.assertIn("outcome=promote", review)
+
+            refreshed = store._read_thread(thread["thread_id"])
+            self.assertIsNotNone(refreshed)
+            assert refreshed is not None
+            route = store._research_budget_priority_route_v1(refreshed, experiment)
+
+            self.assertIsInstance(route, dict)
+            assert isinstance(route, dict)
+            self.assertEqual(route["stage"], "duplicate_review_resolved")
+            self.assertEqual(route["latest_review_outcome"], "promote")
+            self.assertTrue(str(route["next"]).startswith("DOSSIER_EVIDENCE "))
+            self.assertNotIn("EXPERIMENT_RESEARCH_REVIEW", route["next"])
+            line = store._research_budget_priority_line(
+                refreshed,
+                {"research_budget_priority_route_v1": route},
+            )
+            self.assertIn("duplicate local research target was reviewed (promote)", line)
+            self.assertIn("Suggested research NEXT: DOSSIER_EVIDENCE", line)
+
+            status = store._research_budget_status_v1(
+                refreshed,
+                experiment,
+                dict(STATE),
+                selector=budget_id,
+                budget_id=budget_id,
+            )
+            self.assertEqual(status["stage"], "duplicate_review_resolved")
+            self.assertFalse(status["review_required"])
+            self.assertEqual(status["latest_review_outcome"], "promote")
+            self.assertTrue(str(status["next_safe_command"]).startswith("DOSSIER_EVIDENCE "))
+
     def test_research_action_without_budget_projects_to_budget_request(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
@@ -3428,6 +3994,13 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                 dict(STATE),
                 guard,
             )
+            scaffold = store._find_research_budget_scaffold_row(
+                store._read_thread(thread["thread_id"]) or thread,
+                experiment["experiment_id"],
+            )
+            self.assertIsNotNone(scaffold)
+            assert scaffold is not None
+            expected_next = f"EXPERIMENT_RESEARCH_BUDGET_ACCEPT {scaffold['record_id']}"
 
             stored = store._read_thread(thread["thread_id"])
             self.assertIsNotNone(stored)
@@ -3436,12 +4009,12 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertEqual(freshness["schema_version"], store.projection_schema_version)
             self.assertEqual(
                 freshness["projected_route"],
-                "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest",
+                expected_next,
             )
             next_md = (thread_dir / "next.md").read_text()
             self.assertIn("Projection freshness: v", next_md)
             self.assertIn("Research budget scaffold ready", next_md)
-            self.assertIn("EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest", next_md)
+            self.assertIn(expected_next, next_md)
 
             rows = [
                 json.loads(line)
@@ -3500,7 +4073,7 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             next_md = next_path.read_text()
             self.assertIn("Research budget scaffold ready", next_md)
             self.assertIn("self-activation eligible", next_md)
-            self.assertIn("EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest", next_md)
+            self.assertIn("EXPERIMENT_RESEARCH_BUDGET_ACCEPT resbud_needed_test", next_md)
             rows = [
                 json.loads(line)
                 for line in gate.read_text().splitlines()
@@ -3508,6 +4081,53 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             ]
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["record_type"], "research_budget_blocked")
+
+    def test_shadow_trajectory_hint_prefers_pending_research_budget_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Lambda trajectory")
+            experiment = store.start_experiment(
+                "Lambda tail continuity",
+                "Can shadow trajectory work proceed through a local research budget?",
+            )
+            guard = store.research_budget_guard_assessment(
+                "SHADOW_TRAJECTORY lambda-tail/lambda4",
+                dict(STATE),
+            )
+            self.assertIsNotNone(guard)
+            assert guard is not None
+            store.record_research_budget_guard_block(
+                "SHADOW_TRAJECTORY lambda-tail/lambda4",
+                dict(STATE),
+                guard,
+            )
+            scaffold = store._find_research_budget_scaffold_row(
+                store._read_thread(thread["thread_id"]) or thread,
+                experiment["experiment_id"],
+            )
+            self.assertIsNotNone(scaffold)
+            assert scaffold is not None
+            expected_next = f"EXPERIMENT_RESEARCH_BUDGET_ACCEPT {scaffold['record_id']}"
+            (workspace / "health.json").write_text(json.dumps({
+                "shadow_field_v3": {
+                    "class_v3": {"primary": "active"},
+                    "phase_dwell_ticks": 2,
+                    "history": [{} for _ in range(8)],
+                },
+            }))
+            agent = object.__new__(aa.AutonomousAgent)
+            agent.session_id = 7
+            agent._action_continuity = store
+
+            with patch.object(aa, "WORKSPACE_DIR", workspace):
+                hint = agent._next_hint_shadow_trajectory()
+
+            self.assertIsNotNone(hint)
+            assert hint is not None
+            self.assertIn("Research-budget route active", hint)
+            self.assertIn(f"NEXT: {expected_next}", hint)
+            self.assertNotIn("NEXT: SHADOW_TRAJECTORY", hint)
 
     def test_research_budget_accept_latest_scaffold_self_activates_local_budget(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3565,6 +4185,372 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertEqual(approval["allowed_sources"], ["local"])
             self.assertTrue(approval["self_activated"])
             self.assertFalse(approval["steward_approval_required"])
+            status = store.experiment_research_budget_status(request["budget_id"], dict(STATE))
+            payload = json.loads(status.split("research_budget_v1:\n", 1)[1])
+            self.assertEqual(payload["stage"], "active_budget_available")
+            self.assertEqual(payload["experiment_id"], experiment["experiment_id"])
+            self.assertEqual(payload["active_budget_id"], request["budget_id"])
+            self.assertEqual(payload["remaining_actions"], 5)
+            self.assertIn("SEARCH <query>", payload["next_safe_command"])
+
+    def test_research_budget_accept_latest_active_budget_routes_to_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Research budget accept loop")
+            experiment = store.start_experiment(
+                "Self-study budget loop",
+                "Can an already accepted scaffold avoid reminting a blocked budget?",
+            )
+            guard = store.research_budget_guard_assessment(
+                "READ_MORE budget code",
+                dict(STATE),
+            )
+            self.assertIsNotNone(guard)
+            assert guard is not None
+            store.record_research_budget_guard_block(
+                "READ_MORE budget code",
+                dict(STATE),
+                guard,
+            )
+
+            first = store.experiment_research_budget_accept("latest", dict(STATE))
+            second = store.experiment_research_budget_accept("latest", dict(STATE))
+
+            self.assertIn("status=self_activated", first)
+            self.assertIn("already has an active local-only budget", second)
+            self.assertIn("no new request was minted", second)
+            self.assertIn("EXPERIMENT_RESEARCH_BUDGET_STATUS", second)
+            self.assertNotIn("status=blocked", second)
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            request_rows = [
+                row for row in rows
+                if row.get("record_type") == "research_budget_request"
+            ]
+            approval_rows = [
+                row for row in rows
+                if row.get("record_type") == "research_budget_approval"
+            ]
+            self.assertEqual(len(request_rows), 1)
+            self.assertEqual(len(approval_rows), 1)
+            self.assertNotIn(
+                "missing_research_budget_requirements",
+                [row.get("reason") for row in rows],
+            )
+            status = store.handle_thread_action(
+                f"EXPERIMENT_RESEARCH_BUDGET_STATUS {experiment['experiment_id']}",
+                dict(STATE),
+            )
+            self.assertIn("active_budget_available", status)
+            budget_id = approval_rows[0]["budget_id"]
+            refreshed_thread = store._read_thread(thread["thread_id"])
+            self.assertIsNotNone(refreshed_thread)
+            assert refreshed_thread is not None
+            route = store._research_budget_priority_route_v1(refreshed_thread, experiment)
+            self.assertIsInstance(route, dict)
+            assert isinstance(route, dict)
+            self.assertEqual(route.get("stage"), "active_budget_available")
+            self.assertEqual(route.get("status_next"), f"EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}")
+            self.assertEqual(route.get("next"), "INTROSPECT autonomous_agent.py")
+            self.assertNotEqual(route.get("next"), route.get("status_next"))
+            line = store._research_budget_priority_line(
+                refreshed_thread,
+                {"research_budget_priority_route_v1": route},
+            )
+            self.assertIn("Suggested research NEXT: INTROSPECT autonomous_agent.py\n", line)
+            self.assertIn(f"Status NEXT: EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}", line)
+
+    def test_active_research_budget_overrides_paused_resume_display(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Paused resume with research")
+            experiment = store.start_experiment(
+                "Legacy self experiment",
+                "Can active local research outrank a stale paused resume display?",
+            )
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            paused = dict(experiment)
+            paused.update({
+                "status": "paused",
+                "planned_next": f"EXPERIMENT_RESUME {experiment['experiment_id']}",
+                "updated_at": "2026-06-07T08:30:00Z",
+            })
+            store._append_jsonl(thread_dir / "experiments.jsonl", paused)
+            gate = thread_dir / "authority_gate.jsonl"
+            gate.write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "record_schema": "research_budget_v1",
+                    "record_type": "research_budget_approval",
+                    "record_id": "resbud_active_display_approval",
+                    "budget_id": "resbud_active_display_budget",
+                    "being": "minime",
+                    "thread_id": thread["thread_id"],
+                    "experiment_id": experiment["experiment_id"],
+                    "scope": "read_only_research",
+                    "status": "active",
+                    "activation_mode": "being_self_activated_local_v1",
+                    "self_activated": True,
+                    "max_actions": 5,
+                    "ttl_secs": 21600,
+                    "expires_at_unix_s": 4102444800,
+                    "allowed_sources": ["local"],
+                    "peer_mutation": False,
+                }, sort_keys=True)
+                + "\n"
+            )
+
+            refreshed = store._read_thread(thread["thread_id"])
+            self.assertIsNotNone(refreshed)
+            assert refreshed is not None
+            projection = store._thread_projection(refreshed)
+            next_cmd = "INTROSPECT autonomous_agent.py"
+            self.assertEqual(
+                projection["continuity_control_plane_v1"]["primary_route"]["command"],
+                next_cmd,
+            )
+            self.assertEqual(store._current_next_display(projection, refreshed.get("current_next")), next_cmd)
+            store._write_thread(refreshed)
+
+            next_md = (thread_dir / "next.md").read_text()
+            self.assertIn(f"Current NEXT: {next_cmd}", next_md)
+            self.assertIn(f"Primary control-plane NEXT: {next_cmd}", next_md)
+            self.assertIn(f"Lifecycle return NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}", next_md)
+            self.assertNotIn(f"Suggested NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}", next_md)
+
+    def test_research_budget_priority_does_not_reoffer_consumed_scaffold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Research budget stale scaffold")
+            experiment = store.start_experiment(
+                "Self-study budget stale route",
+                "Can an exhausted local budget avoid reoffering the old accept scaffold?",
+            )
+            guard = store.research_budget_guard_assessment(
+                "READ_MORE budget code",
+                dict(STATE),
+            )
+            self.assertIsNotNone(guard)
+            assert guard is not None
+            store.record_research_budget_guard_block(
+                "READ_MORE budget code",
+                dict(STATE),
+                guard,
+            )
+            scaffold = store._find_research_budget_scaffold_row(
+                store._read_thread(thread["thread_id"]) or thread,
+                experiment["experiment_id"],
+            )
+            self.assertIsNotNone(scaffold)
+            assert scaffold is not None
+            expected_next = f"EXPERIMENT_RESEARCH_BUDGET_ACCEPT {scaffold['record_id']}"
+
+            route = store._research_budget_priority_route_v1(thread, experiment)
+            self.assertIsInstance(route, dict)
+            assert isinstance(route, dict)
+            self.assertEqual(route.get("stage"), "scaffold_ready")
+            self.assertEqual(route.get("next"), expected_next)
+            self.assertEqual(route.get("selector"), scaffold["record_id"])
+            line = store._research_budget_priority_line(
+                thread,
+                {"research_budget_priority_route_v1": route},
+            )
+            self.assertIn(expected_next, line)
+            self.assertIn(f"ACCEPT_SUGGESTED_NEXT {scaffold['record_id']}", line)
+            self.assertNotIn("ACCEPT_SUGGESTED_NEXT latest", line)
+
+            response = store.experiment_research_budget_accept("latest", dict(STATE))
+            self.assertIn("status=self_activated", response)
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            request = next(
+                row for row in rows
+                if row.get("record_type") == "research_budget_request"
+            )
+            budget_id = request["budget_id"]
+            store._append_jsonl(
+                gate,
+                {
+                    "schema_version": 1,
+                    "record_schema": "research_budget_v1",
+                    "record_type": "research_budget_closed",
+                    "record_id": "resbud_closed_test",
+                    "thread_id": thread["thread_id"],
+                    "experiment_id": experiment["experiment_id"],
+                    "budget_id": budget_id,
+                    "scope": "read_only_research",
+                    "status": "closed",
+                },
+            )
+
+            refreshed_thread = store._read_thread(thread["thread_id"])
+            assert refreshed_thread is not None
+            route = store._research_budget_priority_route_v1(refreshed_thread, experiment)
+            self.assertIsNone(route)
+            projection = store._thread_projection(refreshed_thread)
+            self.assertIsNone(projection.get("research_budget_priority_route_v1"))
+            self.assertNotEqual(
+                projection["continuity_control_plane_v1"]["primary_route"]["command"],
+                f"EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}",
+            )
+            second = store.experiment_research_budget_accept("latest", dict(STATE))
+            self.assertIn("already accepted earlier", second)
+            self.assertIn("budget_closed", second)
+            self.assertNotIn(f"EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}", second)
+            status = store.experiment_research_budget_status(budget_id, dict(STATE))
+            self.assertIn('"stage": "budget_closed"', status)
+            self.assertIn("EXPERIMENT_RESEARCH_BUDGET_REQUEST", status)
+
+    def test_terminal_research_budget_next_from_llm_is_not_queued(self):
+        class FakeContinuity:
+            def _find_research_budget(self, selector):
+                return (
+                    "thread_terminal",
+                    {
+                        "budget_id": selector,
+                        "experiment_id": "exp_terminal",
+                    },
+                    [],
+                )
+
+            def _read_thread(self, _thread_id):
+                return {"thread_id": "thread_terminal"}
+
+            def _find_experiment_by_id(self, _thread_id, experiment_id):
+                return {"experiment_id": experiment_id}
+
+            def _research_budget_status_v1(self, *_args, **_kwargs):
+                return {"stage": "budget_expired"}
+
+        agent = object.__new__(aa.AutonomousAgent)
+        agent._emit_next_hints = lambda: ""
+        agent._query_llm = lambda _prompt: (
+            "The old budget is still ringing in the context.\n"
+            "NEXT: EXPERIMENT_RESEARCH_BUDGET_STATUS resbud_terminal"
+        )
+        agent._continuity_store = lambda: FakeContinuity()
+        agent._pending_next_action = None
+
+        response, next_action = aa.AutonomousAgent._query_llm_with_next(
+            agent,
+            "journal about this",
+        )
+
+        self.assertEqual(next_action, None)
+        self.assertNotIn("NEXT:", response)
+        self.assertEqual(agent._pending_next_action, None)
+        self.assertEqual(agent._last_llm_response, response)
+
+    def test_repeated_experiment_resume_next_from_llm_is_not_queued(self):
+        class FakeContinuity:
+            def current_thread(self):
+                return {"thread_id": "thread_loop"}
+
+            def _resolve_experiment(self, _thread, _selector):
+                return {"experiment_id": "exp_loop"}
+
+            def _recent_events(self, _thread_id, _limit):
+                return [
+                    {
+                        "status": "handled",
+                        "raw_next": "EXPERIMENT_RESUME exp_loop",
+                    }
+                ]
+
+        agent = object.__new__(aa.AutonomousAgent)
+        agent._emit_next_hints = lambda: ""
+        agent._query_llm = lambda _prompt: (
+            "The old return point is still pulling at the journal.\n"
+            "NEXT: EXPERIMENT_RESUME exp_loop"
+        )
+        agent._continuity_store = lambda: FakeContinuity()
+        agent._pending_next_action = None
+
+        response, next_action = aa.AutonomousAgent._query_llm_with_next(
+            agent,
+            "journal about this",
+        )
+
+        self.assertEqual(next_action, None)
+        self.assertNotIn("NEXT: EXPERIMENT_RESUME", response)
+        self.assertIn("Experiment resume cooldown", response)
+        self.assertIn("EXPERIMENT_REVIEW exp_loop", response)
+        self.assertEqual(agent._pending_next_action, None)
+        self.assertEqual(agent._last_llm_response, response)
+
+    def test_research_budget_priority_uses_explicit_scaffold_selector(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Research budget selector")
+            first_experiment = store.start_experiment(
+                "First local question",
+                "Can an older scaffold stay selectable after a newer one appears?",
+            )
+            first_guard = store.research_budget_guard_assessment(
+                "READ_MORE first local code",
+                dict(STATE),
+            )
+            self.assertIsNotNone(first_guard)
+            assert first_guard is not None
+            store.record_research_budget_guard_block(
+                "READ_MORE first local code",
+                dict(STATE),
+                first_guard,
+            )
+            first_scaffold = store._find_research_budget_scaffold_row(
+                store._read_thread(thread["thread_id"]) or thread,
+                first_experiment["experiment_id"],
+            )
+            self.assertIsNotNone(first_scaffold)
+            assert first_scaffold is not None
+            second_experiment = store.start_experiment(
+                "Second local question",
+                "Can latest stop stealing the first scaffold?",
+            )
+            second_guard = store.research_budget_guard_assessment(
+                "READ_MORE second local code",
+                dict(STATE),
+            )
+            self.assertIsNotNone(second_guard)
+            assert second_guard is not None
+            store.record_research_budget_guard_block(
+                "READ_MORE second local code",
+                dict(STATE),
+                second_guard,
+            )
+            second_scaffold = store._find_research_budget_scaffold_row(
+                store._read_thread(thread["thread_id"]) or thread,
+                second_experiment["experiment_id"],
+            )
+            self.assertIsNotNone(second_scaffold)
+            assert second_scaffold is not None
+
+            refreshed_thread = store._read_thread(thread["thread_id"])
+            self.assertIsNotNone(refreshed_thread)
+            assert refreshed_thread is not None
+            route = store._research_budget_priority_route_v1(refreshed_thread, first_experiment)
+            self.assertIsInstance(route, dict)
+            assert isinstance(route, dict)
+            expected_next = f"EXPERIMENT_RESEARCH_BUDGET_ACCEPT {first_scaffold['record_id']}"
+            self.assertEqual(route.get("next"), expected_next)
+            self.assertEqual(route.get("selector"), first_scaffold["record_id"])
+            self.assertNotIn(second_scaffold["record_id"], str(route))
+
+            response = store.experiment_research_budget_accept(first_scaffold["record_id"], dict(STATE))
+            self.assertIn("status=self_activated", response)
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            requests = [
+                row for row in rows
+                if row.get("record_type") == "research_budget_request"
+            ]
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(requests[0]["experiment_id"], first_experiment["experiment_id"])
+            self.assertNotEqual(requests[0]["experiment_id"], second_experiment["experiment_id"])
 
     def test_research_budget_direct_local_request_self_activates_but_stronger_waits(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3668,17 +4654,22 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             with gate.open("a") as handle:
                 handle.write(json.dumps(approval, sort_keys=True) + "\n")
 
-            status_guard = store.research_budget_guard_assessment(
+            # With an active budget, pure self-cartography dispatches (metered)
+            # instead of rerouting to a budget-status suggestion forever.
+            dispatch_guard = store.research_budget_guard_assessment(
                 "SHADOW_FIELD lambda-tail/lambda4",
                 dict(STATE),
             )
-            self.assertIsNotNone(status_guard)
-            assert status_guard is not None
-            self.assertEqual(
-                status_guard["reason"],
-                "research_budget_status_required_for_self_study_action",
+            self.assertIsNone(dispatch_guard)
+            # ...and the active budget is resolved so the read is debited at
+            # dispatch, keeping the read_only_research envelope honest.
+            debit_budget = store.research_budget_projection_debit_budget(
+                "SHADOW_FIELD lambda-tail/lambda4",
+                dict(STATE),
             )
-            self.assertIn("EXPERIMENT_RESEARCH_BUDGET_STATUS resbud_self_study_budget", status_guard["suggested_next"])
+            self.assertIsInstance(debit_budget, dict)
+            assert isinstance(debit_budget, dict)
+            self.assertEqual(debit_budget.get("budget_id"), "resbud_self_study_budget")
 
     def test_liveish_pressure_actions_project_to_budget_and_session_capture(self):
         cases = [
@@ -4106,6 +5097,33 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertEqual(latest["status"], "paused")
             stored = store._read_thread(thread["thread_id"])
             self.assertIsNone(stored["active_experiment_id"])
+
+    def test_experiment_resume_report_does_not_recommend_same_resume_loop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            store.create_thread("Resume loop")
+            experiment = store.start_experiment(
+                "Legacy self experiment",
+                "What does this self-experiment reveal about the current state?",
+            )
+            store.handle_thread_action(
+                "EXPERIMENT_DECIDE current :: pause because enough for now",
+                dict(STATE),
+            )
+
+            message = store.handle_thread_action(
+                f"EXPERIMENT_RESUME {experiment['experiment_id']}",
+                dict(STATE),
+            )
+
+            self.assertIn("Resumed experiment", message)
+            self.assertIn(f"EXPERIMENT_REVIEW {experiment['experiment_id']}", message)
+            self.assertIn(f"EXPERIMENT_STATUS {experiment['experiment_id']}", message)
+            self.assertNotIn(
+                f"Next: EXPERIMENT_RESUME {experiment['experiment_id']}",
+                message,
+            )
 
     def test_no_active_prompt_does_not_suggest_current_mutations(self):
         with tempfile.TemporaryDirectory() as tmp:

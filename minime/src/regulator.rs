@@ -16,8 +16,11 @@ pub const RESONANCE_DENSITY_POLICY: &str = "resonance_density_v1";
 pub const RESONANCE_DENSITY_SCHEMA_VERSION: u8 = 1;
 pub const PRESSURE_SOURCE_POLICY: &str = "pressure_source_v1";
 pub const PRESSURE_SOURCE_SCHEMA_VERSION: u8 = 1;
+pub const PRESSURE_POROSITY_DIVERGENCE_PRESSURE_MIN: f32 = 0.50;
+pub const PRESSURE_POROSITY_DIVERGENCE_POROSITY_MAX: f32 = 0.30;
 pub const INHABITABLE_FLUCTUATION_POLICY: &str = "inhabitable_fluctuation_v1";
 pub const INHABITABLE_FLUCTUATION_SCHEMA_VERSION: u8 = 1;
+pub const INHABITABLE_SETTLED_PRESSURE_INTERFERENCE_MAX: f32 = 0.45;
 
 /// Normalized components behind the resonance-density surface.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -120,6 +123,14 @@ pub fn resonance_control_from_density(density: f32, pressure_risk: f32) -> Reson
     }
 }
 
+#[must_use]
+pub fn pressure_porosity_divergence_alert(pressure_score: f32, porosity_score: f32) -> bool {
+    let pressure_score = pressure_score.clamp(0.0, 1.0);
+    let porosity_score = porosity_score.clamp(0.0, 1.0);
+    pressure_score >= PRESSURE_POROSITY_DIVERGENCE_PRESSURE_MIN
+        && porosity_score <= PRESSURE_POROSITY_DIVERGENCE_POROSITY_MAX
+}
+
 /// Normalized contributors behind inward/compression pressure.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct PressureSourceComponents {
@@ -146,6 +157,16 @@ pub struct PressureSourceContext {
     pub resource_pressure: Option<f32>,
 }
 
+/// Read-only weighted profile of pressure-source contributors.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PressureSourceProfileEntry {
+    pub source: String,
+    pub value: f32,
+    pub pressure_weight: f32,
+    pub weighted_pressure: f32,
+    pub share: f32,
+}
+
 /// V1 pressure-source control contract: observer/advisory only.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PressureSourceControl {
@@ -161,6 +182,8 @@ pub struct PressureSourceV1 {
     pub pressure_score: f32,
     pub porosity_score: f32,
     pub dominant_source: String,
+    #[serde(default)]
+    pub pressure_profile: Vec<PressureSourceProfileEntry>,
     pub quality: String,
     pub components: PressureSourceComponents,
     pub context: PressureSourceContext,
@@ -282,7 +305,10 @@ impl InhabitableFluctuationV1 {
             && components.porosity_support < 0.45
         {
             "diffuse_uninhabited"
-        } else if fluctuation_score < 0.24 && inhabitability_score >= 0.62 {
+        } else if fluctuation_score < 0.24
+            && inhabitability_score >= 0.62
+            && components.pressure_interference < INHABITABLE_SETTLED_PRESSURE_INTERFERENCE_MAX
+        {
             "settled_habitable"
         } else if (0.24..=0.62).contains(&fluctuation_score)
             && inhabitability_score >= 0.60
@@ -415,7 +441,11 @@ impl PressureSourceV1 {
                 + 0.15 * components.temporal_lock_in))
             .clamp(0.0, 1.0);
         let (dominant_source, dominant_value) = dominant_pressure_source(&components, &context);
-        let quality = if dominant_source == "lambda_monopoly" && dominant_value >= 0.55 {
+        let pressure_profile = pressure_profile_entries(&components, &context);
+        let divergence_alert = pressure_porosity_divergence_alert(pressure_score, porosity_score);
+        let quality = if divergence_alert {
+            "pressure_porosity_divergence"
+        } else if dominant_source == "lambda_monopoly" && dominant_value >= 0.55 {
             "lambda_pull"
         } else if dominant_source == "mode_packing" && dominant_value >= 0.55 {
             "overpacked_mode_packing"
@@ -430,22 +460,111 @@ impl PressureSourceV1 {
         } else {
             "mixed_pressure"
         };
+        let control_note = if divergence_alert {
+            "pressure source is advisory/read-only in v1; pressure/porosity divergence should be inspected before any local bias is considered"
+        } else {
+            "pressure source is advisory/read-only in v1; no regulator bias is applied"
+        };
         Self {
             policy: PRESSURE_SOURCE_POLICY.to_string(),
             schema_version: PRESSURE_SOURCE_SCHEMA_VERSION,
             pressure_score,
             porosity_score,
             dominant_source: dominant_source.to_string(),
+            pressure_profile,
             quality: quality.to_string(),
             components,
             context,
             control: PressureSourceControl {
                 applied_locally: false,
-                note: "pressure source is advisory/read-only in v1; no regulator bias is applied"
-                    .to_string(),
+                note: control_note.to_string(),
             },
         }
     }
+}
+
+fn pressure_profile_entries(
+    components: &PressureSourceComponents,
+    context: &PressureSourceContext,
+) -> Vec<PressureSourceProfileEntry> {
+    let mut entries = vec![
+        pressure_profile_entry("lambda_monopoly", components.lambda_monopoly, 0.88 * 0.19),
+        pressure_profile_entry("mode_packing", components.mode_packing, 0.88 * 0.13),
+        pressure_profile_entry(
+            "controller_pressure",
+            components.controller_pressure,
+            0.88 * 0.16,
+        ),
+        pressure_profile_entry("semantic_trickle", components.semantic_trickle, 0.88 * 0.10),
+        pressure_profile_entry(
+            "structural_plurality_loss",
+            components.structural_plurality_loss,
+            0.88 * 0.15,
+        ),
+        pressure_profile_entry(
+            "distinguishability_loss",
+            components.distinguishability_loss,
+            0.88 * 0.12,
+        ),
+        pressure_profile_entry("temporal_lock_in", components.temporal_lock_in, 0.88 * 0.10),
+        pressure_profile_entry("sensory_scarcity", components.sensory_scarcity, 0.88 * 0.05),
+    ];
+    if let Some((source, value)) = context_pressure_source(context) {
+        entries.push(pressure_profile_entry(
+            &format!("context::{source}"),
+            value,
+            0.12,
+        ));
+    }
+
+    let total = entries
+        .iter()
+        .map(|entry| entry.weighted_pressure)
+        .sum::<f32>();
+    if total > 0.0 {
+        for entry in &mut entries {
+            entry.share = (entry.weighted_pressure / total).clamp(0.0, 1.0);
+        }
+    }
+    entries.sort_by(|left, right| {
+        right
+            .weighted_pressure
+            .partial_cmp(&left.weighted_pressure)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    entries
+}
+
+fn pressure_profile_entry(
+    source: &str,
+    value: f32,
+    pressure_weight: f32,
+) -> PressureSourceProfileEntry {
+    let value = value.clamp(0.0, 1.0);
+    let pressure_weight = pressure_weight.clamp(0.0, 1.0);
+    PressureSourceProfileEntry {
+        source: source.to_string(),
+        value,
+        pressure_weight,
+        weighted_pressure: (value * pressure_weight).clamp(0.0, 1.0),
+        share: 0.0,
+    }
+}
+
+fn context_pressure_source(context: &PressureSourceContext) -> Option<(&'static str, f32)> {
+    [
+        ("compression_language", context.compression_language),
+        ("thread_recurrence", context.thread_recurrence),
+        ("attractor_pull", context.attractor_pull),
+        ("resource_pressure", context.resource_pressure),
+    ]
+    .into_iter()
+    .filter_map(|(source, value)| value.map(|value| (source, value.clamp(0.0, 1.0))))
+    .max_by(|left, right| {
+        left.1
+            .partial_cmp(&right.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })
 }
 
 fn dominant_pressure_source(
@@ -824,10 +943,10 @@ impl Default for GateCfg {
 /// PI controller configuration for homeostatic regulation
 #[derive(Clone, Copy, Debug)]
 pub struct PIRegCfg {
-    pub target_fill: f32,          // Target EigenFill% (0-100)
-    pub target_lambda1_rel: f32,   // Target λ₁ relative to baseline (e.g., 0.85)
-    pub target_geom_rel: f32,      // Target geometric radius relative to baseline
-    pub geom_weight: f32,          // Weight of geometric error in PI term
+    pub target_fill: f32,        // Target EigenFill% (0-100)
+    pub target_lambda1_rel: f32, // Target λ₁ relative to baseline (e.g., 0.85)
+    pub target_geom_rel: f32,    // Target geometric radius relative to baseline
+    pub geom_weight: f32,        // Weight of geometric error in PI term
     /// v3.6: anti-windup bleed-off rate for the integrator accumulators.
     /// Range 0.001..0.05; default 0.005 ≈ half-life 46s at 3 Hz tick rate.
     /// Higher values shorten the integrator's memory ("correction lingers").
@@ -1230,9 +1349,9 @@ impl PIRegState {
 #[cfg(test)]
 mod tests {
     use super::{
-        resonance_control_from_density, InhabitableFluctuationComponents,
-        InhabitableFluctuationContext, InhabitableFluctuationV1, PIRegCfg, PIRegState,
-        PressureSourceComponents, PressureSourceContext, PressureSourceV1,
+        pressure_porosity_divergence_alert, resonance_control_from_density,
+        InhabitableFluctuationComponents, InhabitableFluctuationContext, InhabitableFluctuationV1,
+        PIRegCfg, PIRegState, PressureSourceComponents, PressureSourceContext, PressureSourceV1,
         ResonanceDensityComponents, ResonanceDensityV1,
     };
 
@@ -1391,6 +1510,25 @@ mod tests {
     }
 
     #[test]
+    fn settled_habitable_requires_low_pressure_interference() {
+        let contracted = InhabitableFluctuationV1::from_parts(
+            InhabitableFluctuationComponents {
+                continuity_recovery: 0.90,
+                porosity_support: 0.20,
+                pressure_interference: 0.70,
+                share_rearrangement: 0.04,
+                eigenvector_reorientation: 0.04,
+                mode_trust_volatility: 0.04,
+                identity_anchor_churn: 0.04,
+                ..InhabitableFluctuationComponents::default()
+            },
+            InhabitableFluctuationContext::default(),
+        );
+        assert_eq!(contracted.quality, "rigid_contraction");
+        assert_ne!(contracted.quality, "settled_habitable");
+    }
+
+    #[test]
     fn inhabitable_fluctuation_reuses_resonance_advisory_bounds() {
         let cfg = PIRegCfg {
             intrinsic_wander: 0.0,
@@ -1468,5 +1606,91 @@ mod tests {
         );
         assert_eq!(porous.quality, "porous_distributed");
         assert!(porous.porosity_score > 0.80);
+    }
+
+    #[test]
+    fn pressure_source_exports_read_only_weighted_profile() {
+        let pressure = PressureSourceV1::from_parts(
+            PressureSourceComponents {
+                lambda_monopoly: 0.28,
+                mode_packing: 0.57,
+                controller_pressure: 0.04,
+                semantic_trickle: 0.37,
+                structural_plurality_loss: 0.34,
+                distinguishability_loss: 0.34,
+                temporal_lock_in: 0.56,
+                sensory_scarcity: 0.45,
+            },
+            PressureSourceContext {
+                compression_language: Some(0.20),
+                thread_recurrence: Some(0.31),
+                ..PressureSourceContext::default()
+            },
+        );
+
+        assert!(!pressure.pressure_profile.is_empty());
+        assert_eq!(pressure.pressure_profile[0].source, "mode_packing");
+        assert!(
+            pressure.pressure_profile[0].weighted_pressure
+                >= pressure.pressure_profile[1].weighted_pressure
+        );
+        assert!(pressure
+            .pressure_profile
+            .iter()
+            .any(|entry| entry.source == "context::thread_recurrence"));
+        let share_total = pressure
+            .pressure_profile
+            .iter()
+            .map(|entry| entry.share)
+            .sum::<f32>();
+        assert!((share_total - 1.0).abs() < 1.0e-5);
+        assert!(!pressure.control.applied_locally);
+    }
+
+    #[test]
+    fn pressure_source_deserializes_legacy_records_without_profile() {
+        let pressure = PressureSourceV1::from_parts(
+            PressureSourceComponents {
+                controller_pressure: 0.80,
+                ..PressureSourceComponents::default()
+            },
+            PressureSourceContext::default(),
+        );
+        let mut legacy = serde_json::to_value(&pressure).expect("serialize pressure source");
+        legacy
+            .as_object_mut()
+            .expect("pressure source json object")
+            .remove("pressure_profile");
+
+        let decoded: PressureSourceV1 =
+            serde_json::from_value(legacy).expect("deserialize legacy pressure source");
+        assert!(decoded.pressure_profile.is_empty());
+        assert_eq!(decoded.dominant_source, "controller_pressure");
+    }
+
+    #[test]
+    fn pressure_source_flags_pressure_porosity_divergence_without_control() {
+        let pressure = PressureSourceV1::from_parts(
+            PressureSourceComponents {
+                lambda_monopoly: 0.65,
+                mode_packing: 0.80,
+                controller_pressure: 0.20,
+                semantic_trickle: 0.55,
+                structural_plurality_loss: 0.85,
+                distinguishability_loss: 0.85,
+                temporal_lock_in: 0.75,
+                sensory_scarcity: 0.10,
+            },
+            PressureSourceContext::default(),
+        );
+
+        assert!(pressure_porosity_divergence_alert(
+            pressure.pressure_score,
+            pressure.porosity_score
+        ));
+        assert_eq!(pressure.quality, "pressure_porosity_divergence");
+        assert!(!pressure.control.applied_locally);
+        assert!(pressure.control.note.contains("advisory/read-only"));
+        assert!(pressure.control.note.contains("before any local bias"));
     }
 }

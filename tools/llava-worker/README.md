@@ -1,6 +1,8 @@
 # LLaVA SSE Worker
 
 Lightweight proxy that streams Ollama's LLaVA responses as Server-Sent Events for faster first-token latency.
+The default model is `llava-llama3`; override with `OLLAMA_MODEL` when testing
+another vision model.
 
 ## Quick start
 
@@ -8,7 +10,7 @@ Lightweight proxy that streams Ollama's LLaVA responses as Server-Sent Events fo
 cd tools/llava-worker
 node llava_worker.mjs
 # or override defaults
-OLLAMA_URL=http://127.0.0.1:11434/api/generate PORT=3031 node llava_worker.mjs
+OLLAMA_URL=http://127.0.0.1:11434/api/generate OLLAMA_MODEL=llava-llama3 PORT=3031 node llava_worker.mjs
 ```
 
 The server listens on `http://127.0.0.1:3031` by default and exposes:
@@ -33,5 +35,4 @@ If the environment variable is unset, the Python stack falls back to the direct 
 ## Monitoring Tips
 
 - Log `firstTokenMs` and `totalMs` in clients for p95 budgeting (<20 s recommended).
-- Use the `/healthz` endpoint in supervision scripts to confirm availability before starting the consciousness loop.
-
+- Use the `/healthz` endpoint in supervision scripts to confirm availability before starting the Minime loop.

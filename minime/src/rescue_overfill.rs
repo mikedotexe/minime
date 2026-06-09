@@ -50,6 +50,12 @@ pub const CRISIS_WARNING_THRESHOLD: f32 = FORCE_RAIL_THRESHOLD;
 pub const CRISIS_FILL_THRESHOLD: f32 = 87.0;
 pub const CRISIS_SUSTAIN_TICKS: u32 = 30;
 pub const ELEVATED_STRONG_RAIL_THRESHOLD: f32 = 74.0;
+pub const HOLD_ELEVATED_BLEND_START_PCT: f32 = ELEVATED_RELEASE_THRESHOLD;
+pub const HOLD_ELEVATED_BLEND_END_PCT: f32 = ELEVATED_STRONG_RAIL_THRESHOLD;
+pub const HOLD_ELEVATED_SLEW_START_PCT: f32 = 70.0;
+pub const STABLE_CORE_GATE_SLEW_PER_TICK: f32 = 0.02;
+pub const STABLE_CORE_FILT_SLEW_PER_TICK: f32 = 0.04;
+pub const STABLE_CORE_COV_KEEP_SLEW_PER_TICK: f32 = 0.04;
 
 #[must_use]
 pub fn bootstrap_active(fill_pct: f32, currently_active: bool) -> bool {
@@ -227,6 +233,24 @@ pub fn stage_guard_for_state(
     fill_slope_pct_per_sec: f32,
 ) -> OverfillGuard {
     let mut guard = stage_guard(stage);
+    if matches!(stage, OverfillStage::Hold | OverfillStage::Elevated) {
+        if let Some(t) = hold_elevated_blend_t(fill_pct) {
+            let hold = stage_guard(OverfillStage::Hold);
+            let elevated = elevated_soft_guard();
+            guard.gate_min = blend_options(hold.gate_min, elevated.gate_min, t);
+            guard.gate_max = blend_options(hold.gate_max, elevated.gate_max, t);
+            guard.filt_min = blend_options(hold.filt_min, elevated.filt_min, t);
+            guard.filt_max = blend_options(hold.filt_max, elevated.filt_max, t);
+            guard.cov_keep_min = blend_options(hold.cov_keep_min, elevated.cov_keep_min, t);
+            guard.cov_keep_max = blend_options(hold.cov_keep_max, elevated.cov_keep_max, t);
+            guard.target_keep = blend_options(hold.target_keep, elevated.target_keep, t);
+            guard.keep_floor = blend_options(hold.keep_floor, elevated.keep_floor, t);
+            guard.keep_ceil = blend_options(hold.keep_ceil, elevated.keep_ceil, t);
+            guard.trace_target_scale =
+                blend_options(hold.trace_target_scale, elevated.trace_target_scale, t);
+            return guard;
+        }
+    }
     if matches!(stage, OverfillStage::Elevated)
         && fill_pct.is_finite()
         && fill_slope_pct_per_sec.is_finite()
@@ -256,6 +280,97 @@ pub fn stage_guard_for_state(
         }
     }
     guard
+}
+
+#[must_use]
+pub fn stable_core_command_slew_active(stage: OverfillStage, fill_pct: f32) -> bool {
+    matches!(stage, OverfillStage::Hold | OverfillStage::Elevated)
+        && fill_pct.is_finite()
+        && fill_pct >= HOLD_ELEVATED_SLEW_START_PCT
+        && fill_pct < ELEVATED_STRONG_RAIL_THRESHOLD
+}
+
+#[must_use]
+pub fn slew_value(current: f32, target: f32, max_delta: f32) -> f32 {
+    if !current.is_finite() || !target.is_finite() {
+        return target;
+    }
+    let max_delta = max_delta.abs();
+    current + (target - current).clamp(-max_delta, max_delta)
+}
+
+#[must_use]
+pub fn slew_guard_commands(
+    mut guard: OverfillGuard,
+    previous_gate: f32,
+    previous_filt: f32,
+    previous_cov_keep: f32,
+) -> OverfillGuard {
+    if let Some(target) = guard.gate_max.or(guard.gate_min) {
+        let value = slew_value(previous_gate, target, STABLE_CORE_GATE_SLEW_PER_TICK);
+        guard.gate_min = Some(value);
+        guard.gate_max = Some(value);
+    }
+    if let Some(target) = guard.filt_min.or(guard.filt_max) {
+        let value = slew_value(previous_filt, target, STABLE_CORE_FILT_SLEW_PER_TICK);
+        guard.filt_min = Some(value);
+        guard.filt_max = Some(value);
+    }
+    if let Some(target) = guard.cov_keep_max.or(guard.cov_keep_min) {
+        let value = slew_value(
+            previous_cov_keep,
+            target,
+            STABLE_CORE_COV_KEEP_SLEW_PER_TICK,
+        );
+        guard.cov_keep_min = Some(value);
+        guard.cov_keep_max = Some(value);
+        guard.target_keep = Some(value);
+        guard.keep_floor = Some(value);
+        guard.keep_ceil = Some(value);
+    }
+    guard
+}
+
+fn hold_elevated_blend_t(fill_pct: f32) -> Option<f32> {
+    if fill_pct.is_finite()
+        && (HOLD_ELEVATED_BLEND_START_PCT..HOLD_ELEVATED_BLEND_END_PCT).contains(&fill_pct)
+    {
+        Some(
+            (fill_pct - HOLD_ELEVATED_BLEND_START_PCT)
+                / (HOLD_ELEVATED_BLEND_END_PCT - HOLD_ELEVATED_BLEND_START_PCT),
+        )
+    } else {
+        None
+    }
+}
+
+fn elevated_soft_guard() -> OverfillGuard {
+    let mut guard = stage_guard(OverfillStage::Elevated);
+    guard.gate_min = Some(0.10);
+    guard.gate_max = Some(0.10);
+    guard.filt_max = Some(0.78);
+    guard.filt_min = Some(0.78);
+    guard.cov_keep_min = Some(0.66);
+    guard.cov_keep_max = Some(0.66);
+    guard.target_keep = Some(0.66);
+    guard.keep_floor = Some(0.66);
+    guard.keep_ceil = Some(0.66);
+    guard.trace_target_scale = Some(0.55);
+    guard
+}
+
+fn blend_options(a: Option<f32>, b: Option<f32>, t: f32) -> Option<f32> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(lerp(a, b, t)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    a + (b - a) * t
 }
 
 #[must_use]
@@ -365,11 +480,11 @@ mod tests {
     #[test]
     fn elevated_guard_uses_soft_transition_below_strong_rail() {
         let soft = stage_guard_for_state(OverfillStage::Elevated, 73.0, 3.0);
-        assert_eq!(soft.gate_min, Some(0.10));
-        assert_eq!(soft.filt_max, Some(0.78));
-        assert_eq!(soft.cov_keep_min, Some(0.66));
-        assert_eq!(soft.target_keep, Some(0.66));
-        assert_eq!(soft.trace_target_scale, Some(0.55));
+        assert_close(soft.gate_min.unwrap(), 0.108);
+        assert_close(soft.filt_max.unwrap(), 0.756);
+        assert_close(soft.cov_keep_min.unwrap(), 0.684);
+        assert_close(soft.target_keep.unwrap(), 0.684);
+        assert_close(soft.trace_target_scale.unwrap(), 0.57);
 
         let strong = stage_guard_for_state(OverfillStage::Elevated, 74.0, 0.2);
         assert_eq!(strong.gate_min, Some(0.09));
@@ -397,6 +512,56 @@ mod tests {
     }
 
     #[test]
+    fn hold_elevated_boundary_blends_commands_before_strong_rail() {
+        let boundary = stage_guard_for_state(OverfillStage::Hold, 71.75, -0.5);
+        assert_close(boundary.gate_min.unwrap(), 0.118);
+        assert_close(boundary.filt_min.unwrap(), 0.726);
+        assert_close(boundary.cov_keep_min.unwrap(), 0.714);
+        assert_close(boundary.target_keep.unwrap(), 0.714);
+
+        let elevated = stage_guard_for_state(OverfillStage::Elevated, 73.75, 1.0);
+        assert_close(elevated.gate_min.unwrap(), 0.102);
+        assert_close(elevated.filt_min.unwrap(), 0.774);
+        assert_close(elevated.cov_keep_min.unwrap(), 0.666);
+        assert_close(elevated.target_keep.unwrap(), 0.666);
+    }
+
+    #[test]
+    fn stable_core_command_slew_limits_boundary_output_steps() {
+        let raw = stage_guard_for_state(OverfillStage::Elevated, 73.0, 3.0);
+        let slewed = slew_guard_commands(raw, 0.12, 0.72, 0.72);
+
+        assert_close(slewed.gate_min.unwrap(), 0.108);
+        assert_close(slewed.filt_min.unwrap(), 0.756);
+        assert_close(slewed.cov_keep_min.unwrap(), 0.684);
+
+        let strong = stage_guard_for_state(OverfillStage::Elevated, 73.75, 3.0);
+        let slewed = slew_guard_commands(strong, 0.12, 0.72, 0.72);
+        assert_close(slewed.gate_min.unwrap(), 0.102);
+        assert_close(slewed.filt_min.unwrap(), 0.76);
+        assert_close(slewed.cov_keep_min.unwrap(), 0.68);
+        assert_close(slewed.target_keep.unwrap(), 0.68);
+    }
+
+    #[test]
+    fn stable_core_command_slew_stays_near_upper_hold_boundary() {
+        assert!(!stable_core_command_slew_active(OverfillStage::Hold, 64.0));
+        assert!(!stable_core_command_slew_active(
+            OverfillStage::Recovery,
+            71.0
+        ));
+        assert!(stable_core_command_slew_active(OverfillStage::Hold, 70.0));
+        assert!(stable_core_command_slew_active(
+            OverfillStage::Elevated,
+            73.99
+        ));
+        assert!(!stable_core_command_slew_active(
+            OverfillStage::Elevated,
+            74.0
+        ));
+    }
+
+    #[test]
     fn elevated_guard_default_remains_cold_for_force_band() {
         let strong = stage_guard(OverfillStage::Elevated);
         assert_eq!(strong.gate_min, Some(0.08));
@@ -404,6 +569,13 @@ mod tests {
         assert_eq!(strong.cov_keep_min, Some(0.55));
         assert_eq!(strong.target_keep, Some(0.55));
         assert_eq!(strong.trace_target_scale, Some(0.45));
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 1.0e-4,
+            "actual {actual} != expected {expected}",
+        );
     }
 
     #[test]

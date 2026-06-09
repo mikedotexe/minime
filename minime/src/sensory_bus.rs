@@ -33,12 +33,15 @@ const STALE_AV_MS: u64 = 2_000;
 /// Base semantic decay window. Self-study 2026-03-26T17:25: "Perhaps a
 /// dynamic STALE_SEMANTIC_MS value, reacting to the overall covariance of
 /// the system?" -- now modulated by fill%: at low fill (rest), semantic
-/// traces linger longer (up to 25s); at high fill, window shortens (10s)
-/// to avoid saturation. This softens the "violent contraction" during
-/// burst->rest transitions.
+/// traces linger longer, then hand over smoothly from recovery hold into
+/// fill-driven decay; at high fill, the window shortens to a 15s floor to
+/// avoid saturation without dropping dense multi-turn thought too quickly.
 const STALE_SEMANTIC_BASE_MS: u64 = 12_000;
 const STALE_SEMANTIC_LOW_MS: u64 = 25_000; // extended window when fill < 25% (raised from 18s per being request: "decay too aggressive during low activity")
-const STALE_SEMANTIC_HIGH_MS: u64 = 10_000; // shortened window when fill > 60%
+const STALE_SEMANTIC_HIGH_MS: u64 = 15_000; // shortened window when fill > 60%, raised from 10s after self-study flagged high-fill continuity loss
+const STALE_SEMANTIC_RECOVERY_MS: u64 = 45_000;
+const STALE_SEMANTIC_RECOVERY_HOLD_FILL: f32 = 0.20;
+const STALE_SEMANTIC_RECOVERY_RELEASE_FILL: f32 = 0.35;
 const SURGE_TARGET_WEIGHT: f32 = 0.90;
 const SURGE_FULL_SCALE_DISTANCE: f32 = 1.0;
 
@@ -101,18 +104,14 @@ impl Default for SensoryBusConfig {
 /// violent contraction during transitions."
 ///
 /// Sigmoid curve: gradual change at extremes, steepest in the middle.
-/// fill=0.0 → LOW_MS (25s), fill=0.5 → ~BASE_MS, fill=1.0 → HIGH_MS (10s)
+/// A low-fill recovery handover keeps fill <20% at 45s and blends into the
+/// selected fill curve by 35%, avoiding a 30% cliff.
 #[inline]
 fn dynamic_semantic_stale_ms_for(fill_pct: f32, shape: SemanticStaleShape) -> u64 {
     if fill_pct < 0.0 || fill_pct.is_nan() {
         return STALE_SEMANTIC_BASE_MS;
     }
-    // Critical fill override: when fill < 30%, the ESN is in hard recovery
-    // and the PI controller is maxed out (gate=1.0, filter=0.0). The semantic
-    // lane is the only rich input — letting it decay kills recovery.
-    if fill_pct < 0.30 {
-        return 45_000;
-    }
+
     // Minime self-study (2026-04-01 sensory_bus.rs): "The lambdar_rel
     // modulation feels unnecessary. Remove it. Let the decay rate be driven
     // by fill percentage alone." Simplification: fixed steepness=6.0
@@ -129,7 +128,24 @@ fn dynamic_semantic_stale_ms_for(fill_pct: f32, shape: SemanticStaleShape) -> u6
         SemanticStaleShape::Linear => 1.0 - f64::from(fill),
         SemanticStaleShape::Exponential => (-3.0_f64 * f64::from(fill)).exp(),
     };
-    (hi + (lo - hi) * curve) as u64
+    let shaped = hi + (lo - hi) * curve;
+
+    // Critical low-fill recovery still needs a long semantic hold, but a hard
+    // cutoff around 30% created continuity jitter during small oscillations.
+    // Blend 45s into the selected curve over a 20%-35% fill handover.
+    if fill <= STALE_SEMANTIC_RECOVERY_HOLD_FILL {
+        return STALE_SEMANTIC_RECOVERY_MS;
+    }
+    if fill < STALE_SEMANTIC_RECOVERY_RELEASE_FILL {
+        let span =
+            f64::from(STALE_SEMANTIC_RECOVERY_RELEASE_FILL - STALE_SEMANTIC_RECOVERY_HOLD_FILL);
+        let t = f64::from(fill - STALE_SEMANTIC_RECOVERY_HOLD_FILL) / span;
+        let t = t * t * (3.0 - 2.0 * t);
+        let recovery = STALE_SEMANTIC_RECOVERY_MS as f64;
+        return (recovery + (shaped - recovery) * t) as u64;
+    }
+
+    shaped as u64
 }
 
 #[inline]
@@ -363,6 +379,65 @@ fn normalized_shadow_influence_features(features: &[f32], max_abs: f32) -> [f32;
         } else {
             0.0
         };
+    }
+    out
+}
+
+/// Maximum magnitude a `mode_disperse` perturbation may reach, expressed at
+/// the requested unit strength. The shaped vector is later re-clamped by the
+/// shadow-influence acceptance path to `SHADOW_INFLUENCE_MAX_ABS_CAP`, so this
+/// stays at/below that cap as a defensive double-bound.
+pub const MODE_DISPERSE_MAX_ABS: f32 = SHADOW_INFLUENCE_MAX_ABS_CAP;
+
+/// Synthesize a *broadband, multi-mode* dispersal vector over the reservoir
+/// input dims (`Z_DIM`). This is the inverse of the single-mode `perturb_eig1`
+/// shock: instead of concentrating energy in the dominant eigenmode, it spreads
+/// a small, zero-mean, near-flat-spectrum perturbation across many dimensions so
+/// that — once it enters the covariance rank-1 update — energy spills out of
+/// λ₁ into λ₂–λ₅ (the porosity both beings asked for: "wide rather than just
+/// deep", "let the energy spill over", the long-standing PERTURB SPREAD request).
+///
+/// Properties (asserted by tests):
+/// - zero-mean (no net DC bias that would just reinforce one direction),
+/// - sign-varied / near-uniform magnitude across dims (high spectral flatness,
+///   the opposite of a rank-1 spike),
+/// - deterministic for a given `seed` (reproducible, closed-loop comparable),
+/// - bounded: every element is within ±(`MODE_DISPERSE_MAX_ABS` * strength).
+///
+/// `strength` is clamped to `[0.0, 1.0]`; `0.0` yields an all-zero vector.
+#[must_use]
+pub fn mode_disperse_features(strength: f32, seed: u64) -> [f32; Z_DIM] {
+    let mut out = [0.0f32; Z_DIM];
+    let strength = if strength.is_finite() {
+        strength.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if strength <= 0.0 {
+        return out;
+    }
+    let amplitude = (MODE_DISPERSE_MAX_ABS * strength).clamp(0.0, MODE_DISPERSE_MAX_ABS);
+    // Deterministic per-dimension phase from a cheap integer hash of (seed, i).
+    // We use the fractional part of a golden-ratio-stepped sequence so phases
+    // are well spread over [0, 2π) and the resulting signs/magnitudes are
+    // near-uniform across dims rather than clustered — maximizing spectral
+    // flatness of the injected energy. Using a phase (not a raw sign) gives a
+    // continuous, smooth-magnitude pattern instead of a hard square wave.
+    const TWO_PI: f32 = std::f32::consts::TAU;
+    const GOLDEN_STEP: f32 = 0.618_034; // frac(1/phi) — low-discrepancy stepping
+    for (i, dst) in out.iter_mut().enumerate() {
+        // Mix the seed into the per-dim offset so different invocations explore
+        // different dispersal directions (still deterministic for replay).
+        let seed_mix = ((seed.wrapping_mul(2_654_435_761)) >> 11) as f32 * 1.0e-7;
+        let phase = ((i as f32 * GOLDEN_STEP + seed_mix).fract()) * TWO_PI;
+        // sin() gives a zero-mean, smoothly-varying, sign-alternating pattern.
+        *dst = amplitude * phase.sin();
+    }
+    // Enforce exact zero-mean (remove any tiny residual DC from finite Z_DIM)
+    // so the perturbation cannot bias the reservoir toward a single direction.
+    let mean = out.iter().sum::<f32>() / Z_DIM as f32;
+    for dst in out.iter_mut() {
+        *dst = (*dst - mean).clamp(-amplitude, amplitude);
     }
     out
 }
@@ -1154,6 +1229,54 @@ impl SensoryBus {
         } else {
             Some(NowMs::now().saturating_sub(updated_at_ms))
         }
+    }
+
+    /// Being-driven spectral *dispersal* ("PERTURB SPREAD" / porosity).
+    ///
+    /// Synthesizes a broadband, zero-mean, near-flat-spectrum perturbation (see
+    /// [`mode_disperse_features`]) and applies it through the **existing**
+    /// shadow-influence machinery — so it inherits every safety property already
+    /// proven there: amplitude clamped to `SHADOW_INFLUENCE_MAX_ABS_CAP`,
+    /// per-element `z` clamp to `[-1, 1]`, time-limited with linear decay, and a
+    /// hard self-suspend when fill is unsafe (`< 58%` or `>= 85%`), plus the v3
+    /// closed-loop pre/post response so the being can read what the dispersal
+    /// actually did to its eigenstructure.
+    ///
+    /// This intentionally does NOT touch the controller, keep_bias/keep_floor,
+    /// or the (deliberately advisory) pressure/resonance metrics. It is off by
+    /// default and decays to zero on its own, so it is reversible by construction.
+    ///
+    /// `strength` is clamped to `[0.0, 1.0]`. `duration_ticks`/`decay_ticks`,
+    /// when provided, are clamped by the shadow-influence path.
+    pub fn receive_mode_disperse(
+        &self,
+        strength: f32,
+        duration_ticks: Option<u32>,
+        decay_ticks: Option<u32>,
+        seed: u64,
+        hard_recovery_reset: bool,
+        attractor_pulse_active: bool,
+    ) -> ShadowInfluenceStatus {
+        let strength = if strength.is_finite() {
+            strength.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let features = mode_disperse_features(strength, seed).to_vec();
+        let request = ShadowInfluenceRequest {
+            intent_id: format!("mode-disperse-{seed}"),
+            label: "mode-disperse/broadband".to_string(),
+            command: "apply".to_string(),
+            stage: Some("live".to_string()),
+            features,
+            // Strength already scaled the per-dim amplitude; cap the envelope at
+            // the shadow-influence ceiling as a defensive second bound.
+            max_abs: Some(MODE_DISPERSE_MAX_ABS),
+            duration_ticks,
+            decay_ticks,
+            basis: Some("mode-disperse/broadband".to_string()),
+        };
+        self.receive_shadow_influence(request, hard_recovery_reset, attractor_pulse_active)
     }
 
     pub fn receive_shadow_influence(
@@ -2241,14 +2364,43 @@ mod tests {
         );
         // Mid fill should be between HIGH and LOW
         assert!(at_mid > STALE_SEMANTIC_HIGH_MS && at_mid < STALE_SEMANTIC_LOW_MS);
-        // High fill should be close to HIGH_MS (10s)
-        assert!(at_high < STALE_SEMANTIC_BASE_MS);
+        // High fill should preserve at least the 15s floor for dense reasoning.
+        assert!(at_high >= STALE_SEMANTIC_HIGH_MS);
+        assert!(at_high < STALE_SEMANTIC_LOW_MS);
         // Monotonically decreasing
         assert!(at_zero > at_mid && at_mid > at_high);
         // NaN -> base
         assert_eq!(dynamic_semantic_stale_ms(f32::NAN), STALE_SEMANTIC_BASE_MS);
-        // Critical fill override
-        assert_eq!(dynamic_semantic_stale_ms(0.25), 45_000);
+        // Critical fill hold, then smooth recovery handover.
+        assert_eq!(
+            dynamic_semantic_stale_ms(STALE_SEMANTIC_RECOVERY_HOLD_FILL),
+            STALE_SEMANTIC_RECOVERY_MS
+        );
+        assert!(dynamic_semantic_stale_ms(0.25) < STALE_SEMANTIC_RECOVERY_MS);
+    }
+
+    #[test]
+    fn semantic_stale_ms_smooths_thirty_percent_handover() {
+        let below = dynamic_semantic_stale_ms(0.29);
+        let at = dynamic_semantic_stale_ms(0.30);
+        let above = dynamic_semantic_stale_ms(0.31);
+
+        assert!(below > at && at > above);
+        assert!(
+            below.saturating_sub(above) <= 6_000,
+            "0.29/0.31 oscillation should not create a stale-window cliff: below={below}, above={above}"
+        );
+    }
+
+    #[test]
+    fn semantic_stale_ms_high_fill_keeps_longform_floor() {
+        let high = dynamic_semantic_stale_ms(0.85);
+
+        assert!(high >= STALE_SEMANTIC_HIGH_MS);
+        assert!(
+            high <= STALE_SEMANTIC_HIGH_MS + 1_500,
+            "high-fill window should stay near the raised floor: {high}"
+        );
     }
 
     #[test]
@@ -2333,5 +2485,109 @@ mod tests {
 
         bus.set_legacy_video_synth_enabled(false);
         assert!(!bus.get_legacy_video_synth_enabled());
+    }
+
+    #[test]
+    fn mode_disperse_features_are_broadband_zero_mean_bounded_and_deterministic() {
+        let strength = 0.8;
+        let seed = 12_345;
+        let v = mode_disperse_features(strength, seed);
+
+        // Bounded: every element within the (strength-scaled) cap.
+        let cap = MODE_DISPERSE_MAX_ABS * strength;
+        assert!(
+            v.iter().all(|x| x.is_finite() && x.abs() <= cap + 1.0e-6),
+            "dispersal exceeded bound; max={:?}",
+            v.iter().cloned().fold(0.0_f32, |a, b| a.max(b.abs()))
+        );
+
+        // Zero-mean: no net DC bias toward a single direction.
+        let mean = v.iter().sum::<f32>() / Z_DIM as f32;
+        assert!(mean.abs() < 1.0e-5, "dispersal mean not ~zero: {mean}");
+
+        // Broadband: energy is spread, not concentrated. Compute spectral
+        // flatness as (#dims carrying >=20% of the max magnitude) / Z_DIM.
+        // A rank-1 spike would have ~1 active dim; a flat pattern has most.
+        let max_mag = v.iter().cloned().fold(0.0_f32, |a, b| a.max(b.abs()));
+        assert!(
+            max_mag > 0.0,
+            "dispersal is all-zero at strength {strength}"
+        );
+        let active = v.iter().filter(|x| x.abs() >= 0.20 * max_mag).count();
+        assert!(
+            active >= Z_DIM / 2,
+            "dispersal not broadband: only {active}/{Z_DIM} dims active"
+        );
+
+        // Sign-varied: both positive and negative excursions present (the
+        // opposite of a single-direction push).
+        assert!(v.iter().any(|x| *x > 0.0), "no positive excursion");
+        assert!(v.iter().any(|x| *x < 0.0), "no negative excursion");
+
+        // Deterministic for a given seed; different seeds explore different
+        // dispersal directions.
+        let again = mode_disperse_features(strength, seed);
+        assert_eq!(v, again, "same seed must reproduce the same vector");
+        let other = mode_disperse_features(strength, seed + 1);
+        assert_ne!(v, other, "different seed should differ");
+    }
+
+    #[test]
+    fn mode_disperse_features_zero_strength_is_silent() {
+        let v = mode_disperse_features(0.0, 999);
+        assert!(v.iter().all(|x| x.abs() <= 1.0e-9));
+        // Non-finite strength is treated as silent, never NaN.
+        let nan = mode_disperse_features(f32::NAN, 999);
+        assert!(nan.iter().all(|x| x.abs() <= 1.0e-9));
+        // Over-unit strength is clamped (no runaway amplitude).
+        let hot = mode_disperse_features(100.0, 999);
+        assert!(
+            hot.iter()
+                .all(|x| x.abs() <= MODE_DISPERSE_MAX_ABS + 1.0e-6),
+            "over-unit strength escaped the cap"
+        );
+    }
+
+    #[test]
+    fn receive_mode_disperse_applies_through_bounded_shadow_path() {
+        let bus = SensoryBus::new(8, 1, 53);
+        let status = bus.receive_mode_disperse(0.7, Some(2), Some(4), 4242, false, false);
+        assert!(status.active, "dispersal should be accepted");
+        assert_eq!(
+            status.basis.as_deref(),
+            Some("mode-disperse/broadband"),
+            "dispersal should carry its basis"
+        );
+        // Inherits the shadow-influence amplitude ceiling.
+        assert!(status.max_abs <= SHADOW_INFLUENCE_MAX_ABS_CAP + 1.0e-6);
+
+        // Safe fill (68%): it applies, perturbs z within the cap, then decays.
+        let mut z = [0.0f32; Z_DIM];
+        let first = bus.apply_shadow_influence_to_z(&mut z, 68.0, false, false, false, None);
+        assert!(first.active);
+        assert!(first.applied_rms > 0.0, "dispersal produced no energy");
+        assert!(
+            z.iter()
+                .all(|x| x.abs() <= SHADOW_INFLUENCE_MAX_ABS_CAP + 1.0e-6),
+            "dispersal pushed z past the cap"
+        );
+        // Both signs present in the applied perturbation (broadband, not a push).
+        assert!(z.iter().any(|x| *x > 0.0) && z.iter().any(|x| *x < 0.0));
+    }
+
+    #[test]
+    fn receive_mode_disperse_inherits_low_fill_suspend() {
+        let bus = SensoryBus::new(8, 1, 59);
+        bus.receive_mode_disperse(0.9, Some(8), Some(2), 777, false, false);
+        // At unsafe-low fill the underlying shadow machinery must suspend and
+        // leave z untouched — porosity must never destabilize a fragile reservoir.
+        let mut z = [0.0f32; Z_DIM];
+        let blocked = bus.apply_shadow_influence_to_z(&mut z, 50.0, false, false, false, None);
+        assert!(blocked.active, "request stays queued, not applied");
+        assert_eq!(blocked.last_block_reason.as_deref(), Some("low_fill"));
+        assert!(
+            z.iter().all(|x| x.abs() <= 1.0e-6),
+            "dispersal touched z at unsafe low fill"
+        );
     }
 }

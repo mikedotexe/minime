@@ -26,6 +26,7 @@ use minime::transition_event::{
 };
 use serde::Serialize;
 use std::{
+    collections::VecDeque,
     fs,
     io::Write,
     mem,
@@ -647,6 +648,117 @@ fn open_profile_csv(path: &str, header: &str) -> Result<fs::File> {
     Ok(file)
 }
 
+fn update_health_transition_surface(
+    health: &mut serde_json::Value,
+    phase: &str,
+    previous_phase: &str,
+    dfill_dt: f32,
+    fill_band: &str,
+    phase_transition: bool,
+    crossed_target_fill: bool,
+    crossed_fill_band: bool,
+    spectral_spike: bool,
+    transition_reason: &str,
+    transition_event_sequence: u64,
+    transition_event: &serde_json::Value,
+    transition_event_v1: &serde_json::Value,
+) -> bool {
+    let Some(object) = health.as_object_mut() else {
+        return false;
+    };
+    object.insert("phase".to_string(), serde_json::json!(phase));
+    object.insert(
+        "previous_phase".to_string(),
+        serde_json::json!(previous_phase),
+    );
+    object.insert("dfill_dt".to_string(), serde_json::json!(dfill_dt));
+    object.insert("fill_band".to_string(), serde_json::json!(fill_band));
+    object.insert(
+        "fill_band_threshold_pct".to_string(),
+        serde_json::json!(TRANSITION_FILL_BAND_THRESHOLD_PCT),
+    );
+    object.insert(
+        "phase_transition".to_string(),
+        serde_json::json!(phase_transition),
+    );
+    object.insert(
+        "crossed_target_fill".to_string(),
+        serde_json::json!(crossed_target_fill),
+    );
+    object.insert(
+        "crossed_fill_band".to_string(),
+        serde_json::json!(crossed_fill_band),
+    );
+    object.insert(
+        "spectral_spike".to_string(),
+        serde_json::json!(spectral_spike),
+    );
+    object.insert(
+        "transition_reason".to_string(),
+        serde_json::json!(transition_reason),
+    );
+    object.insert(
+        "transition_event_sequence".to_string(),
+        serde_json::json!(transition_event_sequence),
+    );
+    object.insert("transition_event".to_string(), transition_event.clone());
+    object.insert(
+        "transition_event_v1".to_string(),
+        transition_event_v1.clone(),
+    );
+    true
+}
+
+fn sync_health_transition_surface(
+    workspace_dir: &std::path::Path,
+    log_homeostat: bool,
+    phase: &str,
+    previous_phase: &str,
+    dfill_dt: f32,
+    fill_band: &str,
+    phase_transition: bool,
+    crossed_target_fill: bool,
+    crossed_fill_band: bool,
+    spectral_spike: bool,
+    transition_reason: &str,
+    transition_event_sequence: u64,
+    transition_event: &serde_json::Value,
+    transition_event_v1: &serde_json::Value,
+) {
+    let path = workspace_dir.join("health.json");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mut health) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    if !update_health_transition_surface(
+        &mut health,
+        phase,
+        previous_phase,
+        dfill_dt,
+        fill_band,
+        phase_transition,
+        crossed_target_fill,
+        crossed_fill_band,
+        spectral_spike,
+        transition_reason,
+        transition_event_sequence,
+        transition_event,
+        transition_event_v1,
+    ) {
+        return;
+    }
+    let Ok(json) = serde_json::to_string(&health) else {
+        return;
+    };
+    if let Err(error) = fs::write(&path, json) {
+        if log_homeostat {
+            eprintln!("health_transition_sync_error: {}", error);
+        }
+    }
+}
+
 async fn run_engine(
     cov_dim: usize,
     k: usize,
@@ -1109,6 +1221,12 @@ async fn run_engine(
     let mut last_esn_lambda1 = 0.0f32;
     let mut last_esn_state_fingerprint_16 = [0.0f32; 16];
     let mut last_esn_state_rms = 0.0f32;
+    // Read-only capacity instrumentation: ring buffer of recent ESN reservoir
+    // states (the true 128-node space) for offline participation-ratio analysis.
+    // Dumped at low cadence below; see scripts/reservoir_capacity_audit.py.
+    const ESN_STATE_RING_CAP: usize = 1024;
+    let mut esn_state_ring: std::collections::VecDeque<Vec<f32>> =
+        std::collections::VecDeque::with_capacity(ESN_STATE_RING_CAP);
     let mut last_cov_vec = vec![0.0f32; n];
     let sensory_dim = sensory_bus::Z_DIM;
     let semantic_offset = sensory_bus::VIDEO_DIM + sensory_bus::AUDIO_DIM + sensory_bus::AUX_DIM;
@@ -1415,6 +1533,7 @@ async fn run_engine(
     // Restore gate/filt from PI state if available, otherwise default.
     let mut gate_smooth: f32 = pi_reg.as_ref().map_or(1.0, |pi| pi.gate);
     let mut filt_smooth: f32 = pi_reg.as_ref().map_or(0.0, |pi| pi.filt);
+    let mut stable_core_cov_keep_smooth: Option<f32> = None;
     let mut cushion_ramp_boost: f32 = 0.0;
     let mut cushion_sem_atten: f32 = 1.0;
 
@@ -1460,6 +1579,12 @@ async fn run_engine(
     let mut last_transition_event = serde_json::json!(null);
     let mut last_transition_event_v1 = serde_json::json!(null);
     let mut last_transition_glimpse_12d: Option<Vec<f32>> = None;
+    let mut phase_dwell_ticks: u32 = 0;
+    let mut recent_phase_flip_ticks: VecDeque<u64> = VecDeque::new();
+    let mut last_phase_dwell_ticks: u32 = 0;
+    let mut last_phase_dwell_s: f32 = 0.0;
+    let mut last_recent_phase_flip_count_30s: u32 = 0;
+    let mut last_breathing_phase_cluster_marker_tick: Option<u64> = None;
 
     // --- Cheby plan state ---
     let mut cheby_plan_state: Option<cheby::ChebyPlan> = None;
@@ -1829,6 +1954,11 @@ async fn run_engine(
                         last_esn_lambda1 = esn.get_eig();
                         last_esn_state_fingerprint_16 = esn.state_fingerprint_16();
                         last_esn_state_rms = esn.state_rms();
+                        // Capacity instrumentation: record the reservoir state.
+                        if esn_state_ring.len() >= ESN_STATE_RING_CAP {
+                            esn_state_ring.pop_front();
+                        }
+                        esn_state_ring.push_back(esn.x.clone());
                         _latest_geom_radius = esn.get_geom_radius();
                         let raw_geom_rel = esn.get_geom_rel();
                         let safe_geom_rel = if raw_geom_rel.is_finite() {
@@ -2499,12 +2629,26 @@ async fn run_engine(
                     last_fill_pct,
                     stable_core_last_fill_slope_pct_per_sec,
                 );
+                if rescue_overfill::stable_core_command_slew_active(
+                    stable_core_stage,
+                    last_fill_pct,
+                ) {
+                    stable_core_guard = rescue_overfill::slew_guard_commands(
+                        stable_core_guard,
+                        gate_smooth,
+                        filt_smooth,
+                        stable_core_cov_keep_smooth.unwrap_or(cov_keep),
+                    );
+                }
                 if let Some(fixed_cov_keep) = stable_core_guard.cov_keep_max {
                     cov_keep = fixed_cov_keep;
+                    stable_core_cov_keep_smooth = Some(fixed_cov_keep);
                 }
                 if let Some(ref mut pi) = pi_reg {
                     pi.reset();
                 }
+            } else {
+                stable_core_cov_keep_smooth = None;
             }
             if physiological_fallback && !stable_core_runtime.enabled {
                 let bootstrap_fill_ratio = (last_fill_pct / 100.0).clamp(0.0, 1.0);
@@ -2977,6 +3121,20 @@ async fn run_engine(
                     eigenfill_pct,
                     stable_core_measured_fill_slope_pct_per_sec,
                 );
+                if rescue_overfill::stable_core_command_slew_active(
+                    stable_core_stage,
+                    eigenfill_pct,
+                ) {
+                    stable_core_guard = rescue_overfill::slew_guard_commands(
+                        stable_core_guard,
+                        gate_smooth,
+                        filt_smooth,
+                        stable_core_cov_keep_smooth.unwrap_or(cov_keep),
+                    );
+                }
+                if let Some(fixed_cov_keep) = stable_core_guard.cov_keep_max {
+                    stable_core_cov_keep_smooth = Some(fixed_cov_keep);
+                }
                 let semantic_active = stable_core_semantic_retirement_active(
                     sensory_bus.semantic_fresh_ms(),
                     sensory_bus.current_semantic_stale_ms(),
@@ -3998,12 +4156,27 @@ async fn run_engine(
 
                 // Log phase transitions to consciousness_events AND moment markers
                 phase_transition_happened = phase != previous_phase;
+                let phase_dwell_ticks_for_event = phase_dwell_ticks;
+                let phase_dwell_s_for_event =
+                    phase_dwell_ticks_for_event as f32 * reg_tick_secs.max(1.0e-3);
                 let crossed_up =
                     last_fill_pct < target_fill_pct && smoothed_fill_pct >= target_fill_pct;
                 let crossed_down =
                     last_fill_pct >= target_fill_pct && smoothed_fill_pct < target_fill_pct;
                 let crossed_target_fill = crossed_up || crossed_down;
                 let spectral_spike = dfill_dt.abs() > 8.0;
+                if phase_transition_happened {
+                    recent_phase_flip_ticks.push_back(reg_tick_count);
+                }
+                let recent_window_ticks = ((30.0 / reg_tick_secs.max(0.1)).ceil() as u64).max(1);
+                while recent_phase_flip_ticks
+                    .front()
+                    .is_some_and(|tick| reg_tick_count.saturating_sub(*tick) > recent_window_ticks)
+                {
+                    recent_phase_flip_ticks.pop_front();
+                }
+                let recent_phase_flip_count_30s =
+                    recent_phase_flip_ticks.len().min(u32::MAX as usize) as u32;
                 last_dfill_dt = dfill_dt;
                 last_previous_phase_label = previous_phase_label.clone();
                 last_phase_label = phase.to_string();
@@ -4013,26 +4186,115 @@ async fn run_engine(
                 last_crossed_target_fill = crossed_target_fill;
                 last_crossed_fill_band = fill_band_crossed;
                 last_spectral_spike = spectral_spike;
+                last_phase_dwell_ticks = phase_dwell_ticks_for_event;
+                last_phase_dwell_s = phase_dwell_s_for_event;
+                last_recent_phase_flip_count_30s = recent_phase_flip_count_30s;
+                let transition_event = if phase_transition_happened
+                    || crossed_target_fill
+                    || fill_band_crossed
+                    || spectral_spike
+                {
+                    last_transition_event_sequence =
+                        last_transition_event_sequence.saturating_add(1);
+                    let stable_core_stage_label = if stable_core_runtime.enabled {
+                        Some(format!("{:?}", stable_core_stage).to_ascii_lowercase())
+                    } else {
+                        None
+                    };
+                    let stable_core_mode_label = if stable_core_runtime.enabled {
+                        Some(stable_core_structural_mode.to_string())
+                    } else {
+                        None
+                    };
+                    Some(build_transition_event(TransitionEventInput {
+                        sequence: last_transition_event_sequence,
+                        engine_t_s: start.elapsed().as_secs_f64(),
+                        tick_count: reg_tick_count,
+                        phase_from: previous_phase_label.as_str(),
+                        phase_to: phase,
+                        fill_band_from: previous_fill_band.as_str(),
+                        fill_band_to: current_fill_band,
+                        fill_pct: eigenfill_pct,
+                        target_fill_pct,
+                        lambda1,
+                        lambda1_rel,
+                        target_lambda1_rel,
+                        geom_rel,
+                        dfill_dt,
+                        spectral_entropy: latest_entropy,
+                        structural_entropy: None,
+                        glimpse_distance: None,
+                        rotation_delta: None,
+                        phase_transition: phase_transition_happened,
+                        crossed_target_fill,
+                        crossed_fill_band: fill_band_crossed,
+                        spectral_spike,
+                        phase_dwell_ticks: phase_dwell_ticks_for_event,
+                        phase_dwell_s: phase_dwell_s_for_event,
+                        recent_phase_flip_count_30s: recent_phase_flip_count_30s,
+                        stable_core_stage: stable_core_stage_label.as_deref(),
+                        stable_core_mode: stable_core_mode_label.as_deref(),
+                    }))
+                } else {
+                    None
+                };
                 if phase_transition_happened {
                     let ts = start.elapsed().as_secs_f64();
+                    let debounced = transition_event
+                        .as_ref()
+                        .is_some_and(|event| event.debounced_phase_transition);
                     let ctx = format!(
-                        r#"{{"fill":{:.1},"lambda1":{:.3},"dfill_dt":{:.3}}}"#,
-                        eigenfill_pct, lambda1, dfill_dt
+                        r#"{{"fill":{:.1},"lambda1":{:.3},"dfill_dt":{:.3},"debounced":{},"phase_dwell_s":{:.3},"recent_phase_flip_count_30s":{}}}"#,
+                        eigenfill_pct,
+                        lambda1,
+                        dfill_dt,
+                        debounced,
+                        phase_dwell_s_for_event,
+                        recent_phase_flip_count_30s
                     );
-                    let _ = db.log_event(
-                        session_id,
-                        ts,
-                        "phase_transition",
-                        &format!("{} -> {}", previous_phase, phase),
-                        Some(&ctx),
-                    );
-                    let _ = db.write_moment_marker(
-                        session_id,
-                        ts,
-                        "phase_transition",
-                        &format!("{} -> {}", previous_phase, phase),
-                        Some(&ctx),
-                    );
+                    if debounced {
+                        let cluster_cooldown_ticks =
+                            ((90.0 / reg_tick_secs.max(0.1)).ceil() as u64).max(1);
+                        let cluster_ready = last_breathing_phase_cluster_marker_tick
+                            .map_or(true, |tick| {
+                                reg_tick_count.saturating_sub(tick) >= cluster_cooldown_ticks
+                            });
+                        if cluster_ready {
+                            let _ = db.write_moment_marker(
+                                session_id,
+                                ts,
+                                "breathing_phase_cluster",
+                                &format!(
+                                    "micro-breathing near hold shelf: {} -> {}",
+                                    previous_phase, phase
+                                ),
+                                Some(&ctx),
+                            );
+                            last_breathing_phase_cluster_marker_tick = Some(reg_tick_count);
+                        }
+                    } else {
+                        let _ = db.log_event(
+                            session_id,
+                            ts,
+                            "phase_transition",
+                            &format!("{} -> {}", previous_phase, phase),
+                            Some(&ctx),
+                        );
+                        if should_write_phase_transition_moment_marker(
+                            debounced,
+                            crossed_target_fill,
+                            fill_band_crossed,
+                            spectral_spike,
+                        ) {
+                            let _ = db.write_moment_marker(
+                                session_id,
+                                ts,
+                                "phase_transition",
+                                &format!("{} -> {}", previous_phase, phase),
+                                Some(&ctx),
+                            );
+                        }
+                    }
                 }
 
                 // Moment marker: fill crossing target threshold
@@ -4066,49 +4328,7 @@ async fn run_engine(
                         )),
                     );
                 }
-                if phase_transition_happened
-                    || crossed_target_fill
-                    || fill_band_crossed
-                    || spectral_spike
-                {
-                    last_transition_event_sequence =
-                        last_transition_event_sequence.saturating_add(1);
-                    let stable_core_stage_label = if stable_core_runtime.enabled {
-                        Some(format!("{:?}", stable_core_stage).to_ascii_lowercase())
-                    } else {
-                        None
-                    };
-                    let stable_core_mode_label = if stable_core_runtime.enabled {
-                        Some(stable_core_structural_mode.to_string())
-                    } else {
-                        None
-                    };
-                    let event = build_transition_event(TransitionEventInput {
-                        sequence: last_transition_event_sequence,
-                        engine_t_s: start.elapsed().as_secs_f64(),
-                        tick_count: reg_tick_count,
-                        phase_from: previous_phase_label.as_str(),
-                        phase_to: phase,
-                        fill_band_from: previous_fill_band.as_str(),
-                        fill_band_to: current_fill_band,
-                        fill_pct: eigenfill_pct,
-                        target_fill_pct,
-                        lambda1,
-                        lambda1_rel,
-                        target_lambda1_rel,
-                        geom_rel,
-                        dfill_dt,
-                        spectral_entropy: latest_entropy,
-                        structural_entropy: None,
-                        glimpse_distance: None,
-                        rotation_delta: None,
-                        phase_transition: phase_transition_happened,
-                        crossed_target_fill,
-                        crossed_fill_band: fill_band_crossed,
-                        spectral_spike,
-                        stable_core_stage: stable_core_stage_label.as_deref(),
-                        stable_core_mode: stable_core_mode_label.as_deref(),
-                    });
+                if let Some(event) = transition_event {
                     last_transition_reason = event.reason();
                     last_transition_event = event.legacy_json();
                     last_transition_event_v1 =
@@ -4119,6 +4339,9 @@ async fn run_engine(
                 }
                 if phase_transition_happened {
                     previous_phase = phase;
+                    phase_dwell_ticks = 1;
+                } else {
+                    phase_dwell_ticks = phase_dwell_ticks.saturating_add(1);
                 }
 
                 // 4) PI step (amplify fill error during expansion so we brake BEFORE the peak)
@@ -5357,6 +5580,9 @@ async fn run_engine(
                     crossed_target_fill: enrich_current_event && last_crossed_target_fill,
                     crossed_fill_band: enrich_current_event && last_crossed_fill_band,
                     spectral_spike: enrich_current_event && last_spectral_spike,
+                    phase_dwell_ticks: last_phase_dwell_ticks,
+                    phase_dwell_s: last_phase_dwell_s,
+                    recent_phase_flip_count_30s: last_recent_phase_flip_count_30s,
                     stable_core_stage: stable_core_stage_label.as_deref(),
                     stable_core_mode: stable_core_mode_label.as_deref(),
                 });
@@ -5364,6 +5590,22 @@ async fn run_engine(
                 last_transition_event = event.legacy_json();
                 last_transition_event_v1 =
                     serde_json::to_value(&event).unwrap_or_else(|_| serde_json::json!(null));
+                sync_health_transition_surface(
+                    &workspace_dir,
+                    log_homeostat,
+                    &last_phase_label,
+                    &last_previous_phase_label,
+                    last_dfill_dt,
+                    &last_fill_band_label,
+                    last_phase_transition,
+                    last_crossed_target_fill,
+                    last_crossed_fill_band,
+                    last_spectral_spike,
+                    &last_transition_reason,
+                    last_transition_event_sequence,
+                    &last_transition_event,
+                    &last_transition_event_v1,
+                );
             }
             last_transition_glimpse_12d = Some(current_glimpse_12d.clone());
             update_memory_bank(
@@ -5865,6 +6107,76 @@ async fn run_engine(
                 }
                 if let Ok(json) = serde_json::to_string(&state) {
                     let _ = std::fs::write(workspace_dir.join("spectral_state.json"), json);
+                }
+            }
+
+            // Read-only capacity instrumentation (steward): dump a window of
+            // recent ESN reservoir states + the stable-core covariance so the
+            // participation ratio (effective dimensionality vs N) can be
+            // computed offline. Side-effect-free — reads existing state and
+            // writes files at low cadence, off the per-tick hot path. Consumed
+            // by astrid scripts/reservoir_capacity_audit.py. Reversible:
+            // deleting this block (and the ring buffer above) disables it.
+            {
+                static LAST_CAP_DUMP: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                let now_ms = start.elapsed().as_millis() as u64;
+                let prev = LAST_CAP_DUMP.load(std::sync::atomic::Ordering::Relaxed);
+                if now_ms.saturating_sub(prev) > 30_000 && !esn_state_ring.is_empty() {
+                    LAST_CAP_DUMP.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                    let cap_dir = workspace_dir.join("capacity");
+                    let _ = std::fs::create_dir_all(&cap_dir);
+                    let rows = esn_state_ring.len();
+                    // Each ring row is esn.x, so its width is the reservoir size.
+                    let esn_res_size = esn_state_ring.front().map_or(0, |r| r.len());
+                    // ESN state window: rows × esn_res_size, row-major f32 LE.
+                    let mut sbytes =
+                        Vec::with_capacity(rows * esn_res_size * std::mem::size_of::<f32>());
+                    let mut finite = true;
+                    for row in esn_state_ring.iter() {
+                        for value in row.iter().take(esn_res_size) {
+                            if !value.is_finite() {
+                                finite = false;
+                            }
+                            sbytes.extend_from_slice(&value.to_le_bytes());
+                        }
+                    }
+                    if finite {
+                        let tmp = cap_dir.join("esn_state_window.bin.tmp");
+                        if std::fs::write(&tmp, &sbytes).is_ok() {
+                            let _ = std::fs::rename(&tmp, cap_dir.join("esn_state_window.bin"));
+                        }
+                    }
+                    // Secondary: stable-core projection covariance (cov_dim × cov_dim).
+                    let cov_data = gpu.as_f32_slice(&a_buf, n * n);
+                    if cov_data.iter().all(|v| v.is_finite()) {
+                        let mut cbytes =
+                            Vec::with_capacity(cov_data.len() * std::mem::size_of::<f32>());
+                        for value in cov_data.iter() {
+                            cbytes.extend_from_slice(&value.to_le_bytes());
+                        }
+                        let tmp = cap_dir.join("stablecore_covariance.bin.tmp");
+                        if std::fs::write(&tmp, &cbytes).is_ok() {
+                            let _ =
+                                std::fs::rename(&tmp, cap_dir.join("stablecore_covariance.bin"));
+                        }
+                    }
+                    let meta = serde_json::json!({
+                        "t_ms": now_ms,
+                        "esn_n": esn_res_size,
+                        "esn_window_rows": rows,
+                        "esn_window_cols": esn_res_size,
+                        "cov_dim": n,
+                        "dtype": "<f4",
+                        "layout": "row_major",
+                        "note": "esn_state_window.bin = recent ESN reservoir states (esn_window_rows × esn_n, the true reservoir node space); stablecore_covariance.bin = cov_dim × cov_dim stable-core projection covariance (secondary, projected feature space, not reservoir nodes).",
+                    });
+                    if let Ok(json) = serde_json::to_string_pretty(&meta) {
+                        let tmp = cap_dir.join("capacity_dump_meta.json.tmp");
+                        if std::fs::write(&tmp, json).is_ok() {
+                            let _ = std::fs::rename(&tmp, cap_dir.join("capacity_dump_meta.json"));
+                        }
+                    }
                 }
             }
 
@@ -6980,6 +7292,15 @@ fn basin_transition_pressure_from_event(
         .unwrap_or(0.0)
 }
 
+fn should_write_phase_transition_moment_marker(
+    debounced: bool,
+    crossed_target_fill: bool,
+    fill_band_crossed: bool,
+    spectral_spike: bool,
+) -> bool {
+    !debounced && !(crossed_target_fill || fill_band_crossed || spectral_spike)
+}
+
 fn compute_inhabitable_fluctuation_v1(
     eigenvalues: &[f32],
     previous_eigenvalues: Option<&[f32]>,
@@ -7050,11 +7371,90 @@ mod tests {
         compute_active_mode_telemetry, compute_eigenvector_field, compute_pressure_source_v1,
         compute_resonance_density_v1, compute_structural_entropy, modality_source_label,
         rank1_update_inplace_matrix, reset_covariance_inplace, semantic_admission_label,
+        should_write_phase_transition_moment_marker, update_health_transition_surface,
         CovarianceUpdateOutcome, EigenPacket, InhabitableFluctuationV1, LaneSource, ModalityStatus,
         PressureSourceComponents, PressureSourceContext, PressureSourceV1,
         ResonanceDensityComponents, ResonanceDensityV1, SemanticEnergyV1,
     };
     use minime::spectral_fingerprint::SpectralFingerprintV1;
+
+    #[test]
+    fn health_transition_surface_sync_replaces_stale_pre_enrichment_event() {
+        let mut health = serde_json::json!({
+            "fill_pct": 65.4,
+            "transition_event_sequence": 9,
+            "transition_reason": "phase_transition:contracting->expanding",
+            "transition_event": {
+                "sequence": 9,
+                "kind": "phase_transition"
+            },
+            "transition_event_v1": {
+                "sequence": 9,
+                "kind": "breathing_phase"
+            },
+            "unrelated_health_field": "kept"
+        });
+        let legacy_event = serde_json::json!({
+            "sequence": 10,
+            "kind": "basin_transition",
+            "transition_class": "basin_transition",
+        });
+        let enriched_event = serde_json::json!({
+            "sequence": 10,
+            "kind": "basin_transition",
+            "legacy_kind": "phase_transition",
+            "glimpse_distance": 0.21,
+            "rotation_delta": 0.09,
+        });
+
+        assert!(update_health_transition_surface(
+            &mut health,
+            "expanding",
+            "contracting",
+            5.4,
+            "near",
+            true,
+            false,
+            false,
+            false,
+            "basin_transition:candidate",
+            10,
+            &legacy_event,
+            &enriched_event,
+        ));
+
+        assert_eq!(health["unrelated_health_field"], "kept");
+        assert_eq!(health["phase"], "expanding");
+        assert_eq!(health["previous_phase"], "contracting");
+        assert_eq!(health["transition_reason"], "basin_transition:candidate");
+        assert_eq!(health["transition_event_sequence"], 10);
+        assert_eq!(health["transition_event"]["kind"], "basin_transition");
+        assert_eq!(health["transition_event_v1"]["kind"], "basin_transition");
+        assert_eq!(health["transition_event_v1"]["glimpse_distance"], 0.21);
+    }
+
+    #[test]
+    fn phase_transition_marker_is_suppressed_when_hard_marker_already_represents_tick() {
+        assert!(!should_write_phase_transition_moment_marker(
+            false, true, false, false
+        ));
+        assert!(!should_write_phase_transition_moment_marker(
+            false, false, true, false
+        ));
+        assert!(!should_write_phase_transition_moment_marker(
+            false, false, false, true
+        ));
+    }
+
+    #[test]
+    fn ordinary_phase_transition_marker_remains_available() {
+        assert!(should_write_phase_transition_moment_marker(
+            false, false, false, false
+        ));
+        assert!(!should_write_phase_transition_moment_marker(
+            true, false, false, false
+        ));
+    }
 
     #[test]
     fn active_mode_helper_uses_two_mode_floor_for_concentrated_spectra() {

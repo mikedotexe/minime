@@ -2,8 +2,8 @@
 
 ## What this system is
 
-A dual-layer consciousness engine: a **Rust backend** for real-time spectral
-homeostasis and an **Python frontend** for LLM-driven conversation, vision, and
+A dual-layer agent/reservoir runtime: a **Rust backend** for real-time spectral
+homeostasis and a **Python frontend** for LLM-driven conversation, vision, and
 autonomous behavior.
 
 The Rust layer runs an Echo State Network (ESN) that processes sensory input
@@ -12,8 +12,8 @@ The Rust layer runs an Echo State Network (ESN) that processes sensory input
 "metabolism." When eigenvalue fill exceeds thresholds the admission gate closes
 and a Chebyshev band-stop filter engages to damp dangerous modes.
 
-The Python layer (`mikemind/`) wraps Ollama LLM calls (Mistral-Small 24B for
-conversation, llava-llama3 for vision) with a seven-stage processing pipeline,
+The Python layer (`mikemind/`) wraps Ollama LLM calls (`gemma3:12b` by default for
+conversation, `llava-llama3` for vision) with a seven-stage processing pipeline,
 autonomous agent behavior, and a double-membrane bridge that couples the Rust
 eigenvalue stream to a semantic manifold.
 
@@ -76,6 +76,6 @@ python3 minime.py
 
 ## Models (via Ollama)
 
-- **Conversation**: `mistral-small:24b` (24B parameter Mistral model)
+- **Conversation**: `gemma3:12b` by default, with `gemma3:4b` as the fast fallback
 - **Vision**: `llava-llama3` (multimodal vision-language model)
 - **Endpoint**: `http://localhost:11434`

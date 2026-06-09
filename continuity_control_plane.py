@@ -15,6 +15,12 @@ AUTHORITY_BUDGET_MAX_SENDS = 3
 STEWARD_RESEARCH_MAX_ACTIONS = 8
 READ_ONLY_RESEARCH_SCOPE = "read_only_research"
 SEMANTIC_MICRODOSE_SCOPE = "semantic_microdose"
+TERMINAL_RESEARCH_BUDGET_STAGES = {
+    "budget_expired",
+    "budget_exhausted",
+    "budget_closed",
+    "budget_unavailable",
+}
 
 
 def local_research_budget_request_scaffold(
@@ -219,7 +225,7 @@ def _route_stack(projection: Dict[str, Any]) -> List[Dict[str, Any]]:
     if isinstance(research, dict):
         command = _text(research.get("next"))
         stage = _text(research.get("stage"))
-        if command:
+        if command and stage not in TERMINAL_RESEARCH_BUDGET_STAGES:
             routes.append(_route("Local Research", command, f"research budget stage: {stage}", 12, "research_budget_priority_route_v1"))
 
     session = projection.get("continuity_session_v1")

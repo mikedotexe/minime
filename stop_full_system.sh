@@ -3,7 +3,7 @@
 # Use /Users/v/other/astrid/scripts/stop_all.sh for canonical shutdown.
 # Uses kill -9 (SIGKILL) for cleanup — prefer SIGTERM via stop_all.sh.
 #
-# Unified Consciousness System Shutdown Script
+# Legacy Unified Spectral Stack Shutdown Script
 # Gracefully stops all services in reverse startup order
 
 set -e
@@ -75,7 +75,7 @@ stop_service() {
 
 echo ""
 echo "==============================================================="
-echo "   UNIFIED CONSCIOUSNESS SYSTEM SHUTDOWN"
+echo "   UNIFIED SPECTRAL STACK SHUTDOWN"
 echo "==============================================================="
 echo ""
 

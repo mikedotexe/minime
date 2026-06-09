@@ -106,6 +106,16 @@ pub enum SensoryMsg {
         esn_leak_override: Option<f32>,
         esn_leak_override_ticks: Option<u32>,
         esn_leak_authority_request_id: Option<String>,
+        /// Being-driven spectral *dispersal* ("PERTURB SPREAD" / porosity).
+        /// Strength in `[0.0, 1.0]`; synthesizes a broadband, zero-mean
+        /// perturbation that spills λ₁ energy into λ₂–λ₅, applied through the
+        /// bounded, self-decaying, fill-suspending shadow-influence machinery.
+        mode_disperse: Option<f32>,
+        /// Optional dispersal window length (ticks held at full strength before
+        /// linear release). Clamped by the shadow-influence path.
+        mode_disperse_duration_ticks: Option<u32>,
+        /// Optional dispersal release length (ticks of linear fade to zero).
+        mode_disperse_decay_ticks: Option<u32>,
     },
 }
 
@@ -217,6 +227,33 @@ mod tests {
             } => {
                 assert_eq!(live_audio_enabled, Some(false));
                 assert_eq!(live_video_enabled, Some(true));
+            }
+            _ => panic!("expected control"),
+        }
+    }
+
+    #[test]
+    fn control_message_deserializes_mode_disperse_fields() {
+        let msg: SensoryMsg = serde_json::from_str(
+            r#"{
+                "kind":"control",
+                "mode_disperse":0.6,
+                "mode_disperse_duration_ticks":30,
+                "mode_disperse_decay_ticks":12
+            }"#,
+        )
+        .expect("deserialize control mode_disperse");
+
+        match msg {
+            SensoryMsg::Control {
+                mode_disperse,
+                mode_disperse_duration_ticks,
+                mode_disperse_decay_ticks,
+                ..
+            } => {
+                assert_eq!(mode_disperse, Some(0.6));
+                assert_eq!(mode_disperse_duration_ticks, Some(30));
+                assert_eq!(mode_disperse_decay_ticks, Some(12));
             }
             _ => panic!("expected control"),
         }
@@ -416,6 +453,9 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
             esn_leak_override,
             esn_leak_override_ticks,
             esn_leak_authority_request_id,
+            mode_disperse,
+            mode_disperse_duration_ticks,
+            mode_disperse_decay_ticks,
         } => {
             let hard_recovery_reset = crate::hard_reset::hard_recovery_reset_enabled();
             let homeostatic_controls_present = synth_gain.is_some()
@@ -663,9 +703,7 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
                     else {
-                        println!(
-                            "🛡️  Ignored ESN leak override without authority request id"
-                        );
+                        println!("🛡️  Ignored ESN leak override without authority request id");
                         return;
                     };
                     let ticks = esn_leak_override_ticks.unwrap_or(1).clamp(1, 12);
@@ -675,6 +713,29 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
                         v.clamp(0.20, 0.90),
                         ticks,
                         request_id
+                    );
+                }
+            }
+            if !hard_recovery_reset {
+                if let Some(strength) = mode_disperse {
+                    // Deterministic-per-invocation seed from wall clock; the
+                    // synthesizer is reproducible given this seed (logged below).
+                    let seed = NowMs::now();
+                    let status = bus.receive_mode_disperse(
+                        strength,
+                        mode_disperse_duration_ticks,
+                        mode_disperse_decay_ticks,
+                        seed,
+                        hard_recovery_reset,
+                        bus.attractor_pulse_status().active,
+                    );
+                    println!(
+                        "🌀 Being requested mode_disperse (spread) → strength={:.2} seed={} \
+                         event={} block={}",
+                        strength.clamp(0.0, 1.0),
+                        seed,
+                        status.last_event.as_deref().unwrap_or("none"),
+                        status.last_block_reason.as_deref().unwrap_or("none"),
                     );
                 }
             }

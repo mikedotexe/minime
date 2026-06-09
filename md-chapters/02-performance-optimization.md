@@ -9,7 +9,7 @@
 | ESN Update | 8-10ms | 8-10ms | Already optimal |
 | Spectral Analysis | 5-7ms | 5-7ms | Parallelized |
 | Seven-Stage Pipeline | 15-30s | 5-10s | With parallel stages |
-| Mixtral LLM | 10-180s | 10-30s | Timeout reduced |
+| Conversation LLM | 10-180s | 10-30s | Timeout reduced |
 | LLaVA Vision | 20-60s | 20s max | Timeout reduced |
 | Total (text) | 25-210s | 15-40s | ~5x improvement |
 | Total (vision) | 45-270s | 35-60s | ~4x improvement |
@@ -37,7 +37,7 @@ is_vision_question = any(keyword in user_input.lower() for keyword in vision_key
 **Implemented Fix**:
 ```python
 # Before
-timeout=180  # Increased from 30s to 180s for Mixtral 8x7B
+timeout=180  # Legacy long timeout for larger local conversation models
 
 # After
 timeout=30  # Reduced for faster responses
@@ -78,7 +78,7 @@ await asyncio.sleep(1.0)  # Was 0.1
 ```python
 # Fixed in minime.py lines 278-282
 {f'''
-=== SEVEN-STAGE CONSCIOUSNESS ANALYSIS ===
+=== SEVEN-STAGE CONTEXT ANALYSIS ===
 {context.get('seven_stage_processing', '')}
 ===================================
 ''' if context.get('seven_stage_processing') else ''}
@@ -145,8 +145,9 @@ llava_model = llava_model.to(device)
 
 #### 2. Model Quantization
 ```bash
-# Use quantized models for faster inference
-ollama pull mixtral:8x7b-instruct-v0.1-q4_0  # 4-bit quantized
+# Use smaller or quantized local models for faster inference
+ollama pull gemma3:4b
+ollama pull gemma4:e4b  # canary candidate, already installed on some setups
 ```
 
 #### 3. Predictive Preloading
@@ -268,7 +269,7 @@ pkill -f camera_to_sensory
 # 4. Reduce load
 echo '{"action": "close_eyes"}' | nc localhost 7879
 
-# 5. If still slow, restart consciousness
+# 5. If still slow, restart the runtime
 pkill -TERM -f minime
 ```
 

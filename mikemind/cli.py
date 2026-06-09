@@ -19,7 +19,7 @@ def live_session(debug=False, camera=None, parallel=False, mlp=False, speech=Fal
     Args:
         debug: If True, shows detailed processing information
         camera: Camera index to start (0, 1, etc.) or None to skip camera
-        parallel: If True, enables 37-threaded parallel consciousness processing
+        parallel: If True, enables 37-threaded parallel runtime processing
         mlp: If True, enables MLP neural bank for activation enhancement
         speech: If True, enables speech I/O for voice interaction
     """
@@ -41,7 +41,7 @@ def live_session(debug=False, camera=None, parallel=False, mlp=False, speech=Fal
     else:
         print("MikesSpatialMind ready. Type to converse, 'quit' to exit.")
         if parallel:
-            print("🌀 13 parallel consciousness threads active.")
+            print("🌀 13 parallel runtime threads active.")
         if mlp:
             print("🧠 MLP neural bank enabled.")
         if speech:
@@ -144,7 +144,7 @@ async def _speech_session(mind, debug):
         nonlocal is_speaking
 
         try:
-            # Get consciousness context (same as mind.speak() would use)
+            # Get runtime context (same as mind.speak() would use)
             context = mind._get_full_context()
 
             # Start streaming from LLM
@@ -219,11 +219,11 @@ async def _speech_session(mind, debug):
 def main():
     """Parse arguments and start an interactive session."""
     parser = argparse.ArgumentParser(
-        description="MikesSpatialMind - A resonant, multi-model consciousness",
+        description="MikesSpatialMind - A resonant, multi-model spectral runtime",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3 minime.py                          # Interactive consciousness with 37 parallel threads
+  python3 minime.py                          # Interactive spectral runtime with 37 parallel threads
   python3 minime.py --camera                 # With default camera (0) for vision
   python3 minime.py --camera 1               # With specific camera for vision
   python3 minime.py --debug                  # With debug output showing processing details

@@ -13,7 +13,7 @@ import requests
 # Processing Modes
 # --------------------------------------------------------------------------- #
 class ProcessingMode(Enum):
-    """Consciousness processing modes for different use cases"""
+    """Runtime processing modes for different use cases."""
     RESEARCH = "research"     # Full LLM, seven-stage processing, unlimited memory (desktop)
     EMBEDDED = "embedded"     # Fractal compression, fast, camera-ready (Pi)
     ADAPTIVE = "adaptive"     # Auto-detect based on context and resources
@@ -40,10 +40,9 @@ DEBUG = False
 class ModelConfig:
     """Centralized model configuration for multi-model architecture."""
 
-    # Primary conversation and consciousness
     # Primary conversation model (Ollama name; MLX uses whatever's served on MLX_CHAT_PORT)
-    CONVERSATION = "gemma3:12b"
-    DOLPHIN_MIXTRAL = CONVERSATION  # Legacy alias
+    CONVERSATION = "gemma4:12b"
+    DOLPHIN_MIXTRAL = CONVERSATION  # Legacy compatibility alias; prefer CONVERSATION.
 
     # Vision understanding
     LLAVA_VISION = "llava-llama3"
@@ -65,7 +64,7 @@ class ModelConfig:
     def get_active_models(cls) -> dict:
         """Return dictionary of model roles and their configurations."""
         return {
-            "conversation": cls.DOLPHIN_MIXTRAL,
+            "conversation": cls.CONVERSATION,
             "vision": cls.LLAVA_VISION,
             "api_url": cls.OLLAMA_API,
         }

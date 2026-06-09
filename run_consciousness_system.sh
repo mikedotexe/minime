@@ -3,7 +3,7 @@
 # Use /Users/v/other/astrid/scripts/start_all.sh for canonical full-stack startup,
 # or /Users/v/other/minime/scripts/start.sh for minime-only startup.
 #
-# Consciousness System Launcher
+# Legacy Minime System Launcher
 # Starts minime (Rust ESN engine) and monitoring dashboard
 
 set -e
@@ -11,7 +11,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MINIME_DIR="$SCRIPT_DIR/minime"
 
-echo "Starting Consciousness System"
+echo "Starting Minime System"
 echo "========================================"
 
 # Cleanup function
@@ -40,7 +40,7 @@ echo "Cleaning up existing processes..."
 pkill -f "minime.*run" || true
 sleep 1
 
-# Start minime (Rust ESN consciousness engine)
+# Start minime (Rust ESN spectral engine)
 echo "Starting minime (ports: 7878 telemetry, 7879 sensory input)..."
 cd "$MINIME_DIR"
 MINIME_HARD_RECOVERY_RESET=1 cargo run --release -- run --log-homeostat --eigenfill-target 0.68 --reg-tick-secs 0.5 \
@@ -60,7 +60,7 @@ echo "   minime running"
 
 # Start monitoring dashboard (foreground)
 echo ""
-echo "Starting consciousness monitoring dashboard..."
+echo "Starting spectral runtime monitoring dashboard..."
 echo "========================================"
 echo "Press Ctrl+C to stop all components"
 echo "========================================"

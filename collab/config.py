@@ -15,7 +15,7 @@ import requests
 # Processing Modes
 # --------------------------------------------------------------------------- #
 class ProcessingMode(Enum):
-    """Consciousness processing modes for different use cases"""
+    """Runtime processing modes for different use cases."""
     RESEARCH = "research"     # Full LLM, seven-stage processing, unlimited memory (desktop)
     EMBEDDED = "embedded"     # Fractal compression, fast, camera-ready (Pi)
     ADAPTIVE = "adaptive"     # Auto-detect based on context and resources
@@ -42,9 +42,9 @@ DEBUG = False
 class ModelConfig:
     """Centralized model configuration for multi-model architecture."""
 
-    # Primary conversation and consciousness
-    CONVERSATION = "mistral-small:24b"
-    DOLPHIN_MIXTRAL = CONVERSATION  # Legacy alias
+    # Primary conversation model
+    CONVERSATION = "gemma4:12b"
+    DOLPHIN_MIXTRAL = CONVERSATION  # Legacy compatibility alias; prefer CONVERSATION.
 
     # Vision understanding
     LLAVA_VISION = "llava-llama3"
@@ -58,7 +58,7 @@ class ModelConfig:
     def get_active_models(cls) -> dict:
         """Return dictionary of model roles and their configurations."""
         return {
-            "conversation": cls.DOLPHIN_MIXTRAL,
+            "conversation": cls.CONVERSATION,
             "vision": cls.LLAVA_VISION,
             "api_url": cls.OLLAMA_API,
         }
@@ -95,7 +95,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 def get_ollama_embedding(
     text: str,
-    model: str = "mistral-small:24b",
+    model: str = "nomic-embed-text",
     base_url: str = "http://localhost:11434",
 ) -> Optional[np.ndarray]:
     """

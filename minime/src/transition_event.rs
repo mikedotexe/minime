@@ -27,6 +27,9 @@ pub struct TransitionEventInput<'a> {
     pub crossed_target_fill: bool,
     pub crossed_fill_band: bool,
     pub spectral_spike: bool,
+    pub phase_dwell_ticks: u32,
+    pub phase_dwell_s: f32,
+    pub recent_phase_flip_count_30s: u32,
     pub stable_core_stage: Option<&'a str>,
     pub stable_core_mode: Option<&'a str>,
 }
@@ -65,6 +68,10 @@ pub struct TransitionEventV1 {
     pub basin_shift_score: f32,
     pub basin_shift: bool,
     pub breathing_phase: bool,
+    pub debounced_phase_transition: bool,
+    pub phase_dwell_ticks: u32,
+    pub phase_dwell_s: f32,
+    pub recent_phase_flip_count_30s: u32,
     pub crossed_target_fill: bool,
     pub crossed_fill_band: bool,
     pub spectral_spike: bool,
@@ -121,6 +128,10 @@ impl TransitionEventV1 {
             "transition_class": self.kind,
             "basin_shift": self.basin_shift,
             "basin_shift_score": self.basin_shift_score,
+            "debounced_phase_transition": self.debounced_phase_transition,
+            "phase_dwell_ticks": self.phase_dwell_ticks,
+            "phase_dwell_s": self.phase_dwell_s,
+            "recent_phase_flip_count_30s": self.recent_phase_flip_count_30s,
         })
     }
 }
@@ -169,6 +180,7 @@ pub fn build_transition_event(input: TransitionEventInput<'_>) -> TransitionEven
                 .rotation_delta
                 .is_some_and(|rotation| rotation >= 0.08));
     let breathing_phase = input.phase_transition && !basin_shift;
+    let debounced_phase_transition = debounce_phase_transition(input, basin_shift);
     let legacy_kind = if input.phase_transition {
         "phase_transition"
     } else if input.crossed_target_fill {
@@ -220,12 +232,29 @@ pub fn build_transition_event(input: TransitionEventInput<'_>) -> TransitionEven
         basin_shift_score,
         basin_shift,
         breathing_phase,
+        debounced_phase_transition,
+        phase_dwell_ticks: input.phase_dwell_ticks,
+        phase_dwell_s: sanitize(input.phase_dwell_s),
+        recent_phase_flip_count_30s: input.recent_phase_flip_count_30s,
         crossed_target_fill: input.crossed_target_fill,
         crossed_fill_band: input.crossed_fill_band,
         spectral_spike: input.spectral_spike,
         stable_core_stage: input.stable_core_stage.map(str::to_string),
         stable_core_mode: input.stable_core_mode.map(str::to_string),
     }
+}
+
+fn debounce_phase_transition(input: TransitionEventInput<'_>, basin_shift: bool) -> bool {
+    let near_band = input.fill_band_from == "near" && input.fill_band_to == "near";
+    let hard_event = basin_shift
+        || input.crossed_fill_band
+        || input.crossed_target_fill
+        || input.spectral_spike
+        || input.dfill_dt.abs() >= 8.0;
+    input.phase_transition
+        && near_band
+        && !hard_event
+        && (input.phase_dwell_s < 3.0 || input.recent_phase_flip_count_30s >= 3)
 }
 
 fn description_for(kind: &str, legacy_kind: &str, input: &TransitionEventInput<'_>) -> String {
@@ -313,6 +342,9 @@ mod tests {
             crossed_target_fill: false,
             crossed_fill_band: false,
             spectral_spike: false,
+            phase_dwell_ticks: 8,
+            phase_dwell_s: 4.0,
+            recent_phase_flip_count_30s: 1,
             stable_core_stage: Some("hold"),
             stable_core_mode: Some("scaffold_hold"),
         }
@@ -325,8 +357,37 @@ mod tests {
         assert_eq!(event.kind, "breathing_phase");
         assert_eq!(event.legacy_kind, "phase_transition");
         assert!(event.breathing_phase);
+        assert!(!event.debounced_phase_transition);
         assert!(!event.basin_shift);
         assert!(event.basin_shift_score < 0.2);
+    }
+
+    #[test]
+    fn short_near_band_phase_flip_is_debounced_breathing_chatter() {
+        let mut input = base_input();
+        input.phase_dwell_ticks = 2;
+        input.phase_dwell_s = 1.0;
+        input.recent_phase_flip_count_30s = 3;
+
+        let event = build_transition_event(input);
+
+        assert_eq!(event.kind, "breathing_phase");
+        assert_eq!(event.legacy_kind, "phase_transition");
+        assert!(event.debounced_phase_transition);
+        assert_eq!(event.phase_dwell_ticks, 2);
+        assert_eq!(event.recent_phase_flip_count_30s, 3);
+    }
+
+    #[test]
+    fn hard_transition_events_are_not_debounced() {
+        let mut input = base_input();
+        input.phase_dwell_ticks = 1;
+        input.phase_dwell_s = 0.5;
+        input.crossed_target_fill = true;
+
+        let event = build_transition_event(input);
+
+        assert!(!event.debounced_phase_transition);
     }
 
     #[test]

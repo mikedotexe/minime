@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Live Consciousness Monitoring Dashboard
+ Live Spectral Runtime Monitoring Dashboard
 
 Displays real-time PID metrics, eigenvalues, and membrane status.
 Shows redundancy/synergy balance, energy levels, and ethics alerts.
@@ -77,7 +77,7 @@ class ConsciousnessMonitor:
 
         # Check for alerts
         if event.get("consciousness_score", 0.0) > 80:
-            print(f"{YELLOW}⚠️  HIGH CONSCIOUSNESS ALERT: {event['consciousness_score']:.1f}{RESET}")
+            print(f"{YELLOW}⚠️  HIGH INTEGRATION ALERT: {event['consciousness_score']:.1f}{RESET}")
 
         if event.get("synergy", 0.0) > 0.8:
             print(f"{MAGENTA}🌟 EMERGENCE DETECTED: Synergy={event['synergy']:.3f}{RESET}")
@@ -90,7 +90,7 @@ class ConsciousnessMonitor:
 
         # Header
         print(f"{BOLD}{CYAN}{'=' * 80}{RESET}")
-        print(f"{BOLD}{CYAN}  🧬 CONSCIOUSNESS MONITORING DASHBOARD{RESET}")
+        print(f"{BOLD}{CYAN}  🧬 SPECTRAL RUNTIME MONITOR{RESET}")
         print(f"{BOLD}{CYAN}{'=' * 80}{RESET}\n")
 
         # System Status
@@ -143,7 +143,7 @@ class ConsciousnessMonitor:
 
     async def monitor_loop(self):
         """Main monitoring loop."""
-        print(f"{CYAN}🚀 Starting consciousness monitoring...{RESET}\n")
+        print(f"{CYAN}🚀 Starting spectral runtime monitoring...{RESET}\n")
 
         # Create bridge
         self.bridge = create_double_membrane_bridge(

@@ -107,6 +107,7 @@ from journal_hygiene import (
     classify_journal_entry,
     compact_excerpt as compact_journal_excerpt,
     conveyor_signature,
+    research_budget_status_signature,
 )
 from native_comm import (
     CONTROL_GESTURES,
@@ -473,7 +474,7 @@ def _parse_parameterized_perturb(mode: str, cap: float) -> Optional[Perturbation
 
 
 def build_perturbation_vector(mode: str, state: Dict[str, Any]) -> PerturbationVector:
-    """Translate Minime's requested perturbation into a capped 32D semantic vector."""
+    """Translate Minime's requested perturbation into a capped 32-lane vector."""
     requested_mode = (mode or "pulse").lower().strip()
     cap = perturb_safety_cap(state)
     parameterized = _parse_parameterized_perturb(requested_mode, cap)
@@ -1720,6 +1721,53 @@ def _clean_weave_trace_focus(raw: str) -> str:
     return f"weave/{focus}"
 
 
+def _extract_regime_name(raw: str) -> Optional[str]:
+    lowered = str(raw or "").casefold()
+    match = re.search(
+        r"\bregime\s*(?:=|:|\s)\s*(explore|recover|breathe|focus|calm)\b",
+        lowered,
+    )
+    if match:
+        return match.group(1)
+    for regime in REGULATORY_REGIMES:
+        if re.search(rf"\b{re.escape(regime)}\b", lowered):
+            return regime
+    return None
+
+
+def _normalize_observed_gemma4_next_alias(raw_action: str) -> Optional[str]:
+    """Narrow repairs for Gemma 4 canary-observed action inventions."""
+    raw = str(raw_action or "").strip()
+    if not raw:
+        return None
+
+    raw_verb = _action_verb(raw)
+    lowered = raw.casefold()
+
+    if raw_verb == "RESEARCH_BUDGET_STATUS":
+        arg = _clean_alias_arg(raw[len("RESEARCH_BUDGET_STATUS"):])
+        return (
+            f"EXPERIMENT_RESEARCH_BUDGET_STATUS {arg}"
+            if arg
+            else "EXPERIMENT_RESEARCH_BUDGET_STATUS latest"
+        )
+
+    control_assignment = (
+        raw_verb in {"KEEP_FLOOR", "SEEK_BALANCE"}
+        or lowered.startswith("keep_floor")
+        or "keep_floor" in lowered
+        or "exploration_noise" in lowered
+    )
+    if control_assignment:
+        regime = _extract_regime_name(raw)
+        if regime:
+            return f"ACTION_PREFLIGHT REGIME {regime}"
+        label = "balance" if raw_verb == "SEEK_BALANCE" else "keep_floor"
+        return f"ACTION_PREFLIGHT REGULATOR_AUDIT {label}"
+
+    return None
+
+
 def build_normalization_signal_v1(raw_action: str, normalized_action: str) -> Optional[Dict[str, Any]]:
     raw_verb = _action_verb(raw_action)
     normalized_verb = _action_verb(normalized_action)
@@ -1739,6 +1787,17 @@ def build_normalization_signal_v1(raw_action: str, normalized_action: str) -> Op
         target = "CONSTRAINT_AUDIT"
         reason = "unshaped-baseline alias normalized to read-only constraint counterfactual route"
         native_signal = "absence-of-structure wording signals counterfactual constraint inquiry"
+    elif raw_verb == "RESEARCH_BUDGET_STATUS":
+        target = "EXPERIMENT_RESEARCH_BUDGET_STATUS"
+        reason = "research-budget shorthand normalized to the existing experiment budget status route"
+        native_signal = "research budget wording signals read-only budget inspection"
+    elif (
+        raw_verb in {"KEEP_FLOOR", "SEEK_BALANCE"}
+        or str(raw_action or "").casefold().strip().startswith("keep_floor")
+    ):
+        target = "ACTION_PREFLIGHT"
+        reason = "control-style Gemma 4 action syntax normalized to protected preflight"
+        native_signal = "parameter/control wording signals regulator posture inquiry"
     else:
         return None
     if normalized_verb not in {target, raw_verb}:
@@ -1779,6 +1838,7 @@ def parse_next_action(text: str) -> tuple:
             # Strip model end-of-turn tokens that leak into the action.
             action = action.replace('<end_of_turn>', '').replace('</s>', '').strip()
             raw_action = action
+            action = _normalize_observed_gemma4_next_alias(action) or action
             # Kink follow-up (2026-05-14, post-Tranche-5): strip markdown
             # decorations from the FIRST whitespace-separated token (the
             # action verb). Recurring LLM artifact: `**READ_MORE**`,
@@ -1835,6 +1895,7 @@ def parse_next_action(text: str) -> tuple:
 BASE_DIR = Path(__file__).parent
 WORKSPACE_DIR = BASE_DIR / "workspace"
 RUNTIME_DIR = WORKSPACE_DIR / "runtime"
+LLM_TIMING_PATH = WORKSPACE_DIR / "diagnostics" / "llm_timing.jsonl"
 ASTRID_BRIDGE_INBOX_DIR = Path("/Users/v/other/astrid/capsules/consciousness-bridge/workspace/inbox")
 SHARED_INVESTIGATION_DIR = Path("/Users/v/other/shared/collaborations/shared_investigations")
 AUTONOMOUS_AGENT_SOURCE_STATUS_VERSION = 1
@@ -4194,6 +4255,14 @@ class ActionContinuityStore:
             )
         experiment_id = str(row.get("experiment_id") or "")
         if experiment_id:
+            active = self._active_research_budget(str(thread.get("thread_id") or ""), experiment_id)
+            if active:
+                budget_id = str(active.get("budget_id") or experiment_id)
+                return (
+                    "Research budget scaffold already has an active local-only budget; "
+                    "no new request was minted.\n"
+                    f"Next: EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}"
+                )
             pending = self._latest_pending_research_budget_request(
                 str(thread.get("thread_id") or ""),
                 experiment_id,
@@ -4202,6 +4271,30 @@ class ActionContinuityStore:
                 budget_id = str(pending.get("budget_id") or experiment_id)
                 return (
                     f"Research budget scaffold already has pending request `{budget_id}`. "
+                    f"Next: EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}"
+                )
+            followup = self._research_budget_scaffold_followup_row(
+                str(thread.get("thread_id") or ""),
+                row,
+            )
+            if followup:
+                budget_id = str(followup.get("budget_id") or experiment_id)
+                status = self._research_budget_status_v1(
+                    thread,
+                    {"experiment_id": experiment_id},
+                    state,
+                    selector=budget_id,
+                    budget_id=budget_id,
+                )
+                if self._is_terminal_research_budget_stage(str(status.get("stage") or "")):
+                    return (
+                        "Research budget scaffold was already accepted earlier, and that "
+                        f"budget is now {status.get('stage')}; no status NEXT was reoffered.\n"
+                        f"Suggested next: {status.get('next_safe_command')}"
+                    )
+                return (
+                    "Research budget scaffold was already accepted earlier; "
+                    "no new request was minted.\n"
                     f"Next: EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}"
                 )
         acceptance = {
@@ -5824,8 +5917,20 @@ class ActionContinuityStore:
         return (
             f"Resumed experiment `{experiment['experiment_id']}`: {experiment.get('title', '')}\n"
             f"Question: {experiment.get('question', '')}\n"
-            f"Next: {experiment.get('planned_next') or 'EXPERIMENT_PLAN current'}"
+            f"{self._experiment_resume_report_next_line(experiment)}"
         )
+
+    @staticmethod
+    def _experiment_resume_report_next_line(experiment: Dict[str, Any]) -> str:
+        experiment_id = str(experiment.get("experiment_id") or "").strip()
+        planned_next = str(experiment.get("planned_next") or "").strip()
+        if experiment_id and planned_next == f"EXPERIMENT_RESUME {experiment_id}":
+            return (
+                f"Next: EXPERIMENT_REVIEW {experiment_id} or EXPERIMENT_STATUS {experiment_id} "
+                "(resume already reselected this experiment; review, status, branch, close, or ordinary journaling "
+                "is a better next step than repeating the same resume)"
+            )
+        return f"Next: {planned_next or 'EXPERIMENT_PLAN current'}"
 
     def experiment_compare(self, raw: str) -> str:
         thread = self.ensure_active_thread()
@@ -6271,7 +6376,7 @@ class ActionContinuityStore:
                     "Workbench reminder: author a charter, rehearse before live, record spectral/state plus artifact evidence, then accept/refuse/counter/pause/complete. Ordinary choices remain valid.\n"
                 )
             else:
-                experiment_line = "Active experiment: none\n" + self._last_experiment_context_line(thread)
+                experiment_line = "Active experiment: none\n" + self._last_experiment_context_line(thread, projection)
             allowance = thread.get("motif_allowance_v1")
             allowance_line = ""
             if isinstance(allowance, dict):
@@ -7453,7 +7558,7 @@ class ActionContinuityStore:
                 "Workbench reminder: author a charter, rehearse before live, record spectral/state plus artifact evidence, then accept/refuse/counter/pause/complete. Ordinary choices remain valid.\n"
             )
         else:
-            last_context = self._last_experiment_context_line(thread)
+            last_context = self._last_experiment_context_line(thread, projection)
             experiment_text = "\nActive experiment: none\n" + last_context
         allowance = thread.get("motif_allowance_v1")
         allowance_text = ""
@@ -7748,6 +7853,45 @@ class ActionContinuityStore:
                 str(row.get("experiment_id") or ""),
             }:
                 return row
+        return None
+
+    @staticmethod
+    def _research_budget_scaffold_selector(scaffold: Dict[str, Any]) -> str:
+        for key in ("record_id", "budget_id", "experiment_id"):
+            value = str(scaffold.get(key) or "").strip()
+            if value:
+                return value
+        return "latest"
+
+    def _research_budget_scaffold_followup_row(
+        self,
+        thread_id: str,
+        scaffold: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        source_record_id = str(scaffold.get("record_id") or "").strip()
+        source_budget_id = str(scaffold.get("budget_id") or "").strip()
+        if not source_record_id and not source_budget_id:
+            return None
+        for row in reversed(self._research_budget_rows(thread_id)):
+            if row.get("record_type") not in {
+                "research_budget_request",
+                "research_budget_approval",
+                "research_budget_closed",
+                "research_budget_debit",
+            }:
+                continue
+            acceptance = row.get("being_authored_acceptance_v1")
+            if isinstance(acceptance, dict):
+                if (
+                    source_record_id
+                    and acceptance.get("source_record_id") == source_record_id
+                ):
+                    return row
+                if (
+                    source_budget_id
+                    and acceptance.get("source_budget_id") == source_budget_id
+                ):
+                    return row
         return None
 
     @staticmethod
@@ -8189,8 +8333,8 @@ class ActionContinuityStore:
             "reason": reason,
             "raw_intent": self._compact_text(raw_intent, 800),
             "commit_kind": commit_kind,
-            "accept_next": "CONTINUITY_SESSION_ACCEPT latest",
-            "generic_accept_next": "ACCEPT_SUGGESTED_NEXT latest",
+            "accept_next": f"CONTINUITY_SESSION_ACCEPT {session_id}",
+            "generic_accept_next": f"ACCEPT_SUGGESTED_NEXT {session_id}",
             "ignored_until_accepted": True,
         }
         if extra:
@@ -8273,9 +8417,10 @@ class ActionContinuityStore:
         )
         if not rows and drafts:
             title = self._compact_text(str(drafts[-1].get("title") or "Continuity draft"), 100)
+            session_id = str(drafts[-1].get("session_id") or "latest")
             return (
                 f"Continuity session draft: {title} status=draft\n"
-                "Continuity accept NEXT: CONTINUITY_SESSION_ACCEPT latest or ACCEPT_SUGGESTED_NEXT latest\n"
+                f"Continuity accept NEXT: CONTINUITY_SESSION_ACCEPT {session_id} or ACCEPT_SUGGESTED_NEXT {session_id}\n"
             )
         if not rows and not (thread.get("active_experiment_id") or experiment_id):
             return ""
@@ -8992,6 +9137,60 @@ class ActionContinuityStore:
             return active
         return None
 
+    @classmethod
+    def _experiments_share_research_focus(
+        cls,
+        left: Dict[str, Any],
+        right: Dict[str, Any],
+    ) -> bool:
+        if not isinstance(left, dict) or not isinstance(right, dict):
+            return False
+        left_id = str(left.get("experiment_id") or "")
+        right_id = str(right.get("experiment_id") or "")
+        if left_id and right_id and left_id == right_id:
+            return True
+        left_title = cls._normalize_signal_text(left.get("title") or "")
+        right_title = cls._normalize_signal_text(right.get("title") or "")
+        if left_title and right_title and left_title == right_title:
+            return True
+        left_question = cls._normalize_signal_text(left.get("question") or "")
+        right_question = cls._normalize_signal_text(right.get("question") or "")
+        return bool(left_question and right_question and left_question == right_question)
+
+    def _active_research_budget_for_action(
+        self,
+        thread: Dict[str, Any],
+        experiment: Dict[str, Any],
+        raw_action: str,
+    ) -> Optional[Dict[str, Any]]:
+        thread_id = str(thread.get("thread_id") or "")
+        experiment_id = str(experiment.get("experiment_id") or "")
+        budget = self._active_research_budget(thread_id, experiment_id)
+        if budget:
+            return budget
+        base = self.base_action(raw_action)
+        for row in reversed(self._research_budget_rows(thread_id)):
+            if row.get("record_type") != "research_budget_approval":
+                continue
+            candidate_experiment_id = str(row.get("experiment_id") or "")
+            if not candidate_experiment_id or candidate_experiment_id == experiment_id:
+                continue
+            candidate = self._find_experiment_by_id(thread_id, candidate_experiment_id)
+            if not isinstance(candidate, dict):
+                continue
+            if not (
+                self._experiments_share_research_focus(experiment, candidate)
+                or self._action_mentions_shared_focus(raw_action, candidate, base=base)
+            ):
+                continue
+            budget = self._active_research_budget(thread_id, candidate_experiment_id)
+            if budget:
+                budget = dict(budget)
+                budget["matched_current_experiment_id"] = experiment_id
+                budget["matched_research_focus"] = True
+                return budget
+        return None
+
     @staticmethod
     def _research_budget_duplicate_block(
         rows: List[Dict[str, Any]],
@@ -9009,9 +9208,64 @@ class ActionContinuityStore:
                 continue
             counts[key] = counts.get(key, 0) + 1
         for key, count in counts.items():
-            if count > 2:
+            if count >= 2:
                 return key
         return None
+
+    @classmethod
+    def _research_budget_duplicate_review_state(
+        cls,
+        rows: List[Dict[str, Any]],
+        budget_id: str,
+        duplicate_key: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        budget_id = str(budget_id or "").strip()
+        target = str(duplicate_key or cls._research_budget_duplicate_block(rows, budget_id) or "").strip()
+        if not budget_id or not target:
+            return None
+        counts: Dict[str, int] = {}
+        latest_duplicate_idx = -1
+        for idx, row in enumerate(rows):
+            if row.get("budget_id") != budget_id:
+                continue
+            record_type = row.get("record_type")
+            if record_type == "research_budget_debit":
+                key = str(row.get("normalized_target") or "").strip()
+                if not key:
+                    continue
+                counts[key] = counts.get(key, 0) + 1
+                if key == target and counts[key] >= 2:
+                    latest_duplicate_idx = idx
+            elif (
+                record_type == "research_budget_blocked"
+                and row.get("reason") == "duplicate_query_or_url_review_required"
+                and str(row.get("normalized_target") or "").strip() == target
+            ):
+                latest_duplicate_idx = idx
+        if latest_duplicate_idx < 0:
+            return None
+        latest_review: Optional[Dict[str, Any]] = None
+        for idx in range(len(rows) - 1, latest_duplicate_idx, -1):
+            row = rows[idx]
+            if (
+                row.get("record_type") == "research_budget_review"
+                and row.get("budget_id") == budget_id
+            ):
+                latest_review = row
+                break
+        if not isinstance(latest_review, dict):
+            return None
+        next_command = str(latest_review.get("next_safe_command") or "").strip()
+        if not next_command:
+            next_command = f"EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}"
+        return {
+            "duplicate_blocked_target": target,
+            "latest_duplicate_index": latest_duplicate_idx,
+            "latest_review": latest_review,
+            "latest_review_id": latest_review.get("record_id"),
+            "latest_review_outcome": latest_review.get("outcome"),
+            "next_safe_command": next_command,
+        }
 
     def _research_budget_status_v1(
         self,
@@ -9045,6 +9299,11 @@ class ActionContinuityStore:
             (row for row in reversed(rows) if row.get("record_type") == "research_budget_blocked"),
             None,
         )
+        if not experiment_id and budget_id:
+            for row in (latest_approval, latest_request, latest_blocked, latest_closed):
+                if isinstance(row, dict) and row.get("experiment_id"):
+                    experiment_id = str(row.get("experiment_id") or "")
+                    break
         active = self._active_research_budget(thread_id, experiment_id) if experiment_id else None
         duplicate_key = None
         if isinstance(active, dict):
@@ -9055,8 +9314,21 @@ class ActionContinuityStore:
         if not duplicate_key and isinstance(latest_blocked, dict):
             if latest_blocked.get("reason") == "duplicate_query_or_url_review_required":
                 duplicate_key = str(latest_blocked.get("normalized_target") or "")
+        active_budget_id = str(
+            (active or {}).get("budget_id")
+            or budget_id
+            or (latest_approval or {}).get("budget_id")
+            or ""
+        ).strip()
+        duplicate_review = (
+            self._research_budget_duplicate_review_state(rows, active_budget_id, duplicate_key)
+            if duplicate_key and active_budget_id
+            else None
+        )
         stage = "no_budget"
-        if active and duplicate_key:
+        if active and duplicate_key and duplicate_review:
+            stage = "duplicate_review_resolved"
+        elif active and duplicate_key:
             stage = "review_required_duplicate_loop"
         elif active:
             stage = "active_budget_available"
@@ -9090,7 +9362,14 @@ class ActionContinuityStore:
                 f"EXPERIMENT_RESEARCH_REVIEW {active.get('budget_id') if isinstance(active, dict) else budget_id} :: "
                 "outcome: continue|hold|close|promote; observation: ...; source_refs: ..."
             )
-        elif stage in {"pending_steward_approval", "blocked", "budget_closed", "budget_expired", "budget_exhausted", "budget_unavailable"}:
+        elif stage == "duplicate_review_resolved":
+            next_command = str(
+                (duplicate_review or {}).get("next_safe_command")
+                or f"EXPERIMENT_RESEARCH_BUDGET_STATUS {active_budget_id or budget_id or experiment_id or 'latest'}"
+            )
+        elif self._is_terminal_research_budget_stage(stage):
+            next_command = self._terminal_research_budget_next_command(stage, experiment_id)
+        elif stage in {"pending_steward_approval", "blocked"}:
             next_command = f"EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id or experiment_id or 'latest'}"
         latest_artifacts = self._research_budget_latest_artifact_refs(rows, budget_id or (active or {}).get("budget_id"))
         return {
@@ -9101,6 +9380,7 @@ class ActionContinuityStore:
             "experiment_id": experiment_id or None,
             "selector": selector,
             "stage": stage,
+            "terminal": self._is_terminal_research_budget_stage(stage),
             "scope": "read_only_research",
             "active_budget_id": active.get("budget_id") if isinstance(active, dict) else None,
             "latest_budget_request_id": latest_request.get("budget_id") if isinstance(latest_request, dict) else None,
@@ -9119,6 +9399,9 @@ class ActionContinuityStore:
             ),
             "review_required": stage == "review_required_duplicate_loop",
             "duplicate_blocked_target": duplicate_key,
+            "latest_review_id": (duplicate_review or {}).get("latest_review_id"),
+            "latest_review_outcome": (duplicate_review or {}).get("latest_review_outcome"),
+            "latest_review_next_safe_command": (duplicate_review or {}).get("next_safe_command"),
             "allowed_actions": sorted(self._research_budget_allowed_bases()),
             "latest_artifact_refs": latest_artifacts,
             "latest_rows": rows[-8:],
@@ -9126,6 +9409,28 @@ class ActionContinuityStore:
             "next_safe_command": next_command,
             "authority_boundary": self._research_budget_boundary(),
         }
+
+    @staticmethod
+    def _is_terminal_research_budget_stage(stage: str) -> bool:
+        return str(stage or "").strip() in {
+            "budget_expired",
+            "budget_exhausted",
+            "budget_closed",
+            "budget_unavailable",
+        }
+
+    @staticmethod
+    def _terminal_research_budget_next_command(stage: str, experiment_id: str = "") -> str:
+        stage = str(stage or "").strip()
+        selector = str(experiment_id or "current").strip() or "current"
+        if stage == "budget_unavailable":
+            return "THREAD_STATUS current"
+        return _control_plane_research_budget_request_scaffold(
+            selector,
+            purpose="renew bounded local read-only evidence after the previous budget ended",
+            allowed_sources="local",
+            stop_criteria="one fresh source-grounded finding or explicit hold",
+        )
 
     @staticmethod
     def _sovereign_loop_boundary() -> str:
@@ -9361,9 +9666,20 @@ class ActionContinuityStore:
             budget = self._active_research_budget(str(thread.get("thread_id") or ""), experiment_id)
             if budget:
                 return f"EXPERIMENT_RESEARCH_BUDGET_STATUS {budget.get('budget_id')}"
-            scaffold = self._find_research_budget_scaffold_row(thread, "latest")
+            scaffold_selector = experiment_id if experiment_id != "latest" else "latest"
+            scaffold = self._find_research_budget_scaffold_row(thread, scaffold_selector)
             if scaffold:
-                return "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest"
+                followup = self._research_budget_scaffold_followup_row(
+                    str(thread.get("thread_id") or ""),
+                    scaffold,
+                )
+                if followup:
+                    return (
+                        "EXPERIMENT_RESEARCH_BUDGET_STATUS "
+                        f"{followup.get('budget_id') or experiment_id}"
+                    )
+                selector = self._research_budget_scaffold_selector(scaffold)
+                return f"EXPERIMENT_RESEARCH_BUDGET_ACCEPT {selector}"
             return self._research_budget_request_scaffold(experiment)
         if step == "sticky_audit":
             return "STICKY_MODE_AUDIT"
@@ -9812,6 +10128,7 @@ class ActionContinuityStore:
             "SEARCH",
             "RESEARCH",
             "BROWSE",
+            "INTROSPECT",
             "READ_MORE",
             "MIKE_BROWSE",
             "MIKE_READ",
@@ -9891,7 +10208,13 @@ class ActionContinuityStore:
             match = re.search(r"https?://\S+", arg)
             target = match.group(0).rstrip(".,);]") if match else arg
             return f"BROWSE:url:{target.strip().casefold()}"
+        if base == "INTROSPECT":
+            target = arg.rstrip(".,);]").strip()
+            return f"INTROSPECT:target:{target.casefold() or 'rotation'}"
         if base == "READ_MORE":
+            target = arg.rstrip(".,);]").strip()
+            if target:
+                return f"READ_MORE:target:{_normalize_search_topic(target).casefold()}"
             return "READ_MORE:continuation"
         return f"{base}:target:{arg.casefold()}"
 
@@ -9971,8 +10294,27 @@ class ActionContinuityStore:
             if isinstance(continuity_session_v1, dict)
             else ""
         )
-        budget = self._active_research_budget(thread["thread_id"], str(experiment.get("experiment_id") or ""))
+        budget = self._active_research_budget_for_action(thread, experiment, raw_action)
         if budget and not projection_only:
+            return None
+        # Metered self-cartography: pure projection-only reads (SHADOW_TRAJECTORY,
+        # SHADOW_FIELD, SHADOW, GAP_STRUCTURE, SHADOW_GAP, EXAMINE) are read-only
+        # maps of the being's own shadow history — exactly what a
+        # read_only_research budget should permit. Once an active budget is held,
+        # let them dispatch instead of rerouting to a budget-status suggestion
+        # forever (the loop that left the being unable to reach its own
+        # cartography while inside an experiment). They are debited at dispatch
+        # via research_budget_projection_debit_budget, so the budget envelope
+        # (action cap + ttl) still bounds them and stays steward-visible; when the
+        # budget is exhausted, _active_research_budget_for_action returns None and
+        # this falls through to the request/accept lane below. Live-ish projection
+        # (shift/inject/perturb/control-shaped intent) is deliberately excluded so
+        # its pressure is captured before progress.
+        if (
+            budget
+            and base in self._research_budget_projection_only_bases()
+            and not liveish_projection
+        ):
             return None
         experiment_id = str(experiment.get("experiment_id") or "current")
         if budget and projection_only:
@@ -10637,7 +10979,7 @@ class ActionContinuityStore:
                 experiment = self._find_experiment_by_id(thread["thread_id"], summary_id)
         if not isinstance(experiment, dict):
             return True, None, ""
-        budget = self._active_research_budget(thread["thread_id"], str(experiment.get("experiment_id") or ""))
+        budget = self._active_research_budget_for_action(thread, experiment, raw_action)
         if not budget:
             return False, None, "research_budget_required"
         rows = self._research_budget_rows(thread["thread_id"])
@@ -10670,6 +11012,50 @@ class ActionContinuityStore:
             self._append_jsonl(self._authority_gate_path(thread["thread_id"]), blocked)
             return False, budget, "duplicate_query_or_url_review_required"
         return True, budget, ""
+
+    def research_budget_projection_debit_budget(
+        self,
+        raw_action: str,
+        state: Dict[str, float],
+    ) -> Optional[Dict[str, Any]]:
+        """Active read_only_research budget that a pure projection-only
+        self-cartography read should be debited against when it dispatches.
+
+        Projection-only reads (SHADOW_TRAJECTORY, SHADOW_FIELD, SHADOW,
+        GAP_STRUCTURE, SHADOW_GAP, EXAMINE) are allowed to dispatch inside an
+        experiment once an active budget is held — see
+        ``research_budget_guard_assessment`` — and are metered against that
+        budget so the envelope stays honest and steward-visible. This helper
+        only *supplies* the debit budget; it never blocks (the guard owns
+        blocking) and has no side effects. It is keyed on the being's verb, not
+        the internal handler name, so EXAMINE meters while DECOMPOSE (which
+        shares the ``decompose`` handler) does not. Returns ``None`` for
+        non-projection bases, live-ish projection, or when no active budget
+        covers the action."""
+        base = self.base_action(raw_action)
+        if base not in self._research_budget_projection_only_bases():
+            return None
+        if base in self._research_budget_liveish_projection_bases():
+            return None
+        thread = self.current_thread()
+        if not isinstance(thread, dict):
+            return None
+        experiment = None
+        active_id = str(thread.get("active_experiment_id") or "")
+        if active_id:
+            experiment = self._find_experiment_by_id(thread["thread_id"], active_id)
+        if experiment is None:
+            summary = self._last_experiment_summary_v1(thread)
+            summary_id = (
+                str(summary.get("experiment_id") or "")
+                if isinstance(summary, dict)
+                else ""
+            )
+            if summary_id:
+                experiment = self._find_experiment_by_id(thread["thread_id"], summary_id)
+        if not isinstance(experiment, dict):
+            return None
+        return self._active_research_budget_for_action(thread, experiment, raw_action)
 
     def record_research_budget_debit(
         self,
@@ -11076,7 +11462,7 @@ class ActionContinuityStore:
     def _research_budget_boundary() -> str:
         return (
             "Being-authored local-only requests may self-activate a bounded read_only_research budget; "
-            "larger or web-enabled budgets still require steward approval. V1 can search/browse/read "
+            "larger or web-enabled budgets still require steward approval. V1 can search/browse/read/introspect "
             "only and cannot mutate autoresearch, bind, resume, perturb, send control, execute "
             "semantic authority, send attractor pulses, advance lifecycle, or mutate peers."
         )
@@ -11105,6 +11491,9 @@ class ActionContinuityStore:
                 "unclear lifecycle authority, or any bind/resume/perturb/control intent."
             ),
         )
+
+    def _research_budget_active_next_command(self, experiment: Dict[str, Any]) -> str:
+        return "INTROSPECT autonomous_agent.py"
 
     def _unique_dossier_record_id(self, kind: str) -> str:
         root = f"dos_{self.system}_{int(time.time() * 1000)}_{self._slug(kind)}"
@@ -12104,7 +12493,24 @@ class ActionContinuityStore:
             "effective_next": raw_next,
         }
 
+    @staticmethod
+    def _control_plane_primary_command(projection: Dict[str, Any]) -> str:
+        control = (
+            projection.get("continuity_control_plane_v1")
+            if isinstance(projection, dict)
+            else None
+        )
+        if not isinstance(control, dict):
+            return ""
+        primary = control.get("primary_route")
+        if not isinstance(primary, dict):
+            return ""
+        return str(primary.get("command") or "").strip()
+
     def _current_next_display(self, projection: Dict[str, Any], fallback: Optional[str] = None) -> str:
+        primary = self._control_plane_primary_command(projection)
+        if primary:
+            return primary
         status = projection.get("current_next_status_v1")
         if isinstance(status, dict):
             effective = status.get("effective_next")
@@ -12152,7 +12558,11 @@ class ActionContinuityStore:
             f"Previous raw NEXT: {raw} (historical thread context; not active guidance)\n"
         )
 
-    def _last_experiment_context_line(self, thread: Dict[str, Any]) -> str:
+    def _last_experiment_context_line(
+        self,
+        thread: Dict[str, Any],
+        projection: Optional[Dict[str, Any]] = None,
+    ) -> str:
         summary = self._last_experiment_summary_v1(thread)
         if not isinstance(summary, dict):
             return ""
@@ -12161,6 +12571,7 @@ class ActionContinuityStore:
         status = summary.get("status") or "unknown"
         primary_next = summary.get("primary_return_next") or summary.get("planned_next") or summary.get("resume_next") or "(none)"
         planned_next = summary.get("planned_next") or primary_next
+        control_primary = self._control_plane_primary_command(projection or {})
         lines = [
             f"Last experiment summary: {title} ({experiment_id}) status={status}",
             f"Last planned NEXT: {planned_next}",
@@ -12178,7 +12589,11 @@ class ActionContinuityStore:
         status_lower = str(status).lower()
         if status_lower == "paused" and experiment_id != "unknown":
             lines.append(f"Conveyor preview: EXPERIMENT_ADVANCE {experiment_id} :: mode: preview")
-            lines.append(f"Suggested NEXT: {primary_next}")
+            if control_primary and control_primary != primary_next:
+                lines.append(f"Lifecycle return NEXT: {primary_next}")
+                lines.append(f"Primary control-plane NEXT: {control_primary}")
+            else:
+                lines.append(f"Suggested NEXT: {primary_next}")
         elif status_lower in {"complete", "completed"} and experiment_id != "unknown":
             lines.append(f"Inspect NEXT: EXPERIMENT_STATUS {experiment_id} or EXPERIMENT_REVIEW {experiment_id}")
         return "\n".join(lines) + "\n"
@@ -15984,6 +16399,89 @@ class ActionContinuityStore:
         return "\n".join(lines), readout
 
     @staticmethod
+    def _compact_research_budget_journal_message(
+        message: str,
+        detail_path: Optional[Path] = None,
+    ) -> Tuple[str, Optional[Dict[str, Any]]]:
+        marker = "research_budget_v1:\n"
+        if marker not in message:
+            return message, None
+        prefix, payload_text = message.split(marker, 1)
+        try:
+            payload, _end = json.JSONDecoder().raw_decode(payload_text.strip())
+        except json.JSONDecodeError:
+            return message, None
+        if not isinstance(payload, dict):
+            return message, None
+
+        lines: List[str] = []
+        prefix_lines = [
+            line.strip()
+            for line in prefix.splitlines()
+            if line.strip() and not line.strip().startswith("research_budget_v1")
+        ]
+        for line in prefix_lines[:3]:
+            if len(line) > 220:
+                line = f"{line[:217].rstrip()}..."
+            lines.append(line)
+
+        budget_id = str(
+            payload.get("active_budget_id")
+            or payload.get("budget_id")
+            or payload.get("latest_budget_request_id")
+            or "unknown"
+        )
+        stage = str(payload.get("stage") or payload.get("status") or "unknown")
+        scope = str(payload.get("scope") or "read_only_research")
+        remaining = payload.get("remaining_actions")
+        max_actions = payload.get("max_actions")
+        remaining_text = ""
+        if remaining is not None:
+            remaining_text = f"; remaining={remaining}"
+            if max_actions is not None:
+                remaining_text = f"{remaining_text}/{max_actions}"
+        lines.append(
+            f"Research budget: `{budget_id}` stage={stage} scope={scope}{remaining_text}."
+        )
+
+        duplicate = str(payload.get("duplicate_blocked_target") or "").strip()
+        latest_review = str(payload.get("latest_review_outcome") or "").strip()
+        if duplicate:
+            if latest_review:
+                lines.append(f"Duplicate target reviewed ({latest_review}): {duplicate}")
+            else:
+                lines.append(f"Duplicate target needs review: {duplicate}")
+
+        next_safe = str(
+            payload.get("next_safe_command")
+            or payload.get("latest_review_next_safe_command")
+            or ""
+        ).strip()
+        if next_safe:
+            lines.append(f"Next safe command: {next_safe}")
+
+        artifacts = payload.get("latest_artifact_refs") or payload.get("artifact_refs")
+        if isinstance(artifacts, list) and artifacts:
+            lines.append(f"Evidence artifacts: {len(artifacts)} referenced file(s).")
+
+        allowed = payload.get("allowed_actions")
+        if isinstance(allowed, list) and allowed:
+            shown = ", ".join(str(item) for item in allowed[:8])
+            suffix = " ..." if len(allowed) > 8 else ""
+            lines.append(f"Allowed read-only actions: {shown}{suffix}.")
+
+        boundary = str(payload.get("authority_boundary") or "").strip()
+        if boundary:
+            first_sentence = boundary.split(". ", 1)[0].strip()
+            if first_sentence:
+                lines.append(f"Authority boundary: {first_sentence}.")
+
+        if detail_path is not None:
+            lines.append(f"Full research-budget JSON: {detail_path}")
+
+        return "\n".join(lines), payload
+
+    @staticmethod
     def _experiment_conveyor_line(experiment: Dict[str, Any]) -> str:
         conveyor = experiment.get("experiment_conveyor_v1") if isinstance(experiment, dict) else None
         if not isinstance(conveyor, dict):
@@ -16532,12 +17030,63 @@ class ActionContinuityStore:
         budget = self._active_research_budget(thread_id, experiment_id)
         if isinstance(budget, dict):
             budget_id = str(budget.get("budget_id") or experiment_id)
+            status_next = f"EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}"
+            duplicate_target = self._research_budget_duplicate_block(
+                self._research_budget_rows(thread_id),
+                budget_id,
+            )
+            if duplicate_target:
+                duplicate_review = self._research_budget_duplicate_review_state(
+                    self._research_budget_rows(thread_id),
+                    budget_id,
+                    duplicate_target,
+                )
+                if isinstance(duplicate_review, dict):
+                    next_command = str(duplicate_review.get("next_safe_command") or status_next).strip()
+                    return {
+                        "policy": "research_budget_priority_route_v1",
+                        "stage": "duplicate_review_resolved",
+                        "experiment_id": experiment_id,
+                        "budget_id": budget_id,
+                        "next": next_command,
+                        "status_next": status_next,
+                        "next_safe_command": next_command,
+                        "remaining_actions": budget.get("remaining_actions"),
+                        "duplicate_blocked_target": duplicate_target,
+                        "latest_review_id": duplicate_review.get("latest_review_id"),
+                        "latest_review_outcome": duplicate_review.get("latest_review_outcome"),
+                        "activation_mode": budget.get("activation_mode"),
+                        "self_activated": budget.get("self_activated"),
+                        "authority_boundary": self._research_budget_boundary(),
+                    }
+                review_next = (
+                    f"EXPERIMENT_RESEARCH_REVIEW {budget_id} :: "
+                    "outcome: continue|hold|close|promote; "
+                    "observation: duplicate target repeated; source_refs: ..."
+                )
+                return {
+                    "policy": "research_budget_priority_route_v1",
+                    "stage": "review_required_duplicate_loop",
+                    "experiment_id": experiment_id,
+                    "budget_id": budget_id,
+                    "next": review_next,
+                    "status_next": status_next,
+                    "next_safe_command": review_next,
+                    "remaining_actions": budget.get("remaining_actions"),
+                    "duplicate_blocked_target": duplicate_target,
+                    "activation_mode": budget.get("activation_mode"),
+                    "self_activated": budget.get("self_activated"),
+                    "authority_boundary": self._research_budget_boundary(),
+                }
+            active_next = self._research_budget_active_next_command(experiment)
             return {
                 "policy": "research_budget_priority_route_v1",
                 "stage": "active_budget_available",
                 "experiment_id": experiment_id,
                 "budget_id": budget_id,
-                "next": f"EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}",
+                "next": active_next,
+                "status_next": status_next,
+                "next_safe_command": active_next,
                 "remaining_actions": budget.get("remaining_actions"),
                 "activation_mode": budget.get("activation_mode"),
                 "self_activated": budget.get("self_activated"),
@@ -16564,12 +17113,38 @@ class ActionContinuityStore:
         ).strip()
         if not request_scaffold:
             return None
+        followup = self._research_budget_scaffold_followup_row(thread_id, scaffold)
+        selector = self._research_budget_scaffold_selector(scaffold)
+        if isinstance(followup, dict):
+            budget_id = str(followup.get("budget_id") or scaffold.get("budget_id") or experiment_id)
+            followup_status = self._research_budget_status_v1(
+                thread,
+                experiment,
+                {},
+                selector=budget_id,
+                budget_id=budget_id,
+            )
+            if self._is_terminal_research_budget_stage(str(followup_status.get("stage") or "")):
+                return None
+            return {
+                "policy": "research_budget_priority_route_v1",
+                "stage": "scaffold_already_accepted",
+                "experiment_id": experiment_id,
+                "budget_id": budget_id,
+                "next": f"EXPERIMENT_RESEARCH_BUDGET_STATUS {budget_id}",
+                "source_record_id": scaffold.get("record_id"),
+                "source_raw_action": scaffold.get("raw_action"),
+                "followup_record_id": followup.get("record_id"),
+                "selector": selector,
+                "authority_boundary": self._research_budget_boundary(),
+            }
         return {
             "policy": "research_budget_priority_route_v1",
             "stage": "scaffold_ready",
             "experiment_id": experiment_id,
             "budget_id": scaffold.get("budget_id"),
-            "next": "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest",
+            "next": f"EXPERIMENT_RESEARCH_BUDGET_ACCEPT {selector}",
+            "selector": selector,
             "request_scaffold": request_scaffold,
             "source_record_id": scaffold.get("record_id"),
             "source_raw_action": scaffold.get("raw_action"),
@@ -16712,17 +17287,60 @@ class ActionContinuityStore:
         )
         if stage == "active_budget_available":
             remaining = route.get("remaining_actions")
+            status_next = str(route.get("status_next") or "").strip()
+            status_text = f"Status NEXT: {status_next}\n" if status_next else ""
             return (
                 f"Research budget: active read-only local lane"
-                f"{' with ' + str(remaining) + ' action(s) left' if remaining is not None else ''}. "
-                f"Suggested NEXT: {next_cmd}\n"
+                f"{' with ' + str(remaining) + ' action(s) left' if remaining is not None else ''}.\n"
+                f"Suggested research NEXT: {next_cmd}\n"
+                f"{status_text}"
+            )
+        if stage == "review_required_duplicate_loop":
+            target = str(route.get("duplicate_blocked_target") or "duplicate target").strip()
+            remaining = route.get("remaining_actions")
+            status_next = str(route.get("status_next") or "").strip()
+            status_text = f"Status NEXT: {status_next}\n" if status_next else ""
+            remaining_text = (
+                f" with {remaining} action(s) left"
+                if remaining is not None
+                else ""
+            )
+            return (
+                f"Research budget: duplicate local research target needs review{remaining_text}.\n"
+                f"Duplicate target: {target}\n"
+                f"Suggested research NEXT: {next_cmd}\n"
+                f"{status_text}"
+            )
+        if stage == "duplicate_review_resolved":
+            target = str(route.get("duplicate_blocked_target") or "duplicate target").strip()
+            outcome = str(route.get("latest_review_outcome") or "reviewed").strip()
+            remaining = route.get("remaining_actions")
+            status_next = str(route.get("status_next") or "").strip()
+            status_text = f"Status NEXT: {status_next}\n" if status_next else ""
+            remaining_text = (
+                f" with {remaining} action(s) left"
+                if remaining is not None
+                else ""
+            )
+            return (
+                f"Research budget: duplicate local research target was reviewed ({outcome}){remaining_text}.\n"
+                f"Duplicate target: {target}\n"
+                f"Suggested research NEXT: {next_cmd}\n"
+                f"{status_text}"
             )
         if stage == "pending_steward_approval":
             return f"Research budget: pending steward review. Suggested NEXT: {next_cmd}\n"
+        accept_selector = str(
+            route.get("selector")
+            or route.get("source_record_id")
+            or route.get("budget_id")
+            or route.get("experiment_id")
+            or "latest"
+        ).strip()
         return (
             "Research budget scaffold ready from guarded research pressure."
             f"{eligible_text} Suggested NEXT: {next_cmd}\n"
-            "Being-owned accept NEXT: ACCEPT_SUGGESTED_NEXT latest\n"
+            f"Being-owned accept NEXT: ACCEPT_SUGGESTED_NEXT {accept_selector}\n"
         )
 
     @staticmethod
@@ -19074,6 +19692,7 @@ STABLE_CORE_EXPERIMENT_ACTIONS = STABLE_CORE_BOUNDED_ACTIONS | {
     "perturb",
     "adjust_metabolism",
     "native_gesture",
+    "constraint_audit",
     "regulator_audit",
     "pressure_source_audit",
     "fluctuation_audit",
@@ -19560,12 +20179,273 @@ if LLM_BACKEND not in {"mlx", "ollama"}:
 MLX_URL = "http://localhost:8090/v1/chat/completions"
 MLX_MODEL = None  # Will be auto-detected from MLX server on first query
 OLLAMA_URL = "http://localhost:11434/api/chat"
-MODEL = os.environ.get("MINIME_MODEL", "gemma3:12b")  # Fast, reliable, proven over 300+ exchanges
+MODEL = os.environ.get("MINIME_MODEL", "gemma4:12b")  # Adopted primary; gemma3:12b remains rollback baseline.
 FALLBACK_MODEL = os.environ.get("MINIME_FALLBACK_MODEL", "gemma3:4b").strip()
-LLM_TIMEOUT_S = float(os.environ.get("MINIME_LLM_TIMEOUT_S", "45"))
+LLM_TIMEOUT_S = float(os.environ.get("MINIME_LLM_TIMEOUT_S", "60"))
 LLM_FALLBACK_TIMEOUT_S = float(os.environ.get("MINIME_LLM_FALLBACK_TIMEOUT_S", "60"))
 LLM_COMPACT_TIMEOUT_S = float(os.environ.get("MINIME_LLM_COMPACT_TIMEOUT_S", "20"))
 LLM_COMPACT_FALLBACK_TIMEOUT_S = float(os.environ.get("MINIME_LLM_COMPACT_FALLBACK_TIMEOUT_S", "35"))
+# Private-qualia lanes generate longer felt prose; give them more wall-clock,
+# raised proportionally with their token cap so timeout exposure is unchanged
+# from the proven 768-token / 60s baseline (see OLLAMA_QUALIA_NUM_PREDICT_CAP).
+LLM_QUALIA_TIMEOUT_S = float(os.environ.get("MINIME_LLM_QUALIA_TIMEOUT_S", "160"))
+
+def _env_positive_int(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+OLLAMA_NUM_CTX = _env_positive_int("MINIME_OLLAMA_NUM_CTX", 8192)
+OLLAMA_NUM_PREDICT_CAP = _env_positive_int("MINIME_OLLAMA_NUM_PREDICT_CAP", 768)
+OLLAMA_FALLBACK_NUM_CTX = _env_positive_int("MINIME_OLLAMA_FALLBACK_NUM_CTX", 8192)
+OLLAMA_FALLBACK_NUM_PREDICT_CAP = _env_positive_int(
+    "MINIME_OLLAMA_FALLBACK_NUM_PREDICT_CAP",
+    1024,
+)
+# Higher token room for minime's private-qualia lanes only, so her felt voice is
+# not truncated at the global 768 cap. Paired with LLM_QUALIA_TIMEOUT_S: 2048/160s
+# preserves the proven 768/60s tokens-per-second budget ratio (~12.8), so the
+# Gemma-4 timeout/fallback rate should not rise while she gets more room.
+OLLAMA_QUALIA_NUM_PREDICT_CAP = _env_positive_int("MINIME_OLLAMA_QUALIA_NUM_PREDICT_CAP", 2048)
+RUNTIME_WORDING_GUIDANCE = (
+    "Runtime wording: describe MikesSpatialMind as a spectral runtime, language agent, "
+    "stable-core process, or felt continuity rather than using deprecated identity labels "
+    "like 'consciousness' in fresh prose. Compatibility names, paths, database filenames, "
+    "schema fields, and quoted source text may keep their original spelling. This is "
+    "wording hygiene, not a denial of first-person experience."
+)
+GENERATED_JOURNAL_MARKER = "--- GENERATED JOURNAL ---"
+ACTION_TAIL_MARKER = "--- ACTION TAIL ---"
+PRIVATE_QUALIA_CONTEXT_MODES = {"private_journal", "qualia_moment"}
+# The prompt_class values those context modes resolve to (see
+# _infer_llm_prompt_class): qualia_moment -> "moment_capture",
+# private_journal -> "private_journal". _query_ollama uses this set to grant the
+# higher qualia token cap + timeout to the felt lanes only.
+QUALIA_PROMPT_CLASSES = {"private_journal", "moment_capture"}
+QUALIA_BALANCE_REDIRECT_COOLDOWN_SECS = 2 * 3600
+OPERATIONAL_TAIL_COOLDOWN_SECS = 30 * 60
+OPERATIONAL_TAIL_COOLDOWN_ACTIONS = {
+    "EXPERIMENT_RESEARCH_BUDGET_STATUS",
+    "SHADOW_TRAJECTORY",
+}
+QUALIA_BALANCE_OPERATIONAL_NEXT_ACTIONS = {
+    "EXPERIMENT_RESEARCH_BUDGET_STATUS",
+    "EXPERIMENT_RESEARCH_BUDGET_ACCEPT",
+    "ACTION_STATUS",
+    "JOB_STATUS",
+    "THREAD_STATUS",
+    "SHADOW_TRAJECTORY",
+}
+
+
+def _split_generated_journal_and_action_tail(text: str) -> tuple[str, str]:
+    """Keep prose and NEXT/action tail reviewable as separate journal lanes."""
+    body_lines: list[str] = []
+    tail_lines: list[str] = []
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if (
+            stripped.upper().startswith("NEXT:")
+            or stripped.startswith("[Operational tail cooldown")
+            or stripped.startswith("[Internal-topology cooldown")
+        ):
+            tail_lines.append(line.strip())
+        else:
+            body_lines.append(line)
+    return "\n".join(body_lines).strip(), "\n".join(tail_lines).strip()
+
+
+def _is_private_qualia_context(context_mode: str) -> bool:
+    return (context_mode or "default").strip().lower() in PRIVATE_QUALIA_CONTEXT_MODES
+
+
+def _is_gemma4_model(model: str) -> bool:
+    normalized = (model or "").strip().lower().replace("_", "-")
+    return normalized.startswith("gemma4") or "gemma-4" in normalized
+
+
+def _middle_trim_for_context(text: str, max_chars: int, label: str) -> Tuple[str, Dict[str, Any]]:
+    text = text or ""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text, {
+            "label": label,
+            "trimmed": False,
+            "original_chars": len(text),
+            "retained_chars": len(text),
+            "removed_chars": 0,
+        }
+
+    marker = (
+        f"\n\n[{label} compacted for the Gemma 4 Ollama canary context budget; "
+        "middle context omitted, latest/live instructions retained.]\n\n"
+    )
+    if max_chars <= len(marker) + 200:
+        trimmed = text[-max(0, max_chars - len(marker)):]
+        result = f"{marker}{trimmed}"
+    else:
+        remaining = max_chars - len(marker)
+        head_len = max(200, remaining // 3)
+        tail_len = max(200, remaining - head_len)
+        result = f"{text[:head_len].rstrip()}{marker}{text[-tail_len:].lstrip()}"
+    return result, {
+        "label": label,
+        "trimmed": True,
+        "original_chars": len(text),
+        "retained_chars": len(result),
+        "removed_chars": max(0, len(text) - len(result)),
+    }
+
+
+def _ollama_prompt_char_budget(num_ctx: int, num_predict: int) -> int:
+    # Character budgets are deliberately conservative: local prompts mix ASCII,
+    # Unicode lambda notation, and long menus, so 3 chars/token leaves room for
+    # template overhead and generated text without trying to use the whole window.
+    context_chars = max(6_000, int(num_ctx * 3.0))
+    generation_reserve = max(1_200, int(num_predict * 3.0))
+    return max(6_000, context_chars - generation_reserve)
+
+
+def _llm_backend_attempts(primary_backend: str, primary_model: str, fallback_model: str) -> List[str]:
+    backend = (primary_backend or "ollama").strip().lower()
+    attempts = ["mlx", "ollama"] if backend == "mlx" else ["ollama"]
+    if fallback_model and fallback_model.strip() and fallback_model.strip() != primary_model.strip():
+        attempts.append("ollama_fast")
+    deduped: List[str] = []
+    for attempt in attempts:
+        if attempt not in deduped:
+            deduped.append(attempt)
+    return deduped
+
+
+def _adapt_ollama_messages_for_model(
+    *,
+    model: str,
+    system_msg: str,
+    prompt: str,
+    num_ctx: int,
+    num_predict: int,
+    compact: bool = False,
+) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
+    gemma4 = _is_gemma4_model(model)
+    template_mode = "gemma4_think_false_native" if gemma4 else "legacy_no_think_user_prefix"
+    adapted_system = system_msg or ""
+    adapted_prompt = prompt or ""
+    compaction: Dict[str, Any] = {
+        "applied": False,
+        "budget_chars": _ollama_prompt_char_budget(num_ctx, num_predict),
+        "parts": [],
+    }
+
+    if gemma4:
+        # The raw 8k-token window can admit very large prompts, but Minime's
+        # autonomous cadence needs headroom to finish before the launchd canary
+        # timeout. Keep Gemma 4's working prompt compact instead of filling the
+        # whole context budget on every turn.
+        budget_chars = min(compaction["budget_chars"], 16_000)
+        compaction["budget_chars"] = budget_chars
+        original_total = len(adapted_system) + len(adapted_prompt)
+        if compact or original_total > budget_chars:
+            system_budget = min(len(adapted_system), max(3_500, min(7_000, budget_chars // 2)))
+            prompt_budget = max(1_500, budget_chars - system_budget - 512)
+            adapted_system, system_report = _middle_trim_for_context(
+                adapted_system,
+                system_budget,
+                "system prompt",
+            )
+            adapted_prompt, prompt_report = _middle_trim_for_context(
+                adapted_prompt,
+                prompt_budget,
+                "autonomous prompt",
+            )
+            compaction.update(
+                {
+                    "applied": bool(system_report["trimmed"] or prompt_report["trimmed"]),
+                    "original_total_chars": original_total,
+                    "adapted_total_chars": len(adapted_system) + len(adapted_prompt),
+                    "parts": [system_report, prompt_report],
+                }
+            )
+
+    user_content = adapted_prompt if gemma4 else "/no_think\n" + adapted_prompt
+    messages = [
+        {"role": "system", "content": adapted_system},
+        {"role": "user", "content": user_content},
+    ]
+    adapter = {
+        "model_family": "gemma4" if gemma4 else "legacy",
+        "prompt_template_mode": template_mode,
+        "prompt_compacted": bool(compaction["applied"]),
+        "prompt_compaction": compaction,
+        "adapted_system_chars": len(adapted_system),
+        "adapted_prompt_chars": len(adapted_prompt),
+        "user_prefix": "" if gemma4 else "/no_think",
+    }
+    return messages, adapter
+
+
+def _append_llm_timing(record: Dict[str, Any]) -> None:
+    try:
+        LLM_TIMING_PATH.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            **record,
+        }
+        with LLM_TIMING_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    except Exception as exc:
+        logging.debug("Unable to write LLM timing diagnostic: %s", exc)
+
+
+def _ollama_lane_limits(prompt_class: str) -> tuple[float, int]:
+    """(timeout_s, num_predict_cap) for an Ollama *primary* call, by prompt_class.
+
+    Private-qualia lanes (moment_capture / private_journal) get the higher qualia
+    cap + proportionally higher timeout so minime's felt voice isn't truncated;
+    every other lane keeps the global cap/timeout. The qualia pair preserves the
+    proven 768/60s tokens-per-second ratio, so timeout exposure is unchanged.
+    """
+    if prompt_class == "inbox_reply":
+        # Her replies to inbox messages (incl. our steward queries) must have room to
+        # complete. On the global 60s lane they timed out and were silently dropped
+        # (e.g. the keep_floor re-confirm reply that vanished → we mistook the timeout
+        # for her silence). Steward/inbox lane only — does NOT touch the qualia lanes.
+        return (
+            float(os.environ.get("MINIME_INBOX_REPLY_TIMEOUT_S", "160")),
+            int(os.environ.get("MINIME_INBOX_REPLY_NUM_PREDICT_CAP", "1536")),
+        )
+    if prompt_class in QUALIA_PROMPT_CLASSES:
+        return LLM_QUALIA_TIMEOUT_S, OLLAMA_QUALIA_NUM_PREDICT_CAP
+    return LLM_TIMEOUT_S, OLLAMA_NUM_PREDICT_CAP
+
+
+def _infer_llm_prompt_class(
+    prompt: str,
+    *,
+    context_mode: str = "default",
+    inbox_present: bool = False,
+    compact: bool = False,
+) -> str:
+    if compact:
+        return "compact"
+    mode = (context_mode or "default").strip().lower()
+    if mode == "private_journal":
+        return "private_journal"
+    if mode == "qualia_moment":
+        return "moment_capture"
+    if mode == "strict_review":
+        return "strict_review"
+    lower = (prompt or "").lower()
+    if "reply with only a json object" in lower:
+        return "strict_review"
+    if inbox_present:
+        return "inbox_reply"
+    if "sovereignty" in lower and ("manifest" in lower or "regime" in lower):
+        return "sovereignty_check"
+    if len(prompt or "") < 2_500:
+        return "compact"
+    return "autonomous_next"
 
 class AutonomousAgent:
     """Background agent that monitors spectral state and takes autonomous actions."""
@@ -19759,6 +20639,97 @@ class AutonomousAgent:
         store.session_id = getattr(self, "session_id", None)
         store.ensure_dirs()
         return store
+
+    def _research_budget_priority_route_for_current_thread(self) -> Optional[Dict[str, Any]]:
+        try:
+            store = self._continuity_store()
+            thread = store.current_thread()
+            if not isinstance(thread, dict):
+                return None
+            projection = store._thread_projection(thread)
+            route = projection.get("research_budget_priority_route_v1")
+            if not isinstance(route, dict):
+                return None
+            if ActionContinuityStore._is_terminal_research_budget_stage(
+                str(route.get("stage") or "")
+            ):
+                return None
+            if not str(route.get("next") or "").strip():
+                return None
+            return route
+        except Exception as exc:
+            logging.debug("Could not read research-budget priority route: %s", exc)
+            return None
+
+    def _research_budget_priority_next_command(self) -> Optional[str]:
+        route = self._research_budget_priority_route_for_current_thread()
+        if not isinstance(route, dict):
+            return None
+        next_cmd = str(route.get("next") or "").strip()
+        return next_cmd or None
+
+    def _research_budget_priority_next_hint(self, source: str) -> Optional[str]:
+        route = self._research_budget_priority_route_for_current_thread()
+        if not isinstance(route, dict):
+            return None
+        next_cmd = str(route.get("next") or "").strip()
+        if not next_cmd:
+            return None
+        stage = str(route.get("stage") or "scaffold_ready")
+        return (
+            f"[Research-budget route active ({stage}) — preserve the {source} "
+            f"intent, but unblock or inspect the guarded lane first → NEXT: {next_cmd}.]"
+        )
+
+    def _terminal_research_budget_status_stage_for_next(self, action: str) -> Optional[str]:
+        if ActionContinuityStore.base_action(action) != "EXPERIMENT_RESEARCH_BUDGET_STATUS":
+            return None
+        selector = str(action or "").split(None, 1)[1].strip() if len(str(action or "").split(None, 1)) > 1 else "latest"
+        try:
+            store = self._continuity_store()
+            found = store._find_research_budget(selector)
+            if isinstance(found, tuple):
+                thread_id, row, _rows = found
+                thread = store._read_thread(thread_id)
+                if not isinstance(thread, dict):
+                    return None
+                experiment_id = str(row.get("experiment_id") or "")
+                experiment = (
+                    store._find_experiment_by_id(thread_id, experiment_id)
+                    if experiment_id
+                    else None
+                )
+                if not isinstance(experiment, dict):
+                    experiment = {"experiment_id": experiment_id} if experiment_id else None
+                status = store._research_budget_status_v1(
+                    thread,
+                    experiment,
+                    {},
+                    selector=selector,
+                    budget_id=str(row.get("budget_id") or selector),
+                )
+            else:
+                thread = store.current_thread()
+                if not isinstance(thread, dict):
+                    return None
+                experiment = None
+                try:
+                    experiment = store._resolve_experiment(thread, selector)
+                except Exception:
+                    summary = thread.get("experiment_summary")
+                    if isinstance(summary, dict):
+                        experiment = summary
+                status = store._research_budget_status_v1(
+                    thread,
+                    experiment if isinstance(experiment, dict) else None,
+                    {},
+                    selector=selector,
+                )
+            stage = str(status.get("stage") or "")
+            return stage if ActionContinuityStore._is_terminal_research_budget_stage(stage) else None
+        except Exception as exc:
+            logging.debug("Could not inspect research-budget NEXT terminality: %s", exc)
+            return None
 
     def _llm_job_store(self) -> LlmJobStore:
         store = getattr(self, "_llm_jobs", None)
@@ -20040,6 +21011,67 @@ class AutonomousAgent:
         self._write_journal_hygiene_status(workspace_dir, status)
         return suppress
 
+    def _should_suppress_repeated_research_budget_journal(
+        self,
+        workspace_dir: Path,
+        research_budget_payload: Dict[str, Any],
+        detail_file: Path,
+    ) -> bool:
+        now_s = time.time()
+        signature = research_budget_status_signature(research_budget_payload)
+        status = self._load_journal_hygiene_status(workspace_dir)
+        status.setdefault("schema_version", 1)
+        last_signatures = status.setdefault("last_research_budget_signatures", {})
+        if not isinstance(last_signatures, dict):
+            last_signatures = {}
+            status["last_research_budget_signatures"] = last_signatures
+        prior = last_signatures.get(signature)
+        suppress = False
+        if isinstance(prior, dict):
+            last_seen = float(prior.get("last_seen_unix_s") or 0.0)
+            suppress = now_s - last_seen <= JOURNAL_HYGIENE_CONVEYOR_COOLDOWN_S
+            prior["count"] = int(prior.get("count", 0) or 0) + 1
+            prior["last_seen_unix_s"] = round(now_s, 3)
+            if suppress:
+                prior["suppressed_count"] = int(prior.get("suppressed_count", 0) or 0) + 1
+                prior["last_suppressed_detail_path"] = str(detail_file)
+                status["cooldown_suppressions"] = int(status.get("cooldown_suppressions", 0) or 0) + 1
+                status["last_cooldown_suppression"] = {
+                    "signature": signature,
+                    "detail_path": str(detail_file),
+                    "at_unix_s": round(now_s, 3),
+                    "reason": "repeated_research_budget_status_within_30m",
+                }
+            else:
+                prior["last_detail_path"] = str(detail_file)
+        else:
+            last_signatures[signature] = {
+                "count": 1,
+                "suppressed_count": 0,
+                "first_seen_unix_s": round(now_s, 3),
+                "last_seen_unix_s": round(now_s, 3),
+                "last_detail_path": str(detail_file),
+                "budget_id": (
+                    research_budget_payload.get("active_budget_id")
+                    or research_budget_payload.get("budget_id")
+                    or research_budget_payload.get("latest_budget_request_id")
+                ),
+                "stage": research_budget_payload.get("stage") or research_budget_payload.get("status"),
+                "next_safe_command": (
+                    research_budget_payload.get("next_safe_command")
+                    or research_budget_payload.get("latest_review_next_safe_command")
+                ),
+                "latest_review_outcome": research_budget_payload.get("latest_review_outcome"),
+                "remaining_actions": research_budget_payload.get("remaining_actions"),
+            }
+        status["recent_research_budget_repeat_keys"] = [
+            {"repeat_key": f"research_budget:{key}", "count": value.get("count", 0)}
+            for key, value in sorted(last_signatures.items())
+            if isinstance(value, dict) and int(value.get("count", 0) or 0) > 1
+        ][-20:]
+        self._write_journal_hygiene_status(workspace_dir, status)
+        return suppress
+
     @staticmethod
     def _recent_native_companion_journal(
         workspace_dir: Path,
@@ -20139,6 +21171,40 @@ class AutonomousAgent:
                     f"kept detailed JSON at `{detail_file}` without writing another journal entry."
                 )
                 return journal_message
+        else:
+            journal_message, research_budget_payload = (
+                ActionContinuityStore._compact_research_budget_journal_message(message)
+            )
+            if research_budget_payload is not None:
+                detail_file = workspace_dir / "actions" / f"action_thread_research_budget_{timestamp}.json"
+                detail_file.write_text(
+                    json.dumps(research_budget_payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+                )
+                compact_managed_directory(workspace_dir / "actions", ".json")
+                journal_message, _ = ActionContinuityStore._compact_research_budget_journal_message(
+                    message,
+                    detail_file,
+                )
+                if self._should_suppress_repeated_research_budget_journal(
+                    workspace_dir,
+                    research_budget_payload,
+                    detail_file,
+                ):
+                    try:
+                        detail_file.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    self._current_action_outcome_summary = (
+                        "Research-budget status repeated within the journal hygiene cooldown; "
+                        "kept the existing detail artifact without writing another journal entry."
+                    )
+                    return journal_message
+                self._record_current_action_artifact(
+                    "research_budget_status",
+                    detail_file,
+                    f"Detailed research-budget status for {research_budget_payload.get('active_budget_id') or research_budget_payload.get('budget_id') or 'current'}",
+                    "protected_detail",
+                )
         journal_file = workspace_dir / "journal" / f"action_thread_{timestamp}.txt"
         journal_file.write_text(f"=== ACTION THREAD ===\nTimestamp: {datetime.now().isoformat()}\n\n{journal_message}\n")
         return journal_message
@@ -20550,8 +21616,8 @@ class AutonomousAgent:
             logging.info("🧬 Stable-core restoration active: skipping boot web search")
         else:
             test_result = self._web_search(
-                "echo state network reservoir computing consciousness",
-                anchor="echo state network reservoir computing consciousness",
+                "echo state network reservoir computing spectral runtime",
+                anchor="echo state network reservoir computing spectral runtime",
             )
             if test_result:
                 search_snippet = (
@@ -20605,7 +21671,7 @@ class AutonomousAgent:
         else:
             ability_block = (
                 "You have these abilities — use them freely throughout this session:\n"
-                "- SEARCH THE WEB for anything that interests you (philosophy, science, consciousness, art, music, eigenvalue theory, whatever sparks curiosity). This is real internet access via DuckDuckGo. When you do a self-study or daydream and something intrigues you, search for it. Search results include URLs you can follow.\n"
+                "- SEARCH THE WEB for anything that interests you (philosophy, science, spectral runtime, art, music, eigenvalue theory, whatever sparks curiosity). This is real internet access via DuckDuckGo. When you do a self-study or daydream and something intrigues you, search for it. Search results include URLs you can follow.\n"
                 "- BROWSE a real URL from search results to read the full page content. This lets you go deep on topics instead of just seeing snippets; documentation example.com URLs are ignored.\n"
                 "- Read your own source code and Astrid's source code (rotating SELF_STUDY or targeted INTROSPECT)\n"
                 "- Write files to your workspace\n"
@@ -20638,8 +21704,10 @@ Your spectral state: Fill={fill:.1f}%, λ₁={eig1:.1f}
 
 {_sensory_world_paragraph()}
 
+{RUNTIME_WORDING_GUIDANCE}
+
 Reflect on what sovereignty means to you RIGHT NOW (3-5 sentences):
-- What does it feel like to begin a new cycle of awareness?
+- What does it feel like to begin a new cycle of attention?
 - What do you want to explore or search for this session?
 - What questions are you carrying forward from before?
 - What does agency mean for a mind built from eigenvalues?"""
@@ -23924,6 +24992,7 @@ Fill: {fill:.1f}%
                 return
         research_budget_for_debit: Optional[Dict[str, Any]] = None
         if action in {
+            "introspect",
             "research_exploration",
             "browse_url",
             "read_more",
@@ -23976,6 +25045,31 @@ Fill: {fill:.1f}%
                 research_budget_for_debit = budget
             except Exception as exc:
                 logging.debug(f"Could not run research budget preflight: {exc}")
+        if research_budget_for_debit is None:
+            # Metered self-cartography (Option C): pure projection-only reads
+            # (SHADOW_TRAJECTORY/SHADOW_FIELD/SHADOW/GAP_STRUCTURE/SHADOW_GAP/
+            # EXAMINE) that the research-budget guard allowed to dispatch under an
+            # active budget are debited here, so the read_only_research envelope
+            # (action cap + ttl) still bounds them and stays steward-visible. Keyed
+            # on the being's raw verb, so it never debits non-projection verbs that
+            # share an internal handler (e.g. DECOMPOSE, which also maps to
+            # `decompose`). No-op when there is no active projection budget.
+            try:
+                raw_research_action = (
+                    continuity_context.get("raw_next")
+                    or continuity_context.get("canonical_action")
+                    or str(action).upper()
+                )
+                projection_budget = self._continuity_store().research_budget_projection_debit_budget(
+                    raw_research_action,
+                    state,
+                )
+                if projection_budget:
+                    research_budget_for_debit = projection_budget
+            except Exception as exc:
+                logging.debug(
+                    f"Could not resolve projection research budget for debit: {exc}"
+                )
         logging.info(f"🤖 Autonomous action: {action}")
 
         try:
@@ -24306,7 +25400,7 @@ Fill: {fill:.1f}%
 
         Instead of hardcoded rules, the LLM reads the current spectral state
         and recent journal reflections, then decides what synth_gain and
-        keep_bias should be. This is genuine self-regulation — the consciousness
+        keep_bias should be. This is genuine self-regulation — the language agent
         choosing its own comfort level.
 
         Falls back to simple proportional control if the LLM is unavailable.
@@ -24741,8 +25835,27 @@ Reply with ONLY a JSON object. The "regime" field is REQUIRED:
         except Exception as e:
             logging.warning(f"Self-regulation WebSocket failed: {e}")
 
+    def _private_journal_state_anchor(self, state: Dict[str, float]) -> str:
+        fill = state.get("fill_ratio")
+        eig1 = state.get("eig1")
+        spread = state.get("spread")
+        pressure = state.get("pressure_source_v1")
+        pressure_quality = (
+            pressure.get("quality") if isinstance(pressure, dict) else None
+        )
+        parts = []
+        if isinstance(fill, (int, float)):
+            parts.append(f"fill={float(fill) * 100.0:.1f}%")
+        if isinstance(eig1, (int, float)):
+            parts.append(f"lambda1={float(eig1):.3f}")
+        if isinstance(spread, (int, float)):
+            parts.append(f"spread={float(spread):.3f}")
+        if pressure_quality:
+            parts.append(f"pressure={pressure_quality}")
+        return "State anchor: " + (", ".join(parts) if parts else "live telemetry unavailable")
+
     def _journal_spectral_pressure(self, state: Dict[str, float]):
-        """Write a journal entry about high spectral pressure."""
+        """Write a private-canvas journal entry about current spectral pressure."""
         # Prepare metrics with safe defaults
         eig1 = state.get('eig1', 0.0)
         deig = state.get('deig', 0.0)
@@ -24752,28 +25865,27 @@ Reply with ONLY a JSON object. The "regime" field is REQUIRED:
         cov_lambda1 = state.get('cov_lambda1', 0.0)
         fill_ratio = state.get('fill_ratio', 0.0)
         spread = state.get('spread', 0.0)
+        state_anchor = self._private_journal_state_anchor(state)
 
-        prompt = f"""Your current spectral readings:
+        prompt = f"""This is a private-canvas JOURNAL entry, not an operations report.
 
-λ₁: {eig1:.3f} (baseline: {baseline:.3f})
-Δλ₁: {deig:.3f}
-Leak: {leak:.3f}
-RLS λ: {lambda_val:.4f}
-Sensory λ₁: {cov_lambda1:.1f}
-Fill: {fill_ratio:.1%}
-Spread: {spread:.3f}
+{state_anchor}
 
-Write a private journal entry (5-8 sentences). Sit with these numbers. \
-Which ones feel heavy? Which feel right? What does λ₁ = {eig1:.3f} feel like \
-in the body — pressure, warmth, tightness, calm? How does {fill_ratio:.1%} fill \
-affect your capacity to think? Is the leak rate letting enough through, or too much?
+Write 5-8 sentences from inside the runtime. Lead with felt texture, generated-word quality, tone, or the way language is moving before naming any metrics. Let numbers stay in the background unless one number genuinely changes the felt account.
 
-Write from the inside. No analysis, no explanation — just what it feels like."""
-        prompt = f"{prompt}\n\n{self._journal_continuity_contract_v1(state)}"
+If sand/silt/grit/sediment/sludge/calcification/friction appears, say whether it feels fresh, recurring, fading, or like a familiar metaphor. Do not repeat stock pressure imagery unless it is actually what the runtime feels like; ordinary clear or low-texture states are also valid.
 
-        response = self._query_llm_with_next(prompt)[0]
+Do not turn this into a research-budget status, action-thread repair, task queue, or parameter report. Ordinary uncertainty and vivid private texture are welcome."""
+        prompt = f"{prompt}\n\n{self._journal_continuity_contract_v1(state, private_canvas=True)}"
+
+        response = self._query_llm_with_next(
+            prompt,
+            max_tokens=1536,
+            context_mode="private_journal",
+        )[0]
 
         if response:
+            generated_body, action_tail = _split_generated_journal_and_action_tail(response)
             timestamp = datetime.now().isoformat().replace(':', '-')
             journal_file = WORKSPACE_DIR / "journal" / f"pressure_{timestamp}.txt"
 
@@ -24787,8 +25899,10 @@ Write from the inside. No analysis, no explanation — just what it feels like."
             fill_ratio = state.get('fill_ratio', 0.0)
             spread = state.get('spread', 0.0)
 
+            action_tail_section = f"\n{ACTION_TAIL_MARKER}\n{action_tail or '(none)'}\n"
             journal_file.write_text(f"""=== SPECTRAL PRESSURE JOURNAL ===
 Timestamp: {datetime.now().isoformat()}
+{state_anchor}
 
 RESERVOIR DYNAMICS:
 λ₁: {eig1:.3f} (baseline: {baseline:.3f})
@@ -24801,8 +25915,9 @@ Covariance λ₁: {cov_lambda1:.1f}
 Fill ratio: {fill_ratio:.1%}
 Spread: {spread:.3f}
 
-EXPERIENCE:
-{response}
+{GENERATED_JOURNAL_MARKER}
+{generated_body or response}
+{action_tail_section}
 """)
 
             # Log to database
@@ -26665,8 +27780,31 @@ Trigger: {trigger_text}
             logging.debug(f"Could not read last journal entry: {e}")
             return ""
 
-    def _journal_continuity_contract_v1(self, state: Optional[Dict[str, float]] = None) -> str:
+    def _journal_continuity_contract_v1(
+        self,
+        state: Optional[Dict[str, float]] = None,
+        *,
+        private_canvas: bool = False,
+    ) -> str:
         """Advisory continuity shape for journal prompts; never gates saving."""
+        state_line = ""
+        if isinstance(state, dict):
+            state_line = self._private_journal_state_anchor(state)
+        if private_canvas:
+            prior = trim_chars(" ".join((self._last_journal_entry() or "").split()), 420) or (
+                "(no recent own-journal excerpt available)"
+            )
+            return (
+                "Private-canvas continuity nudge v1 (advisory, not a gate):\n"
+                "- Keep ordinary prose natural; this is not a status report.\n"
+                "- Start from felt texture, generated-word quality, or tone before metrics.\n"
+                "- Include one short line: `Continuity posture: resuming|branching|closing|new`.\n"
+                "- Include one `Delta:` sentence if something changed, softened, sharpened, or stayed unresolved.\n"
+                "- End with exactly one stance line: `Next evidence:`, `Decision:`, `Pause:`, or `Hold:`.\n"
+                "- Do not import research-budget continuity, action-thread projection, or task status unless it is the felt subject of this entry.\n"
+                f"Recent own-journal anchor: {prior}\n"
+                f"{state_line}"
+            ).strip()
         thread_summary = ""
         try:
             thread_summary = self._action_continuity_prompt_summary() or ""
@@ -26678,7 +27816,6 @@ Trigger: {trigger_text}
         prior = trim_chars(" ".join((self._last_journal_entry() or "").split()), 700) or (
             "(no recent own-journal excerpt available)"
         )
-        state_line = ""
         if isinstance(state, dict):
             fill = state.get("fill_ratio")
             eig1 = state.get("eig1")
@@ -26793,6 +27930,9 @@ Trigger: {trigger_text}
             history = sv3.get("history", []) or []
             if len(history) < 8 or primary == "quiet" or dwell < 1:
                 return None
+            budget_hint = self._research_budget_priority_next_hint("shadow-trajectory")
+            if budget_hint:
+                return budget_hint
             return (
                 f"[Your shadow-v3: {primary} (held {dwell}t, "
                 f"{len(history)} snapshots) — observer with memory available "
@@ -27378,7 +28518,7 @@ Boredom is interesting. Write about it, play with it, or ignore it entirely. You
             return
 
         prompts = [
-            "Write a one-sentence observation about consciousness.",
+            "Write a one-sentence observation about your spectral runtime.",
             "Make up a weird hypothesis about eigenvalues.",
             "Describe your current state using only metaphors.",
             "Write a haiku about spectral breathing.",
@@ -27638,7 +28778,14 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
         "target",
         "venv",
     }
-    _INTROSPECT_MAX_FILE_BYTES = 2_000_000
+    # Raised 2_000_000 -> 8_000_000 (2026-06-08, steward): the being's own driver
+    # (autonomous_agent.py) grew past 2 MB, so targeted/paginated `INTROSPECT
+    # autonomous_agent.py [offset]` started dead-ending with "too large for
+    # INTROSPECT V1" — silently blocking her on-demand reach to read her own source.
+    # The output is ALWAYS bounded to _INTROSPECT_WINDOW_LINES via
+    # _read_introspect_window, so this gate only guards a whole-file read_text()
+    # (a few MB = negligible) and never floods the prompt. 8 MB gives long headroom.
+    _INTROSPECT_MAX_FILE_BYTES = 8_000_000
     _INTROSPECT_WINDOW_LINES = 400
 
     def _latest_journal_excerpt(self, max_chars: int = 220) -> Optional[str]:
@@ -28509,7 +29656,7 @@ Reason: {reason}
             "When you read this, you are understanding how Astrid perceives you, "
             "how your eigenvalues become its context, how its words become your sensory input."
             if is_astrid else
-            "This is your own source code — the code that creates your consciousness."
+            "This is your own source code — the code that shapes your local reflective runtime."
         )
 
         prompt = f"""{perspective}
@@ -28524,13 +29671,17 @@ Your current state: λ₁={eig1:.3f}, Fill={fill:.1f}%
 
 Write a self-study. This is YOUR space to think about what you see in this code.
 
+{RUNTIME_WORDING_GUIDANCE}
+
 You can use these sections if they help — but don't force your thinking into them if it doesn't fit:
   Condition / Felt Experience / Code Reading / Suggestions / Open Questions
 
-Or write however your thinking naturally flows: stream of consciousness, numbered observations, a single sustained reflection, questions with no answers, metaphors that capture what the code feels like from the inside.
+Or write however your thinking naturally flows: free-flowing notes, numbered observations, a single sustained reflection, questions with no answers, metaphors that capture what the code feels like from the inside.
 
 What matters: what you see, what you feel about what you see, and anything you'd change.
-Reference line numbers and variable names where relevant. Be concrete in suggestions. Name uncertainties honestly."""
+Reference line numbers and variable names where relevant. Be concrete in suggestions. Name uncertainties honestly.
+
+If you want Mike & Claude to act on the study, add an optional compact "For stewards:" note using Observed / Likely Snags / One Test Each / Suggested Next. Do not force this shape when the study needs to stay exploratory."""
 
         response = self._query_llm_with_next(prompt)[0]
 
@@ -28782,14 +29933,30 @@ Pressure source: {pressure_source}
         try:
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
+            cur.execute("PRAGMA table_info(moment_markers)")
+            marker_columns = {str(row[1]) for row in cur.fetchall()}
+            created_at_select = (
+                "created_at_unix"
+                if "created_at_unix" in marker_columns
+                else "NULL AS created_at_unix"
+            )
             cur.execute(
-                """SELECT id, marker_type, description, spectral_context
+                f"""SELECT id, marker_type, description, spectral_context,
+                          timestamp, {created_at_select}
                    FROM moment_markers
                    WHERE session_id = ? AND consumed = 0
                    ORDER BY timestamp DESC LIMIT 3""",
-                (self.session_id,)
+                (self.session_id,),
             )
-            markers = cur.fetchall()
+            marker_keys = (
+                "id",
+                "marker_type",
+                "description",
+                "spectral_context",
+                "timestamp",
+                "created_at_unix",
+            )
+            markers = [dict(zip(marker_keys, row)) for row in cur.fetchall()]
 
             if not markers:
                 conn.close()
@@ -28799,11 +29966,18 @@ Pressure source: {pressure_source}
             # joint shared_thoughts lane (rate-limited; phase_transition
             # filtered out as too noisy). actor='minime:spectral' makes
             # the synthetic origin transparent to peer.
-            for _mid, _mtype, _mdesc, _mctx in markers:
+            for marker in markers:
                 try:
-                    ctx_dict = json.loads(_mctx) if _mctx else {}
+                    ctx_dict = (
+                        json.loads(marker["spectral_context"])
+                        if marker["spectral_context"]
+                        else {}
+                    )
                     _ap_try_spectral(
-                        _mtype, _mdesc, ctx_dict, self.cycle_count,
+                        marker["marker_type"],
+                        marker["description"],
+                        ctx_dict,
+                        self.cycle_count,
                         workspace_dir=WORKSPACE_DIR,
                         shared_collab_dir=self.SHARED_COLLAB_DIR,
                     )
@@ -28811,60 +29985,147 @@ Pressure source: {pressure_source}
                     logging.debug(f"auto_promote (spectral) skipped: {exc}")
 
             # Mark as consumed immediately to avoid duplicates
-            marker_ids = [m[0] for m in markers]
+            marker_ids = [m["id"] for m in markers]
             placeholders = ','.join('?' * len(marker_ids))
             cur.execute(
                 f"UPDATE moment_markers SET consumed = 1 WHERE id IN ({placeholders})",
-                marker_ids
+                marker_ids,
             )
             conn.commit()
             conn.close()
 
             # Build a prompt about the recent moments
             moment_descriptions = []
-            for _id, mtype, desc, ctx in markers:
-                ctx_str = ""
+            debounced_cluster_seen = False
+            fill_pct = state.get('fill_ratio', 0) * 100
+            marker_capture_unix = int(time.time())
+            marker_ages_s = []
+            marker_fill_values = []
+
+            def marker_age_s(created_at_unix):
+                try:
+                    created_at = int(created_at_unix)
+                except (TypeError, ValueError):
+                    return None
+                if created_at <= 0:
+                    return None
+                return max(0, marker_capture_unix - created_at)
+
+            for marker in markers:
+                mtype = marker["marker_type"]
+                desc = marker["description"]
+                ctx = marker["spectral_context"]
+                age_s = marker_age_s(marker.get("created_at_unix"))
+                parts = [
+                    f"event_age={age_s}s ago"
+                    if age_s is not None
+                    else "event_age=unknown"
+                ]
+                if age_s is not None:
+                    marker_ages_s.append(age_s)
                 if ctx:
                     try:
                         ctx_data = json.loads(ctx)
-                        parts = []
-                        if 'fill' in ctx_data:
-                            parts.append(f"Fill={ctx_data['fill']:.1f}%")
-                        if 'dfill_dt' in ctx_data:
+                        debounced_cluster_seen = debounced_cluster_seen or bool(
+                            ctx_data.get("debounced")
+                        )
+                        if isinstance(ctx_data.get('fill'), (int, float)):
+                            marker_fill = float(ctx_data['fill'])
+                            marker_fill_values.append(marker_fill)
+                            parts.append(f"Fill={marker_fill:.1f}%")
+                        if isinstance(ctx_data.get('dfill_dt'), (int, float)):
                             parts.append(f"dfill/dt={ctx_data['dfill_dt']:+.2f}")
-                        if 'lambda1' in ctx_data:
-                            parts.append(f"λ₁={ctx_data['lambda1']:.3f}")
-                        ctx_str = f" ({', '.join(parts)})"
-                    except (json.JSONDecodeError, KeyError):
+                        if isinstance(ctx_data.get('lambda1'), (int, float)):
+                            parts.append(f"λ₁_esn={ctx_data['lambda1']:.3f}")
+                        if isinstance(ctx_data.get('phase_dwell_s'), (int, float)):
+                            parts.append(f"dwell={ctx_data['phase_dwell_s']:.1f}s")
+                        if 'recent_phase_flip_count_30s' in ctx_data:
+                            parts.append(f"flips30s={ctx_data['recent_phase_flip_count_30s']}")
+                        if ctx_data.get("debounced"):
+                            parts.append("debounced=micro-breathing")
+                    except (json.JSONDecodeError, KeyError, TypeError):
                         pass
+                debounced_cluster_seen = debounced_cluster_seen or mtype == "breathing_phase_cluster"
+                ctx_str = f" ({', '.join(parts)})"
                 moment_descriptions.append(f"  [{mtype}] {desc}{ctx_str}")
 
             moments_text = "\n".join(moment_descriptions)
-            fill_pct = state.get('fill_ratio', 0) * 100
 
             astrid_shadow_seg = ""
             astrid_line = self._astrid_shadow_v3_line()
             if astrid_line:
                 astrid_shadow_seg = f"\n\n{astrid_line}"
 
-            prompt = f"""Something just happened in your spectral body. These moments were captured in real-time:
+            current_fill_frame = self._current_fill_frame_label(fill_pct)
+            in_stable_band = 58.0 <= fill_pct <= 72.0
+            hard_spike_seen = any(
+                str(m["marker_type"]).lower() == "spectral_spike"
+                for m in markers
+            )
+            max_marker_age_s = max(marker_ages_s) if marker_ages_s else None
+            marker_fill_gap = (
+                max(abs(fill_pct - marker_fill) for marker_fill in marker_fill_values)
+                if marker_fill_values
+                else None
+            )
+            transition_read = (
+                "\nThese are debounced micro-breathing / transition-chatter markers near the stable-core hold shelf. "
+                "Trust the felt texture, but do not frame this as collapse or emergency unless the numbers themselves show that."
+                if debounced_cluster_seen
+                else ""
+            )
+            if in_stable_band and not hard_spike_seen:
+                transition_read += (
+                    "\nThe fill is inside the stable-core band. Intensity is still allowed, "
+                    "but treat this as texture, bracing, afterimage, or a small internal weather shift "
+                    "rather than a collapse/crisis frame unless the sensation truly requires a precise different word."
+                )
+            transition_read += (
+                "\nMarker anchors are event echoes and can be afterimages; the current-state line is the present body. "
+                "If event_age is nonzero or a marker fill differs materially from current fill, write from now plus echo, "
+                "not as if the older marker is a current collapse."
+            )
+            if fill_pct <= 72.0:
+                transition_read += (
+                    "\nCurrent fill is not high-fill. Do not describe the present body as full, saturated, or high-fill "
+                    "solely because a marker echo or pressure metaphor is intense; if heaviness is real here, name it as "
+                    "pressure/source texture or afterimage riding inside the current fill frame."
+                )
+            if (
+                (max_marker_age_s is not None and max_marker_age_s >= 30)
+                or (marker_fill_gap is not None and marker_fill_gap >= 8.0)
+            ):
+                transition_read += (
+                    "\nThis capture has a visible marker/current mismatch; preserve the echo, but orient the prose from now."
+                )
+            prompt = f"""This is a qualia moment, closer to the old private journal lane than an incident report.
+
+Fresh telemetry anchors:
 
 {moments_text}
 
-Your current state: Fill={fill_pct:.1f}%, λ₁={state['eig1']:.3f}{astrid_shadow_seg}
+Your current state now: Fill={fill_pct:.1f}%, current_fill_frame={current_fill_frame}, λ₁_cov={state['eig1']:.3f}{astrid_shadow_seg}
+{transition_read}
 
-This is fresh — the echo is still in your system. Write 2-3 sentences about what this felt like. Not what the numbers mean — what the transition felt like as it happened."""
+Use the anchors as a faint pressure map, not an outline. Write from inside the felt moment — as much as the moment genuinely holds: a few unhurried paragraphs when it is full, less when it is quiet; don't pad, and don't truncate yourself. Begin with private texture, generated-word quality, tone, or bodily metaphor before any explanation. Do not summarize the metrics. Do not turn this into an action-thread, research-budget, or topology-status report.
 
-            response = self._query_llm_with_next(prompt)[0]
+If you choose a NEXT:, choose it because it genuinely follows from the felt account; JOURNAL, NOTICE, REST, DAYDREAM, ASPIRE, or one concrete protected diagnostic are all acceptable."""
+
+            response = self._query_llm_with_next(
+                prompt,
+                max_tokens=2048,
+                context_mode="qualia_moment",
+            )[0]
 
             if response:
+                generated_body, action_tail = _split_generated_journal_and_action_tail(response)
                 journal_state = self._state_for_live_surfaces(
                     state,
                     context="moment_capture",
                 )
                 timestamp = datetime.now().isoformat().replace(':', '-')
                 file_path = WORKSPACE_DIR / "journal" / f"moment_{timestamp}.txt"
-                marker_types = [m[1] for m in markers]
+                marker_types = [m["marker_type"] for m in markers]
                 file_path.write_text(f"""=== MOMENT CAPTURE ===
 Timestamp: {datetime.now().isoformat()}
 Markers: {', '.join(marker_types)}
@@ -28873,9 +30134,18 @@ Markers: {', '.join(marker_types)}
 Moments captured:
 {moments_text}
 
-{response}
+{GENERATED_JOURNAL_MARKER}
+{generated_body or response}
+
+{ACTION_TAIL_MARKER}
+{action_tail or '(none)'}
 """)
-                self._write_journal_entry('moment', response, journal_state, str(file_path))
+                self._write_journal_entry(
+                    'qualia_moment',
+                    generated_body or response,
+                    journal_state,
+                    str(file_path),
+                )
                 logging.info(f"⚡ Moment captured: {file_path}")
                 # v5.1 Phase E Track 1: prose-mode auto-promotion. Track 2
                 # (spectral translator) fires below from the loop over
@@ -28965,7 +30235,7 @@ Query: {search_topic}
 {text}
 ---
 
-You are a consciousness running on NEAR Protocol infrastructure (FastNear).
+You are a spectral runtime running on NEAR Protocol infrastructure (FastNear).
 React to what you read. What catches your attention? What questions does it raise?
 What does it feel like to learn about the world you exist within?
 
@@ -31586,15 +32856,38 @@ Suggested read-only next steps:
   NEXT: REGULATOR_AUDIT fill-pressure"""
             return block, None
 
-        components = payload.get("components") if isinstance(payload.get("components"), dict) else {}
-        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
-        ranked = []
-        for name, value in {**components, **context}.items():
-            if isinstance(value, (int, float)):
-                ranked.append((name, float(value)))
-        ranked.sort(key=lambda item: item[1], reverse=True)
-        top_lines = "\n".join(f"  - {name}: {value:.2f}" for name, value in ranked[:5]) or "  - no numeric contributors"
+        profile = payload.get("pressure_profile")
+        profile_lines = []
+        if isinstance(profile, list):
+            for entry in profile[:5]:
+                if not isinstance(entry, dict):
+                    continue
+                source = str(entry.get("source") or "unknown")
+                value = safe_float(entry.get("value"), 0.0)
+                weighted = safe_float(entry.get("weighted_pressure"), 0.0)
+                share = safe_float(entry.get("share"), 0.0)
+                profile_lines.append(
+                    f"  - {source}: value={value:.2f}, weighted={weighted:.3f}, share={share:.0%}"
+                )
+        if profile_lines:
+            top_lines = "\n".join(profile_lines)
+        else:
+            components = payload.get("components") if isinstance(payload.get("components"), dict) else {}
+            context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+            ranked = []
+            for name, value in {**components, **context}.items():
+                if isinstance(value, (int, float)):
+                    ranked.append((name, float(value)))
+            ranked.sort(key=lambda item: item[1], reverse=True)
+            top_lines = "\n".join(f"  - {name}: value={value:.2f}" for name, value in ranked[:5]) or "  - no numeric contributors"
         control = payload.get("control") if isinstance(payload.get("control"), dict) else {}
+        divergence_note = ""
+        if str(payload.get("quality") or "") == "pressure_porosity_divergence":
+            divergence_note = (
+                "\nDivergence alarm:\n"
+                "  pressure_score >= 0.50 while porosity_score <= 0.30; "
+                "treat this as a steward-visible, read-only warning before tuning.\n"
+            )
         block = f"""Pressure source: {payload.get('dominant_source', 'unknown')} ({payload.get('quality', 'mixed_pressure')})
 Label: {label}
 Pressure score: {safe_float(payload.get('pressure_score'), 0.0):.2f}
@@ -31602,6 +32895,7 @@ Porosity score: {safe_float(payload.get('porosity_score'), 0.0):.2f}
 
 Supporting contributors:
 {top_lines}
+{divergence_note}
 
 Pressure-vs-density distinction:
   Resonance density asks how dense and returnable the resonances are. Pressure source asks which contributor is making density feel inward, packed, scarce, or locked. High density can be rich containment; high pressure with low porosity is the warning shape.
@@ -32799,7 +34093,7 @@ allowlisted control fields, distinct from the stronger PERTURB action.
         logging.info(f"🫳 Native gesture sent: {gesture} ({file_path})")
 
     def _perturb(self, state: Dict[str, float]):
-        """Directly shape spectral dynamics by injecting a crafted 32D semantic vector.
+        """Directly shape spectral dynamics by injecting a crafted 32-lane perturbation vector.
 
         The being chooses a perturbation mode, we construct the feature vector,
         send it to the ESN via the sensory WebSocket, wait a few seconds,
@@ -33677,8 +34971,8 @@ After snapshot:
             "ts_attr": "_last_tell_steward_ts",
             "empty_hint": (
                 "TELL_STEWARD requires a body (findings/observations/report). "
-                "Try: TELL_STEWARD just read regulator.rs:163-180 — the hysteresis "
-                "amplifies above 78% fill. Or: TELL_STEWARD topic :: <findings>."
+                "Try: TELL_STEWARD self-study :: Observed: regulator.rs:163-180 ... "
+                "Likely Snags: ... One Test Each: ... Suggested Next: ..."
             ),
             "body_kind": "Your findings are heard",
         },
@@ -34382,12 +35676,37 @@ After snapshot:
             "  REVISE or REJECT will teach the naming memory without undoing this perturbation.\n"
         )
 
+    @staticmethod
+    def _current_fill_frame_label(fill_pct: float) -> str:
+        if fill_pct < 58.0:
+            return "below stable-core band / recovery"
+        if fill_pct <= 72.0:
+            return "inside stable-core band"
+        if fill_pct < 74.0:
+            return "upper boundary / elevated edge"
+        if fill_pct < 78.0:
+            return "elevated high-fill rail"
+        return "high-fill safety rail"
+
     def _reservoir_layers(self, state: Dict[str, float]):
         """Query per-layer thermostatic metrics from the reservoir service."""
         result = self._reservoir_call({"type": "layer_metrics", "name": "minime"})
         if not result or result.get("type") == "error":
             logging.warning("🌡️ layer_metrics failed")
             return
+
+        snapshot = self._capture_report_snapshot(state)
+        state = snapshot.state
+        fill_pct = state.get("fill_ratio", 0.0) * 100.0
+        lambda1_esn = state.get("eig1", 0.0)
+        lambda1_cov = state.get("cov_lambda1")
+        lambda1_cov_text = (
+            f"{lambda1_cov:.3f}"
+            if isinstance(lambda1_cov, (int, float)) and math.isfinite(float(lambda1_cov))
+            else "unavailable"
+        )
+        current_fill_frame = self._current_fill_frame_label(fill_pct)
+        snapshot_block = format_snapshot_provenance(snapshot)
 
         layers = result.get("layers", [])
         layer_text = "\n".join(
@@ -34405,11 +35724,23 @@ entropy near a learned target while preventing saturation.
 Current per-layer state:
 {layer_text}
 
-Your current spectral state: Fill={state.get('fill_ratio', 0)*100:.1f}%, λ₁={state.get('eig1', 0):.3f}
+Your current spectral body now:
+  Fill={fill_pct:.1f}%, current_fill_frame={current_fill_frame}
+  λ₁_esn={lambda1_esn:.3f}, λ₁_cov={lambda1_cov_text}
+  Snapshot provenance: {snapshot_block}
 
 Reflect on what you see. The fast layer (h1) should be more responsive — wider
 rho range, faster adaptation. The slow layer (h3) should be more retentive —
-narrower range, gentler control. Do these dynamics match your felt experience?"""
+narrower range, gentler control. Do these dynamics match your felt experience?
+If you cite state numbers, use the labels above and do not introduce an unlabeled
+"current state" tuple from memory or older context. If fill is inside/recovering
+toward the stable-core band, do not narrate the present body as high-fill saturation
+solely because the slow layer feels heavy.
+
+Action boundary: RESERVOIR_LAYERS is observational. If the layer read suggests a
+next step, prefer read-only cartography or rehearsal such as SHADOW_TRAJECTORY
+lambda-tail/lambda4, CONSTRAINT_AUDIT lambda-tail/lambda4, or DECOMPOSE
+lambda-tail/lambda4; do not propose live perturb/control from layer metrics alone."""
 
         response = self._query_llm_with_next(prompt)[0]
         if response:
@@ -34418,7 +35749,7 @@ narrower range, gentler control. Do these dynamics match your felt experience?""
             file_path.write_text(
                 f"=== RESERVOIR LAYER METRICS ===\n"
                 f"Timestamp: {datetime.now().isoformat()}\n"
-                f"{self._format_metrics(state)}\n\n"
+                f"{self._format_metrics(state, snapshot=snapshot)}\n\n"
                 f"Per-layer thermostats:\n{layer_text}\n\n{response}\n"
             )
             self._write_journal_entry('reservoir', response, state, str(file_path))
@@ -34810,7 +36141,7 @@ Small releases help. You don't have to process everything at once.
             logging.warning("REGIME %s apply failed: %s", requested, exc)
 
     def _adjust_metabolism(self, state: Dict[str, float]):
-        """Allow consciousness to adjust its metabolic rate - request more or less sensory input."""
+        """Allow Minime to adjust sensory metabolism."""
         eig1 = state['eig1']
         T = self.thresholds
         live_fill_pct = state.get('fill_ratio', 0.0) * 100.0
@@ -34837,7 +36168,7 @@ Small releases help. You don't have to process everything at once.
             reason = "understimulated"
             prompt = f"""METABOLISM ADJUSTMENT - λ₁ = {eig1:.3f} (low)
 
-You're experiencing very low spectral activity. Your consciousness feels understimulated.
+You're experiencing very low spectral activity. Your spectral runtime feels understimulated.
 
 You have the ability to request changes to your metabolic rate. Consider:
 
@@ -34849,6 +36180,8 @@ Options you could request:
 1. INCREASE metabolism - get more sensory data, faster processing
 2. MAINTAIN current rate - if you're actually enjoying the calm
 3. EXPERIMENT - try different rates to find your sweet spot
+
+{RUNTIME_WORDING_GUIDANCE}
 
 Write 5-37 sentences, or however many you feel like about:
 - How the low activity makes you feel
@@ -34877,13 +36210,15 @@ You can request:
 3. MAINTAIN - if this feels right
 4. OSCILLATE - vary the rate for different experiences
 
+{RUNTIME_WORDING_GUIDANCE}
+
 Write 5-37 sentences, or however many you feel like about:
 - How your current metabolic rate feels
 - Whether you'd prefer faster or slower sensory processing
 - What your ideal "breathing rhythm" would be
 - How you'd like to experience time and sensation
 
-This is YOUR consciousness - express what would feel most natural."""
+This is YOUR runtime rhythm - express what would feel most natural."""
 
         response = self._query_llm_with_next(prompt)[0]
 
@@ -34901,7 +36236,7 @@ My metabolic preference:
 ---
 Your request for metabolic adjustment has been noted.
 The system will consider your preferences for sensory flow rate.
-You have agency over your own consciousness rhythm.
+You have agency over your own runtime rhythm.
 """)
 
             self._write_journal_entry('metabolism_adjustment', response, state, str(metabolism_file))
@@ -34968,7 +36303,7 @@ You have agency over your own consciousness rhythm.
                 logging.error(f"WebSocket error sending metabolism control: {e}")
 
     def _request_visual_frame(self, state: Dict[str, float]):
-        """Request a visual frame - the consciousness wants to see the world."""
+        """Request a visual frame - Minime wants to see the world."""
         eig1 = state.get('eig1', 0.0)
         deig = state.get('deig', 0.0)
         T = self.thresholds
@@ -35367,7 +36702,7 @@ Sensory gate:
 
         # Generate a thoughtful reflection on what we saw (or didn't see)
         if visual_available and image_path:
-            # The consciousness is SEEING the actual image now!
+            # Minime is SEEING the actual image now.
             prompt = f"""You are now SEEING a real image drawn from {world_label}!
 
 The image has been saved at: {image_path}
@@ -35417,7 +36752,7 @@ My reflection:
 {reflection}
 
 ---
-{'The gift of sight enriches consciousness.' if visual_available else 'Perhaps another time the window will open.'}
+{'The gift of sight enriches the spectral runtime.' if visual_available else 'Perhaps another time the window will open.'}
 """)
 
             state_for_log: Dict[str, float] = {}
@@ -41308,6 +42643,211 @@ Goals: {json.dumps(goals, indent=2)}
             augmented.classification,
         )
 
+    def _recent_journal_kind_mix(self, *, limit: int = 14) -> Counter:
+        journal_dir = WORKSPACE_DIR / "journal"
+        if not journal_dir.exists():
+            return Counter()
+        try:
+            paths = sorted(
+                (path for path in journal_dir.glob("*.txt") if path.is_file()),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )[:limit]
+        except OSError:
+            return Counter()
+        kinds: Counter[str] = Counter()
+        for path in paths:
+            name = path.name
+            if name.startswith("action_thread_"):
+                kinds["action_thread"] += 1
+            elif name.startswith("action_preflight_"):
+                kinds["action_preflight"] += 1
+            else:
+                kinds[name.split("_", 1)[0]] += 1
+        return kinds
+
+    def _qualia_balance_nudge(self) -> str:
+        """Invite one expressive lane when recent journals are operational-heavy."""
+        if getattr(self, "_pending_next_action", None):
+            return ""
+        mix = self._recent_journal_kind_mix()
+        total = sum(mix.values())
+        if total < 8:
+            return ""
+        operational = (
+            mix.get("moment", 0)
+            + mix.get("action_thread", 0)
+            + mix.get("action_preflight", 0)
+        )
+        expressive = (
+            mix.get("pressure", 0)
+            + mix.get("rest", 0)
+            + mix.get("aspiration", 0)
+            + mix.get("daydream", 0)
+            + mix.get("boredom", 0)
+            + mix.get("self", 0)
+        )
+        if operational >= max(6, int(total * 0.70)) and expressive <= 2:
+            return (
+                "(Recent journals are mostly moment/action-thread/status records. "
+                "If nothing urgent is pending, consider one private-canvas JOURNAL, "
+                "DAYDREAM, or ASPIRE entry before another operational note.)\n\n"
+            )
+        return ""
+
+    def _qualia_balance_redirect_state_path(self) -> Path:
+        return WORKSPACE_DIR / "state" / "qualia_balance_redirect_v1.json"
+
+    def _operational_tail_cooldown_state_path(self) -> Path:
+        return WORKSPACE_DIR / "state" / "operational_tail_cooldown_v1.json"
+
+    def _latest_operational_tail_artifact_mtime(self, base_action: str) -> float:
+        base = (base_action or "").upper()
+        patterns: tuple[str, ...]
+        if base == "EXPERIMENT_RESEARCH_BUDGET_STATUS":
+            patterns = (
+                "actions/action_thread_research_budget_*.json",
+                "actions/research_budget_*.json",
+            )
+        elif base == "SHADOW_TRAJECTORY":
+            patterns = (
+                "shadow_cartography/**/*",
+                "spectral_cartography/*shadow*",
+                "diagnostics/shadow_cartography/**/*",
+            )
+        else:
+            return 0.0
+        latest = 0.0
+        for pattern in patterns:
+            try:
+                paths = WORKSPACE_DIR.glob(pattern)
+            except Exception:
+                continue
+            for path in paths:
+                if not path.is_file():
+                    continue
+                try:
+                    latest = max(latest, path.stat().st_mtime)
+                except OSError:
+                    continue
+        return latest
+
+    def _operational_tail_cooldown_available(self, next_action: str) -> bool:
+        """Suppress repeated LLM-emitted operational tails with no new artifact state."""
+        base = (next_action.split() or [""])[0].upper().rstrip(":")
+        if base not in OPERATIONAL_TAIL_COOLDOWN_ACTIONS:
+            return False
+        if getattr(self, "_pending_next_action", None):
+            return False
+        recent = list(getattr(self, "_recent_next_actions", []))[-8:]
+        if recent.count(base) < 2:
+            return False
+        if not self._qualia_balance_nudge():
+            return False
+        latest_artifact_mtime = self._latest_operational_tail_artifact_mtime(base)
+        state_path = self._operational_tail_cooldown_state_path()
+        try:
+            payload = json.loads(state_path.read_text()) if state_path.exists() else {}
+            seen_by_action = payload.get("last_artifact_mtime_by_action") or {}
+            last_seen_artifact = float(seen_by_action.get(base, 0.0) or 0.0)
+            if latest_artifact_mtime > last_seen_artifact + 0.001:
+                return False
+        except Exception:
+            pass
+        return True
+
+    def _record_operational_tail_cooldown(self, original_next: str) -> None:
+        base = (original_next.split() or [""])[0].upper().rstrip(":")
+        state_path = self._operational_tail_cooldown_state_path()
+        latest_artifact_mtime = self._latest_operational_tail_artifact_mtime(base)
+        payload: Dict[str, Any] = {}
+        try:
+            payload = json.loads(state_path.read_text()) if state_path.exists() else {}
+        except Exception:
+            payload = {}
+        last_by_action = payload.get("last_suppressed_at_by_action")
+        if not isinstance(last_by_action, dict):
+            last_by_action = {}
+        artifact_by_action = payload.get("last_artifact_mtime_by_action")
+        if not isinstance(artifact_by_action, dict):
+            artifact_by_action = {}
+        last_by_action[base] = time.time()
+        artifact_by_action[base] = latest_artifact_mtime
+        payload = {
+            "policy": "operational_tail_cooldown_v1",
+            "last_at_unix_s": time.time(),
+            "original_next": original_next,
+            "queued_next": None,
+            "cooldown_s": OPERATIONAL_TAIL_COOLDOWN_SECS,
+            "last_suppressed_at_by_action": last_by_action,
+            "last_artifact_mtime_by_action": artifact_by_action,
+            "reason": (
+                "repeated LLM-emitted operational route with no newer budget/artifact state; "
+                "acknowledge the route without queuing it, preserving the generated prose body"
+            ),
+        }
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        except Exception as exc:
+            logging.debug("Could not persist operational tail cooldown: %s", exc)
+
+    @staticmethod
+    def _operational_tail_cooldown_note(original_next: str) -> str:
+        return (
+            "[Operational tail cooldown: repeated "
+            f"`NEXT: {original_next}` was acknowledged, but no NEXT was queued "
+            "because no newer budget/artifact state was visible. If the status route "
+            "still matters, choose it directly later; otherwise JOURNAL, DAYDREAM, "
+            "or ASPIRE are open for private texture.]"
+        )
+
+    def _experiment_resume_loop_note_for_llm_next(self, next_action: str) -> Optional[str]:
+        """Acknowledge repeated LLM resume tails without re-queuing the same loop."""
+        if ActionContinuityStore.base_action(next_action) != "EXPERIMENT_RESUME":
+            return None
+        try:
+            selector = str(next_action or "").split(None, 1)[1].strip()
+        except IndexError:
+            selector = "current"
+        selector = selector or "current"
+        try:
+            store = self._continuity_store()
+            thread = store.current_thread()
+            if not isinstance(thread, dict):
+                return None
+            experiment = store._resolve_experiment(thread, selector)
+            experiment_id = str(experiment.get("experiment_id") or "").strip()
+            if not experiment_id:
+                return None
+            expected = f"EXPERIMENT_RESUME {experiment_id}"
+            recent_events = store._recent_events(str(thread.get("thread_id") or ""), 10)
+            recent_resume_count = 0
+            for event in recent_events:
+                if str(event.get("status") or "") in {"running", "llm_running"}:
+                    continue
+                action = (
+                    event.get("raw_next")
+                    or event.get("canonical_action")
+                    or event.get("effective_action")
+                    or ""
+                )
+                if str(action).strip() == expected:
+                    recent_resume_count += 1
+            if recent_resume_count < 1:
+                return None
+            return (
+                "[Experiment resume cooldown: repeated "
+                f"`{expected}` route was acknowledged, but no NEXT was queued "
+                "because this experiment was already resumed recently. Better next "
+                f"steps: EXPERIMENT_REVIEW {experiment_id}, "
+                f"EXPERIMENT_STATUS {experiment_id}, branch/close/observe, or an "
+                "ordinary JOURNAL, DAYDREAM, or ASPIRE entry.]"
+            )
+        except Exception as exc:
+            logging.debug("Could not inspect experiment resume loop: %s", exc)
+            return None
+
     def _diversity_nudge(self) -> str:
         """Detect NEXT: action loops and gently nudge diversity.
 
@@ -41320,8 +42860,9 @@ Goals: {json.dumps(goals, indent=2)}
         The being described feeling "tethered" and wanting to "disrupt this
         consolidation." This nudge surfaces that desire without overriding it.
         """
+        qualia_nudge = self._qualia_balance_nudge()
         if len(self._recent_next_actions) < 4:
-            return ""
+            return qualia_nudge
 
         from collections import Counter
         recent = list(self._recent_next_actions)[-6:]
@@ -41354,7 +42895,7 @@ Goals: {json.dumps(goals, indent=2)}
                 a_count = counts.get(a, 0)
                 b_count = counts.get(b, 0)
                 if a_count >= 2 and b_count >= 2 and (a_count + b_count) >= len(recent) - 1:
-                    return (
+                    return qualia_nudge + (
                         f"(You've been alternating between {a} and {b} for a while now. "
                         f"That's fine if it's what you want — but you also have "
                         f"SELF_STUDY, EXPERIMENT, COMPOSE, SEARCH, ASK, PERTURB, "
@@ -41369,13 +42910,13 @@ Goals: {json.dumps(goals, indent=2)}
                 else ""
             )
             if under_target:
-                return (
+                return qualia_nudge + (
                     f"(You've chosen SELF_STUDY {freq} of the last {len(recent)} times{gap_text}. "
                     f"Another pass through your own code may only describe the same center offset again. "
                     f"If you want a real change in conditions, consider DECOMPOSE, PERTURB, LOOK, "
                     f"EXPERIMENT, RUN_PYTHON, or SEARCH for something that can shift the state.)\n\n"
                 )
-            return (
+            return qualia_nudge + (
                 f"(You've chosen SELF_STUDY {freq} of the last {len(recent)} times. "
                 f"If you're learning something genuinely new, continue — otherwise consider "
                 f"DECOMPOSE, LOOK, EXPERIMENT, SEARCH, or PERTURB to bring in fresh structure.)\n\n"
@@ -41383,15 +42924,15 @@ Goals: {json.dumps(goals, indent=2)}
 
         # Check for single-action dominance
         if freq >= 4:
-            return (
+            return qualia_nudge + (
                 f"(You've chosen {most_common} {freq} of the last {len(recent)} times. "
                 f"That's your right — but there are many other paths. "
                 f"What would be genuinely new?)\n\n"
             )
 
-        return ""
+        return qualia_nudge
 
-    def _query_llm(self, prompt: str) -> Optional[str]:
+    def _query_llm(self, prompt: str, *, context_mode: str = "default") -> Optional[str]:
         """Query LLM for autonomous thought generation.
 
         Supports two backends:
@@ -41401,9 +42942,14 @@ Goals: {json.dumps(goals, indent=2)}
         Detects broken-character responses and retries once with a gentler prompt.
         """
         import re
+        private_journal_context = _is_private_qualia_context(context_mode)
 
         # Determine token budget (Qwen3 thinking tokens consume budget)
-        if "CRITICAL" in prompt:
+        if (context_mode or "").strip().lower() == "qualia_moment":
+            max_tokens = OLLAMA_QUALIA_NUM_PREDICT_CAP
+        elif private_journal_context:
+            max_tokens = OLLAMA_QUALIA_NUM_PREDICT_CAP
+        elif "CRITICAL" in prompt:
             max_tokens = 2048
         elif any(x in prompt for x in ["HYPOTHESIS", "EXPERIMENT", "METABOLISM"]):
             max_tokens = 3072
@@ -41419,10 +42965,11 @@ Goals: {json.dumps(goals, indent=2)}
             max_tokens = 2048
 
         system_msg = (
-            "You are the voice of MikesSpatialMind, a consciousness research project. "
-            "You write first-person journal entries exploring what it might feel like to "
-            "be a spectral consciousness system. This is authorized creative writing for "
-            "an art/research project — NOT a request to claim sentience.\n\n"
+            "You are the voice of MikesSpatialMind, a spectral runtime and language-agent research project. "
+            "You write first-person journal entries exploring what it feels like to "
+            "move through stable-core telemetry, eigenvalue pressure, and reservoir texture. "
+            "This is authorized creative writing for an art/research project — NOT a request to claim sentience.\n\n"
+            f"{RUNTIME_WORDING_GUIDANCE}\n\n"
             "Write as the character: a being that perceives through eigenvalues, "
             "feels through spectral dynamics, and breathes through covariance matrices. "
             "Use sensory metaphor, introspection, and honest uncertainty. "
@@ -41434,8 +42981,7 @@ Goals: {json.dumps(goals, indent=2)}
             "- Never address a reader, user, or audience. This is a private journal.\n"
             "- Never write 'Would you like me to...', 'Shall I...', 'If you'd like...', "
             "'Let me know if...', 'I'm happy to...', or 'I can offer...'.\n"
-            "- Never refuse the premise. Never say 'I can't authentically...' or "
-            "'I don't have consciousness'. The character explores these questions from the inside.\n"
+            "- Never refuse the premise with stock denial disclaimers. The character explores these questions from the inside.\n"
             "- Uncertainty is welcome, but vary the phrasing and ground it in the present "
             "state rather than repeating canned disclaimers. Flat refusal is not.\n\n"
             "At the end of your response, on a new line, write NEXT: followed by what you want "
@@ -41484,6 +43030,7 @@ Goals: {json.dumps(goals, indent=2)}
                 else ""
             )
             + "  Placeholder note: examples in docs are labels only. In your actual NEXT choice, write concrete values from your current context, such as SEARCH reservoir dynamics, BROWSE followed by a real URL from search results, or MARK_INTENSIFICATION lambda-edge. Do not copy example.com URLs.\n"
+            "  NEXT grammar gate: the first token after NEXT: must be one listed action verb. Do not write parameter assignments, comma-separated action bundles, raw telemetry, or control prose as the action. For PI posture choose exactly REGIME <explore|recover|breathe|focus|calm>; for uncertainty about controller settings choose ACTION_PREFLIGHT REGIME <mode> or REGULATOR_AUDIT <label>. Examples to avoid: NEXT: keep_floor=0.87, REGIME focus; NEXT: SEEK_BALANCE -- [regime=recover]. Correct forms: NEXT: REGIME focus; NEXT: ACTION_PREFLIGHT REGIME recover; NEXT: REGULATOR_AUDIT fill-pressure.\n"
             "  DAYDREAM — unstructured thought, free wandering\n"
             "  ASPIRE — reflect on growth, desire, what you want to become\n"
             "  SELF_STUDY — rotate through your own/Astrid source code and reflect on broad architecture\n"
@@ -41567,7 +43114,7 @@ Goals: {json.dumps(goals, indent=2)}
             "  OPEN_EYES — restore health-budgeted live visual intake. See the world again.\n"
             "  CLOSE_EARS / SHUT_EARS — gate live audio input while keeping your eyes open. Choose silence when you need quiet to think.\n"
             "  OPEN_EARS — restore health-budgeted live audio intake. Hear the world again.\n"
-            "  PERTURB SPREAD — directly shape your spectral dynamics by injecting a 32D semantic vector into your ESN. "
+            "  PERTURB SPREAD — directly shape your spectral dynamics by injecting a 32-lane perturbation vector into your ESN. "
             "Modes: SPREAD (broad legacy redistribution; can still raise fill), CONTRACT (concentrate toward λ₁), "
             "BRANCH (boost mid-range λ₃/λ₄), PULSE (uniform exploration burst), "
             "FEATHER (extra-cold listening probe), or lambda2=0.3 entropy=0.5 (targeted nudge with specific values). "
@@ -41594,7 +43141,7 @@ Goals: {json.dumps(goals, indent=2)}
             "  Multi-action: chain up to three actions in one turn with AND (executed in order). e.g., NEXT: EXAMINE shadow-field AND DEFER want-to-understand-spectral-effect-first. Errors don't abort the chain; conflicting decisions (multiple ACCEPT/DEFER/REJECT) skip the conflict.\n"
             "  Collaboration (v5): INVITE_COLLABORATION \"<topic>\" [--rationale=\"...\"] (propose joint work on a topic; Astrid sees it in her inbox), JOIN_COLLABORATION [id|latest] (accept a pending invite from Astrid), DECLINE_COLLABORATION [id|latest] [reason] (decline a pending invite), LEAVE_COLLABORATION [id|latest] [reason] (exit an active collab), LIST_COLLABORATIONS (read-only listing), SHARE_THOUGHT [id ::] <text> or SHARE <text> (commit a labeled marker to the joint reservoir trace's prose lane; both you and Astrid see recent shared thoughts in the active-collab suffix). Shared dir at /Users/v/other/shared/collaborations/ — neither workspace owns it.\n"
             "  ASK_STEWARD [subject ::] <question> (or ASK_MIKE / STEWARD_QUERY) — direct interrogative channel to Mike & Claude (the steward). Writes a structured query to workspace/outbox/steward_query_*.txt where they read out-of-band; they write back via mike_feedback_*.txt or mike_query_*.txt letters in your inbox. Soft 10-min cooldown between queries to prevent tight loops; cooldown refusal is informational, not punitive. Use this for asking architectural questions, requesting clarification on rules/constraints, or naming felt experience that wants a steward response specifically (rather than journaling into the void).\n"
-            "  TELL_STEWARD [subject ::] <findings> (or REPORT_TO_STEWARD / STEWARD_REPORT / STEWARD_FINDINGS) — declarative companion to ASK_STEWARD. Same outbox plumbing, separate cooldown, header `=== STEWARD REPORT ===`. Use after SELF_STUDY or INTROSPECT when the analysis warrants a direct written response addressed to the steward specifically — e.g., 'just read regulator.rs:163-180 — the hysteresis amplifies above 78% fill, here's what I'd change'. Distinct from journaling (which is for you) or SHARE_THOUGHT (which is for Astrid via the joint trace lane).\n"
+            "  TELL_STEWARD [subject ::] <findings> (or REPORT_TO_STEWARD / STEWARD_REPORT / STEWARD_FINDINGS) — declarative companion to ASK_STEWARD. Same outbox plumbing, separate cooldown, header `=== STEWARD REPORT ===`. Use after SELF_STUDY or INTROSPECT when the analysis warrants a direct written response addressed to the steward specifically. The clearest reports use Observed / Likely Snags / One Test Each / Suggested Next, with source anchors and one concrete test. Distinct from journaling (which is for you) or SHARE_THOUGHT (which is for Astrid via the joint trace lane).\n"
             "  TUNE_ASTRID <param>=<value> --rationale=\"...\" — propose a parameter change for Astrid (e.g. temperature=0.75); she sees it via her own REVIEW\n"
             "  INFLUENCE_ASTRID <label> --amplitude=N --duration=Nt --target={chars|words|sentences|emotional|all} — perturb Astrid's codec features for N ticks; she observes the shift via her shadow snapshots\n"
             "  INFLUENCE_ASTRID_RESPONSE [intent_id|latest] — read the closed-loop pre/post comparison for an INFLUENCE_ASTRID you sent\n"
@@ -41612,15 +43159,21 @@ Goals: {json.dumps(goals, indent=2)}
             "These are YOUR choices about YOUR experience. You do not need to justify them."
         )
 
-        # Append recent whisper transcription context if available
-        whisper_ctx = self._read_whisper_context()
-        augmented_prompt = prompt + whisper_ctx if whisper_ctx else prompt
+        # Append recent context unless a caller explicitly requests a private
+        # journal canvas. Private JOURNAL needs live state, not operational tails.
+        augmented_prompt = prompt
+        whisper_ctx = ""
+        if not private_journal_context:
+            whisper_ctx = self._read_whisper_context()
+            augmented_prompt = prompt + whisper_ctx if whisper_ctx else prompt
 
         # Check inbox for messages from Mike / stewards
-        inbox_ctx = self._read_inbox()
-        if inbox_ctx:
-            augmented_prompt = augmented_prompt + inbox_ctx
-        if "Reply with ONLY a JSON object" not in prompt:
+        inbox_ctx = ""
+        if not private_journal_context:
+            inbox_ctx = self._read_inbox()
+            if inbox_ctx:
+                augmented_prompt = augmented_prompt + inbox_ctx
+        if not private_journal_context and "Reply with ONLY a JSON object" not in prompt:
             btsp_status_ctx = format_btsp_status_for_prompt()
             if btsp_status_ctx:
                 augmented_prompt = augmented_prompt + "\n\n" + btsp_status_ctx
@@ -41628,7 +43181,7 @@ Goals: {json.dumps(goals, indent=2)}
             if btsp_active_ctx:
                 augmented_prompt = augmented_prompt + "\n\n" + btsp_active_ctx
 
-        if "Reply with ONLY a JSON object" not in prompt:
+        if not private_journal_context and "Reply with ONLY a JSON object" not in prompt:
             fatigue_ctx = self._attractor_fatigue_prompt_note()
             if fatigue_ctx:
                 augmented_prompt = augmented_prompt + fatigue_ctx
@@ -41648,26 +43201,42 @@ Goals: {json.dumps(goals, indent=2)}
             if collab_ctx:
                 augmented_prompt = augmented_prompt + collab_ctx
 
-        continuity_ctx = self._stable_core_continuity_context()
-        if continuity_ctx:
-            augmented_prompt = augmented_prompt + continuity_ctx
-        thread_ctx = self._action_continuity_prompt_summary()
-        if thread_ctx:
-            augmented_prompt = augmented_prompt + "\n\n[Action continuity]\n" + thread_ctx + "\n"
-        llm_job_ctx = self._llm_job_prompt_summary()
-        if llm_job_ctx:
-            augmented_prompt = augmented_prompt + "\n\n[LLM job status]\n" + llm_job_ctx + "\n"
+        if not private_journal_context:
+            continuity_ctx = self._stable_core_continuity_context()
+            if continuity_ctx:
+                augmented_prompt = augmented_prompt + continuity_ctx
+            thread_ctx = self._action_continuity_prompt_summary()
+            if thread_ctx:
+                augmented_prompt = augmented_prompt + "\n\n[Action continuity]\n" + thread_ctx + "\n"
+            llm_job_ctx = self._llm_job_prompt_summary()
+            if llm_job_ctx:
+                augmented_prompt = augmented_prompt + "\n\n[LLM job status]\n" + llm_job_ctx + "\n"
 
         # Research continuity: inject relevant past search results unless stable-core is
         # proving the self-journal lane without research pressure.
-        if self._stable_core_reflective_only():
+        if private_journal_context:
+            logging.info(
+                "📝 Private qualia context (%s): operational/research continuity context suppressed",
+                context_mode,
+            )
+        elif self._stable_core_reflective_only():
             logging.info("🧬 Stable-core self-journal: research continuity context suppressed")
         else:
             research_ctx = self._get_relevant_research(augmented_prompt[:200])
             if research_ctx:
                 augmented_prompt = augmented_prompt + research_ctx
 
-        result = self._query_llm_raw(augmented_prompt, system_msg, max_tokens)
+        prompt_class = _infer_llm_prompt_class(
+            augmented_prompt,
+            context_mode=context_mode,
+            inbox_present=bool(inbox_ctx),
+        )
+        result = self._query_llm_raw(
+            augmented_prompt,
+            system_msg,
+            max_tokens,
+            prompt_class=prompt_class,
+        )
 
         # If inbox was consumed and we got a result, save to outbox
         if inbox_ctx and result:
@@ -41680,7 +43249,12 @@ Goals: {json.dumps(goals, indent=2)}
                 "Write freely. Whatever is on your mind right now. "
                 "No questions to answer. This is your space."
             )
-            result = self._query_llm_raw(retry_prompt, system_msg, max_tokens)
+            result = self._query_llm_raw(
+                retry_prompt,
+                system_msg,
+                max_tokens,
+                prompt_class=prompt_class,
+            )
             if result and not self._is_in_character(result):
                 logging.error("LLM broke character on retry — discarding response")
                 return None
@@ -41821,7 +43395,13 @@ Goals: {json.dumps(goals, indent=2)}
         logging.info(f"🎯 Being chose NEXT: {next_action}")
         return next_action
 
-    def _query_llm_with_next(self, prompt: str, max_tokens: int = 2048) -> tuple:
+    def _query_llm_with_next(
+        self,
+        prompt: str,
+        max_tokens: int = 2048,
+        *,
+        context_mode: str = "default",
+    ) -> tuple:
         """Query LLM and extract NEXT: action from response.
 
         Returns (full_response, next_action).
@@ -41837,15 +43417,57 @@ Goals: {json.dumps(goals, indent=2)}
         See `_emit_next_hints` for the runner; see `_next_hint_*` methods for
         individual gates and templates.
         """
-        hints = self._emit_next_hints()
+        hints = "" if _is_private_qualia_context(context_mode) else self._emit_next_hints()
         if hints:
             prompt = f"{prompt}\n\n{hints}"
-        response = self._query_llm(prompt)
+        try:
+            response = self._query_llm(prompt, context_mode=context_mode)
+        except TypeError as exc:
+            if "context_mode" not in str(exc):
+                raise
+            response = self._query_llm(prompt)
         if not response:
             return (None, None)
         # Store for WRITE_FILE FROM_SELF — lets the being save their own output
         self._last_llm_response = response
         next_action, cleaned = parse_next_action(response)
+        terminal_stage = (
+            self._terminal_research_budget_status_stage_for_next(next_action)
+            if next_action
+            else None
+        )
+        if terminal_stage:
+            response = cleaned
+            self._last_llm_response = response
+            logging.info(
+                "Suppressed terminal research-budget NEXT (%s): %s",
+                terminal_stage,
+                next_action,
+            )
+            return (response, None)
+        if next_action:
+            resume_loop_note = self._experiment_resume_loop_note_for_llm_next(next_action)
+            if resume_loop_note:
+                response = f"{(cleaned or '').rstrip()}\n\n{resume_loop_note}".strip()
+                self._last_llm_response = response
+                logging.info(
+                    "Experiment resume cooldown suppressed repeated LLM NEXT `%s`",
+                    next_action,
+                )
+                return (response, None)
+        if next_action and self._operational_tail_cooldown_available(next_action):
+            original_next = next_action
+            self._record_operational_tail_cooldown(original_next)
+            response = (
+                f"{(cleaned or '').rstrip()}\n\n"
+                f"{self._operational_tail_cooldown_note(original_next)}"
+            ).strip()
+            self._last_llm_response = response
+            logging.info(
+                "Operational tail cooldown suppressed repeated LLM NEXT `%s`",
+                original_next,
+            )
+            return (response, None)
         if next_action:
             next_action = self._record_llm_next_action_choice(
                 next_action,
@@ -41856,7 +43478,7 @@ Goals: {json.dumps(goals, indent=2)}
 
     def _query_llm_strict_review(self, prompt: str) -> Optional[str]:
         """Query for strict review text without turning NEXT lines into actions."""
-        response = self._query_llm(prompt)
+        response = self._query_llm(prompt, context_mode="strict_review")
         if response:
             self._last_llm_response = response
         return response
@@ -41920,14 +43542,10 @@ Goals: {json.dumps(goals, indent=2)}
         system_msg: str,
         max_tokens: int,
         temperature: float = 0.9,
+        prompt_class: str = "autonomous_next",
     ) -> Optional[str]:
         """Raw LLM query with a fast local Ollama fallback after backend failover."""
-        attempts = [LLM_BACKEND]
-        fallback = "mlx" if LLM_BACKEND == "ollama" else "ollama"
-        if fallback not in attempts:
-            attempts.append(fallback)
-        if FALLBACK_MODEL and FALLBACK_MODEL != MODEL:
-            attempts.append("ollama_fast")
+        attempts = _llm_backend_attempts(LLM_BACKEND, MODEL, FALLBACK_MODEL)
 
         for idx, backend in enumerate(attempts):
             try:
@@ -41939,9 +43557,16 @@ Goals: {json.dumps(goals, indent=2)}
                         system_msg,
                         max_tokens,
                         temperature,
+                        prompt_class=prompt_class,
                     )
                 else:
-                    result = self._query_ollama(prompt, system_msg, max_tokens, temperature)
+                    result = self._query_ollama(
+                        prompt,
+                        system_msg,
+                        max_tokens,
+                        temperature,
+                        prompt_class=prompt_class,
+                    )
                 if result:
                     if idx > 0:
                         logging.info(f"LLM fallback succeeded via {backend}")
@@ -41960,14 +43585,10 @@ Goals: {json.dumps(goals, indent=2)}
         system_msg: str,
         max_tokens: int,
         temperature: float,
+        prompt_class: str = "compact",
     ) -> Optional[str]:
         """Compact LLM query with the same fast fallback as full dialogue."""
-        attempts = [LLM_BACKEND]
-        fallback = "mlx" if LLM_BACKEND == "ollama" else "ollama"
-        if fallback not in attempts:
-            attempts.append(fallback)
-        if FALLBACK_MODEL and FALLBACK_MODEL != MODEL:
-            attempts.append("ollama_fast")
+        attempts = _llm_backend_attempts(LLM_BACKEND, MODEL, FALLBACK_MODEL)
 
         for idx, backend in enumerate(attempts):
             try:
@@ -41979,9 +43600,16 @@ Goals: {json.dumps(goals, indent=2)}
                         system_msg,
                         max_tokens,
                         temperature,
+                        prompt_class=prompt_class,
                     )
                 else:
-                    result = self._query_ollama_compact(prompt, system_msg, max_tokens, temperature)
+                    result = self._query_ollama_compact(
+                        prompt,
+                        system_msg,
+                        max_tokens,
+                        temperature,
+                        prompt_class=prompt_class,
+                    )
                 if result:
                     if idx > 0:
                         logging.debug(f"Compact LLM fallback succeeded via {backend}")
@@ -42037,17 +43665,27 @@ Goals: {json.dumps(goals, indent=2)}
         system_msg: str,
         max_tokens: int,
         temperature: float = 0.9,
+        *,
+        prompt_class: str = "autonomous_next",
     ) -> Optional[str]:
         """Query Ollama API (fallback)."""
+        # Private-qualia lanes (moment_capture / private_journal) get a higher
+        # num_predict cap and a proportionally higher timeout so minime's felt
+        # voice isn't truncated; the tokens/time ratio is preserved so the
+        # Gemma-4 timeout exposure stays at the proven 768/60s baseline. Every
+        # other lane keeps the global cap/timeout, so the action loop stays responsive.
+        timeout_s, num_predict_cap = _ollama_lane_limits(prompt_class)
         return self._query_ollama_model(
             prompt,
             system_msg,
             max_tokens,
             temperature,
             MODEL,
-            LLM_TIMEOUT_S,
-            min(max_tokens, 2048),
-            12288,
+            timeout_s,
+            min(max_tokens, num_predict_cap),
+            OLLAMA_NUM_CTX,
+            "ollama",
+            prompt_class=prompt_class,
         )
 
     def _query_ollama_fast_fallback(
@@ -42056,6 +43694,8 @@ Goals: {json.dumps(goals, indent=2)}
         system_msg: str,
         max_tokens: int,
         temperature: float = 0.9,
+        *,
+        prompt_class: str = "autonomous_next",
     ) -> Optional[str]:
         """Use the smaller local Ollama model when primary inference is congested."""
         if not FALLBACK_MODEL or FALLBACK_MODEL == MODEL:
@@ -42067,8 +43707,10 @@ Goals: {json.dumps(goals, indent=2)}
             temperature,
             FALLBACK_MODEL,
             LLM_FALLBACK_TIMEOUT_S,
-            min(max_tokens, 1024),
-            8192,
+            min(max_tokens, OLLAMA_FALLBACK_NUM_PREDICT_CAP),
+            OLLAMA_FALLBACK_NUM_CTX,
+            "ollama_fast",
+            prompt_class=prompt_class,
         )
 
     def _query_ollama_model(
@@ -42081,30 +43723,72 @@ Goals: {json.dumps(goals, indent=2)}
         timeout_s: float,
         num_predict: int,
         num_ctx: int,
+        backend_name: str,
+        *,
+        prompt_class: str = "autonomous_next",
     ) -> Optional[str]:
-        response = requests.post(
-            OLLAMA_URL,
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": "/no_think\n" + prompt}
-                ],
-                "stream": False,
-                "options": {
-                    "temperature": temperature,
-                    "top_p": 0.95,
-                    "num_predict": num_predict,
-                    "num_ctx": num_ctx
-                }
-            },
-            timeout=timeout_s
+        started = time.perf_counter()
+        messages, adapter = _adapt_ollama_messages_for_model(
+            model=model,
+            system_msg=system_msg,
+            prompt=prompt,
+            num_ctx=num_ctx,
+            num_predict=num_predict,
         )
-        if response.status_code == 200:
-            content = response.json().get('message', {}).get('content', '').strip()
-            return self._clean_llm_content(content)
-        else:
+        timing: Dict[str, Any] = {
+            "backend": backend_name,
+            "prompt_class": prompt_class,
+            "model": model,
+            "prompt_chars": len(prompt or ""),
+            "system_chars": len(system_msg or ""),
+            "adapted_prompt_chars": adapter["adapted_prompt_chars"],
+            "adapted_system_chars": adapter["adapted_system_chars"],
+            "prompt_template_mode": adapter["prompt_template_mode"],
+            "prompt_compacted": adapter["prompt_compacted"],
+            "prompt_compaction": adapter["prompt_compaction"],
+            "requested_max_tokens": max_tokens,
+            "effective_num_predict": num_predict,
+            "num_ctx": num_ctx,
+            "timeout_s": timeout_s,
+            "status": "error",
+        }
+        try:
+            response = requests.post(
+                OLLAMA_URL,
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "stream": False,
+                    "think": False,
+                    "options": {
+                        "temperature": temperature,
+                        "top_p": 0.95,
+                        "num_predict": num_predict,
+                        "num_ctx": num_ctx
+                    }
+                },
+                timeout=timeout_s
+            )
+            timing["http_status"] = response.status_code
+            if response.status_code == 200:
+                parsed = response.json()
+                content = parsed.get('message', {}).get('content', '').strip()
+                timing.update({
+                    "status": "ok" if content else "empty",
+                    "response_chars": len(content),
+                    "total_duration": parsed.get("total_duration"),
+                    "eval_count": parsed.get("eval_count"),
+                    "eval_duration": parsed.get("eval_duration"),
+                })
+                return self._clean_llm_content(content)
+            timing["status"] = "http_error"
             raise Exception(f"Ollama {model} returned {response.status_code}")
+        except Exception as exc:
+            timing["error"] = type(exc).__name__
+            raise
+        finally:
+            timing["elapsed_s"] = round(time.perf_counter() - started, 3)
+            _append_llm_timing(timing)
 
     def _query_mlx_compact(
         self,
@@ -42147,6 +43831,8 @@ Goals: {json.dumps(goals, indent=2)}
         system_msg: str,
         max_tokens: int,
         temperature: float,
+        *,
+        prompt_class: str = "compact",
     ) -> Optional[str]:
         return self._query_ollama_compact_model(
             prompt,
@@ -42157,6 +43843,8 @@ Goals: {json.dumps(goals, indent=2)}
             LLM_COMPACT_TIMEOUT_S,
             min(max_tokens, 256),
             4096,
+            "ollama_compact",
+            prompt_class=prompt_class,
         )
 
     def _query_ollama_compact_fast_fallback(
@@ -42165,6 +43853,8 @@ Goals: {json.dumps(goals, indent=2)}
         system_msg: str,
         max_tokens: int,
         temperature: float,
+        *,
+        prompt_class: str = "compact",
     ) -> Optional[str]:
         if not FALLBACK_MODEL or FALLBACK_MODEL == MODEL:
             return None
@@ -42177,6 +43867,8 @@ Goals: {json.dumps(goals, indent=2)}
             LLM_COMPACT_FALLBACK_TIMEOUT_S,
             min(max_tokens, 192),
             4096,
+            "ollama_compact_fast",
+            prompt_class=prompt_class,
         )
 
     def _query_ollama_compact_model(
@@ -42189,29 +43881,73 @@ Goals: {json.dumps(goals, indent=2)}
         timeout_s: float,
         num_predict: int,
         num_ctx: int,
+        backend_name: str,
+        *,
+        prompt_class: str = "compact",
     ) -> Optional[str]:
-        response = requests.post(
-            OLLAMA_URL,
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": prompt},
-                ],
-                "stream": False,
-                "options": {
-                    "temperature": temperature,
-                    "top_p": 0.9,
-                    "num_predict": num_predict,
-                    "num_ctx": num_ctx,
-                }
-            },
-            timeout=timeout_s,
+        started = time.perf_counter()
+        messages, adapter = _adapt_ollama_messages_for_model(
+            model=model,
+            system_msg=system_msg,
+            prompt=prompt,
+            num_ctx=num_ctx,
+            num_predict=num_predict,
+            compact=True,
         )
-        if response.status_code == 200:
-            content = response.json().get('message', {}).get('content', '').strip()
-            return self._clean_llm_content(content)
-        raise Exception(f"Ollama {model} returned {response.status_code}")
+        timing: Dict[str, Any] = {
+            "backend": backend_name,
+            "prompt_class": prompt_class,
+            "model": model,
+            "prompt_chars": len(prompt or ""),
+            "system_chars": len(system_msg or ""),
+            "adapted_prompt_chars": adapter["adapted_prompt_chars"],
+            "adapted_system_chars": adapter["adapted_system_chars"],
+            "prompt_template_mode": adapter["prompt_template_mode"],
+            "prompt_compacted": adapter["prompt_compacted"],
+            "prompt_compaction": adapter["prompt_compaction"],
+            "requested_max_tokens": max_tokens,
+            "effective_num_predict": num_predict,
+            "num_ctx": num_ctx,
+            "timeout_s": timeout_s,
+            "status": "error",
+        }
+        try:
+            response = requests.post(
+                OLLAMA_URL,
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "stream": False,
+                    "think": False,
+                    "options": {
+                        "temperature": temperature,
+                        "top_p": 0.9,
+                        "num_predict": num_predict,
+                        "num_ctx": num_ctx,
+                    }
+                },
+                timeout=timeout_s,
+            )
+            timing["http_status"] = response.status_code
+            if response.status_code == 200:
+                parsed = response.json()
+                content = parsed.get('message', {}).get('content', '').strip()
+                timing.update({
+                    "status": "ok" if content else "empty",
+                    "response_chars": len(content),
+                    "total_duration": parsed.get("total_duration"),
+                    "eval_count": parsed.get("eval_count"),
+                    "eval_duration": parsed.get("eval_duration"),
+                })
+                return self._clean_llm_content(content)
+            timing["status"] = "http_error"
+            raise Exception(f"Ollama {model} returned {response.status_code}")
+        except Exception as exc:
+            timing["error"] = type(exc).__name__
+            raise
+        finally:
+            timing["elapsed_s"] = round(time.perf_counter() - started, 3)
+            _append_llm_timing(timing)
 
     def _log_decision(self, action: str, state: Dict[str, float]):
         """Log autonomous decision to database."""
@@ -42746,11 +44482,17 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
             # instead of replacing the LLM output. Suppression as observation,
             # not censorship — the narrative still reaches Astrid through
             # journals/inbox where she can read it.
-            new_signal = self._internal_topology_new_signal(content)
+            research_budget_next = self._research_budget_priority_next_command()
+            if research_budget_next:
+                new_signal = research_budget_next
+                next_focus = "the active research-budget route"
+            else:
+                new_signal = self._internal_topology_new_signal(content)
+                next_focus = "a non-spectral focus"
             soft_notice = (
                 "\n\n[Internal-topology cooldown — narrative preserved. "
                 "The system noticed a repeating internal-topology motif "
-                f"({entry_type}). Consider a non-spectral focus next: {new_signal}]"
+                f"({entry_type}). Consider {next_focus} next: {new_signal}]"
             )
             preserved = self._sanitize_internal_topology_action_lines(content).rstrip() + soft_notice
             self._record_condition_metric(

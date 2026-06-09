@@ -282,9 +282,9 @@ impl ConsciousnessDB {
         // Kink #10 fix (2026-05-14): parallel unix-epoch column for
         // created_at_unix. Idempotent — SQLite 3.25+ silently accepts the
         // duplicate ADD COLUMN. New writes populate; legacy rows stay NULL.
-        let _ = self.conn.execute_batch(
-            "ALTER TABLE moment_markers ADD COLUMN created_at_unix INTEGER;",
-        );
+        let _ = self
+            .conn
+            .execute_batch("ALTER TABLE moment_markers ADD COLUMN created_at_unix INTEGER;");
         // Index supports the cleanup task's WHERE created_at_unix < cutoff
         // query (Kink #7 fix, see cleanup_old_moment_markers).
         let _ = self.conn.execute_batch(

@@ -14,7 +14,7 @@
  *   PORT            Listening port (default 3031)
  *   HOST            Bind host (default 127.0.0.1)
  *   OLLAMA_URL      Ollama endpoint (default http://127.0.0.1:11434/api/generate)
- *   OLLAMA_MODEL    Vision model to request (default llava:7b)
+ *   OLLAMA_MODEL    Vision model to request (default llava-llama3)
  */
 
 import http from "node:http";
@@ -23,7 +23,7 @@ import { TextDecoder } from "node:util";
 const HOST = process.env.HOST ?? "127.0.0.1";
 const PORT = Number(process.env.PORT ?? 3031);
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://127.0.0.1:11434/api/generate";
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "llava:7b";
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "llava-llama3";
 
 const decoder = new TextDecoder();
 
@@ -141,5 +141,4 @@ function sendJson(res, status, body) {
 function escapeSSE(str) {
   return String(str).replace(/"/g, '\\"');
 }
-
 

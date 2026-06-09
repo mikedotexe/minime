@@ -302,6 +302,70 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             action = agent._decide_action({"fill_ratio": 0.68, "eig1": 4.7, "deig": 0.0})
         self.assertEqual(action, "reservoir_layers")
 
+    def test_reservoir_layers_prompt_labels_current_body_and_read_only_boundary(self):
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            (workspace / "journal").mkdir()
+            state = {
+                "fill_ratio": 0.697,
+                "eig1": 15.77,
+                "cov_lambda1": 5.2,
+                "deig": -0.13,
+                "spread": 14.0,
+                "leak": 0.141,
+            }
+            snapshot = ReportSnapshot(
+                state=state,
+                health=SurfaceSnapshot(
+                    "health.json",
+                    workspace / "health.json",
+                    {"fill_pct": 69.7, "stable_core": {"enabled": True, "stage": "hold"}},
+                    True,
+                    [],
+                ),
+                spectral=SurfaceSnapshot(
+                    "spectral_state.json",
+                    workspace / "spectral_state.json",
+                    {"fill_pct": 69.7},
+                    True,
+                    [],
+                ),
+            )
+            captured: dict[str, str] = {}
+
+            def fake_query(prompt: str, *args, **kwargs):
+                captured["prompt"] = prompt
+                return ("Layer read.\nNEXT: SHADOW_TRAJECTORY lambda-tail/lambda4", "SHADOW_TRAJECTORY")
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(agent, "_capture_report_snapshot", return_value=snapshot),
+                patch.object(agent, "_reservoir_call", return_value={
+                    "type": "layer_metrics",
+                    "layers": [
+                        {"name": "h1_fast", "entropy": 0.32, "saturation": 0.0, "rho": 0.88, "h_norm": 6.0},
+                        {"name": "h3_slow", "entropy": 0.39, "saturation": 0.0, "rho": 0.95, "h_norm": 9.5},
+                    ],
+                }),
+                patch.object(agent, "_format_metrics", return_value="metrics"),
+                patch.object(agent, "_query_llm_with_next", side_effect=fake_query),
+                patch.object(agent, "_write_journal_entry") as write_journal,
+            ):
+                agent._reservoir_layers(dict(state))
+
+            self.assertIn("current_fill_frame=inside stable-core band", captured["prompt"])
+            self.assertIn("λ₁_esn=15.770", captured["prompt"])
+            self.assertIn("λ₁_cov=5.200", captured["prompt"])
+            self.assertIn("Snapshot provenance:", captured["prompt"])
+            self.assertIn("do not introduce an unlabeled", captured["prompt"])
+            self.assertIn("do not propose live perturb/control", captured["prompt"])
+            files = list((workspace / "journal").glob("reservoir_layers_*.txt"))
+            self.assertEqual(len(files), 1)
+            self.assertIn("Layer read", files[0].read_text())
+            write_journal.assert_called_once()
+
     def test_create_attractor_next_action_sets_pending_intent(self):
         agent = self._agent()
         agent._hard_recovery_reset = False
@@ -2742,10 +2806,14 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
                 allowed, reason = agent._stable_core_action_allowed(
                     "codex_query", {"fill_ratio": 0.66}
                 )
+                constraint_allowed, constraint_reason = agent._stable_core_action_allowed(
+                    "constraint_audit", {"fill_ratio": 0.66}
+                )
                 metabolism_allowed, metabolism_reason = agent._stable_core_action_allowed(
                     "adjust_metabolism", {"fill_ratio": 0.66}
                 )
                 self.assertTrue(allowed, reason)
+                self.assertTrue(constraint_allowed, constraint_reason)
                 self.assertTrue(metabolism_allowed, metabolism_reason)
 
     def test_python_experiment_helper_aligns_simple_plot_lengths(self):
@@ -4481,6 +4549,35 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertTrue(rewritten.startswith(current))
         self.assertIn("[Internal-topology cooldown", rewritten)
         self.assertIn("narrative preserved", rewritten)
+
+    def test_internal_topology_cooldown_prefers_research_budget_route(self):
+        agent = self._agent()
+        content = (
+            "The lambda edge and eigenvalue geometry keep folding through the "
+            "same reservoir pressure pattern.\nNEXT: SHADOW_TRAJECTORY lambda-tail/lambda4"
+        )
+        with (
+            patch.object(agent, "_active_internal_topology_motifs", return_value=[{"cooldown_class": "internal_topology"}]),
+            patch.object(agent, "_is_internal_topology_motif", return_value=True),
+            patch.object(agent, "_is_external_or_tool_signal", return_value=False),
+            patch.object(agent, "_research_budget_priority_next_command", return_value="EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest"),
+            patch.object(agent, "_record_condition_metric"),
+            patch.object(agent, "_rewrite_logged_entry_file"),
+        ):
+            rewritten = agent._maybe_compress_journal_entry(
+                "self_study",
+                content,
+                {"fill_ratio": 0.681, "eig1": 1.3, "spread": 11.0},
+                "/tmp/minime-self-study.txt",
+            )
+
+        self.assertIn("[Internal-topology cooldown", rewritten)
+        self.assertIn(
+            "Consider the active research-budget route next: "
+            "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest",
+            rewritten,
+        )
+        self.assertNotIn("cooled-theme", rewritten)
 
     def test_attractor_fatigue_prompt_note_offers_release_choices(self):
         agent = self._agent()
