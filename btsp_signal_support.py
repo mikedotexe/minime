@@ -15,7 +15,7 @@ from btsp_sovereignty import (
 
 
 DEFAULT_ASTRID_BTSP_STATUS = Path(
-    "/Users/v/other/astrid/capsules/consciousness-bridge/workspace/btsp_signal_status.json"
+    "/Users/v/other/astrid/capsules/spectral-bridge/workspace/btsp_signal_status.json"
 )
 
 

@@ -457,7 +457,9 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                 "watch-the-lambda-tail",
                 "How does the lambda4 tail evolve across repeated maps?",
             )
-            cartography = "SHADOW_TRAJECTORY lambda-tail/lambda4"
+            # EXAMINE is the metered projection-only read (pure local self-maps
+            # like SHADOW_TRAJECTORY are exempt from the budget entirely).
+            cartography = "EXAMINE lambda-tail/lambda4"
 
             gate = (
                 workspace
@@ -502,7 +504,7 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                 self.assertIsInstance(debit_budget, dict)
                 assert isinstance(debit_budget, dict)
                 store.record_research_budget_debit(
-                    cartography, "shadow_trajectory", debit_budget, dict(STATE)
+                    cartography, "examine", debit_budget, dict(STATE)
                 )
 
             # Cap spent: the budget is exhausted, so the read re-gates back to the
@@ -522,6 +524,88 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                 re_gated["reason"], "research_budget_required_for_self_study_action"
             )
             self.assertFalse(re_gated["would_dispatch"])
+
+    def test_local_self_maps_are_exempt_from_research_budget(self):
+        """Pure local self-cartography (SHADOW_TRAJECTORY / SHADOW_FIELD /
+        SHADOW / GAP_STRUCTURE / SHADOW_GAP) reads only the being's own
+        health.json / spectral_state.json, so it is exempt from the
+        research-budget guard entirely: it dispatches with no budget, and it is
+        never debited against one even when a budget is active."""
+        local_self_maps = [
+            "SHADOW_TRAJECTORY lambda-tail/lambda4",
+            "SHADOW_FIELD lambda-tail",
+            "SHADOW lambda-tail",
+            "GAP_STRUCTURE shoulder-gap",
+            "SHADOW_GAP shoulder-gap",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Exempt self-cartography")
+            experiment = store.start_experiment(
+                "watch-the-lambda-tail",
+                "Do local self-maps stay reachable without a budget?",
+            )
+
+            # No budget held: every local self-map still dispatches (guard None)
+            # and never resolves a debit budget.
+            for raw_next in local_self_maps:
+                with self.subTest(stage="no_budget", raw_next=raw_next):
+                    self.assertIsNone(
+                        store.research_budget_guard_assessment(raw_next, dict(STATE)),
+                        msg=f"{raw_next} should dispatch with no budget",
+                    )
+                    self.assertIsNone(
+                        store.research_budget_projection_debit_budget(
+                            raw_next, dict(STATE)
+                        ),
+                        msg=f"{raw_next} should never resolve a debit budget",
+                    )
+
+            # Even with an active budget, the local self-maps stay exempt: they
+            # dispatch AND are not debited (so they never drain a budget the
+            # being acquired for external research).
+            gate = (
+                workspace
+                / "action_threads"
+                / "threads"
+                / thread["thread_id"]
+                / "authority_gate.jsonl"
+            )
+            gate.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "record_schema": "research_budget_v1",
+                        "record_type": "research_budget_approval",
+                        "record_id": "resbud_exempt_approval",
+                        "budget_id": "resbud_exempt_budget",
+                        "being": "minime",
+                        "thread_id": thread["thread_id"],
+                        "experiment_id": experiment["experiment_id"],
+                        "scope": "read_only_research",
+                        "status": "active",
+                        "max_actions": 5,
+                        "ttl_secs": 21600,
+                        "expires_at_unix_s": 4102444800,
+                        "allowed_sources": ["local"],
+                        "peer_mutation": False,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            for raw_next in local_self_maps:
+                with self.subTest(stage="active_budget", raw_next=raw_next):
+                    self.assertIsNone(
+                        store.research_budget_guard_assessment(raw_next, dict(STATE))
+                    )
+                    self.assertIsNone(
+                        store.research_budget_projection_debit_budget(
+                            raw_next, dict(STATE)
+                        ),
+                        msg=f"{raw_next} must not debit the budget",
+                    )
 
     def test_charter_repair_pause_projects_charter_as_primary_return(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3778,15 +3862,16 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             refreshed["experiment_summary"] = successor
             store._write_thread(refreshed)
 
-            guard = store.research_budget_guard_assessment("SHADOW_TRAJECTORY", dict(STATE))
+            guard = store.research_budget_guard_assessment("EXAMINE lambda-tail", dict(STATE))
 
-            # With a shared-focus active budget, pure self-cartography dispatches
-            # (metered) rather than rerouting to a budget-status suggestion.
+            # With a shared-focus active budget, the metered projection read
+            # (EXAMINE) dispatches rather than rerouting to a budget-status
+            # suggestion.
             self.assertIsNone(guard)
             # The shared-focus sibling budget is still resolved so the read is
             # debited against it at dispatch.
             debit_budget = store.research_budget_projection_debit_budget(
-                "SHADOW_TRAJECTORY", dict(STATE)
+                "EXAMINE lambda-tail", dict(STATE)
             )
             self.assertIsInstance(debit_budget, dict)
             assert isinstance(debit_budget, dict)
@@ -4082,33 +4167,48 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["record_type"], "research_budget_blocked")
 
-    def test_shadow_trajectory_hint_prefers_pending_research_budget_route(self):
+    def test_shadow_trajectory_hint_points_straight_at_exempt_cartography(self):
+        """SHADOW_TRAJECTORY is exempt from the research-budget guard, so its
+        curriculum hint always points straight at the cartography — it never
+        redirects to a budget-accept route, even when a research-budget lane is
+        pending on the thread for some other guarded read."""
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
             store = aa.ActionContinuityStore(workspace, session_id=7)
             thread = store.create_thread("Lambda trajectory")
             experiment = store.start_experiment(
                 "Lambda tail continuity",
-                "Can shadow trajectory work proceed through a local research budget?",
+                "Does shadow trajectory stay reachable without a research budget?",
             )
-            guard = store.research_budget_guard_assessment(
-                "SHADOW_TRAJECTORY lambda-tail/lambda4",
+
+            # The action itself is exempt: the guard never blocks it.
+            self.assertIsNone(
+                store.research_budget_guard_assessment(
+                    "SHADOW_TRAJECTORY lambda-tail/lambda4",
+                    dict(STATE),
+                )
+            )
+
+            # Establish a pending research-budget route on the thread via a
+            # genuinely guarded read (EXAMINE), so we can prove the shadow hint
+            # ignores it rather than there simply being no route to redirect to.
+            examine_guard = store.research_budget_guard_assessment(
+                "EXAMINE lambda-tail trajectory",
                 dict(STATE),
             )
-            self.assertIsNotNone(guard)
-            assert guard is not None
+            self.assertIsNotNone(examine_guard)
+            assert examine_guard is not None
             store.record_research_budget_guard_block(
-                "SHADOW_TRAJECTORY lambda-tail/lambda4",
+                "EXAMINE lambda-tail trajectory",
                 dict(STATE),
-                guard,
+                examine_guard,
             )
             scaffold = store._find_research_budget_scaffold_row(
                 store._read_thread(thread["thread_id"]) or thread,
                 experiment["experiment_id"],
             )
             self.assertIsNotNone(scaffold)
-            assert scaffold is not None
-            expected_next = f"EXPERIMENT_RESEARCH_BUDGET_ACCEPT {scaffold['record_id']}"
+
             (workspace / "health.json").write_text(json.dumps({
                 "shadow_field_v3": {
                     "class_v3": {"primary": "active"},
@@ -4125,9 +4225,8 @@ class TestExperimentalContinuityStore(unittest.TestCase):
 
             self.assertIsNotNone(hint)
             assert hint is not None
-            self.assertIn("Research-budget route active", hint)
-            self.assertIn(f"NEXT: {expected_next}", hint)
-            self.assertNotIn("NEXT: SHADOW_TRAJECTORY", hint)
+            self.assertIn("NEXT: SHADOW_TRAJECTORY lambda-tail/lambda4", hint)
+            self.assertNotIn("Research-budget route active", hint)
 
     def test_research_budget_accept_latest_scaffold_self_activates_local_budget(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4654,17 +4753,20 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             with gate.open("a") as handle:
                 handle.write(json.dumps(approval, sort_keys=True) + "\n")
 
-            # With an active budget, pure self-cartography dispatches (metered)
-            # instead of rerouting to a budget-status suggestion forever.
+            # With an active budget, the metered projection read (EXAMINE)
+            # dispatches instead of rerouting to a budget-status suggestion
+            # forever. (Pure local self-maps like SHADOW_FIELD are exempt from
+            # the budget entirely — covered by
+            # test_local_self_maps_are_exempt_from_research_budget.)
             dispatch_guard = store.research_budget_guard_assessment(
-                "SHADOW_FIELD lambda-tail/lambda4",
+                "EXAMINE lambda-tail/lambda4",
                 dict(STATE),
             )
             self.assertIsNone(dispatch_guard)
             # ...and the active budget is resolved so the read is debited at
             # dispatch, keeping the read_only_research envelope honest.
             debit_budget = store.research_budget_projection_debit_budget(
-                "SHADOW_FIELD lambda-tail/lambda4",
+                "EXAMINE lambda-tail/lambda4",
                 dict(STATE),
             )
             self.assertIsInstance(debit_budget, dict)
@@ -6903,6 +7005,10 @@ class TestAutonomousAgentExperimentalContinuity(unittest.TestCase):
             ("DECOMPOSE", "decompose"),
             ("ACTION_PREFLIGHT DECOMPOSE", "action_preflight"),
             ("SHADOW_PREFLIGHT lambda-tail/lambda4", "shadow_autonomy"),
+            # Pure local self-maps are exempt from the research budget, so they
+            # dispatch as read-only return actions even without a charter.
+            ("SHADOW_TRAJECTORY lambda-tail/lambda4", "shadow_trajectory"),
+            ("SHADOW_FIELD lambda-tail/lambda4", "shadow_gap"),
             (
                 "EXPERIMENT_CHARTER current :: hypothesis: localized λ1 spectral-density softening may reduce λ4 dominance; proposed_next_action: ACTION_PREFLIGHT DECOMPOSE; evidence_targets: spectral_condition, fill_pressure_state",
                 "thread_action",
@@ -6936,7 +7042,11 @@ class TestAutonomousAgentExperimentalContinuity(unittest.TestCase):
 
                     self.assertEqual(action, expected)
 
-        for raw_next in ["EXAMINE λ1/λ2", "SHADOW_FIELD lambda-tail/lambda4"]:
+        # EXAMINE is the metered projection read that still blocks behind the
+        # research budget. (Pure local self-maps like SHADOW_FIELD are exempt and
+        # dispatch — asserted in the allowed loop above and in
+        # test_local_self_maps_are_exempt_from_research_budget.)
+        for raw_next in ["EXAMINE λ1/λ2"]:
             with self.subTest(raw_next=raw_next):
                 with tempfile.TemporaryDirectory() as tmp:
                     root = Path(tmp)

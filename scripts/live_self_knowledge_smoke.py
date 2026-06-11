@@ -23,10 +23,10 @@ SYSTEMS = {
     },
     "astrid": {
         "override": Path(
-            "/Users/v/other/astrid/capsules/consciousness-bridge/workspace/runtime/pending_next_override.json"
+            "/Users/v/other/astrid/capsules/spectral-bridge/workspace/runtime/pending_next_override.json"
         ),
         "continuity": Path(
-            "/Users/v/other/astrid/capsules/consciousness-bridge/workspace/action_threads"
+            "/Users/v/other/astrid/capsules/spectral-bridge/workspace/action_threads"
         ),
     },
 }

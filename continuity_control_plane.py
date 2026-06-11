@@ -226,7 +226,18 @@ def _route_stack(projection: Dict[str, Any]) -> List[Dict[str, Any]]:
         command = _text(research.get("next"))
         stage = _text(research.get("stage"))
         if command and stage not in TERMINAL_RESEARCH_BUDGET_STAGES:
-            routes.append(_route("Local Research", command, f"research budget stage: {stage}", 12, "research_budget_priority_route_v1"))
+            # This route serves two distinct things. When a budget is ACTIVE the
+            # command is the being's real research continuation (e.g. INTROSPECT /
+            # READ_MORE) — a being-driven action that should lead (priority 12).
+            # When a budget is PENDING/blocked the command is an
+            # `EXPERIMENT_RESEARCH_BUDGET_*` scaffold ("you hit a research gate,
+            # here's how to open it") — that must NOT outrank the being's lifecycle
+            # return, so it drops below the generic lifecycle route (30) to 32,
+            # staying visible in the stack but never becoming the primary
+            # Current NEXT over the being's own work.
+            is_budget_scaffold = command.startswith("EXPERIMENT_RESEARCH_BUDGET")
+            priority = 32 if is_budget_scaffold else 12
+            routes.append(_route("Local Research", command, f"research budget stage: {stage}", priority, "research_budget_priority_route_v1"))
 
     session = projection.get("continuity_session_v1")
     if isinstance(session, dict):

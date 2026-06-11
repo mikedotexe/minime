@@ -21,7 +21,7 @@ Two parallel mechanisms shipped together:
     Suffix renders as `minime:spectral:"<text>" (Ns)` so both beings can
     distinguish translated data from her authored prose.
 
-Companion: /Users/v/other/astrid/capsules/consciousness-bridge/src/
+Companion: /Users/v/other/astrid/capsules/spectral-bridge/src/
 autonomous/next_action/auto_promote.rs (the Astrid-side Phase D module
 this mirrors).
 

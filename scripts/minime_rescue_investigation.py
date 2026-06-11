@@ -29,7 +29,7 @@ RESCUE_TARGET_FILL = 68.0
 RESCUE_REG_TICK_SECS = 0.5
 RESCUE_MODE = "rescue_b8823ad"
 RESCUE_PHYSIOLOGICAL_FALLBACK = True
-BRIDGE_USER_LABEL = "com.astrid.consciousness-bridge"
+BRIDGE_USER_LABEL = "com.astrid.spectral-bridge"
 CAMERA_USER_LABEL = "com.minime.camera-client"
 MIC_USER_LABEL = "com.minime.mic-to-sensory"
 HOST_SENSORY_USER_LABEL = "com.minime.host-sensory"
@@ -705,8 +705,8 @@ class InvestigationContext:
     @property
     def bridge_plist_candidates(self) -> list[Path]:
         return [
-            Path("/Users/v/other/astrid/launchd/com.astrid.consciousness-bridge.plist"),
-            HOME_LAUNCH_AGENTS / "com.astrid.consciousness-bridge.plist",
+            Path("/Users/v/other/astrid/launchd/com.astrid.spectral-bridge.plist"),
+            HOME_LAUNCH_AGENTS / "com.astrid.spectral-bridge.plist",
         ]
 
     @property
@@ -1466,7 +1466,7 @@ def collect_process_state(context: InvestigationContext, profile: dict[str, Any]
         "captured_at": now_iso(),
         "runtime_root": str(runtime_root),
         "engine_pid": _pgrep_latest(engine_binary),
-        "bridge_pid": _pgrep_latest("consciousness-bridge-server"),
+        "bridge_pid": _pgrep_latest("spectral-bridge-server"),
         "mic_pid": _pgrep_latest("mic_to_sensory.py"),
         "camera_pid": _pgrep_latest("camera_client.py"),
         "ports": _port_snapshot(["7878", "7879", "7880"]),

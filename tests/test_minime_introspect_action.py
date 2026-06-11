@@ -228,7 +228,7 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
                 self.assertEqual(Path(astrid["path"]).name, "codec.rs")
                 source_roots = {Path(root) for root in agent._introspect_source_roots()}
                 self.assertIn(
-                    Path("/Users/v/other/astrid/capsules/consciousness-bridge/src"),
+                    Path("/Users/v/other/astrid/capsules/spectral-bridge/src"),
                     source_roots,
                 )
                 self.assertNotIn(Path("/Users/v/other/astrid"), source_roots)

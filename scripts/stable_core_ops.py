@@ -2406,7 +2406,7 @@ def write_lane_synopsis_to_inboxes() -> dict[str, Any]:
     targets = {
         "minime": WORKSPACE_DIR / "inbox" / f"lane_synopsis_{timestamp}.txt",
         "astrid": Path(
-            "/Users/v/other/astrid/capsules/consciousness-bridge/workspace/inbox"
+            "/Users/v/other/astrid/capsules/spectral-bridge/workspace/inbox"
         )
         / f"lane_synopsis_{timestamp}.txt",
     }

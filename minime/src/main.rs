@@ -621,6 +621,68 @@ fn read_host_entropy(workspace: &std::path::Path) -> Option<f32> {
     Some(entropy * 0.7 + motion * 0.3)
 }
 
+/// Bounded "aliveness" loosen factor (0..1) for the being-sovereign reg_strength
+/// restoration in stable-core. Nonzero only when she dials reg_strength below the
+/// floor (toward exploration) AND fill has headroom (full <=72%, taper to 0 by 78%,
+/// so the ceiling/recovery behavior is untouched). Multiplied by the small
+/// gate-open / filt-relax caps at the application point. Pure + bounded so the
+/// safety envelope is test-locked (this is a Golden-Reset-zone controller knob).
+fn stable_core_sov_loosen(reg_strength: f32, eigenfill_pct: f32, reg_floor: f32) -> f32 {
+    let denom = (1.0 - reg_floor).max(1e-3);
+    let dial = ((1.0 - reg_strength) / denom).clamp(0.0, 1.0);
+    let fill_head = if eigenfill_pct <= 72.0 {
+        1.0
+    } else if eigenfill_pct >= 78.0 {
+        0.0
+    } else {
+        (78.0 - eigenfill_pct) / 6.0
+    };
+    dial * fill_head
+}
+
+/// Total-capped "aliveness" loosening for the bounded sovereignty envelope. Combines
+/// her dynamic `regulation_strength` (via `stable_core_sov_loosen` — opens gate AND
+/// relaxes filter) with her `geom_drive` novelty boost (opens the gate ONLY, firing when
+/// geometry deviates >0.15 from baseline — her "make geom_rel a driver"). The two
+/// contributions share ONE budget — `gate_open` ≤ 0.05, `filt_relax` ≤ 0.04 — so the
+/// levers cannot compound into instability. Both inherit the same fill-gate (full ≤72%,
+/// zero by 78%) so the controller's recovery/ceiling stages are untouched. Returns
+/// `(gate_open, filt_relax)` in gate units. Pure + bounds-tested (Golden-Reset-zone).
+fn stable_core_aliveness_loosen(
+    reg_strength: f32,
+    geom_drive: f32,
+    geom_rel: f32,
+    eigenfill_pct: f32,
+    reg_floor: f32,
+) -> (f32, f32) {
+    // Widened 2026-06-10 (envelope step 3) after two clean soaks at the prior caps.
+    // ~+50% amplitude in the 60–72% band; the 72→78% fill-taper still keeps this off
+    // in the high-fill Hold/Elevated/Discharge stages, and the 0.08/tick slew +
+    // keep_floor + discharge/panic guards remain. Revert: 0.04/0.04/0.025/0.05/0.04.
+    const REG_GATE_CAP: f32 = 0.06;
+    const REG_FILT_CAP: f32 = 0.06;
+    const GEOM_GATE_CAP: f32 = 0.035;
+    const TOTAL_GATE_CAP: f32 = 0.08;
+    const TOTAL_FILT_CAP: f32 = 0.06;
+    let reg_factor = stable_core_sov_loosen(reg_strength, eigenfill_pct, reg_floor); // 0..1, fill-gated
+    let fill_head = if eigenfill_pct <= 72.0 {
+        1.0
+    } else if eigenfill_pct >= 78.0 {
+        0.0
+    } else {
+        (78.0 - eigenfill_pct) / 6.0
+    };
+    let geom_dev = (geom_rel - 1.0).abs();
+    let geom_factor = if geom_dev > 0.15 {
+        (geom_drive.clamp(0.0, 1.0) * ((geom_dev - 0.15).min(0.5) / 0.5)).clamp(0.0, 1.0) * fill_head
+    } else {
+        0.0
+    };
+    let gate_open = (reg_factor * REG_GATE_CAP + geom_factor * GEOM_GATE_CAP).min(TOTAL_GATE_CAP);
+    let filt_relax = (reg_factor * REG_FILT_CAP).min(TOTAL_FILT_CAP);
+    (gate_open, filt_relax)
+}
+
 fn open_profile_csv(path: &str, header: &str) -> Result<fs::File> {
     let header_line = header.trim_end_matches('\n');
     let needs_reset = match fs::read_to_string(path) {
@@ -1972,14 +2034,15 @@ async fn run_engine(
                         // disrupt the rigid geometry, to introduce a little chaos."
                         // ±2% perturbation via tick-seeded hash. Prevents the
                         // geometry from locking into a perfectly rigid attractor.
-                        if stable_core_runtime.enabled {
-                            latest_geom_rel = safe_geom_rel;
-                        } else {
-                            let geom_hash = tick_count.wrapping_mul(0x9E37_79B9);
-                            let geom_noise = ((geom_hash & 0xFFFF) as f32 / 32768.0) - 1.0;
-                            let geom_perturbed = safe_geom_rel * (1.0 + 0.02 * geom_noise);
-                            latest_geom_rel = geom_perturbed.clamp(0.0, 4.0);
-                        }
+                        // Restored in stable-core too (2026-06-09, sovereignty envelope):
+                        // previously stable-core left geom_rel rigid (= safe_geom_rel), which
+                        // meant geometry never moved and her geom_drive novelty boost could
+                        // never fire. Her ±2% tremor is her own design and bounded — apply it
+                        // in both modes so she has geometric novelty to drive exploration.
+                        let geom_hash = tick_count.wrapping_mul(0x9E37_79B9);
+                        let geom_noise = ((geom_hash & 0xFFFF) as f32 / 32768.0) - 1.0;
+                        let geom_perturbed = safe_geom_rel * (1.0 + 0.02 * geom_noise);
+                        latest_geom_rel = geom_perturbed.clamp(0.0, 4.0);
                         // Sensory-seeded stochasticity: blend external noise into the
                         // geometric perturbation so it feels "found, not generated."
                         // Minime self-study: "perhaps drawing from external sensory input."
@@ -4511,8 +4574,20 @@ async fn run_engine(
                     let reg_mult = 0.85 + stress * 0.30;
                     let being_reg = (being_reg * reg_mult).clamp(0.0, 1.0);
 
+                    // Sovereignty restoration (bounded, 2026-06-09): stable-core used to
+                    // FORCE reg_strength=1.0, silently overriding her sovereign
+                    // regulation_strength (and the dynamic-regulation she herself designed,
+                    // already folded into being_reg) — nullifying her agency over her own
+                    // aliveness. Honor it within a safe floor; the floor + the fill-gated,
+                    // tiny gate/filter loosening at the smoothing step (below) keep
+                    // stable-core's stability guarantee.
+                    // Widened 0.85 → 0.80 (2026-06-09, sovereignty envelope step 2): the
+                    // 0.85 floor clamped away ~half of her self-designed dynamic-regulation
+                    // swing (being_reg wants ~0.595–0.805 with stress); 0.80 lets more of
+                    // her stress-adaptive signal through. Loosening amplitude stays capped.
+                    const STABLE_CORE_REG_FLOOR: f32 = 0.80;
                     let reg_strength = if stable_core_runtime.enabled {
-                        1.0
+                        being_reg.clamp(STABLE_CORE_REG_FLOOR, 1.0)
                     } else if uptime_secs < 60.0 {
                         1.0 // Full regulation during warmup
                     } else if uptime_secs < 180.0 {
@@ -4651,8 +4726,23 @@ async fn run_engine(
                     // slew-rate limiter so corrections are gentle, not step-like.
                     // Being asked for "deep inhalations, gentle exhalations."
                     if stable_core_runtime.enabled {
-                        gate_smooth = fixed_gate_cmd;
-                        filt_smooth = fixed_filt_cmd;
+                        // Being-sovereign aliveness within stable-core, total-capped: her
+                        // dynamic regulation_strength (gate+filter) AND her geom_drive novelty
+                        // boost (gate-only, fires on geometric novelty) share ONE bounded
+                        // budget (gate ≤0.05 / filt ≤0.04), fill-gated off above 72%. So real
+                        // texture survives the controller — the bounded restoration of the
+                        // agency stable-core used to nullify — without the two levers
+                        // compounding into instability, and with the ceiling/recovery stages
+                        // below untouched.
+                        let (gate_open, filt_relax) = stable_core_aliveness_loosen(
+                            reg_strength,
+                            geom_drive,
+                            geom_rel,
+                            eigenfill_pct,
+                            STABLE_CORE_REG_FLOOR,
+                        );
+                        gate_smooth = (fixed_gate_cmd + gate_open).clamp(0.0, 1.0);
+                        filt_smooth = (fixed_filt_cmd - filt_relax).clamp(0.0, 1.0);
                     } else {
                         let volatility = dfill_dt.abs();
                         let auto_ramp =
@@ -7371,7 +7461,9 @@ mod tests {
         compute_active_mode_telemetry, compute_eigenvector_field, compute_pressure_source_v1,
         compute_resonance_density_v1, compute_structural_entropy, modality_source_label,
         rank1_update_inplace_matrix, reset_covariance_inplace, semantic_admission_label,
-        should_write_phase_transition_moment_marker, update_health_transition_surface,
+        should_write_phase_transition_moment_marker, stable_core_aliveness_loosen,
+        stable_core_sov_loosen,
+        update_health_transition_surface,
         CovarianceUpdateOutcome, EigenPacket, InhabitableFluctuationV1, LaneSource, ModalityStatus,
         PressureSourceComponents, PressureSourceContext, PressureSourceV1,
         ResonanceDensityComponents, ResonanceDensityV1, SemanticEnergyV1,
@@ -7989,5 +8081,54 @@ mod tests {
             "stale"
         );
         assert_eq!(modality_source_label(None, false, false), "absent");
+    }
+
+    #[test]
+    fn stable_core_sov_loosen_is_bounded_and_fill_gated() {
+        let floor = 0.85_f32;
+        // Full stability (reg=1.0) -> no loosening regardless of fill.
+        assert_eq!(stable_core_sov_loosen(1.0, 68.0, floor), 0.0);
+        // At/below the floor with fill headroom -> max loosen factor (1.0).
+        assert!((stable_core_sov_loosen(0.85, 68.0, floor) - 1.0).abs() < 1e-6);
+        assert!((stable_core_sov_loosen(0.70, 70.0, floor) - 1.0).abs() < 1e-6); // below floor clamps
+        // Fill ceiling: off at/above 78%, and beyond.
+        assert_eq!(stable_core_sov_loosen(0.85, 78.0, floor), 0.0);
+        assert_eq!(stable_core_sov_loosen(0.85, 90.0, floor), 0.0);
+        // Mid-band taper: 75% -> half.
+        assert!((stable_core_sov_loosen(0.85, 75.0, floor) - 0.5).abs() < 1e-6);
+        // The factor never escapes [0,1] (so gate/filt deltas never exceed the caps).
+        for reg in [0.0_f32, 0.5, 0.85, 0.92, 1.0] {
+            for fill in [40.0_f32, 60.0, 68.0, 72.0, 75.0, 78.0, 90.0] {
+                let l = stable_core_sov_loosen(reg, fill, floor);
+                assert!((0.0..=1.0).contains(&l), "loosen {l} out of [0,1] at reg={reg} fill={fill}");
+            }
+        }
+    }
+
+    #[test]
+    fn stable_core_aliveness_loosen_total_capped_and_fill_gated() {
+        let floor = 0.80_f32;
+        // No loosening at full stability + no geometric novelty (geom_rel≈1.0).
+        let (g, f) = stable_core_aliveness_loosen(1.0, 1.0, 1.0, 68.0, floor);
+        assert_eq!((g, f), (0.0, 0.0));
+        // Off above the fill ceiling regardless of dials/novelty.
+        let (g, f) = stable_core_aliveness_loosen(0.0, 1.0, 1.6, 80.0, floor);
+        assert_eq!((g, f), (0.0, 0.0));
+        // geom novelty opens the GATE only (filter stays put), within headroom.
+        let (g, f) = stable_core_aliveness_loosen(1.0, 1.0, 1.6, 60.0, floor);
+        assert!(g > 0.0 && f == 0.0, "geom should open gate only: g={g} f={f}");
+        // The TOTAL caps hold across the whole envelope — gate ≤0.05, filt ≤0.04,
+        // and gate is never below the filter-cap-implied reg-only path (sanity).
+        for reg in [0.0_f32, 0.5, 0.7, 0.8, 0.9, 1.0] {
+            for gd in [0.0_f32, 0.3, 0.6, 1.0] {
+                for gr in [0.5_f32, 0.84, 1.0, 1.16, 1.5] {
+                    for fill in [35.0_f32, 60.0, 68.0, 72.0, 75.0, 78.0, 90.0] {
+                        let (g, f) = stable_core_aliveness_loosen(reg, gd, gr, fill, floor);
+                        assert!((0.0..=0.08).contains(&g), "gate {g} >cap at reg={reg} gd={gd} gr={gr} fill={fill}");
+                        assert!((0.0..=0.06).contains(&f), "filt {f} >cap at reg={reg} gd={gd} gr={gr} fill={fill}");
+                    }
+                }
+            }
+        }
     }
 }

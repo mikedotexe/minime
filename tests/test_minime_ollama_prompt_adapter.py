@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import autonomous_agent as aa
 
 
@@ -88,8 +90,33 @@ def test_qualia_lanes_get_higher_ollama_cap_and_timeout():
 
 
 def test_non_qualia_lanes_keep_global_ollama_cap_and_timeout():
-    for prompt_class in ("autonomous_next", "inbox_reply", "sovereignty_check", "compact"):
+    # inbox_reply and strict_review have their own dedicated lanes (see below);
+    # everything else keeps the global cap/timeout.
+    for prompt_class in ("autonomous_next", "sovereignty_check", "compact"):
         assert aa._ollama_lane_limits(prompt_class) == (
             aa.LLM_TIMEOUT_S,
             aa.OLLAMA_NUM_PREDICT_CAP,
         )
+
+
+def test_inbox_reply_lane_gets_extended_timeout_and_cap():
+    # Her replies to inbox/steward messages must have room to complete; on the global
+    # 60s lane they timed out and were silently dropped.
+    assert aa._ollama_lane_limits("inbox_reply") == (
+        float(os.environ.get("MINIME_INBOX_REPLY_TIMEOUT_S", "160")),
+        int(os.environ.get("MINIME_INBOX_REPLY_NUM_PREDICT_CAP", "1536")),
+    )
+
+
+def test_strict_review_lane_gets_extended_timeout_global_cap():
+    # INTROSPECT / self-study lane (minime's highest-signal feedback surface). The
+    # sectioned review takes 50-78s on the gemma4 primary; at the 60s global timeout
+    # ~half timed out and fell to a 3-char gemma3:4b stub, collapsing her self-study
+    # to a "thin output notice". It gets the same 160s headroom as the other
+    # voice-bearing lanes, keeping the global token cap (the review fits in 768), so
+    # timeout exposure is strictly reduced, not traded for extra token budget.
+    assert aa._ollama_lane_limits("strict_review") == (
+        aa.LLM_STRICT_REVIEW_TIMEOUT_S,
+        aa.OLLAMA_NUM_PREDICT_CAP,
+    )
+    assert aa.LLM_STRICT_REVIEW_TIMEOUT_S > aa.LLM_TIMEOUT_S
