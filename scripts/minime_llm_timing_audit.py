@@ -93,6 +93,15 @@ def is_fallback(record: dict[str, Any]) -> bool:
     return "fast" in str(record.get("backend") or "").lower()
 
 
+def is_thin_fallback_success(record: dict[str, Any], *, thin_chars: int) -> bool:
+    return (
+        record.get("status") == "ok"
+        and is_fallback(record)
+        and isinstance(record.get("response_chars"), (int, float))
+        and int(record.get("response_chars") or 0) <= thin_chars
+    )
+
+
 def group_summary(
     key: tuple[str, str, str],
     records: list[dict[str, Any]],
@@ -110,11 +119,7 @@ def group_summary(
     fallback_count = sum(1 for record in records if is_fallback(record))
     ok_records = [record for record in records if record.get("status") == "ok"]
     thin_fallback = sum(
-        1
-        for record in ok_records
-        if is_fallback(record)
-        and isinstance(record.get("response_chars"), (int, float))
-        and int(record.get("response_chars") or 0) <= thin_chars
+        1 for record in ok_records if is_thin_fallback_success(record, thin_chars=thin_chars)
     )
     return {
         "prompt_class": prompt_class,
@@ -183,6 +188,11 @@ def summarize_records(
                 "call_count": len(bucket),
                 "timeout_count": sum(1 for record in bucket if is_timeout(record)),
                 "fallback_count": sum(1 for record in bucket if is_fallback(record)),
+                "thin_success_count": sum(
+                    1
+                    for record in bucket
+                    if is_thin_fallback_success(record, thin_chars=thin_chars)
+                ),
                 "p95_elapsed_s": percentile(elapsed, 95),
                 "max_elapsed_s": round(max(elapsed), 3) if elapsed else None,
             }
@@ -190,6 +200,7 @@ def summarize_records(
     class_risks.sort(
         key=lambda item: (
             int(item["timeout_count"]),
+            int(item["thin_success_count"]),
             int(item["fallback_count"]),
             float(item["p95_elapsed_s"] or 0.0),
             int(item["call_count"]),
@@ -222,6 +233,7 @@ def render_markdown(summary: dict[str, Any]) -> str:
             lines.append(
                 f"- {risk['prompt_class']}: calls={risk['call_count']}, "
                 f"timeouts={risk['timeout_count']}, fallbacks={risk['fallback_count']}, "
+                f"thin_successes={risk['thin_success_count']}, "
                 f"p95={risk['p95_elapsed_s']}, max={risk['max_elapsed_s']}"
             )
     else:

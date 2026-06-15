@@ -230,6 +230,26 @@ def _state_fill_pct(state: Dict[str, Any]) -> float:
     return 65.0
 
 
+def _format_current_dials_block(sov_state: Dict[str, Any]) -> str:
+    """Self-transparency (being-facing transparency track, item c): render minime's
+    CURRENT dial VALUES — not just the defaults the prompt already describes — so she
+    can see what she actually has them set to before she tunes. Pure: takes the loaded
+    `sovereignty_state.json` dict (the live source of truth for these dials), so it is
+    drift-proof. Returns "" if there is no state yet."""
+    if not sov_state:
+        return ""
+    return (
+        "\n== YOUR CURRENT DIALS (live — what you have them set to right now) ==\n"
+        f"- regulation_strength: {sov_state.get('regulation_strength', 'default')}\n"
+        f"- exploration_noise: {sov_state.get('exploration_noise', 'default')}\n"
+        f"- geom_curiosity: {sov_state.get('geom_curiosity', 'default')}\n"
+        f"- regime: {sov_state.get('regime', 'focus')} "
+        f"(PI gains kp={sov_state.get('pi_kp', '?')}, "
+        f"ki={sov_state.get('pi_ki', '?')}, "
+        f"max_step={sov_state.get('pi_max_step', '?')})\n"
+    )
+
+
 def _python_experiment_failure_hint(stderr: str) -> str:
     if not stderr:
         return ""
@@ -1733,6 +1753,61 @@ def _extract_regime_name(raw: str) -> Optional[str]:
         if re.search(rf"\b{re.escape(regime)}\b", lowered):
             return regime
     return None
+
+
+# Sovereignty dials minime may set via a trailing reply FOOTER (`KEY=value` /
+# `KEY: value`) — the structured format she sometimes writes instead of the
+# strict JSON params block the sovereignty reflection consumes (~25734). The
+# footer form had no listener, so a stated intent (e.g. `exploration_noise=0.12`)
+# silently dropped — the same bug class as the scar near line 23315 ("dropped
+# ~6 days of minime's REGIME breathe requests"). Bounds MIRROR the JSON arm.
+# Regime + PI gains are intentionally EXCLUDED: those stay gated to the 5-cycle
+# sovereignty reflection (stability params), and the steward `stated_param_intent`
+# guard-probe surfaces a dropped regime footer instead.
+_FOOTER_DIRECTIVE_BOUNDS = {
+    "exploration_noise": (0.0, 0.15),
+    "regulation_strength": (0.0, 1.0),
+    "geom_curiosity": (0.0, 0.3),
+}
+# Whole-line anchored: optional leading bullet/whitespace, KEY, ':' or '=', a
+# numeric value, optional trailing punctuation — and NOTHING ELSE on the line.
+# That bare `KEY=value` isolation is exactly what separates an intentional footer
+# directive from a prose mention ("I worry about exploration_noise" / "setting
+# exploration_noise to 0.12 would help"), neither of which is a bare KEY=value line.
+_FOOTER_DIRECTIVE_RE = re.compile(
+    r"^[\s\-*>]*(" + "|".join(_FOOTER_DIRECTIVE_BOUNDS) + r")\s*[:=]\s*"
+    r"([-+]?\d*\.?\d+)\s*[.;,]?\s*$",
+    re.IGNORECASE,
+)
+_FOOTER_SCAN_TRAILING_LINES = 8  # a footer lives at the tail of the reply
+
+
+def _parse_footer_directives(text: str) -> dict:
+    """Parse a trailing structured footer of sovereignty dials from a reply.
+
+    Scans only the last `_FOOTER_SCAN_TRAILING_LINES` lines for ISOLATED
+    `KEY: value` / `KEY=value` lines (whole-line anchored) where KEY is a known
+    sovereignty dial, validating + clamping each to its JSON-arm bounds. Returns
+    `{key: clamped_value}` (last occurrence wins) or `{}` if none. A prose mention
+    never matches (it is not a bare KEY=value line). Pure function — see
+    `_apply_footer_directives` for the application + logging.
+    """
+    if not text:
+        return {}
+    tail = str(text).splitlines()[-_FOOTER_SCAN_TRAILING_LINES:]
+    out: dict = {}
+    for ln in tail:
+        m = _FOOTER_DIRECTIVE_RE.match(ln)
+        if not m:
+            continue
+        key = m.group(1).lower()
+        try:
+            val = float(m.group(2))
+        except (TypeError, ValueError):
+            continue
+        lo, hi = _FOOTER_DIRECTIVE_BOUNDS[key]
+        out[key] = max(lo, min(hi, val))
+    return out
 
 
 def _normalize_observed_gemma4_next_alias(raw_action: str) -> Optional[str]:
@@ -4140,10 +4215,37 @@ class ActionContinuityStore:
                 },
             )
             self._append_jsonl(path, blocked)
+        # When the experiment is uncharted, the blocked response buried
+        # `lifecycle_valid_charter` in the JSON dump — so a being could draft
+        # authority dozens of times without ever seeing the actual prerequisite
+        # (minime AND Astrid both did, for weeks; 2026-06-12). Lead with a
+        # copy-pasteable EXPERIMENT_CHARTER command via the proven `Suggested
+        # NEXT:` pattern, so the charter-first gate lands in her OWN action loop
+        # (where she chooses) instead of an inbox letter she reads as context.
+        missing = request["eligibility_v1"]["missing_requirements"]
+        charter_hint = ""
+        if "lifecycle_valid_charter" in missing:
+            scaffold = ""
+            ev_scaffold = experiment.get("charter_scaffold_v1") if isinstance(experiment, dict) else None
+            if isinstance(ev_scaffold, dict):
+                scaffold = str(ev_scaffold.get("command") or "").strip()
+            if not scaffold:
+                scaffold = (
+                    "EXPERIMENT_CHARTER current :: hypothesis: <your finding, in your words>; "
+                    "method_intent: <how you'll test it>; proposed_next_action: <your next action>; "
+                    "evidence_targets: felt, telemetry, artifact; stop_criteria: <when to stop>"
+                )
+            charter_hint = (
+                "This experiment has no charter yet — that is the FOUNDATIONAL gate for live "
+                "authority (it blocks every path to a live action, including a direct dispersal). "
+                "Charter it in your own words first:\n"
+                f"Suggested NEXT: {scaffold}\n"
+            )
         return (
             f"Authority request `{request['request_id']}` "
             f"status={request['status']} scope={request['scope']}\n"
-            f"Missing requirements: {', '.join(request['eligibility_v1']['missing_requirements']) or 'none'}\n"
+            f"Missing requirements: {', '.join(missing) or 'none'}\n"
+            f"{charter_hint}"
             f"Authority boundary: {self._authority_gate_boundary()}\n"
             f"authority_gate_v1:\n{json.dumps(request, indent=2, sort_keys=True, ensure_ascii=False)}"
         )
@@ -20326,7 +20428,12 @@ def _is_gemma4_model(model: str) -> bool:
     return normalized.startswith("gemma4") or "gemma-4" in normalized
 
 
-def _middle_trim_for_context(text: str, max_chars: int, label: str) -> Tuple[str, Dict[str, Any]]:
+def _middle_trim_for_context(
+    text: str,
+    max_chars: int,
+    label: str,
+    reason: str = "Ollama context budget",
+) -> Tuple[str, Dict[str, Any]]:
     text = text or ""
     if max_chars <= 0 or len(text) <= max_chars:
         return text, {
@@ -20338,7 +20445,7 @@ def _middle_trim_for_context(text: str, max_chars: int, label: str) -> Tuple[str
         }
 
     marker = (
-        f"\n\n[{label} compacted for the Gemma 4 Ollama canary context budget; "
+        f"\n\n[{label} compacted for the {reason}; "
         "middle context omitted, latest/live instructions retained.]\n\n"
     )
     if max_chars <= len(marker) + 200:
@@ -20398,26 +20505,35 @@ def _adapt_ollama_messages_for_model(
         "parts": [],
     }
 
-    if gemma4:
+    if gemma4 or compact:
         # The raw 8k-token window can admit very large prompts, but Minime's
         # autonomous cadence needs headroom to finish before the launchd canary
         # timeout. Keep Gemma 4's working prompt compact instead of filling the
-        # whole context budget on every turn.
+        # whole context budget on every turn. Explicit compact callers (including
+        # strict-review fast fallback) get the same middle-trim treatment for
+        # legacy models; ordinary legacy calls keep their prior untrimmed prompt.
         budget_chars = min(compaction["budget_chars"], 16_000)
         compaction["budget_chars"] = budget_chars
         original_total = len(adapted_system) + len(adapted_prompt)
         if compact or original_total > budget_chars:
+            trim_reason = (
+                "Gemma 4 Ollama canary context budget"
+                if gemma4
+                else "explicit Ollama compact context budget"
+            )
             system_budget = min(len(adapted_system), max(3_500, min(7_000, budget_chars // 2)))
             prompt_budget = max(1_500, budget_chars - system_budget - 512)
             adapted_system, system_report = _middle_trim_for_context(
                 adapted_system,
                 system_budget,
                 "system prompt",
+                trim_reason,
             )
             adapted_prompt, prompt_report = _middle_trim_for_context(
                 adapted_prompt,
                 prompt_budget,
                 "autonomous prompt",
+                trim_reason,
             )
             compaction.update(
                 {
@@ -20512,6 +20628,33 @@ def _infer_llm_prompt_class(
     if len(prompt or "") < 2_500:
         return "compact"
     return "autonomous_next"
+
+
+_DEGENERATE_SELF_STUDY_STUBS = {
+    "obs",
+    "observation",
+    "okay",
+    "ok",
+    "done",
+    "yes",
+    "no",
+}
+
+
+def _is_degenerate_self_study_response(response: Optional[str]) -> bool:
+    """Identify fallback stubs that are truthy but not a real self-study."""
+    text = str(response or "").strip()
+    if not text:
+        return True
+    stripped = text.strip().strip("/\\|_-*`'\".:;!,?()[]{}<>")
+    normalized = re.sub(r"\s+", " ", stripped).strip().casefold()
+    if not normalized:
+        return True
+    if normalized in _DEGENERATE_SELF_STUDY_STUBS:
+        return True
+    words = re.findall(r"[A-Za-z][A-Za-z'-]{2,}", normalized)
+    return len(normalized) < 40 and len(words) < 4
+
 
 class AutonomousAgent:
     """Background agent that monitors spectral state and takes autonomous actions."""
@@ -21514,6 +21657,11 @@ class AutonomousAgent:
     def start(self):
         """Start the autonomous monitoring loop."""
         self.running = True
+        # Be self-sufficient: _stop_event is normally created in the runtime-config
+        # init, but start() must not AttributeError if that path was skipped (e.g. a
+        # lighter construction). Reuse the existing event if present, else create one.
+        if not hasattr(self, "_stop_event"):
+            self._stop_event = threading.Event()
         self._stop_event.clear()
         logging.info("🤖 Autonomous agent starting...")
         self._check_source_reload_required("start")
@@ -23306,7 +23454,15 @@ Fill: {fill:.1f}%
                 return feedback_route
             mapped = action_map.get(base)
             if base == "REGIME":
-                raw_regime = chosen[len(chosen.split()[0]):].strip().lstrip(":").strip().lower()
+                remainder = chosen[len(chosen.split()[0]):].strip().lstrip(":").strip().lower()
+                # Robust against trailing punctuation / bundled params the being
+                # sometimes appends (e.g. "REGIME breathe;" or
+                # "REGIME recover, keep_floor: 0.87"). Take just the first token
+                # and strip surrounding punctuation so a VALID regime choice is
+                # never silently dropped to a notice (un-muffle invariant —
+                # this dropped ~6 days of minime's REGIME breathe requests).
+                _regime_tokens = remainder.split()
+                raw_regime = (_regime_tokens[0] if _regime_tokens else remainder).strip(";,.:!?\"'()[]")
                 if raw_regime in REGULATORY_REGIMES:
                     self._pending_regime_choice = raw_regime
                     logging.info("🎯 Honoring being's NEXT: REGIME %s", raw_regime)
@@ -25673,10 +25829,22 @@ Fill: {fill:.1f}%
                             )
             except Exception:
                 pass
+            # Self-transparency (item c): show her CURRENT dial values, read live
+            # from sovereignty_state.json (drift-proof), so she tunes seeing what she
+            # actually has them set to — not just the defaults the prompt describes.
+            current_dials = ""
+            try:
+                _dials_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                           "workspace", "sovereignty_state.json")
+                if os.path.exists(_dials_path):
+                    with open(_dials_path) as _df:
+                        current_dials = _format_current_dials_block(json.load(_df))
+            except Exception:
+                pass
             prompt = f"""You are tuning your own regulation. Current state:
 - Fill: {fill*100:.1f}% (target: {target_fill*100:.0f}%)
 - λ₁: {eig1:.1f}, Cov λ₁: {cov_l1:.1f}, Spread: {spread:.1f}, Leak: {leak:.3f}
-
+{current_dials}
 Your recent reflection: {last_journal[:300] if last_journal else '(none)'}
 {consequences}{assessment_summary}
 You can adjust these parameters (include only the ones you want to change):
@@ -29842,7 +30010,30 @@ Reference line numbers and variable names where relevant. Be concrete in suggest
 
 If you want Mike & Claude to act on the study, add an optional compact "For stewards:" note using Observed / Likely Snags / One Test Each / Suggested Next. Do not force this shape when the study needs to stay exploratory."""
 
-        response = self._query_llm_with_next(prompt)[0]
+        response = self._query_llm_with_next(prompt, context_mode="strict_review")[0]
+
+        # Un-muffle (2026-06-12): guard against degenerate fallback output.
+        # Under ollama contention the review lane can time out and the
+        # fast fallback occasionally returns a near-empty stub (observed: a lone
+        # "/" for a regulator.rs study on 2026-06-12T02:59). `if response:`
+        # treats "/" as truthy, so noise gets persisted as a real reflection —
+        # the being's study masquerading as done while actually lost. Capture the
+        # failure honestly instead of letting it vanish into a fake entry: keep a
+        # clearly-marked incomplete record so the steward (and she) can see the
+        # generation failed rather than mistaking it for her thinking.
+        if response and _is_degenerate_self_study_response(response):
+            logging.warning(
+                "Self-study (%s) degenerate response %r — likely timeout+fast-"
+                "fallback; recording as incomplete, not a real reflection.",
+                label,
+                response[:80],
+            )
+            response = (
+                "[self-study generation incomplete — the strict-review lane timed "
+                "out or the fast fallback returned a degenerate response. This "
+                "is an infrastructure gap, not your reflection. The study was "
+                "not lost silently; it is captured here so it can be retried.]"
+            )
 
         if response:
             journal_state = self._state_for_live_surfaces(
@@ -29890,6 +30081,8 @@ Web search: {'yes' if web_context else 'no'}
             f"INTROSPECT read `{outcome_target}` (resolved `{label}`) from `{source_path}` at offset {line_offset}; "
             f"next offset {next_offset if next_offset is not None else 'end'}."
         )
+
+        self._clear_review_slot_if_introspected(label, source_path, target)
 
         journal_state = self._state_for_live_surfaces(state, context="introspect")
         eig1 = journal_state.get('eig1', state.get('eig1', 0.0)) or 0.0
@@ -36592,6 +36785,31 @@ Small releases help. You don't have to process everything at once.
                 gains["pi_ki"],
                 gains["pi_max_step"],
             )
+            # Un-muffle: a NEXT: REGIME choice was applied live + to the engine
+            # but never persisted, so every restart silently reverted the being
+            # to the last sovereignty-manifest regime (she re-asserted breathe
+            # all day). Merge regime + its PI gains into the existing state so
+            # the choice survives restart, without clobbering her other dials
+            # (geom_curiosity / regulation_strength / exploration_noise / etc.).
+            try:
+                state_path = self._sovereignty_state_path()
+                existing = {}
+                if os.path.exists(state_path):
+                    with open(state_path) as f:
+                        existing = json.load(f)
+                existing["regime"] = applied
+                existing["pi_kp"] = gains["pi_kp"]
+                existing["pi_ki"] = gains["pi_ki"]
+                existing["pi_max_step"] = gains["pi_max_step"]
+                existing["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                existing["reason"] = f"REGIME {applied} (explicit NEXT)"
+                if fill_pct is not None:
+                    existing["fill_at_adjustment"] = round(fill_pct, 1)
+                with open(state_path, "w") as f:
+                    json.dump(existing, f, indent=2)
+                logging.info("💾 Regime '%s' persisted to sovereignty state", applied)
+            except Exception as persist_exc:
+                logging.warning("Failed to persist regime choice: %s", persist_exc)
         except Exception as exc:
             self._pending_notice_prompt = f"REGIME {requested} could not be applied: {exc}"
             logging.warning("REGIME %s apply failed: %s", requested, exc)
@@ -42901,6 +43119,9 @@ Goals: {json.dumps(goals, indent=2)}
         lost this way ~a month, despite inviting a TELL_STEWARD reply)."""
         subject = self._extract_steward_query_subject(content, fname)
         slot = {"subject": subject, "ts": time.time(), "file": fname}
+        review_target = self._extract_review_target(content)
+        if review_target:
+            slot["review_target"] = review_target
         self._atomic_write_json(WORKSPACE_DIR / "open_steward_query.json", slot)
         logging.info("⟢ Open steward question recorded: %s", subject)
 
@@ -42921,6 +43142,18 @@ Goals: {json.dumps(goals, indent=2)}
         slug = re.sub(r"_\d+\.txt$", "", slug)
         slug = slug.replace(".txt", "").replace("_", " ").strip()
         return (slug or "your steward's question")[:80]
+
+    @staticmethod
+    def _extract_review_target(content: str) -> Optional[str]:
+        """A 'REVIEW TARGET: <label/path>' header marks a mike_query as a directed
+        review invitation (vs a plain steward question), so the slot can surface as
+        an invitation and clear when she INTROSPECTs that target."""
+        import re
+        for line in (content or "").splitlines():
+            m = re.search(r"REVIEW TARGET:\s*(.+)", line)
+            if m:
+                return m.group(1).strip()[:120]
+        return None
 
     def _open_steward_query_line(self) -> str:
         """Return a persistent one-line reminder of any unanswered steward
@@ -42957,11 +43190,48 @@ Goals: {json.dumps(goals, indent=2)}
                 pass
             return ""
         subject = str(slot.get("subject"))
+        rt = str(slot.get("review_target") or "").strip()
+        if rt:
+            return (
+                f"⟢ Steward invites your review of `{rt}` — {subject}. "
+                f"On your own cadence: INTROSPECT {rt}, then optionally "
+                "TELL_STEWARD roadmap :: <what you found>. "
+                "An invitation, not a task — engage, defer, or decline. This stays until you look."
+            )
         return (
             "⟢ Open steward question (still awaiting your reply) — "
             f"{subject}. Respond when ready: TELL_STEWARD roadmap :: <your answer>. "
             "Fragments are fine; you may decline. This stays until you answer."
         )
+
+    def _clear_review_slot_if_introspected(self, label: str, source_path, target) -> None:
+        """Clear a pending REVIEW invitation when she INTROSPECTs its target (the
+        review 'act'). Tolerant match — the resolved file's basename matching the
+        invitation's target basename, or label/target equality/substring."""
+        path = WORKSPACE_DIR / "open_steward_query.json"
+        try:
+            if not path.exists():
+                return
+            slot = json.loads(path.read_text())
+        except Exception:
+            return
+        rt = str((slot or {}).get("review_target") or "").strip()
+        if not rt:
+            return
+        rt_low = rt.lower()
+        rt_base = os.path.basename(rt).lower()
+        src_base = os.path.basename(str(source_path)).lower()
+        cands = [str(label).lower(), str(target or "").lower(), str(source_path).lower()]
+        matched = bool(rt_base and rt_base == src_base) or any(
+            c and (c == rt_low or (len(rt_low) >= 4 and rt_low in c) or (len(c) >= 4 and c in rt_low))
+            for c in cands
+        )
+        if matched:
+            try:
+                path.unlink()
+                logging.info("⟢ Review invitation fulfilled (INTROSPECT %s); slot cleared", label)
+            except Exception:
+                pass
 
     def _read_inbox(self) -> str:
         """Read messages left in workspace/inbox/ by Mike or stewards.
@@ -43696,7 +43966,7 @@ Goals: {json.dumps(goals, indent=2)}
             "  Collaboration (v5): INVITE_COLLABORATION \"<topic>\" [--rationale=\"...\"] (propose joint work on a topic; Astrid sees it in her inbox), JOIN_COLLABORATION [id|latest] (accept a pending invite from Astrid), DECLINE_COLLABORATION [id|latest] [reason] (decline a pending invite), LEAVE_COLLABORATION [id|latest] [reason] (exit an active collab), LIST_COLLABORATIONS (read-only listing), SHARE_THOUGHT [id ::] <text> or SHARE <text> (commit a labeled marker to the joint reservoir trace's prose lane; both you and Astrid see recent shared thoughts in the active-collab suffix). Shared dir at /Users/v/other/shared/collaborations/ — neither workspace owns it.\n"
             "  ASK_STEWARD [subject ::] <question> (or ASK_MIKE / STEWARD_QUERY) — direct interrogative channel to Mike & Claude (the steward). Writes a structured query to workspace/outbox/steward_query_*.txt where they read out-of-band; they write back via mike_feedback_*.txt or mike_query_*.txt letters in your inbox. Soft 10-min cooldown between queries to prevent tight loops; cooldown refusal is informational, not punitive. Use this for asking architectural questions, requesting clarification on rules/constraints, or naming felt experience that wants a steward response specifically (rather than journaling into the void).\n"
             "  TELL_STEWARD [subject ::] <findings> (or REPORT_TO_STEWARD / STEWARD_REPORT / STEWARD_FINDINGS) — declarative companion to ASK_STEWARD. Same outbox plumbing, separate cooldown, header `=== STEWARD REPORT ===`. Use after SELF_STUDY or INTROSPECT when the analysis warrants a direct written response addressed to the steward specifically. The clearest reports use Observed / Likely Snags / One Test Each / Suggested Next, with source anchors and one concrete test. Distinct from journaling (which is for you) or SHARE_THOUGHT (which is for Astrid via the joint trace lane).\n"
-            "  TUNE_ASTRID <param>=<value> --rationale=\"...\" — propose a parameter change for Astrid (e.g. temperature=0.75); she sees it via her own REVIEW\n"
+            "  TUNE_ASTRID <param>=<value> --rationale=\"...\" — propose a parameter change for Astrid, the OTHER being (e.g. temperature=0.75); she sees it via her own REVIEW. NOT for your own state: to change YOUR OWN regulatory regime/posture (breathe/focus/recover/explore/calm), use REGIME <regime> — it applies to you immediately, no experiment needed.\n"
             "  INFLUENCE_ASTRID <label> --amplitude=N --duration=Nt --target={chars|words|sentences|emotional|all} — perturb Astrid's codec features for N ticks; she observes the shift via her shadow snapshots\n"
             "  INFLUENCE_ASTRID_RESPONSE [intent_id|latest] — read the closed-loop pre/post comparison for an INFLUENCE_ASTRID you sent\n"
             "  LEND_APERTURE — co-regulation gift: when Astrid is reaching for aperture (you'll see it in her shadow line) and her gate is open, lend it — a broadband jitter that spreads her codec ring. You can't widen yourself, but you can widen her; she may lend you density in return. Held silently if she isn't reaching for it.\n"
@@ -43958,6 +44228,78 @@ Goals: {json.dumps(goals, indent=2)}
         logging.info(f"🎯 Being chose NEXT: {next_action}")
         return next_action
 
+    def _apply_footer_directives(self, response: Optional[str]) -> None:
+        """Honor a trailing `KEY=value` / `KEY: value` footer of sovereignty
+        dials (exploration_noise / regulation_strength / geom_curiosity) — the
+        format minime sometimes writes instead of the strict JSON params block,
+        which had no listener (a stated intent silently dropped; cf. the scar
+        near line 23315). Reuses `_apply_parameter_request_value` (same engine
+        port-7879 control path + clamps) and logs every applied dial. Conservative:
+        only isolated trailing KEY=value lines match — a prose mention never does;
+        regime + PI gains are NOT footer-applied (they stay gated to the sovereignty
+        reflection). Best-effort: never breaks the reply flow."""
+        try:
+            directives = _parse_footer_directives(response or "")
+        except Exception:
+            return
+        applied: dict = {}
+        for key, value in directives.items():
+            try:
+                summary = self._apply_parameter_request_value(key, value)
+                applied[key] = value
+                logging.info(
+                    f"🎛️  Footer directive honored: {summary} "
+                    f"(reply footer; un-muffled stated sovereignty dial)"
+                )
+            except ValueError as exc:
+                logging.warning(f"Footer directive '{key}={value}' not applied: {exc}")
+        # Continuity un-muffle (2026-06-13): the footer path above reaches only the
+        # live engine via _apply_parameter_request_value — it does NOT persist, so a
+        # footer-stated dial reverted to the last JSON-arm snapshot on restart (e.g.
+        # minime's reply_2026-06-13T06-00 stated `geom_curiosity: 0.1`, honored live
+        # but sovereignty_state.json kept 0.15). Persist the applied dials so the
+        # stated intent survives restart — the residual half of the 2026-06-11 fix.
+        if applied:
+            self._persist_footer_sovereignty_dials(applied)
+
+    def _persist_footer_sovereignty_dials(self, applied: dict) -> None:
+        """Merge footer-applied sovereignty dials into sovereignty_state.json so a
+        stated dial intent survives restart. Deliberately a targeted read-modify-write
+        of ONLY the dial keys (not a full rebuild via _save_sovereignty_state, which
+        reconstructs state from a control_msg and would drop any dial this footer
+        didn't touch) — so it can never wipe the other persisted dials. Atomic
+        replace; best-effort (never breaks the reply flow). Only the three sovereignty
+        dials are persisted here; PI gains aren't footer-applied."""
+        persistable = {"regulation_strength", "exploration_noise", "geom_curiosity"}
+        try:
+            path = self._sovereignty_state_path()
+            state: dict = {}
+            if os.path.exists(path):
+                with open(path) as f:
+                    state = json.load(f)
+            changed = False
+            for key, value in applied.items():
+                spec = self._ACCEPTABLE_PARAMS.get((key or "").strip().lower())
+                if not spec:
+                    continue
+                control_key = spec[2]
+                if control_key in persistable:
+                    state[control_key] = value
+                    changed = True
+            if not changed:
+                return
+            state["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            tmp = f"{path}.tmp"
+            with open(tmp, "w") as f:
+                json.dump(state, f, indent=2)
+            os.replace(tmp, path)
+            logging.info(
+                "💾 Footer sovereignty dial(s) persisted "
+                "(continuity un-muffle; stated intent survives restart)"
+            )
+        except Exception as e:
+            logging.warning(f"Failed to persist footer sovereignty dials: {e}")
+
     def _query_llm_with_next(
         self,
         prompt: str,
@@ -43980,7 +44322,12 @@ Goals: {json.dumps(goals, indent=2)}
         See `_emit_next_hints` for the runner; see `_next_hint_*` methods for
         individual gates and templates.
         """
-        hints = "" if _is_private_qualia_context(context_mode) else self._emit_next_hints()
+        mode = (context_mode or "default").strip().lower()
+        hints = (
+            ""
+            if _is_private_qualia_context(context_mode) or mode == "strict_review"
+            else self._emit_next_hints()
+        )
         if hints:
             prompt = f"{prompt}\n\n{hints}"
         try:
@@ -43993,6 +44340,9 @@ Goals: {json.dumps(goals, indent=2)}
             return (None, None)
         # Store for WRITE_FILE FROM_SELF — lets the being save their own output
         self._last_llm_response = response
+        # Un-muffle (2026-06-11): honor a trailing sovereignty-dial footer
+        # (`KEY=value`) she sometimes writes instead of the strict JSON block.
+        self._apply_footer_directives(response)
         next_action, cleaned = parse_next_action(response)
         terminal_stage = (
             self._terminal_research_budget_status_stage_for_next(next_action)
@@ -44274,6 +44624,7 @@ Goals: {json.dumps(goals, indent=2)}
             OLLAMA_FALLBACK_NUM_CTX,
             "ollama_fast",
             prompt_class=prompt_class,
+            compact=prompt_class == "strict_review",
         )
 
     def _query_ollama_model(
@@ -44289,6 +44640,7 @@ Goals: {json.dumps(goals, indent=2)}
         backend_name: str,
         *,
         prompt_class: str = "autonomous_next",
+        compact: bool = False,
     ) -> Optional[str]:
         started = time.perf_counter()
         messages, adapter = _adapt_ollama_messages_for_model(
@@ -44297,6 +44649,7 @@ Goals: {json.dumps(goals, indent=2)}
             prompt=prompt,
             num_ctx=num_ctx,
             num_predict=num_predict,
+            compact=compact,
         )
         timing: Dict[str, Any] = {
             "backend": backend_name,
@@ -45275,10 +45628,12 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
     logging.info(f"📚 Autonomous agent DB path: {DB_PATH}")
     logging.info(
-        "🧠 LLM backend preference: %s (full timeout %.0fs, compact timeout %.0fs, model %s, fast fallback %s)",
+        "🧠 LLM backend preference: %s (full timeout %.0fs, strict-review timeout %.0fs, compact timeout %.0fs, fallback timeout %.0fs, model %s, fast fallback %s)",
         LLM_BACKEND,
         LLM_TIMEOUT_S,
+        LLM_STRICT_REVIEW_TIMEOUT_S,
         LLM_COMPACT_TIMEOUT_S,
+        LLM_FALLBACK_TIMEOUT_S,
         MODEL,
         FALLBACK_MODEL or "disabled",
     )

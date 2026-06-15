@@ -51,14 +51,28 @@ class MinimeLlmTimingAuditTests(unittest.TestCase):
                 "adapted_prompt_chars": 9000,
                 "prompt_compacted": True,
             },
+            {
+                "timestamp": now,
+                "prompt_class": "autonomous_next",
+                "backend": "ollama_fast",
+                "model": "gemma3:4b",
+                "status": "ok",
+                "elapsed_s": 18.0,
+                "response_chars": 1,
+                "prompt_chars": 21000,
+                "system_chars": 7000,
+                "adapted_prompt_chars": 9000,
+                "prompt_compacted": True,
+            },
         ]
 
         summary = audit.summarize_records(records, hours=2, thin_chars=80)
 
-        self.assertEqual(summary["record_count"], 2)
+        self.assertEqual(summary["record_count"], 3)
         risks = summary["top_risk_classes"]
         self.assertEqual(risks[0]["prompt_class"], "autonomous_next")
         self.assertEqual(risks[0]["timeout_count"], 1)
+        self.assertEqual(risks[0]["thin_success_count"], 1)
         groups = {
             (group["prompt_class"], group["model"], group["backend"]): group
             for group in summary["groups"]
@@ -66,6 +80,12 @@ class MinimeLlmTimingAuditTests(unittest.TestCase):
         self.assertEqual(
             groups[("autonomous_next", "gemma3:4b", "ollama_fast")][
                 "fallback_count"
+            ],
+            2,
+        )
+        self.assertEqual(
+            groups[("autonomous_next", "gemma3:4b", "ollama_fast")][
+                "thin_fallback_count"
             ],
             1,
         )

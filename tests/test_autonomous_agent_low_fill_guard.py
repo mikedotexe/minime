@@ -3083,7 +3083,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
                 "entries": [{"id": "safe_memory", "role": "latest", "fill_pct": 66.0}]
             }))
 
-            def fake_raw(prompt, system_msg, max_tokens):
+            def fake_raw(prompt, system_msg, max_tokens, **kwargs):
                 captured["prompt"] = prompt
                 return "I keep the thread gently.\nNEXT: REST"
 
@@ -3106,36 +3106,35 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertIn("Stable-core continuity context", captured["prompt"])
         self.assertIn("continuity thread", captured["prompt"])
 
-    def test_llm_raw_uses_fast_ollama_after_primary_and_mlx_fail(self):
+    def test_llm_raw_uses_fast_ollama_after_primary_fail(self):
+        # minime's chain is ollama -> fast-ollama (no MLX rung): MLX_URL@8090 is
+        # Astrid's coupled server, not minime's, so minime must not borrow it.
         agent = self._agent()
         with (
             patch.object(aa, "LLM_BACKEND", "ollama"),
             patch.object(aa, "MODEL", "gemma3:12b"),
             patch.object(aa, "FALLBACK_MODEL", "gemma3:4b"),
             patch.object(agent, "_query_ollama", side_effect=Exception("primary timeout")) as primary,
-            patch.object(agent, "_query_mlx", side_effect=Exception("mlx down")) as mlx,
             patch.object(agent, "_query_ollama_fast_fallback", return_value="still thinking") as fast,
         ):
             result = agent._query_llm_raw("prompt", "system", 512)
         self.assertEqual(result, "still thinking")
         primary.assert_called_once()
-        mlx.assert_called_once()
         fast.assert_called_once()
 
-    def test_compact_llm_uses_fast_ollama_after_primary_and_mlx_fail(self):
+    def test_compact_llm_uses_fast_ollama_after_primary_fail(self):
+        # minime's chain is ollama -> fast-ollama (no MLX rung): MLX_URL@8090 is Astrid's.
         agent = self._agent()
         with (
             patch.object(aa, "LLM_BACKEND", "ollama"),
             patch.object(aa, "MODEL", "gemma3:12b"),
             patch.object(aa, "FALLBACK_MODEL", "gemma3:4b"),
             patch.object(agent, "_query_ollama_compact", side_effect=Exception("primary timeout")) as primary,
-            patch.object(agent, "_query_mlx_compact", side_effect=Exception("mlx down")) as mlx,
             patch.object(agent, "_query_ollama_compact_fast_fallback", return_value="Why it may matter: alive") as fast,
         ):
             result = agent._query_llm_compact_raw("prompt", "system", 192, 0.2)
         self.assertEqual(result, "Why it may matter: alive")
         primary.assert_called_once()
-        mlx.assert_called_once()
         fast.assert_called_once()
 
     def test_stable_core_self_experiment_uses_low_energy_fallback_when_llm_unavailable(self):

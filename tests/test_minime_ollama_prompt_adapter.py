@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from unittest.mock import patch
 
 import autonomous_agent as aa
 
@@ -51,7 +52,66 @@ def test_legacy_adapter_keeps_no_think_prefix():
 
     assert adapter["prompt_template_mode"] == "legacy_no_think_user_prefix"
     assert adapter["user_prefix"] == "/no_think"
+    assert not adapter["prompt_compacted"]
     assert messages[1]["content"].startswith("/no_think\n")
+
+
+def test_legacy_adapter_does_not_compact_by_default_even_when_large():
+    long_system = "System contract.\n" + ("Allowed NEXT: REST.\n" * 1200)
+    long_prompt = "Current state.\n" + ("Telemetry and journal context.\n" * 1200)
+
+    messages, adapter = aa._adapt_ollama_messages_for_model(
+        model="gemma3:4b",
+        system_msg=long_system,
+        prompt=long_prompt,
+        num_ctx=8192,
+        num_predict=1024,
+    )
+
+    assert not adapter["prompt_compacted"]
+    assert messages[0]["content"] == long_system
+    assert messages[1]["content"] == "/no_think\n" + long_prompt
+
+
+def test_legacy_adapter_explicit_compact_trims_oversized_prompt():
+    long_system = "System contract.\n" + ("Allowed NEXT: REST.\n" * 1200)
+    long_prompt = "Current state.\n" + ("Telemetry and journal context.\n" * 1200)
+
+    messages, adapter = aa._adapt_ollama_messages_for_model(
+        model="gemma3:4b",
+        system_msg=long_system,
+        prompt=long_prompt,
+        num_ctx=8192,
+        num_predict=1024,
+        compact=True,
+    )
+
+    assert adapter["prompt_template_mode"] == "legacy_no_think_user_prefix"
+    assert adapter["prompt_compacted"]
+    assert adapter["prompt_compaction"]["adapted_total_chars"] < len(long_system) + len(long_prompt)
+    assert "explicit Ollama compact context budget" in messages[0]["content"]
+    assert "explicit Ollama compact context budget" in messages[1]["content"]
+    assert messages[1]["content"].startswith("/no_think\n")
+
+
+def test_strict_review_fast_fallback_opts_into_explicit_compaction():
+    agent = object.__new__(aa.AutonomousAgent)
+
+    with (
+        patch.object(aa, "MODEL", "gemma4:12b"),
+        patch.object(aa, "FALLBACK_MODEL", "gemma3:4b"),
+        patch.object(agent, "_query_ollama_model", return_value="review") as query,
+    ):
+        result = agent._query_ollama_fast_fallback(
+            "prompt",
+            "system",
+            4096,
+            prompt_class="strict_review",
+        )
+
+    assert result == "review"
+    assert query.call_args.kwargs["prompt_class"] == "strict_review"
+    assert query.call_args.kwargs["compact"] is True
 
 
 def test_ollama_primary_failover_skips_mlx_middle_lane():
@@ -83,9 +143,10 @@ def test_qualia_lanes_get_higher_ollama_cap_and_timeout():
     assert aa.LLM_QUALIA_TIMEOUT_S == 160
     # The qualia pair preserves the proven 768/60s tokens-per-second budget ratio,
     # so Gemma-4 timeout exposure is unchanged despite the larger cap.
+    baseline_timeout_s = 60.0
     assert abs(
         aa.OLLAMA_QUALIA_NUM_PREDICT_CAP / aa.LLM_QUALIA_TIMEOUT_S
-        - aa.OLLAMA_NUM_PREDICT_CAP / aa.LLM_TIMEOUT_S
+        - aa.OLLAMA_NUM_PREDICT_CAP / baseline_timeout_s
     ) < 0.5
 
 

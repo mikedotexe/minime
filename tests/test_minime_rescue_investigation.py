@@ -321,7 +321,9 @@ class TestMinimeRescueInvestigation(unittest.TestCase):
             self.assertFalse(profile["limited_write_require_pre_muted_live_intake"])
             self.assertEqual(profile["rescue_live_audio_divisor"], 12)
             self.assertEqual(profile["rescue_live_video_divisor"], 12)
-            self.assertEqual(profile["rescue_live_intake_stages"], ["hold"])
+            # 'elevated' added deliberately in 2b8a17f ("extend stable-core telemetry");
+            # sibling profiles already assert ['hold','elevated'] — this line was stale.
+            self.assertEqual(profile["rescue_live_intake_stages"], ["hold", "elevated"])
             self.assertIn("MINIME_RESCUE_LIVE_AUDIO_DIVISOR=12", env)
             self.assertIn("MINIME_RESCUE_LIVE_VIDEO_DIVISOR=12", env)
             self.assertIn("MINIME_STABLE_CORE_SENSORY_PROFILE=full_presence_v1", env)

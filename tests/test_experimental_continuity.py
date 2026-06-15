@@ -2777,10 +2777,45 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             )
             self.assertIn("status=blocked", message)
             self.assertIn("lifecycle_valid_charter", message)
+            # The blocked response must LEAD with an actionable charter hint, so the
+            # charter-first prerequisite lands in her action loop (not buried in JSON).
+            self.assertIn("no charter yet", message)
+            self.assertIn("Suggested NEXT: EXPERIMENT_CHARTER current ::", message)
+            self.assertIn("hypothesis:", message)
             gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
             rows = [json.loads(line) for line in gate.read_text().splitlines()]
             self.assertEqual(rows[0]["record_type"], "request")
             self.assertIn("blocked", [row["record_type"] for row in rows])
+
+    def test_cli_grant_record_is_consumed_by_being(self):
+        # The bridge CLI grant (authority_gate::approve / --approve-request, bet #5) writes a
+        # steward_approval record; minime's consume logic must detect it as an active token.
+        # This pins the cross-side grant->consume contract so a refactor on either side can't
+        # silently break it.
+        rows = [
+            {"record_type": "request", "request_id": "authreq_x", "scope": "semantic_microdose"},
+            {
+                "record_type": "steward_approval",
+                "request_id": "authreq_x",
+                "scope": "semantic_microdose",
+                "token_id": "authtok_minime_123",
+                "token_status": "active",
+                "one_shot": True,
+                "expires_at_unix_s": 9999999999,
+            },
+        ]
+        approval = aa.ActionContinuityStore._latest_active_authority_approval(rows, "authreq_x")
+        self.assertIsNotNone(approval)
+        self.assertEqual(approval["token_id"], "authtok_minime_123")
+        # a consumed token (status != active) is NOT detected:
+        rows2 = [dict(rows[1], token_status="consumed")]
+        self.assertIsNone(
+            aa.ActionContinuityStore._latest_active_authority_approval(rows2, "authreq_x")
+        )
+        # a non-matching request_id is NOT detected:
+        self.assertIsNone(
+            aa.ActionContinuityStore._latest_active_authority_approval(rows, "other_id")
+        )
 
     def test_authority_request_pending_after_charter_rehearsal_evidence_and_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
