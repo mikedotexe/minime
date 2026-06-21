@@ -695,6 +695,64 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertNotEqual(ids[0], ids[1])
         self.assertTrue(all(item.startswith("chamber_annotation_1234568_") for item in ids))
 
+    def test_collab_chamber_consent_writes_public_receipt(self):
+        agent = self._agent()
+        agent._collab_chamber_state_cache = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            coll_id = "coll_123_chamber"
+            proposal_id = "chamber_proposal_123_456"
+            coll_dir = shared / coll_id
+            coll_dir.mkdir(parents=True)
+            (coll_dir / "meta.json").write_text(json.dumps({
+                "schema_version": 1,
+                "id": coll_id,
+                "topic": "triadic chamber",
+                "inviter": "astrid",
+                "invitee": "minime",
+                "status": "joined",
+                "created_t_ms": 1000,
+                "updated_t_ms": 2000,
+                "members": ["astrid", "minime"],
+            }))
+            (coll_dir / "chamber_proposals.jsonl").write_text(json.dumps({
+                "schema_version": 2,
+                "consent_schema_version": 1,
+                "id": proposal_id,
+                "t_ms": 1,
+                "actor": "steward",
+                "support_type": "repair_invitation",
+                "text": "Invite a repair re-entry.",
+                "witness_only": True,
+                "authority": "support_proposal_not_control",
+            }) + "\n")
+            agent._collab_chamber_state_cache[coll_id] = ("stale", 0.0)
+            with (
+                patch.object(agent, "SHARED_COLLAB_DIR", shared),
+                patch.object(aa.time, "time", return_value=1234.569),
+                patch.object(aa.time, "time_ns", return_value=555),
+            ):
+                summary = agent._collab_chamber_consent(
+                    f"{proposal_id} consent :: I can hold this as context"
+                )
+
+            receipt = json.loads(
+                (coll_dir / "chamber_consent.jsonl").read_text().splitlines()[0]
+            )
+            event = json.loads((coll_dir / "chamber_events.jsonl").read_text().splitlines()[0])
+
+        self.assertIn("public receipt, not control", summary)
+        self.assertEqual(receipt["id"], "chamber_consent_1234569_555")
+        self.assertEqual(receipt["actor"], "minime")
+        self.assertEqual(receipt["source"], "minime_next_action")
+        self.assertEqual(receipt["proposal_id"], proposal_id)
+        self.assertEqual(receipt["stance"], "consent")
+        self.assertEqual(receipt["note"], "I can hold this as context")
+        self.assertEqual(receipt["authority"], "consent_receipt_not_control")
+        self.assertEqual(event["event"], "chamber_consent_recorded")
+        self.assertEqual(event["detail"]["proposal_id"], proposal_id)
+        self.assertNotIn(coll_id, agent._collab_chamber_state_cache)
+
     def test_collab_chamber_parsers_reject_command_shaped_annotations(self):
         agent = self._agent()
 
@@ -711,6 +769,46 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             agent._collab_parse_chamber_annotation_body("private question :: hidden lane")
+        target, proposal_id, stance, note = agent._collab_parse_chamber_consent_body(
+            "coll_abc :: chamber_proposal_123_456 revise :: soften the wording"
+        )
+        self.assertEqual(target, "coll_abc")
+        self.assertEqual(proposal_id, "chamber_proposal_123_456")
+        self.assertEqual(stance, "revise")
+        self.assertEqual(note, "soften the wording")
+        with self.assertRaises(ValueError):
+            agent._collab_parse_chamber_consent_body(
+                "chamber_proposal_123_456 command :: do this now"
+            )
+        with self.assertRaises(ValueError):
+            agent._collab_parse_chamber_consent_body(
+                "../proposal consent :: malformed id"
+            )
+
+    def test_collab_chamber_consent_rejects_missing_proposal(self):
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            coll_id = "coll_123_chamber"
+            coll_dir = shared / coll_id
+            coll_dir.mkdir(parents=True)
+            (coll_dir / "meta.json").write_text(json.dumps({
+                "schema_version": 1,
+                "id": coll_id,
+                "topic": "triadic chamber",
+                "inviter": "astrid",
+                "invitee": "minime",
+                "status": "joined",
+                "created_t_ms": 1000,
+                "updated_t_ms": 2000,
+                "members": ["astrid", "minime"],
+            }))
+            with patch.object(agent, "SHARED_COLLAB_DIR", shared):
+                with self.assertRaises(ValueError):
+                    agent._collab_chamber_consent(
+                        "chamber_proposal_missing_1 consent :: yes"
+                    )
+            self.assertFalse((coll_dir / "chamber_consent.jsonl").exists())
 
     def test_create_attractor_next_action_sets_pending_intent(self):
         agent = self._agent()
@@ -2118,7 +2216,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
                 patch.object(aa, "STABLE_CORE_AGENCY_PATH", agency_path),
                 patch.object(aa, "runtime_health_path", return_value=health_path),
             ):
-                for action in ("chamber_seen", "chamber_annotate"):
+                for action in ("chamber_seen", "chamber_annotate", "chamber_consent"):
                     with self.subTest(action=action):
                         allowed, reason = agent._stable_core_action_allowed(
                             action, {"fill_ratio": 0.68}

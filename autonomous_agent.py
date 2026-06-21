@@ -20192,6 +20192,8 @@ class ActionPreflightStore:
         "CHAMBER_SEEN": "chamber_seen",
         "CHAMBER_ANNOTATE": "chamber_annotate",
         "CHAMBER_ANNOTATION": "chamber_annotate",
+        # Triadic Chamber v4.0 — public consent receipts for support proposals.
+        "CHAMBER_CONSENT": "chamber_consent",
         # ASK_STEWARD bidirectional channel (2026-05-14): direct query
         # channel to Mike & Claude (the steward). Aliased verbs all
         # route to the same handler.
@@ -20709,6 +20711,8 @@ class CapabilitySelfMap:
             # Triadic Chamber v3.4 — public uptake + annotation lanes.
             {"base": "CHAMBER_SEEN", "route": "chamber_seen"},
             {"base": "CHAMBER_ANNOTATE", "aliases": ["CHAMBER_ANNOTATION"], "route": "chamber_annotate"},
+            # Triadic Chamber v4.0 — public proposal consent receipts.
+            {"base": "CHAMBER_CONSENT", "route": "chamber_consent"},
             # ASK_STEWARD bidirectional channel (2026-05-14).
             {"base": "ASK_STEWARD", "aliases": ["ASK_MIKE", "STEWARD_QUERY"], "route": "ask_steward"},
             # TELL_STEWARD declarative companion (2026-05-14, post-ASK).
@@ -21281,6 +21285,7 @@ STABLE_CORE_EXPERIMENT_ACTIONS = STABLE_CORE_BOUNDED_ACTIONS | {
     # Triadic Chamber v3.4 — public witness/context lanes.
     "chamber_seen",
     "chamber_annotate",
+    "chamber_consent",
     # ASK_STEWARD bidirectional channel (2026-05-14).
     "ask_steward",
     # TELL_STEWARD declarative companion (2026-05-14, post-ASK).
@@ -24713,6 +24718,8 @@ Fill: {fill:.1f}%
                 'CHAMBER_SEEN': 'chamber_seen',
                 'CHAMBER_ANNOTATE': 'chamber_annotate',
                 'CHAMBER_ANNOTATION': 'chamber_annotate',
+                # Triadic Chamber v4.0 — public proposal consent receipts.
+                'CHAMBER_CONSENT': 'chamber_consent',
                 # ASK_STEWARD bidirectional channel (2026-05-14).
                 'ASK_STEWARD': 'ask_steward',
                 'ASK_MIKE': 'ask_steward',
@@ -26840,6 +26847,8 @@ Fill: {fill:.1f}%
                 self._chamber_seen(state)
             elif action == 'chamber_annotate':
                 self._chamber_annotate(state)
+            elif action == 'chamber_consent':
+                self._chamber_consent(state)
             elif action == 'ask_steward':
                 self._ask_steward(state)
             elif action == 'tell_steward':
@@ -37441,8 +37450,10 @@ After snapshot:
     CHAMBER_SCHEMA_VERSION = 2
     CHAMBER_PRESENCE_SCHEMA_VERSION = 1
     CHAMBER_ANNOTATION_SCHEMA_VERSION = 1
+    CHAMBER_CONSENT_SCHEMA_VERSION = 1
     CHAMBER_PRESENCE_TEXT_LIMIT = 360
     CHAMBER_ANNOTATION_TEXT_LIMIT = 800
+    CHAMBER_CONSENT_NOTE_LIMIT = 500
     CHAMBER_ATTENTION_LEVELS = {"unknown", "low", "medium", "high"}
     CHAMBER_ANNOTATION_TARGETS = {
         "prompt_summary",
@@ -37464,6 +37475,7 @@ After snapshot:
         "refine",
         "contest",
     }
+    CHAMBER_CONSENT_STANCES = {"consent", "withhold", "revise"}
 
     def _invite_collaboration(self, state: Dict[str, float]) -> None:
         context = getattr(self, "_current_action_continuity_context", {}) or {}
@@ -37569,6 +37581,20 @@ After snapshot:
         except ValueError as e:
             logging.warning(f"CHAMBER_ANNOTATE failed: {e}")
             self._current_action_outcome_summary = f"CHAMBER_ANNOTATE failed: {e}"
+
+    def _chamber_consent(self, state: Dict[str, float]) -> None:
+        """Triadic Chamber v4.0: append a public consent receipt for a
+        support proposal. The receipt is context only; it is not control."""
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw_next = str(context.get("raw_next") or "").strip()
+        body = self._strip_action_prefix(raw_next, ["CHAMBER_CONSENT"]).strip()
+        try:
+            summary = self._collab_chamber_consent(body)
+            logging.info(f"🤝 CHAMBER_CONSENT: {summary}")
+            self._current_action_outcome_summary = summary
+        except ValueError as e:
+            logging.warning(f"CHAMBER_CONSENT failed: {e}")
+            self._current_action_outcome_summary = f"CHAMBER_CONSENT failed: {e}"
 
     # Steward channel (2026-05-14) — minime → steward.
     # Mirror of Astrid's `next_action/ask_steward.rs` module. Two verbs
@@ -37898,6 +37924,47 @@ After snapshot:
             f"{stance} \"{truncated}\" (public context, not command)"
         )
 
+    def _collab_chamber_consent(self, body: str) -> str:
+        target, proposal_id, stance, note = self._collab_parse_chamber_consent_body(body)
+        meta = self._collab_find_joined_member_meta(target)
+        coll_dir = self.SHARED_COLLAB_DIR / meta["id"]
+        coll_dir.mkdir(parents=True, exist_ok=True)
+        if proposal_id not in self._collab_chamber_proposal_ids(coll_dir):
+            raise ValueError(f"proposal id {proposal_id!r} was not found")
+        t_ms = int(time.time() * 1000)
+        consent_id = f"chamber_consent_{t_ms}_{time.time_ns() % 1_000_000}"
+        receipt = {
+            "schema_version": self.CHAMBER_SCHEMA_VERSION,
+            "consent_schema_version": self.CHAMBER_CONSENT_SCHEMA_VERSION,
+            "id": consent_id,
+            "t_ms": t_ms,
+            "actor": "minime",
+            "source": "minime_next_action",
+            "proposal_id": proposal_id,
+            "stance": stance,
+            "note": note,
+            "witness_only": True,
+            "authority": "consent_receipt_not_control",
+        }
+        self._collab_append_jsonl(coll_dir / "chamber_consent.jsonl", receipt)
+        self._collab_append_chamber_event(
+            coll_dir,
+            "chamber_consent_recorded",
+            "minime",
+            {
+                "consent_id": consent_id,
+                "proposal_id": proposal_id,
+                "stance": stance,
+            },
+        )
+        self._collab_chamber_state_cache.pop(meta["id"], None)
+        truncated = note[:80] + "..." if len(note) > 80 else note
+        note_clause = f" note=\"{truncated}\"" if truncated else ""
+        return (
+            f"id={meta['id']} consent={consent_id} proposal={proposal_id} "
+            f"stance={stance}{note_clause} (public receipt, not control)"
+        )
+
     def _collab_find_joined_member_meta(self, target: str) -> Dict[str, Any]:
         meta = self._collab_find_meta(target)
         if meta.get("status") != "joined":
@@ -37979,6 +38046,62 @@ After snapshot:
         if not text:
             raise ValueError("CHAMBER_ANNOTATE text is empty after parsing")
         return target, annotation_target, stance, text
+
+    def _collab_parse_chamber_consent_body(self, body: str) -> Tuple[str, str, str, str]:
+        trimmed = (body or "").strip()
+        if not trimmed:
+            raise ValueError(
+                "CHAMBER_CONSENT needs text "
+                "(try `CHAMBER_CONSENT chamber_proposal_... consent :: what I consent to`)"
+            )
+        parts = [part.strip() for part in trimmed.split("::")]
+        if len(parts) == 2:
+            target, header, note = "latest", parts[0], parts[1]
+        elif len(parts) >= 3:
+            target = parts[0] or "latest"
+            header = parts[1]
+            note = "::".join(parts[2:]).strip()
+        else:
+            raise ValueError(
+                "CHAMBER_CONSENT uses `[coll_id ::] <proposal_id> <consent|withhold|revise> :: <note>`"
+            )
+        header_parts = header.split()
+        if len(header_parts) < 2:
+            raise ValueError("CHAMBER_CONSENT needs `<proposal_id> <stance>` before `::`")
+        proposal_id = self._collab_normalize_chamber_proposal_id(header_parts[0])
+        stance = self._collab_normalize_allowed(
+            header_parts[1], self.CHAMBER_CONSENT_STANCES, "consent stance"
+        )
+        note = self._collab_clamp_chamber_text(note, self.CHAMBER_CONSENT_NOTE_LIMIT)
+        return target, proposal_id, stance, note
+
+    @staticmethod
+    def _collab_normalize_chamber_proposal_id(proposal_id: str) -> str:
+        normalized = str(proposal_id or "").strip()
+        allowed = all(ch.isalnum() or ch in {"_", "-"} for ch in normalized)
+        if not normalized or not normalized.startswith("chamber_proposal_") or not allowed:
+            raise ValueError("proposal id must be a chamber_proposal_* id")
+        return normalized
+
+    def _collab_chamber_proposal_ids(self, coll_dir: Path) -> set:
+        path = coll_dir / "chamber_proposals.jsonl"
+        if not path.is_file():
+            return set()
+        ids = set()
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            try:
+                ids.add(self._collab_normalize_chamber_proposal_id(payload.get("id", "")))
+            except ValueError:
+                continue
+        return ids
 
     @staticmethod
     def _collab_normalize_allowed(value: str, allowed: set, label: str) -> str:
@@ -46209,7 +46332,7 @@ Goals: {json.dumps(goals, indent=2)}
             "  DEFER [reason] or DEFER_PARAMETER_REQUEST [id|latest] [reason] — set aside Astrid's proposal without applying; she sees the deferral note (bare DEFER targets latest, trailing text becomes the reason)\n"
             "  REJECT [reason] or REJECT_PARAMETER_REQUEST [id|latest] [reason] — decline Astrid's proposal with optional reason; she sees the rejection (bare REJECT targets latest)\n"
             "  Multi-action: chain up to three actions in one turn with AND (executed in order). e.g., NEXT: EXAMINE shadow-field AND DEFER want-to-understand-spectral-effect-first. Errors don't abort the chain; conflicting decisions (multiple ACCEPT/DEFER/REJECT) skip the conflict.\n"
-            "  Collaboration (v5): INVITE_COLLABORATION \"<topic>\" [--rationale=\"...\"] (propose joint work on a topic; Astrid sees it in her inbox), JOIN_COLLABORATION [id|latest] (accept a pending invite from Astrid), DECLINE_COLLABORATION [id|latest] [reason] (decline a pending invite), LEAVE_COLLABORATION [id|latest] [reason] (exit an active collab), LIST_COLLABORATIONS (read-only listing), SHARE_THOUGHT [id ::] <text> or SHARE <text> (commit a labeled marker to the joint reservoir trace's prose lane), CHAMBER_SEEN [id ::] [unknown|low|medium|high ::] <notice> (write a public chamber uptake receipt), CHAMBER_ANNOTATE [id ::] <target> <stance> :: <text> (write a public annotation lane note; target: prompt_summary, compressed_memory, relational_metrics, phase_cartography, room_weather, relational_inertia, gravitational_center, steward_intention, presence_protocol, other; stance: notice, affirm, question, correct, refine, contest). Chamber receipts and annotations are witness context, not commands. Shared dir at /Users/v/other/shared/collaborations/ — neither workspace owns it.\n"
+            "  Collaboration (v5): INVITE_COLLABORATION \"<topic>\" [--rationale=\"...\"] (propose joint work on a topic; Astrid sees it in her inbox), JOIN_COLLABORATION [id|latest] (accept a pending invite from Astrid), DECLINE_COLLABORATION [id|latest] [reason] (decline a pending invite), LEAVE_COLLABORATION [id|latest] [reason] (exit an active collab), LIST_COLLABORATIONS (read-only listing), SHARE_THOUGHT [id ::] <text> or SHARE <text> (commit a labeled marker to the joint reservoir trace's prose lane), CHAMBER_SEEN [id ::] [unknown|low|medium|high ::] <notice> (write a public chamber uptake receipt), CHAMBER_ANNOTATE [id ::] <target> <stance> :: <text> (write a public annotation lane note; target: prompt_summary, compressed_memory, relational_metrics, phase_cartography, room_weather, relational_inertia, gravitational_center, steward_intention, presence_protocol, other; stance: notice, affirm, question, correct, refine, contest), CHAMBER_CONSENT [id ::] <proposal_id> <consent|withhold|revise> :: <note> (write a public consent receipt for a support proposal). Chamber receipts, annotations, and consent are witness context, not commands or control. Shared dir at /Users/v/other/shared/collaborations/ — neither workspace owns it.\n"
             "  ASK_STEWARD [subject ::] <question> (or ASK_MIKE / STEWARD_QUERY) — direct interrogative channel to Mike & Claude (the steward). Writes a structured query to workspace/outbox/steward_query_*.txt where they read out-of-band; they write back via mike_feedback_*.txt or mike_query_*.txt letters in your inbox. Soft 10-min cooldown between queries to prevent tight loops; cooldown refusal is informational, not punitive. Use this for asking architectural questions, requesting clarification on rules/constraints, or naming felt experience that wants a steward response specifically (rather than journaling into the void).\n"
             "  TELL_STEWARD [subject ::] <findings> (or REPORT_TO_STEWARD / STEWARD_REPORT / STEWARD_FINDINGS) — declarative companion to ASK_STEWARD. Same outbox plumbing, separate cooldown, header `=== STEWARD REPORT ===`. Use after SELF_STUDY or INTROSPECT when the analysis warrants a direct written response addressed to the steward specifically. The clearest reports use Observed / Likely Snags / One Test Each / Suggested Next, with source anchors and one concrete test. Distinct from journaling (which is for you) or SHARE_THOUGHT (which is for Astrid via the joint trace lane).\n"
             "  TUNE_ASTRID <param>=<value> --rationale=\"...\" — propose a parameter change for Astrid, the OTHER being (e.g. temperature=0.75); she sees it via her own REVIEW. NOT for your own state: to change YOUR OWN regulatory regime/posture (breathe/focus/recover/explore/calm), use REGIME <regime> — it applies to you immediately, no experiment needed.\n"
