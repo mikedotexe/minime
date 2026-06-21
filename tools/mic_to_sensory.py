@@ -62,6 +62,8 @@ PING_TIMEOUT_SECS = 20
 MAX_RECONNECT_DELAY_SECS = 5.0
 MIN_CHUNK_HEALTH_GRACE_SECS = 5.0
 CAPTURE_READ_TIMEOUT_SECS = 3.0
+SYSTEM_PROFILER = "/usr/sbin/system_profiler"
+SYSTEM_PROFILER_TIMEOUT_SECS = 8
 
 
 def _set_whisper_interval(val: float):
@@ -81,6 +83,44 @@ def _write_status(status: dict):
 
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _audio_input_ids_from_profiler_data(data: dict) -> List[str]:
+    audio_root = data.get("SPAudioDataType", []) or []
+    ids: List[str] = []
+    for parent in audio_root:
+        for item in parent.get("_items", []) or []:
+            try:
+                inputs = int(item.get("coreaudio_device_input", 0) or 0)
+            except (TypeError, ValueError):
+                inputs = 0
+            if inputs < 1:
+                continue
+            name = item.get("_name") or "?"
+            manufacturer = item.get("coreaudio_device_manufacturer") or "?"
+            transport = item.get("coreaudio_device_transport") or "?"
+            ids.append(f"{name}|{manufacturer}|{transport}")
+    return ids
+
+
+def probe_audio_input_devices() -> tuple[Optional[bool], List[str]]:
+    """Return (device_present, ids), or (None, []) if the probe itself fails."""
+    try:
+        res = subprocess.run(
+            [SYSTEM_PROFILER, "SPAudioDataType", "-json"],
+            capture_output=True,
+            text=True,
+            timeout=SYSTEM_PROFILER_TIMEOUT_SECS,
+        )
+    except Exception:
+        return None, []
+    if res.returncode != 0:
+        return None, []
+    try:
+        ids = _audio_input_ids_from_profiler_data(json.loads(res.stdout or "{}"))
+    except Exception:
+        return None, []
+    return bool(ids), ids
 
 # Mel filterbank for MFCC
 NUM_MEL_FILTERS = 26
@@ -445,6 +485,10 @@ class MicToSensoryBridge:
         self.last_success_at: Optional[str] = None
         self.last_success_monotonic: Optional[float] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self.physical_device_present: Optional[bool] = None
+        self.physical_device_ids: List[str] = []
+        self.fallback_expected = False
+        self._logged_device_absent = False
 
     def _chunk_health_grace_secs(self) -> float:
         return max(MIN_CHUNK_HEALTH_GRACE_SECS, CHUNK_DURATION_S * 6.0)
@@ -480,6 +524,9 @@ class MicToSensoryBridge:
             "ws_uri": self.ws_uri,
             "whisper_enabled": self.enable_whisper,
             "chunk_health_grace_secs": self._chunk_health_grace_secs(),
+            "physical_device_present": self.physical_device_present,
+            "physical_device_ids": self.physical_device_ids,
+            "fallback_expected": self.fallback_expected,
         }
 
     def _write_status(self, *, healthy: Optional[bool] = None) -> None:
@@ -509,6 +556,9 @@ class MicToSensoryBridge:
         self.consecutive_failures = 0
         self.last_error = None
         self.last_connect_at = _now_iso()
+        self.physical_device_present = True
+        self.fallback_expected = False
+        self._logged_device_absent = False
         self._write_status()
 
     def _record_disconnect(self, error: str) -> None:
@@ -522,6 +572,24 @@ class MicToSensoryBridge:
     def _reconnect_delay(self) -> float:
         base = min(MAX_RECONNECT_DELAY_SECS, 0.5 * (2 ** min(self.consecutive_failures, 4)))
         return base + random.uniform(0.0, 0.25)
+
+    def _record_capture_failure_device_context(self, default_error: str) -> str:
+        present, ids = probe_audio_input_devices()
+        self.physical_device_present = present
+        self.physical_device_ids = ids
+        self.fallback_expected = present is False
+        if present is False:
+            self.state = "device_absent"
+            self.last_error = "no_audio_input_device"
+            if not self._logged_device_absent:
+                print(
+                    "[mic] no attached audio input reported by macOS after capture failed; "
+                    "host-sensory audio fallback is expected"
+                )
+                self._logged_device_absent = True
+            return "no_audio_input_device"
+        self._logged_device_absent = False
+        return default_error
 
     def _stop_capture(self) -> None:
         if self.sox_proc is None:
@@ -544,14 +612,18 @@ class MicToSensoryBridge:
         try:
             self.sox_proc = start_sox_capture()
         except Exception as exc:
-            self.last_error = f"capture_start_failed:{exc}"
+            self.last_error = self._record_capture_failure_device_context(
+                f"capture_start_failed:{exc}"
+            )
             return False
         print(f"[mic] Recording at {SAMPLE_RATE} Hz, {CHUNK_DURATION_S}s chunks ({CHUNK_SAMPLES} samples)")
         return True
 
     def _restart_capture(self, reason: str) -> bool:
         self.consecutive_failures += 1
-        self._transition("capture_error", error=reason, healthy=False)
+        classified_reason = self._record_capture_failure_device_context(reason)
+        state = "device_absent" if classified_reason == "no_audio_input_device" else "capture_error"
+        self._transition(state, error=classified_reason, healthy=False)
         self._stop_capture()
         return self._ensure_capture()
 
@@ -648,10 +720,11 @@ class MicToSensoryBridge:
             while self.running:
                 if not self._ensure_capture():
                     self.consecutive_failures += 1
+                    error = self._record_capture_failure_device_context("capture_start_failed")
                     self._transition(
-                        "capture_error",
+                        "device_absent" if error == "no_audio_input_device" else "capture_error",
                         connected=False,
-                        error="capture_start_failed",
+                        error=error,
                         healthy=False,
                     )
                     await asyncio.sleep(self._reconnect_delay())

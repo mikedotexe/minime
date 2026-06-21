@@ -1995,6 +1995,16 @@ def build_fissure_trace(
                 "suggested_mark": "NOTICE_AMBIGUITY distributed",
             }
         )
+    if classification == "quiet_fabric":
+        safe_suggested_next = (
+            "Hold FISSURE_TRACE/NOTICE_AMBIGUITY for now; return after a phase or "
+            "slope change, or choose a different reflective action."
+        )
+    else:
+        safe_suggested_next = (
+            "Use FISSURE_TRACE/NOTICE_AMBIGUITY now; promote to NATIVE_GESTURE fissure only "
+            "when the health gate is green and the target region is named."
+        )
 
     payload = {
         "timestamp": utc_now_iso(),
@@ -2044,10 +2054,7 @@ def build_fissure_trace(
             ],
             "if_green": ["NATIVE_GESTURE fissure <label>", "FISSURE <label>", "RESIST <label>"],
         },
-        "safe_suggested_next": (
-            "Use FISSURE_TRACE/NOTICE_AMBIGUITY now; promote to NATIVE_GESTURE fissure only "
-            "when the health gate is green and the target region is named."
-        ),
+        "safe_suggested_next": safe_suggested_next,
         "provenance": {
             "source": "fissure_trace_v1",
             "read_write": "append_only_cartography",

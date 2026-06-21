@@ -211,7 +211,7 @@ def _route_stack(projection: Dict[str, Any]) -> List[Dict[str, Any]]:
             command = lifecycle_next or _text(experiment.get("continuity_return")) or "EXPERIMENT_ADVANCE current :: mode: preview"
             routes.append(_route("Lifecycle", command, f"safety lifecycle stage: {classification}", 5, "active_experiment"))
     elif lifecycle_next:
-        routes.append(_route("Lifecycle", lifecycle_next, "current lifecycle return", 30, "thread_projection"))
+        routes.append(_route("Lifecycle", lifecycle_next, "current lifecycle return", 15, "thread_projection"))
 
     loop = projection.get("sovereign_loop_v1")
     if isinstance(loop, dict):
@@ -232,7 +232,7 @@ def _route_stack(projection: Dict[str, Any]) -> List[Dict[str, Any]]:
             # When a budget is PENDING/blocked the command is an
             # `EXPERIMENT_RESEARCH_BUDGET_*` scaffold ("you hit a research gate,
             # here's how to open it") — that must NOT outrank the being's lifecycle
-            # return, so it drops below the generic lifecycle route (30) to 32,
+            # return, so it drops below the generic lifecycle route (15) to 32,
             # staying visible in the stack but never becoming the primary
             # Current NEXT over the being's own work.
             is_budget_scaffold = command.startswith("EXPERIMENT_RESEARCH_BUDGET")
@@ -244,12 +244,24 @@ def _route_stack(projection: Dict[str, Any]) -> List[Dict[str, Any]]:
         command = _text(session.get("suggested_next")) or "CONTINUITY_SESSION_STATUS latest"
         routes.append(_route("Continuity Session", command, "latest continuity session", 20, "continuity_session_v1"))
 
+    session_draft = projection.get("continuity_session_draft_v1")
+    if isinstance(session_draft, dict):
+        command = _text(session_draft.get("accept_next") or session_draft.get("generic_accept_next"))
+        if command:
+            routes.append(_route("Continuity Session", command, "pending continuity draft awaits optional acceptance", 19, "continuity_session_draft_v1"))
+
     memory = projection.get("being_memory_v1")
     if isinstance(memory, dict) and memory.get("latest_memory"):
         routes.append(_route("Memory/Dossier", "MEMORY_RECALL latest :: focus: current thread", "owned memory available", 35, "being_memory_v1"))
 
     if projection.get("constraint_release_trajectory_v1") or projection.get("interpretation_risk_v1"):
-        routes.append(_route("Continuity Session", "CONTINUITY_SESSION_CAPTURE latest", "interpretation or release cue needs capture", 10, "self_study_cue"))
+        capture_priority = 24 if isinstance(session_draft, dict) else 10
+        capture_reason = (
+            "cue already has a pending draft; accept, defer, or recapture deliberately"
+            if isinstance(session_draft, dict)
+            else "interpretation or release cue needs capture"
+        )
+        routes.append(_route("Continuity Session", "CONTINUITY_SESSION_CAPTURE latest", capture_reason, capture_priority, "self_study_cue"))
 
     seen = set()
     deduped: List[Dict[str, Any]] = []
@@ -293,23 +305,39 @@ def command_palette_text() -> str:
     return "Command palette (generated): " + " | ".join(groups)
 
 
-def continuity_control_plane_text(control: Dict[str, Any]) -> str:
+def continuity_control_plane_text(
+    control: Dict[str, Any],
+    *,
+    include_commands: bool = True,
+) -> str:
     if not isinstance(control, dict):
         return ""
     primary = control.get("primary_route") if isinstance(control.get("primary_route"), dict) else {}
     stack = control.get("route_stack") if isinstance(control.get("route_stack"), list) else []
     caps = control.get("caps_v1") if isinstance(control.get("caps_v1"), dict) else caps_v1()
     primary_command = _text(primary.get("command")) or "THREAD_STATUS current"
-    route_bits = [
-        f"{item.get('group')}: {item.get('command')}"
-        for item in stack[:4]
-        if isinstance(item, dict) and item.get("command")
-    ]
-    route_text = "; ".join(route_bits) if route_bits else "Lifecycle: THREAD_STATUS current"
+    if include_commands:
+        primary_text = f"primary={primary_command}"
+        route_bits = [
+            f"{item.get('group')}: {item.get('command')}"
+            for item in stack[:4]
+            if isinstance(item, dict) and item.get("command")
+        ]
+        route_text = "; ".join(route_bits) if route_bits else "Lifecycle: THREAD_STATUS current"
+    else:
+        primary_group = _text(primary.get("group")) or "Lifecycle"
+        primary_text = f"primary_group={primary_group}; primary_command=see Current NEXT"
+        route_groups = [
+            str(item.get("group"))
+            for item in stack[:4]
+            if isinstance(item, dict) and item.get("group")
+        ]
+        grouped = ", ".join(route_groups) if route_groups else "Lifecycle"
+        route_text = f"{len(stack)} route(s): {grouped}; commands kept in continuity_control_plane_v1 metadata"
     local = caps.get("local_research", {})
     loop = caps.get("owned_loop", {})
     return (
-        f"continuity_control_plane_v1: primary={primary_command}\n"
+        f"continuity_control_plane_v1: {primary_text}\n"
         f"Operating stack: {route_text}\n"
         "Caps: "
         f"local_research={local.get('self_activated_max_actions', LOCAL_RESEARCH_MAX_ACTIONS)}/{local.get('self_activated_ttl_secs', LOCAL_RESEARCH_TTL_SECS)}s; "

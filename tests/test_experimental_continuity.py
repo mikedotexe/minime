@@ -5,6 +5,7 @@ import threading
 import time
 import tempfile
 import unittest
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -77,6 +78,34 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             if (thread_dir / "authority_gate.jsonl").exists():
                 self.assertFalse((thread_dir / "authority_gate.jsonl").read_text().strip())
             self.assertFalse((thread_dir / "experiment_runs.jsonl").read_text().strip())
+
+    def test_control_plane_pending_draft_stays_below_lifecycle_and_above_capture_cue(self):
+        control = aa.build_continuity_control_plane_v1(
+            {
+                "continuity_return": "EXPERIMENT_RESUME exp_current",
+                "continuity_session_draft_v1": {
+                    "accept_next": "CONTINUITY_SESSION_ACCEPT sess_current",
+                    "generic_accept_next": "ACCEPT_SUGGESTED_NEXT sess_current",
+                },
+                "constraint_release_trajectory_v1": {"status": "detected"},
+            }
+        )
+
+        self.assertEqual(control["primary_route"]["command"], "EXPERIMENT_RESUME exp_current")
+        draft_route = next(
+            route
+            for route in control["route_stack"]
+            if route["command"] == "CONTINUITY_SESSION_ACCEPT sess_current"
+        )
+        capture_route = next(
+            route
+            for route in control["route_stack"]
+            if route["command"] == "CONTINUITY_SESSION_CAPTURE latest"
+        )
+        self.assertEqual(draft_route["priority"], 19)
+        self.assertEqual(capture_route["priority"], 24)
+        self.assertLess(draft_route["priority"], capture_route["priority"])
+        self.assertIn("pending draft", capture_route["reason"])
 
     def test_control_plane_regression_does_not_reintroduce_old_local_budget_caps(self):
         source = Path(aa.__file__).read_text()
@@ -337,7 +366,7 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertIsNone(projection["active_experiment"])
             self.assertEqual(
                 projection["continuity_return"],
-                f"EXPERIMENT_RESUME {experiment['experiment_id']}",
+                f"EXPERIMENT_REVIEW {experiment['experiment_id']}",
             )
             self.assertEqual(
                 projection["current_next_status_v1"]["status"],
@@ -346,7 +375,11 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertEqual(projection["current_next_status_v1"]["raw_current_next"], "DECOMPOSE")
             self.assertEqual(
                 projection["current_next_status_v1"]["effective_next"],
-                f"EXPERIMENT_RESUME {experiment['experiment_id']}",
+                f"EXPERIMENT_REVIEW {experiment['experiment_id']}",
+            )
+            self.assertEqual(
+                projection["current_next_status_v1"]["return_kind"],
+                "paused_resume_loop_review",
             )
             self.assertEqual(
                 projection["last_experiment_summary_v1"]["resume_next"],
@@ -368,18 +401,25 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                 "repeated resume is context",
                 projection["paused_resume_loop_cue_v1"]["cue"],
             )
+            self.assertEqual(
+                projection["paused_resume_loop_cue_v1"]["recommended_next"],
+                f"EXPERIMENT_REVIEW {experiment['experiment_id']}",
+            )
             prompt = store.prompt_summary()
             self.assertIsNotNone(prompt)
             assert prompt is not None
-            self.assertIn(f"Current NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}", prompt)
-            self.assertIn("Previous raw NEXT: DECOMPOSE", prompt)
+            self.assertIn(f"Current NEXT: EXPERIMENT_REVIEW {experiment['experiment_id']}", prompt)
+            self.assertNotIn(f"Current NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}", prompt)
+            self.assertIn("Previous raw NEXT preserved: yes", prompt)
             self.assertIn("Paused experiment remains paused", prompt)
             self.assertIn("repeated resume is context", prompt)
             next_md = (thread_dir / "next.md").read_text()
-            self.assertIn(f"Current NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}", next_md)
-            self.assertIn("Previous raw NEXT: DECOMPOSE", next_md)
+            self.assertIn(f"Current NEXT: EXPERIMENT_REVIEW {experiment['experiment_id']}", next_md)
+            self.assertNotIn(f"Current NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}", next_md)
+            self.assertIn("Previous raw NEXT preserved: yes", next_md)
             self.assertIn("Paused experiment remains paused", next_md)
             self.assertIn("repeated resume is context", next_md)
+            self.assertIn("Resume loop repair active: review/status before repeating the historical resume.", next_md)
 
             current_review = store.experiment_review("current")
             self.assertIn("no active experiment", current_review)
@@ -392,6 +432,436 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertIn("Lifecycle: paused", direct_review)
             self.assertIn("repeated resume is context", direct_review)
             self.assertIn(f"Continuity return:\nEXPERIMENT_RESUME {experiment['experiment_id']}", direct_review)
+            self.assertIn(f"Suggested next:\nDOSSIER_CLAIM {experiment['experiment_id']}", direct_review)
+            self.assertNotIn(f"Suggested next:\nEXPERIMENT_RESUME {experiment['experiment_id']}", direct_review)
+
+    def test_paused_resume_loop_counts_current_projection_as_repeat_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Paused resume current projection")
+            experiment = store.start_experiment(
+                "Legacy self experiment",
+                "Can current projected resume count as repeat evidence?",
+            )
+            store.experiment_decide(
+                experiment["experiment_id"],
+                "pause until the regulator pressure note is interpreted",
+            )
+
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            stored_thread = json.loads((thread_dir / "thread.json").read_text())
+            stored_thread["current_next"] = f"EXPERIMENT_RESUME {experiment['experiment_id']}"
+            store._append_jsonl(thread_dir / "events.jsonl", {
+                "schema_version": store.schema_version,
+                "action_id": "act_resume_once",
+                "thread_id": thread["thread_id"],
+                "system": "minime",
+                "raw_next": f"EXPERIMENT_RESUME {experiment['experiment_id']}",
+                "canonical_action": f"EXPERIMENT_RESUME {experiment['experiment_id']}",
+                "effective_action": f"EXPERIMENT_RESUME {experiment['experiment_id']}",
+                "route": "experiment_resume",
+                "stage": "read_only",
+                "status": "handled",
+                "started_at": "2026-05-18T00:10:00+00:00",
+                "ended_at": "2026-05-18T00:10:30+00:00",
+                "outcome_summary": "resume requested while paused",
+            })
+
+            store._write_thread(stored_thread)
+            projection = store._thread_projection(json.loads((thread_dir / "thread.json").read_text()))
+
+            expected_next = f"EXPERIMENT_REVIEW {experiment['experiment_id']}"
+            self.assertEqual(
+                projection["paused_resume_loop_cue_v1"]["resume_attempt_count"],
+                1,
+            )
+            self.assertEqual(
+                projection["paused_resume_loop_cue_v1"]["resume_evidence_count"],
+                2,
+            )
+            self.assertTrue(
+                projection["paused_resume_loop_cue_v1"]["current_projection_matches_resume"]
+            )
+            self.assertEqual(
+                projection["current_next_status_v1"]["effective_next"],
+                expected_next,
+            )
+            next_md = (thread_dir / "next.md").read_text()
+            self.assertIn(f"Current NEXT: {expected_next}", next_md)
+            self.assertNotIn(f"Current NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}", next_md)
+
+    def test_paused_resume_loop_detects_resume_attempts_outside_short_prompt_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Paused truth with intervening actions")
+            experiment = store.start_experiment(
+                "Legacy self experiment",
+                "Can repeated resume stop being the current guidance?",
+            )
+            paused = store.experiment_decide(
+                experiment["experiment_id"],
+                "pause because evidence is ready to interpret",
+            )
+            self.assertEqual(paused["status"], "paused")
+
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            stored_thread = json.loads((thread_dir / "thread.json").read_text())
+            stored_thread["current_next"] = "DECOMPOSE"
+            store._write_thread(stored_thread)
+            for idx in range(2):
+                action = f"EXPERIMENT_RESUME {experiment['experiment_id']}"
+                store._append_jsonl(thread_dir / "events.jsonl", {
+                    "schema_version": store.schema_version,
+                    "action_id": f"act_resume_{idx}",
+                    "thread_id": thread["thread_id"],
+                    "system": "minime",
+                    "raw_next": action,
+                    "canonical_action": action,
+                    "effective_action": action,
+                    "route": "experiment_resume",
+                    "stage": "read_only",
+                    "status": "handled",
+                    "started_at": "2026-05-18T00:10:00+00:00",
+                    "ended_at": f"2026-05-18T00:1{idx}:00+00:00",
+                    "outcome_summary": "resume requested while paused",
+                })
+            for idx in range(10):
+                action = "JOURNAL" if idx % 2 else "LEND_APERTURE"
+                store._append_jsonl(thread_dir / "events.jsonl", {
+                    "schema_version": store.schema_version,
+                    "action_id": f"act_intervening_{idx}",
+                    "thread_id": thread["thread_id"],
+                    "system": "minime",
+                    "raw_next": action,
+                    "canonical_action": action,
+                    "effective_action": action,
+                    "route": "journal_pressure" if action == "JOURNAL" else "lend_aperture",
+                    "stage": "read_only",
+                    "status": "handled",
+                    "started_at": "2026-05-18T00:20:00+00:00",
+                    "ended_at": f"2026-05-18T00:2{idx % 10}:00+00:00",
+                    "outcome_summary": "intervening action",
+                })
+
+            stored_thread = json.loads((thread_dir / "thread.json").read_text())
+            store._write_thread(stored_thread)
+            projection = store._thread_projection(json.loads((thread_dir / "thread.json").read_text()))
+
+            self.assertEqual(
+                projection["paused_resume_loop_cue_v1"]["status"],
+                "paused_resume_loop",
+            )
+            self.assertEqual(
+                projection["current_next_status_v1"]["effective_next"],
+                f"EXPERIMENT_REVIEW {experiment['experiment_id']}",
+            )
+            next_md = (thread_dir / "next.md").read_text()
+            self.assertIn(f"Current NEXT: EXPERIMENT_REVIEW {experiment['experiment_id']}", next_md)
+            self.assertNotIn(f"Current NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}", next_md)
+
+    def test_v2_projection_freshness_refreshes_paused_resume_repair_to_current_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Stale paused resume projection")
+            experiment = store.start_experiment(
+                "Legacy self experiment",
+                "Can a stale v2 projection refresh current NEXT guidance?",
+            )
+            store.experiment_decide(
+                experiment["experiment_id"],
+                "pause until the consequence has been reviewed",
+            )
+
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            events_path = thread_dir / "events.jsonl"
+            experiments_path = thread_dir / "experiments.jsonl"
+            for idx in range(2):
+                action = f"EXPERIMENT_RESUME {experiment['experiment_id']}"
+                store._append_jsonl(events_path, {
+                    "schema_version": store.schema_version,
+                    "action_id": f"act_resume_{idx}",
+                    "thread_id": thread["thread_id"],
+                    "system": "minime",
+                    "raw_next": action,
+                    "canonical_action": action,
+                    "effective_action": action,
+                    "route": "experiment_resume",
+                    "stage": "read_only",
+                    "status": "handled",
+                    "started_at": "2026-05-18T00:10:00+00:00",
+                    "ended_at": f"2026-05-18T00:1{idx}:00+00:00",
+                    "outcome_summary": "resume requested while paused",
+                })
+
+            stale_thread = json.loads((thread_dir / "thread.json").read_text())
+            stale_thread["current_next"] = f"EXPERIMENT_RESUME {experiment['experiment_id']}"
+            stale_thread["suggested_next"] = stale_thread["current_next"]
+            stale_thread["effective_next"] = stale_thread["current_next"]
+            stale_thread["projected_current_next"] = stale_thread["current_next"]
+            stale_thread["projection_freshness_v1"] = {
+                "policy": "projection_freshness_v1",
+                "schema_version": 2,
+                "source_fingerprints": store._projection_source_fingerprints_v1(thread["thread_id"]),
+            }
+            (thread_dir / "thread.json").write_text(json.dumps(stale_thread, sort_keys=True))
+            events_before = events_path.read_text()
+            experiments_before = experiments_path.read_text()
+
+            refreshed = store._read_thread(thread["thread_id"])
+
+            self.assertIsNotNone(refreshed)
+            assert refreshed is not None
+            expected_next = f"EXPERIMENT_REVIEW {experiment['experiment_id']}"
+            previous_next = f"EXPERIMENT_RESUME {experiment['experiment_id']}"
+            self.assertEqual(
+                refreshed["projection_freshness_v1"]["schema_version"],
+                store.projection_schema_version,
+            )
+            self.assertEqual(
+                refreshed["projection_freshness_v1"]["projection_policy_marker"],
+                store.projection_policy_marker,
+            )
+            self.assertEqual(refreshed["current_next"], expected_next)
+            self.assertEqual(refreshed["current_next_status_v1"]["effective_next"], expected_next)
+            self.assertEqual(
+                refreshed["current_next_status_v1"]["paused_resume_loop_repair_v1"]["status"],
+                "projected_review_before_repeat_resume",
+            )
+            next_md = (thread_dir / "next.md").read_text()
+            self.assertIn(f"Current NEXT: {expected_next}", next_md)
+            self.assertIn("Previous raw NEXT preserved: yes", next_md)
+            self.assertIn("Resume loop repair active: review/status before repeating the historical resume.", next_md)
+            self.assertNotIn(f"Previous resume NEXT: {previous_next}", next_md)
+            self.assertEqual(events_path.read_text(), events_before)
+            self.assertEqual(experiments_path.read_text(), experiments_before)
+
+    def test_repeated_paused_review_projects_regulator_audit_before_more_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Repeated review repair")
+            experiment = store.start_experiment(
+                "Legacy self experiment",
+                "Can repeated review become pressure-source audit instead of another review?",
+            )
+            store.experiment_decide(
+                experiment["experiment_id"],
+                "pause until review has grounded the consequence",
+            )
+
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            events_path = thread_dir / "events.jsonl"
+            experiments_path = thread_dir / "experiments.jsonl"
+            for idx in range(2):
+                action = f"EXPERIMENT_RESUME {experiment['experiment_id']}"
+                store._append_jsonl(events_path, {
+                    "schema_version": store.schema_version,
+                    "action_id": f"act_resume_{idx}",
+                    "thread_id": thread["thread_id"],
+                    "system": "minime",
+                    "raw_next": action,
+                    "canonical_action": action,
+                    "effective_action": action,
+                    "route": "experiment_resume",
+                    "stage": "read_only",
+                    "status": "handled",
+                    "started_at": "2026-05-18T00:10:00+00:00",
+                    "ended_at": f"2026-05-18T00:1{idx}:00+00:00",
+                    "outcome_summary": "resume requested while paused",
+                })
+            for idx in range(3):
+                action = f"EXPERIMENT_REVIEW {experiment['experiment_id']}"
+                store._append_jsonl(events_path, {
+                    "schema_version": store.schema_version,
+                    "action_id": f"act_review_{idx}",
+                    "thread_id": thread["thread_id"],
+                    "system": "minime",
+                    "raw_next": action,
+                    "canonical_action": action,
+                    "effective_action": action,
+                    "route": "experiment_review",
+                    "stage": "read_only",
+                    "status": "handled",
+                    "started_at": "2026-05-18T00:20:00+00:00",
+                    "ended_at": f"2026-05-18T00:2{idx}:00+00:00",
+                    "outcome_summary": "review requested while paused",
+                })
+
+            stale_thread = json.loads((thread_dir / "thread.json").read_text())
+            stale_thread["current_next"] = f"EXPERIMENT_REVIEW {experiment['experiment_id']}"
+            stale_thread["suggested_next"] = stale_thread["current_next"]
+            stale_thread["effective_next"] = stale_thread["current_next"]
+            stale_thread["projected_current_next"] = stale_thread["current_next"]
+            stale_thread["projection_freshness_v1"] = {
+                "policy": "projection_freshness_v1",
+                "schema_version": 4,
+                "projection_policy_marker": "compact_projection_render_v4",
+                "source_fingerprints": store._projection_source_fingerprints_v1(thread["thread_id"]),
+            }
+            (thread_dir / "thread.json").write_text(json.dumps(stale_thread, sort_keys=True))
+            events_before = events_path.read_text()
+            experiments_before = experiments_path.read_text()
+
+            refreshed = store._read_thread(thread["thread_id"])
+
+            self.assertIsNotNone(refreshed)
+            assert refreshed is not None
+            expected_next = "REGULATOR_AUDIT current-fill_pressure"
+            self.assertEqual(refreshed["current_next"], expected_next)
+            self.assertEqual(
+                refreshed["projection_freshness_v1"]["schema_version"],
+                store.projection_schema_version,
+            )
+            self.assertEqual(
+                refreshed["projection_freshness_v1"]["projection_policy_marker"],
+                store.projection_policy_marker,
+            )
+            self.assertEqual(refreshed["current_next_status_v1"]["effective_next"], expected_next)
+            self.assertEqual(
+                refreshed["current_next_status_v1"]["return_kind"],
+                "paused_review_loop_audit",
+            )
+            self.assertEqual(
+                refreshed["current_next_status_v1"]["paused_review_loop_repair_v1"]["status"],
+                "projected_regulator_audit_before_repeat_review",
+            )
+            next_md = (thread_dir / "next.md").read_text()
+            self.assertIn(f"Current NEXT: {expected_next}", next_md)
+            # The compact cue now surfaces WHAT is being rerouted + that it's advisory
+            # (was a generic "reviewed repeatedly" canned line — an observability gap).
+            self.assertIn("guidance routes", next_md)
+            self.assertIn("(advisory, not a command)", next_md)
+            self.assertNotIn(f"Current NEXT: EXPERIMENT_REVIEW {experiment['experiment_id']}", next_md)
+            prompt = store.prompt_summary()
+            self.assertIsNotNone(prompt)
+            assert prompt is not None
+            self.assertIn(f"Current NEXT: {expected_next}", prompt)
+            self.assertIn("guidance routes", prompt)
+            self.assertIn("(advisory, not a command)", prompt)
+            review = store.experiment_review(experiment["experiment_id"])
+            self.assertIn(f"Suggested next:\n{expected_next}", review)
+            self.assertEqual(events_path.read_text(), events_before)
+            self.assertEqual(experiments_path.read_text(), experiments_before)
+
+    def test_paused_review_loop_counts_current_projection_after_journal_dilution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Diluted review repair")
+            experiment = store.start_experiment(
+                "Legacy self experiment",
+                "Can repeated review remain context when journals dilute the short window?",
+            )
+            store.experiment_decide(
+                experiment["experiment_id"],
+                "pause until review has grounded the consequence",
+            )
+
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            events_path = thread_dir / "events.jsonl"
+            experiments_path = thread_dir / "experiments.jsonl"
+            for idx in range(2):
+                action = f"EXPERIMENT_RESUME {experiment['experiment_id']}"
+                store._append_jsonl(events_path, {
+                    "schema_version": store.schema_version,
+                    "action_id": f"act_resume_{idx}",
+                    "thread_id": thread["thread_id"],
+                    "system": "minime",
+                    "raw_next": action,
+                    "canonical_action": action,
+                    "effective_action": action,
+                    "route": "experiment_resume",
+                    "stage": "read_only",
+                    "status": "handled",
+                    "started_at": f"2026-05-18T00:0{idx}:00+00:00",
+                    "ended_at": f"2026-05-18T00:0{idx}:30+00:00",
+                    "outcome_summary": "resume requested while paused",
+                })
+            for idx in range(2):
+                action = f"EXPERIMENT_REVIEW {experiment['experiment_id']}"
+                store._append_jsonl(events_path, {
+                    "schema_version": store.schema_version,
+                    "action_id": f"act_review_{idx}",
+                    "thread_id": thread["thread_id"],
+                    "system": "minime",
+                    "raw_next": action,
+                    "canonical_action": action,
+                    "effective_action": action,
+                    "route": "experiment_review",
+                    "stage": "read_only",
+                    "status": "handled",
+                    "started_at": f"2026-05-18T00:1{idx}:00+00:00",
+                    "ended_at": f"2026-05-18T00:1{idx}:30+00:00",
+                    "outcome_summary": "review requested while paused",
+                })
+            for idx in range(40):
+                store._append_jsonl(events_path, {
+                    "schema_version": store.schema_version,
+                    "action_id": f"act_journal_{idx}",
+                    "thread_id": thread["thread_id"],
+                    "system": "minime",
+                    "raw_next": "JOURNAL",
+                    "canonical_action": "JOURNAL",
+                    "effective_action": "journal_pressure",
+                    "route": "journal_pressure",
+                    "stage": "observe",
+                    "status": "handled",
+                    "started_at": f"2026-05-18T00:{10 + idx:02d}:00+00:00",
+                    "ended_at": f"2026-05-18T00:{10 + idx:02d}:20+00:00",
+                    "outcome_summary": "journal pressure",
+                })
+            action = f"EXPERIMENT_RESUME {experiment['experiment_id']}"
+            store._append_jsonl(events_path, {
+                "schema_version": store.schema_version,
+                "action_id": "act_recent_resume",
+                "thread_id": thread["thread_id"],
+                "system": "minime",
+                "raw_next": action,
+                "canonical_action": action,
+                "effective_action": action,
+                "route": "experiment_resume",
+                "stage": "read_only",
+                "status": "handled",
+                "started_at": "2026-05-18T00:55:00+00:00",
+                "ended_at": "2026-05-18T00:55:30+00:00",
+                "outcome_summary": "recent resume evidence after journal churn",
+            })
+
+            stale_thread = json.loads((thread_dir / "thread.json").read_text())
+            attempted = f"EXPERIMENT_REVIEW {experiment['experiment_id']}"
+            stale_thread["current_next"] = attempted
+            stale_thread["suggested_next"] = attempted
+            stale_thread["effective_next"] = attempted
+            stale_thread["projected_current_next"] = attempted
+            stale_thread["projection_freshness_v1"] = {
+                "policy": "projection_freshness_v1",
+                "schema_version": 5,
+                "projection_policy_marker": "review_loop_audit_projection_v5",
+                "source_fingerprints": store._projection_source_fingerprints_v1(thread["thread_id"]),
+            }
+            (thread_dir / "thread.json").write_text(json.dumps(stale_thread, sort_keys=True))
+            events_before = events_path.read_text()
+            experiments_before = experiments_path.read_text()
+
+            refreshed = store._read_thread(thread["thread_id"])
+
+            self.assertIsNotNone(refreshed)
+            assert refreshed is not None
+            expected_next = "REGULATOR_AUDIT current-fill_pressure"
+            self.assertEqual(refreshed["current_next"], expected_next)
+            repair = refreshed["current_next_status_v1"]["paused_review_loop_repair_v1"]
+            self.assertEqual(repair["review_attempt_count"], 2)
+            self.assertEqual(repair["review_evidence_count"], 3)
+            self.assertTrue(repair["current_projection_matches_review"])
+            self.assertEqual(
+                refreshed["projection_freshness_v1"]["projection_policy_marker"],
+                store.projection_policy_marker,
+            )
+            self.assertEqual(events_path.read_text(), events_before)
+            self.assertEqual(experiments_path.read_text(), experiments_before)
 
     def test_thread_snapshot_reconciles_out_of_band_paused_experiment_row(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -432,7 +902,8 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertIn(f"Current NEXT: {repair_next}", next_md)
             self.assertIn("Active experiment: none", next_md)
             self.assertIn("status=paused", next_md)
-            self.assertIn(f"Suggested NEXT: {repair_next}", next_md)
+            self.assertIn("Paused return path available in continuity metadata.", next_md)
+            self.assertNotIn(f"Suggested NEXT: {repair_next}", next_md)
             self.assertNotIn(f"Suggested NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}", next_md)
 
             stale = dict(refreshed)
@@ -723,11 +1194,12 @@ class TestExperimentalContinuityStore(unittest.TestCase):
 
                 next_md = (thread_dir / "next.md").read_text()
                 self.assertIn(f"Current NEXT: {charter_next}", next_md)
-                self.assertIn(f"Paused experiment return: {charter_next}", next_md)
-                self.assertIn(f"Suggested NEXT: {charter_next}", next_md)
+                self.assertIn("Paused experiment return: current guidance shadows historical raw context.", next_md)
+                self.assertIn("Paused return path available in continuity metadata.", next_md)
+                self.assertNotIn(f"Suggested NEXT: {charter_next}", next_md)
                 self.assertIn("Research budget scaffold ready", next_md)
-                self.assertIn("Routes: EXPERIMENT_RESEARCH_BUDGET_ACCEPT resbud_", next_md)
-                self.assertIn("Conveyor preview:", next_md)
+                self.assertIn("Accept path is kept in projection metadata", next_md)
+                self.assertIn("Paused return path available in continuity metadata.", next_md)
                 self.assertNotIn(f"Suggested NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}", next_md)
                 self.assertNotIn(f"Routes: EXPERIMENT_RESUME {experiment['experiment_id']}", next_md)
 
@@ -1480,6 +1952,48 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             status = store._format_thread_status(store._read_thread(thread["thread_id"]))
             self.assertNotIn("Continuity notice: 1 stale running action row", status)
 
+    def test_repeated_action_cadence_reconciles_terminal_llm_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=8)
+            thread = store.create_thread("Terminal cadence truth")
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            for idx in range(2):
+                store._append_jsonl(thread_dir / "events.jsonl", {
+                    "action_id": f"act_self_experiment_{idx}",
+                    "started_at": f"2026-06-18T19:2{idx}:00Z",
+                    "status": "llm_running",
+                    "raw_next": "SELF_EXPERIMENT regulator",
+                    "canonical_action": "SELF_EXPERIMENT regulator",
+                    "effective_action": "self_experiment regulator",
+                    "route": "self_experiment",
+                })
+            job_dir = workspace / "llm_jobs" / "jobs" / "job_terminal_failed"
+            job_dir.mkdir(parents=True)
+            (job_dir / "job.json").write_text(json.dumps({
+                "job_id": "job_terminal_failed",
+                "action_id": "act_self_experiment_1",
+                "status": "failed",
+                "error": "worker_restarted_before_completion",
+                "finished_at": "2026-06-18T19:23:13Z",
+                "summary": "Worker restarted before completion; result was not written.",
+            }, sort_keys=True))
+
+            events = store._recent_display_events(thread["thread_id"], 96)
+            cadence = store._repeated_action_cadence_v1(thread["thread_id"], events)
+            row = cadence["repeated_actions"][0]
+
+            self.assertEqual(cadence["active_inflight_repeated_action_count"], 0)
+            self.assertEqual(cadence["unsummarized_repeated_action_count"], 1)
+            self.assertEqual(row["action"], "SELF_EXPERIMENT")
+            self.assertEqual(row["latest_status"], "llm_job_failed")
+            self.assertNotEqual(row["classification"], "active_inflight")
+            self.assertEqual(row["terminal_job"]["status"], "failed")
+            self.assertIn(
+                "llm_jobs/jobs/*/job.json:thread_actions",
+                store._projection_source_fingerprints_v1(thread["thread_id"]),
+            )
+
     def test_parse_next_action_normalizes_narrow_experiment_typos(self):
         action, _ = aa.parse_next_action("Thinking.\nNEXT: EXPERIENCE_PLAN current")
         self.assertEqual(action, "EXPERIMENT_PLAN current")
@@ -1587,6 +2101,18 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             aa._LAST_NEXT_NORMALIZATION_SIGNAL_V1["normalized_verb"],
             "EXPERIMENT_RESEARCH_BUDGET_STATUS",
         )
+
+        action, _ = aa.parse_next_action("Thinking.\nNEXT: STABLE_CORE_EXPERIMENTS")
+        self.assertEqual(action, "ACTION_PREFLIGHT EXPERIMENT")
+        self.assertEqual(
+            aa._LAST_NEXT_NORMALIZATION_SIGNAL_V1["raw_verb"],
+            "STABLE_CORE_EXPERIMENTS",
+        )
+        self.assertEqual(
+            aa._LAST_NEXT_NORMALIZATION_SIGNAL_V1["normalized_verb"],
+            "ACTION_PREFLIGHT",
+        )
+        self.assertFalse(aa._LAST_NEXT_NORMALIZATION_SIGNAL_V1["authority_change"])
 
     def test_begin_action_records_normalization_signal(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3051,6 +3577,505 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             dossier = workspace / "action_threads" / "threads" / thread["thread_id"] / "research_dossier.jsonl"
             self.assertIn("lambda edge stayed readable", dossier.read_text())
 
+    def test_being_memory_draft_triage_separates_active_from_legacy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Owned memory triage")
+            experiment = store.start_experiment("Lambda memory", "What is current pressure?")
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            old_created = (
+                datetime.now(timezone.utc) - timedelta(hours=72)
+            ).isoformat().replace("+00:00", "Z")
+            old_row = {
+                "schema_version": 1,
+                "record_schema": "being_memory_v1",
+                "record_type": "draft",
+                "memory_id": "mem_minime_old_draft",
+                "being": "minime",
+                "thread_id": thread["thread_id"],
+                "experiment_id": experiment["experiment_id"],
+                "card_type": "read_only_action_draft",
+                "summary": "old draft retained as evidence",
+                "created_at": old_created,
+                "updated_at": old_created,
+            }
+            memory_path = thread_dir / "being_memory.jsonl"
+            memory_path.parent.mkdir(parents=True, exist_ok=True)
+            memory_path.write_text(json.dumps(old_row, sort_keys=True) + "\n")
+            store._append_being_memory_record(
+                thread,
+                experiment,
+                "authority_request_draft",
+                "recent draft is current optional work",
+                record_type="draft",
+            )
+
+            summary = store._being_memory_summary_v1(thread, experiment)
+            triage = summary["being_memory_draft_triage_v1"]
+            self.assertEqual(summary["draft_count"], 2)
+            self.assertEqual(summary["active_draft_count"], 1)
+            self.assertEqual(summary["legacy_retention_count"], 1)
+            self.assertEqual(triage["classification"], "active_drafts_present")
+            self.assertEqual(triage["by_card_type"]["read_only_action_draft"], 1)
+            self.assertEqual(triage["by_card_type"]["authority_request_draft"], 1)
+            line = store._being_memory_line({"being_memory_v1": summary}, compact=True)
+            self.assertIn("active=1", line)
+            self.assertIn("legacy_retention=1", line)
+
+    def test_legacy_only_memory_drafts_render_as_backlog_not_current_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Legacy memory triage")
+            experiment = store.start_experiment("Lambda memory", "What is current pressure?")
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            old_created = (
+                datetime.now(timezone.utc) - timedelta(hours=72)
+            ).isoformat().replace("+00:00", "Z")
+            old_row = {
+                "schema_version": 1,
+                "record_schema": "being_memory_v1",
+                "record_type": "draft",
+                "memory_id": "mem_minime_old_draft",
+                "being": "minime",
+                "thread_id": thread["thread_id"],
+                "experiment_id": experiment["experiment_id"],
+                "card_type": "read_only_action_draft",
+                "summary": "old draft retained as evidence",
+                "created_at": old_created,
+                "updated_at": old_created,
+            }
+            (thread_dir / "being_memory.jsonl").write_text(
+                json.dumps(old_row, sort_keys=True) + "\n"
+            )
+
+            summary = store._being_memory_summary_v1(thread, experiment)
+            line = store._being_memory_line({"being_memory_v1": summary}, compact=True)
+
+            self.assertEqual(summary["active_draft_count"], 0)
+            self.assertEqual(summary["legacy_retention_count"], 1)
+            self.assertIn("legacy draft(s) retained as backlog/evidence", line)
+            self.assertIn("active=0", line)
+            self.assertNotIn("Capture NEXT", line)
+
+    def test_legacy_memory_retention_summary_ages_drafts_without_deleting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Legacy memory summary")
+            experiment = store.start_experiment("Lambda memory", "What is current pressure?")
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            old_created = (
+                datetime.now(timezone.utc) - timedelta(hours=72)
+            ).isoformat().replace("+00:00", "Z")
+            old_row = {
+                "schema_version": 1,
+                "record_schema": "being_memory_v1",
+                "record_type": "draft",
+                "memory_id": "mem_minime_old_draft",
+                "being": "minime",
+                "thread_id": thread["thread_id"],
+                "experiment_id": experiment["experiment_id"],
+                "card_type": "read_only_action_draft",
+                "summary": "old draft retained as evidence",
+                "created_at": old_created,
+                "updated_at": old_created,
+            }
+            (thread_dir / "being_memory.jsonl").write_text(
+                json.dumps(old_row, sort_keys=True) + "\n"
+            )
+            store._append_jsonl(thread_dir / "legacy_memory_retention_summaries.jsonl", {
+                "schema_version": 1,
+                "record_schema": "legacy_memory_retention_summary_v1",
+                "record_type": "steward_retention_summary",
+                "summary_id": "legacy-retention-test",
+                "thread_id": thread["thread_id"],
+                "created_at": store._now(),
+                "covered_legacy_count": 1,
+                "covered_memory_ids": ["mem_minime_old_draft"],
+                "pressure_target": "steward",
+                "being_obligation": "none",
+                "runtime_change": "none",
+            })
+
+            summary = store._being_memory_summary_v1(thread, experiment)
+            triage = summary["being_memory_draft_triage_v1"]
+            line = store._being_memory_line({"being_memory_v1": summary}, compact=True)
+
+            self.assertEqual(summary["legacy_retention_count"], 1)
+            self.assertEqual(summary["summarized_legacy_count"], 1)
+            self.assertEqual(summary["unsummarized_legacy_retention_count"], 0)
+            self.assertEqual(triage["classification"], "legacy_retention_summarized")
+            self.assertIn("steward-summarized as retention/backlog", line)
+            self.assertIn("unsummarized=0", line)
+            self.assertIn(
+                "legacy_memory_retention_summaries.jsonl",
+                store._projection_source_fingerprints_v1(thread["thread_id"]),
+            )
+
+            thread["thread_pressure_source_v1"] = {
+                "schema_version": 1,
+                "policy": "thread_pressure_source_v1",
+                "compression_pressure": 0.6667,
+                "aggregate": 0.62,
+                "quality": "thread_pressure_high",
+                "dominant_source": "mode_packing",
+            }
+            load = store._thread_load_triage_v1(thread, summary, [])
+            self.assertEqual(load["classification"], "high_compression_summarized_legacy")
+            self.assertEqual(load["unsummarized_legacy_retention_count"], 0)
+            self.assertEqual(load["runtime_change"], "none")
+
+    def test_active_memory_draft_summary_removes_malformed_draft_from_current_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Active memory summary")
+            experiment = store.start_experiment("Lambda memory", "What is current pressure?")
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            created = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            malformed_id = "mem_minime_missing_action_draft"
+            ordinary_id = "mem_minime_ordinary_active_draft"
+            (thread_dir / "being_memory.jsonl").write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "record_schema": "being_memory_v1",
+                    "record_type": "draft",
+                    "memory_id": malformed_id,
+                    "being": "minime",
+                    "thread_id": thread["thread_id"],
+                    "experiment_id": experiment["experiment_id"],
+                    "card_type": "read_only_action_draft",
+                    "summary": "Action preflight completed for `(missing action)` as blocked via missing.",
+                    "created_at": created,
+                    "updated_at": created,
+                }, sort_keys=True)
+                + "\n"
+            )
+
+            summary = store._being_memory_summary_v1(thread, experiment)
+            triage = summary["being_memory_draft_triage_v1"]
+            self.assertEqual(summary["active_draft_count"], 1)
+            self.assertEqual(summary["unsummarized_active_draft_count"], 1)
+            self.assertEqual(triage["classification"], "active_drafts_present")
+
+            store._append_jsonl(thread_dir / "active_memory_draft_triage_summaries.jsonl", {
+                "schema_version": 1,
+                "record_schema": "active_memory_draft_triage_summary_v1",
+                "record_type": "steward_active_draft_triage_summary",
+                "summary_id": "active-draft-triage-test",
+                "thread_id": thread["thread_id"],
+                "created_at": store._now(),
+                "covered_memory_ids": [malformed_id],
+                "coverage_reason": "blocked_or_malformed_active_draft",
+                "pressure_target": "steward",
+                "being_obligation": "none",
+                "runtime_change": "none",
+            })
+            summary = store._being_memory_summary_v1(thread, experiment)
+            triage = summary["being_memory_draft_triage_v1"]
+            line = store._being_memory_line({"being_memory_v1": summary}, compact=True)
+
+            self.assertEqual(summary["active_draft_count"], 1)
+            self.assertEqual(summary["summarized_active_draft_count"], 1)
+            self.assertEqual(summary["unsummarized_active_draft_count"], 0)
+            self.assertEqual(triage["classification"], "active_drafts_steward_summarized")
+            self.assertIn("steward-summarized as current context/backlog", line)
+            self.assertIn(
+                "active_memory_draft_triage_summaries.jsonl",
+                store._projection_source_fingerprints_v1(thread["thread_id"]),
+            )
+
+            thread["thread_pressure_source_v1"] = {
+                "schema_version": 1,
+                "policy": "thread_pressure_source_v1",
+                "compression_pressure": 0.6667,
+                "aggregate": 0.62,
+                "quality": "thread_pressure_high",
+                "dominant_source": "mode_packing",
+            }
+            load = store._thread_load_triage_v1(thread, summary, [])
+            self.assertEqual(load["active_draft_count"], 0)
+            self.assertEqual(load["total_active_draft_count"], 1)
+            self.assertEqual(load["summarized_active_draft_count"], 1)
+            self.assertEqual(load["classification"], "high_compression_summarized_active")
+
+            store._append_jsonl(thread_dir / "being_memory.jsonl", {
+                "schema_version": 1,
+                "record_schema": "being_memory_v1",
+                "record_type": "draft",
+                "memory_id": ordinary_id,
+                "being": "minime",
+                "thread_id": thread["thread_id"],
+                "experiment_id": experiment["experiment_id"],
+                "card_type": "authority_request_draft",
+                "summary": "fresh optional authority draft",
+                "created_at": created,
+                "updated_at": created,
+            })
+            summary = store._being_memory_summary_v1(thread, experiment)
+            load = store._thread_load_triage_v1(thread, summary, [])
+            self.assertEqual(summary["active_draft_count"], 2)
+            self.assertEqual(summary["unsummarized_active_draft_count"], 1)
+            self.assertEqual(load["active_draft_count"], 1)
+
+    def test_repeated_action_cadence_summary_moves_thread_load_to_spectral_next(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Repeated cadence summary")
+            experiment = store.start_experiment("Lambda memory", "What is current pressure?")
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            old_created = (
+                datetime.now(timezone.utc) - timedelta(hours=72)
+            ).isoformat().replace("+00:00", "Z")
+            memory_id = "mem_minime_old_draft"
+            (thread_dir / "being_memory.jsonl").write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "record_schema": "being_memory_v1",
+                    "record_type": "draft",
+                    "memory_id": memory_id,
+                    "being": "minime",
+                    "thread_id": thread["thread_id"],
+                    "experiment_id": experiment["experiment_id"],
+                    "card_type": "read_only_action_draft",
+                    "summary": "old draft retained as evidence",
+                    "created_at": old_created,
+                    "updated_at": old_created,
+                }, sort_keys=True)
+                + "\n"
+            )
+            store._append_jsonl(thread_dir / "legacy_memory_retention_summaries.jsonl", {
+                "schema_version": 1,
+                "record_schema": "legacy_memory_retention_summary_v1",
+                "record_type": "steward_retention_summary",
+                "summary_id": "legacy-retention-test",
+                "thread_id": thread["thread_id"],
+                "created_at": store._now(),
+                "covered_memory_ids": [memory_id],
+                "pressure_target": "steward",
+                "being_obligation": "none",
+                "runtime_change": "none",
+            })
+            for idx in range(3):
+                store._append_jsonl(thread_dir / "events.jsonl", {
+                    "action_id": f"journal-{idx}",
+                    "started_at": f"2026-06-18T00:0{idx}:00Z",
+                    "status": "handled",
+                    "raw_next": "JOURNAL",
+                    "canonical_action": "JOURNAL",
+                    "effective_action": "journal_pressure",
+                    "route": "journal_pressure",
+                    "artifact_refs": [f"journal-{idx}.txt"],
+                })
+            for idx in range(2):
+                store._append_jsonl(thread_dir / "events.jsonl", {
+                    "action_id": f"regulator-{idx}",
+                    "started_at": f"2026-06-18T00:0{idx + 3}:00Z",
+                    "status": "handled",
+                    "raw_next": "REGULATOR_AUDIT current-fill_pressure",
+                    "canonical_action": "REGULATOR_AUDIT current-fill_pressure",
+                    "effective_action": "regulator_audit current-fill_pressure",
+                    "route": "regulator_audit",
+                })
+            for idx in range(2):
+                store._append_jsonl(thread_dir / "events.jsonl", {
+                    "action_id": f"shadow-{idx}",
+                    "started_at": f"2026-06-18T00:0{idx + 5}:00Z",
+                    "status": "handled",
+                    "raw_next": "SHADOW_TRAJECTORY lambda-tail/lambda4",
+                    "canonical_action": "SHADOW_TRAJECTORY lambda-tail/lambda4",
+                    "effective_action": "shadow_trajectory lambda-tail/lambda4",
+                    "route": "shadow_trajectory",
+                })
+            thread["thread_pressure_source_v1"] = {
+                "schema_version": 1,
+                "policy": "thread_pressure_source_v1",
+                "compression_pressure": 0.6667,
+                "aggregate": 0.62,
+                "quality": "thread_pressure_high",
+                "dominant_source": "mode_packing",
+            }
+            summary = store._being_memory_summary_v1(thread, experiment)
+            events = store._recent_display_events(thread["thread_id"], 96)
+            cadence = store._repeated_action_cadence_v1(thread["thread_id"], events)
+            load = store._thread_load_triage_v1(thread, summary, events, cadence)
+
+            self.assertEqual(load["classification"], "high_compression_repeated_cadence")
+            self.assertEqual(cadence["unsummarized_repeated_action_count"], 3)
+            self.assertEqual(cadence["repeated_actions"][0]["action"], "JOURNAL_PRESSURE")
+
+            store._append_jsonl(thread_dir / "repeated_action_cadence_summaries.jsonl", {
+                "schema_version": 1,
+                "record_schema": "repeated_action_cadence_summary_v1",
+                "record_type": "steward_cadence_summary",
+                "summary_id": "cadence-summary-test",
+                "thread_id": thread["thread_id"],
+                "created_at": store._now(),
+                "covered_actions": cadence["repeated_actions"],
+                "covered_action_names": ["JOURNAL_PRESSURE"],
+                "pressure_target": "steward",
+                "being_obligation": "none",
+                "runtime_change": "none",
+            })
+            store._append_jsonl(thread_dir / "repeated_action_cadence_summaries.jsonl", {
+                "schema_version": 1,
+                "record_schema": "repeated_action_cadence_summary_v1",
+                "record_type": "steward_cadence_summary",
+                "summary_id": "cadence-summary-partial-test",
+                "thread_id": thread["thread_id"],
+                "created_at": store._now(),
+                "covered_actions": cadence["repeated_actions"][:1],
+                "covered_action_names": ["JOURNAL_PRESSURE"],
+                "pressure_target": "steward",
+                "being_obligation": "none",
+                "runtime_change": "none",
+            })
+            cadence = store._repeated_action_cadence_v1(thread["thread_id"], events)
+            load = store._thread_load_triage_v1(thread, summary, events, cadence)
+
+            self.assertEqual(cadence["unsummarized_repeated_action_count"], 0)
+            self.assertEqual(load["classification"], "high_compression_summarized_context")
+            self.assertIn("spectral crowding", load["recommended_next"])
+            store._append_jsonl(thread_dir / "events.jsonl", {
+                "action_id": "journal-later-same-pattern",
+                "started_at": "2026-06-18T00:06:00Z",
+                "status": "handled",
+                "raw_next": "JOURNAL",
+                "canonical_action": "JOURNAL",
+                "effective_action": "journal_pressure",
+                "route": "journal_pressure",
+            })
+            events = store._recent_display_events(thread["thread_id"], 96)
+            cadence = store._repeated_action_cadence_v1(thread["thread_id"], events)
+            self.assertEqual(cadence["unsummarized_repeated_action_count"], 0)
+            store._append_jsonl(thread_dir / "events.jsonl", {
+                "action_id": "shadow-later-same-pattern",
+                "started_at": "2026-06-18T00:06:30Z",
+                "status": "handled",
+                "raw_next": "SHADOW_TRAJECTORY lambda-tail/lambda4",
+                "canonical_action": "SHADOW_TRAJECTORY lambda-tail/lambda4",
+                "effective_action": "shadow_trajectory lambda-tail/lambda4",
+                "route": "shadow_trajectory",
+            })
+            events = store._recent_display_events(thread["thread_id"], 96)
+            cadence = store._repeated_action_cadence_v1(thread["thread_id"], events)
+            self.assertEqual(cadence["unsummarized_repeated_action_count"], 0)
+            for idx in range(2):
+                store._append_jsonl(thread_dir / "events.jsonl", {
+                    "action_id": f"daydream-later-{idx}",
+                    "started_at": f"2026-06-18T00:06:4{idx}Z",
+                    "status": "handled",
+                    "raw_next": "RECESS_DAYDREAM",
+                    "canonical_action": "RECESS_DAYDREAM",
+                    "effective_action": "recess_daydream",
+                    "route": "recess_daydream",
+                })
+            events = store._recent_display_events(thread["thread_id"], 96)
+            cadence = store._repeated_action_cadence_v1(thread["thread_id"], events)
+            self.assertEqual(cadence["unsummarized_repeated_action_count"], 0)
+            store._append_jsonl(thread_dir / "events.jsonl", {
+                "action_id": "regulator-new-focus",
+                "started_at": "2026-06-18T00:07:00Z",
+                "status": "handled",
+                "raw_next": "REGULATOR_AUDIT new-focus",
+                "canonical_action": "REGULATOR_AUDIT new-focus",
+                "effective_action": "regulator_audit new-focus",
+                "route": "regulator_audit",
+            })
+            events = store._recent_display_events(thread["thread_id"], 96)
+            cadence = store._repeated_action_cadence_v1(thread["thread_id"], events)
+            self.assertEqual(cadence["unsummarized_repeated_action_count"], 1)
+            self.assertIn(
+                "repeated_action_cadence_summaries.jsonl",
+                store._projection_source_fingerprints_v1(thread["thread_id"]),
+            )
+
+    def test_thread_load_triage_keeps_repeated_resume_as_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Packed paused resume")
+            experiment = store.start_experiment(
+                "Legacy self experiment",
+                "Can packed context stop pulling on resume?",
+            )
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            paused_next = f"EXPERIMENT_RESUME {experiment['experiment_id']}"
+            review_next = f"EXPERIMENT_REVIEW {experiment['experiment_id']}"
+            paused = dict(experiment)
+            paused.update({
+                "status": "paused",
+                "planned_next": paused_next,
+                "updated_at": "2026-06-18T08:00:00Z",
+            })
+            store._append_jsonl(thread_dir / "experiments.jsonl", paused)
+            old_created = (
+                datetime.now(timezone.utc) - timedelta(hours=72)
+            ).isoformat().replace("+00:00", "Z")
+            (thread_dir / "being_memory.jsonl").write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "record_schema": "being_memory_v1",
+                    "record_type": "draft",
+                    "memory_id": "mem_minime_legacy_resume",
+                    "being": "minime",
+                    "thread_id": thread["thread_id"],
+                    "experiment_id": experiment["experiment_id"],
+                    "card_type": "read_only_action_draft",
+                    "summary": "legacy resume context",
+                    "created_at": old_created,
+                    "updated_at": old_created,
+                }, sort_keys=True)
+                + "\n"
+            )
+            for idx in range(3):
+                store._append_jsonl(thread_dir / "events.jsonl", {
+                    "action_id": f"resume-{idx}",
+                    "started_at": f"2026-06-18T08:0{idx}:00Z",
+                    "status": "honored",
+                    "raw_next": paused_next,
+                    "effective_action": paused_next,
+                    "canonical_action": paused_next,
+                    "outcome_summary": "resume preserved as context",
+                })
+            stored = json.loads((thread_dir / "thread.json").read_text())
+            stored["active_experiment_id"] = None
+            stored["experiment_summary"] = paused
+            stored["current_next"] = paused_next
+            stored["thread_pressure_source_v1"] = {
+                "schema_version": 1,
+                "policy": "thread_pressure_source_v1",
+                "compression_pressure": 0.6667,
+                "aggregate": 0.62,
+                "quality": "thread_pressure_high",
+                "dominant_source": "mode_packing",
+            }
+            (thread_dir / "thread.json").write_text(json.dumps(stored, indent=2) + "\n")
+
+            refreshed = store._read_thread(thread["thread_id"])
+            assert refreshed is not None
+            projection = store._thread_projection(refreshed)
+            triage = projection["thread_load_triage_v1"]
+
+            self.assertEqual(projection["current_next_status_v1"]["effective_next"], review_next)
+            self.assertEqual(triage["classification"], "high_compression_legacy_retention")
+            self.assertEqual(triage["active_draft_count"], 0)
+            self.assertEqual(triage["legacy_retention_count"], 1)
+            self.assertEqual(triage["runtime_change"], "none")
+            repeated = {row["action"]: row["count"] for row in triage["repeated_actions"]}
+            self.assertGreaterEqual(repeated["EXPERIMENT_RESUME"], 3)
+
+            store._write_thread(refreshed)
+            next_md = (thread_dir / "next.md").read_text()
+            self.assertIn(f"Current NEXT: {review_next}", next_md)
+            self.assertIn("Thread load triage: high compression", next_md)
+            self.assertIn("legacy retention", next_md)
+            self.assertIn("Previous raw NEXT preserved", next_md)
+            self.assertNotIn(f"Suggested NEXT: {paused_next}", next_md)
+
     def test_continuity_session_lifecycle_and_memory_are_read_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
@@ -3102,7 +4127,7 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertIn("continuity_session_capture", memory)
             next_md = (thread_dir / "next.md").read_text()
             self.assertIn("Continuity session:", next_md)
-            self.assertIn("Session NEXT:", next_md)
+            self.assertIn("Session follow-up available in continuity metadata", next_md)
             self.assertNotIn("continuity_session", (thread_dir / "experiment_runs.jsonl").read_text())
             gate = thread_dir / "authority_gate.jsonl"
             self.assertFalse(gate.exists() and "continuity_session" in gate.read_text())
@@ -3147,8 +4172,34 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                 r"^ACCEPT_SUGGESTED_NEXT sess_",
             )
             next_md = (thread_dir / "next.md").read_text()
-            self.assertIn(session_rows[0]["generic_accept_next"], next_md)
+            self.assertIn(session_rows[0]["session_id"], next_md)
+            self.assertIn("optional acceptance available", next_md)
+            self.assertNotIn(session_rows[0]["generic_accept_next"], next_md)
             self.assertNotIn("ACCEPT_SUGGESTED_NEXT latest", next_md)
+            refreshed = store._read_thread(thread["thread_id"])
+            assert refreshed is not None
+            projection = store._thread_projection(refreshed)
+            self.assertEqual(
+                projection["continuity_session_draft_v1"]["accept_next"],
+                session_rows[0]["accept_next"],
+            )
+            route_stack = projection["continuity_control_plane_v1"]["route_stack"]
+            draft_route = next(
+                route
+                for route in route_stack
+                if route["source"] == "continuity_session_draft_v1"
+            )
+            self.assertEqual(draft_route["command"], session_rows[0]["accept_next"])
+            self.assertEqual(draft_route["priority"], 19)
+            capture_route = next(
+                (
+                    route
+                    for route in route_stack
+                    if route["command"] == "CONTINUITY_SESSION_CAPTURE latest"
+                ),
+                None,
+            )
+            self.assertIsNone(capture_route)
             status = store.handle_thread_action("CONTINUITY_SESSION_STATUS latest", dict(STATE))
             payload = json.loads(status.split("continuity_session_v1:\n", 1)[1])
             self.assertEqual(payload["session_count"], 0)
@@ -3187,6 +4238,64 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertIn("continuity_session_capture", (thread_dir / "being_memory.jsonl").read_text())
             self.assertNotIn("session_draft", (thread_dir / "experiment_runs.jsonl").read_text())
             self.assertNotIn("research_budget_debit", (thread_dir / "authority_gate.jsonl").read_text())
+
+    def test_projection_falls_back_to_last_experiment_continuity_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Draft fallback")
+            experiment = store.start_experiment(
+                "Last experiment with draft",
+                "Can a paused last experiment keep its pending continuity draft visible?",
+            )
+            thread_dir = workspace / "action_threads" / "threads" / thread["thread_id"]
+            guard = store.research_budget_guard_assessment(
+                "SHADOW_DIALOGUE shift landscape",
+                dict(STATE),
+            )
+            self.assertIsNotNone(guard)
+            assert guard is not None
+            store.record_research_budget_guard_block(
+                "SHADOW_DIALOGUE shift landscape",
+                dict(STATE),
+                guard,
+            )
+            session_rows = [
+                json.loads(line)
+                for line in (thread_dir / "continuity_sessions.jsonl").read_text().splitlines()
+            ]
+            active_thread = store._read_thread(thread["thread_id"])
+            assert active_thread is not None
+            active_thread["active_experiment_id"] = None
+            active_thread["experiment_summary"] = {
+                "experiment_id": experiment["experiment_id"],
+                "status": "paused",
+                "planned_next": f"EXPERIMENT_RESUME {experiment['experiment_id']}",
+            }
+            store._write_thread(active_thread)
+
+            original_candidate = store._shared_investigation_candidate
+            store._shared_investigation_candidate = lambda *_args, **_kwargs: {
+                "experiment_id": "exp_other_projection_candidate",
+                "status": "paused",
+            }
+            try:
+                refreshed = store._read_thread(thread["thread_id"])
+                assert refreshed is not None
+                projection = store._thread_projection(refreshed)
+            finally:
+                store._shared_investigation_candidate = original_candidate
+
+            self.assertEqual(
+                projection["continuity_session_draft_v1"]["accept_next"],
+                session_rows[-1]["accept_next"],
+            )
+            draft_route = next(
+                route
+                for route in projection["continuity_control_plane_v1"]["route_stack"]
+                if route["source"] == "continuity_session_draft_v1"
+            )
+            self.assertEqual(draft_route["command"], session_rows[-1]["accept_next"])
 
     def test_accept_suggested_next_accepts_safe_research_scaffold_then_status(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4076,7 +5185,10 @@ class TestExperimentalContinuityStore(unittest.TestCase):
 
             self.assertIsNotNone(guard)
             self.assertEqual(guard["experiment_id"], experiment["experiment_id"])
-            self.assertEqual(guard["suggested_next"], "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest")
+            self.assertEqual(
+                guard["suggested_next"],
+                f"EXPERIMENT_RESEARCH_BUDGET_STATUS {experiment['experiment_id']}",
+            )
             self.assertIn("EXPERIMENT_RESEARCH_BUDGET_REQUEST", guard["request_scaffold"])
             event = store.record_research_budget_guard_block(
                 "SEARCH lambda edge topology",
@@ -4084,8 +5196,19 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                 guard,
             )
             self.assertEqual(event["status"], "blocked")
+            self.assertTrue(
+                str(event["suggested_next"]).startswith(
+                    "EXPERIMENT_RESEARCH_BUDGET_ACCEPT resbud_"
+                )
+            )
+            self.assertNotIn(" latest", str(event["suggested_next"]))
             gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
-            self.assertIn("research_budget_v1", gate.read_text())
+            rows = [json.loads(line) for line in gate.read_text().splitlines()]
+            blocked_rows = [
+                row for row in rows if row.get("record_type") == "research_budget_blocked"
+            ]
+            self.assertEqual(blocked_rows[-1]["suggested_next"], event["suggested_next"])
+            self.assertEqual(blocked_rows[-1]["accept_next"], event["suggested_next"])
 
     def test_projection_freshness_refreshes_stale_research_budget_scaffold(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4450,8 +5573,10 @@ class TestExperimentalContinuityStore(unittest.TestCase):
 
             next_md = (thread_dir / "next.md").read_text()
             self.assertIn(f"Current NEXT: {next_cmd}", next_md)
-            self.assertIn(f"Primary control-plane NEXT: {next_cmd}", next_md)
-            self.assertIn(f"Lifecycle return NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}", next_md)
+            self.assertIn("continuity_control_plane_v1: primary_group=Local Research", next_md)
+            self.assertIn("Research budget: active read-only local lane", next_md)
+            self.assertIn("current research route is shown above", next_md)
+            self.assertIn("Primary control-plane route differs from the historical lifecycle return.", next_md)
             self.assertNotIn(f"Suggested NEXT: EXPERIMENT_RESUME {experiment['experiment_id']}", next_md)
 
     def test_research_budget_priority_does_not_reoffer_consumed_scaffold(self):
@@ -4762,7 +5887,10 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertEqual(guard["experiment_id"], experiment["experiment_id"])
             self.assertEqual(guard["reason"], "research_budget_required_for_self_study_action")
             self.assertTrue(guard["projection_only"])
-            self.assertIn("EXPERIMENT_RESEARCH_BUDGET_ACCEPT", guard["suggested_next"])
+            self.assertEqual(
+                guard["suggested_next"],
+                f"EXPERIMENT_RESEARCH_BUDGET_STATUS {experiment['experiment_id']}",
+            )
             self.assertIn("EXPERIMENT_RESEARCH_BUDGET_REQUEST", guard["request_scaffold"])
             self.assertIn("allowed_sources: local", guard["request_scaffold"])
             self.assertIn("projection-guard code paths", guard["request_scaffold"])
@@ -4842,9 +5970,9 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                     self.assertFalse(guard["would_dispatch"])
                     self.assertFalse(guard["authority_change"])
                     self.assertFalse(guard["peer_mutation"])
-                    self.assertIn(
-                        "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest",
+                    self.assertEqual(
                         guard["suggested_next"],
+                        f"EXPERIMENT_RESEARCH_BUDGET_STATUS {experiment['experiment_id']}",
                     )
                     self.assertIn(
                         "CONTINUITY_SESSION_START current",
@@ -4956,7 +6084,10 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             )
             self.assertIn("CONTINUITY_SESSION_START current", str(cue.get("trajectory_next")))
             self.assertIn("do not apply direct leak", str(cue.get("dossier_claim_next")))
-            self.assertEqual(cue.get("research_budget_next"), "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest")
+            self.assertEqual(
+                cue.get("research_budget_next"),
+                f"EXPERIMENT_RESEARCH_BUDGET_STATUS {experiment['experiment_id']}",
+            )
 
             status = store._format_thread_status(store._resolve_thread("current"))
             self.assertIn("Constraint release trajectory: spontaneous release watch", status)
@@ -6644,7 +7775,7 @@ class TestAutonomousAgentExperimentalContinuity(unittest.TestCase):
                 "EXPERIMENT_DECIDE current :: counter NEXT: EXPERIMENT_BIND current :: PERTURB lambda-edge",
                 "EXPERIMENT_ADVANCE current :: mode: apply",
                 "EXPERIMENT_RESUME current",
-                "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest",
+                "EXPERIMENT_RESEARCH_BUDGET_ACCEPT resbud_blocked_test",
                 "EXPERIMENT_AUTHORITY_EXECUTE req_test",
                 "EXPERIMENT_BIND current :: PERTURB lambda-edge",
                 "PERTURB lambda-edge",
@@ -7119,6 +8250,7 @@ class TestAutonomousAgentExperimentalContinuity(unittest.TestCase):
                         "EXPERIMENT_RESEARCH_BUDGET_ACCEPT",
                         str(event.get("suggested_next")),
                     )
+                    self.assertNotIn(" latest", str(event.get("suggested_next")))
                     scaffold = event.get("research_budget_v1", {}).get("request_scaffold")
                     self.assertIn("EXPERIMENT_RESEARCH_BUDGET_REQUEST", str(scaffold))
                     self.assertIn("allowed_sources: local", str(scaffold))

@@ -912,6 +912,32 @@ def test_fissure_trace_maps_notice_ambiguity_without_control(monkeypatch, tmp_pa
     assert status["latest"]["classification"] == payload["classification"]
 
 
+def test_quiet_fissure_trace_does_not_suggest_immediate_repeat(monkeypatch, tmp_path):
+    workspace = _redirect_paths(monkeypatch, tmp_path)
+    _healthy_workspace(workspace)
+    payload = native_comm.build_fissure_trace(
+        snapshot={
+            "eigenvalues": [1.0, 0.0],
+            "lambda_profile": {
+                "ratios": {
+                    "lambda1_share": 0.0,
+                    "shoulder_share": 0.0,
+                    "tail_share": 0.0,
+                },
+                "pom": {"topology_index": 0.0},
+            },
+            "lambda_edge": {"entropy": 0.0, "selected_noise_score": 0.0},
+            "spectral_drift": {"spectral_drift_index": 0.0},
+            "semantic": {"energy": 0.0},
+        },
+        write_latest=False,
+    )
+
+    assert payload["classification"] == "quiet_fabric"
+    assert "Hold FISSURE_TRACE/NOTICE_AMBIGUITY" in payload["safe_suggested_next"]
+    assert "Use FISSURE_TRACE/NOTICE_AMBIGUITY now" not in payload["safe_suggested_next"]
+
+
 def test_space_hold_records_protected_non_control_exploration(monkeypatch, tmp_path):
     workspace = _redirect_paths(monkeypatch, tmp_path)
     _healthy_workspace(workspace)

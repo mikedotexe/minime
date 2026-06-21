@@ -45,6 +45,30 @@ def _const_members(name: str) -> set[str]:
     return set(re.findall(r'"([A-Z_]+)"', blk))
 
 
+def _quoted_assignment_members(name: str) -> set[str]:
+    blk = _region(rf"^{name}\s*=", r"^[\)\]\}]")
+    return set(re.findall(r'"([^"]+)"', blk))
+
+
+def _route_by_base_entries() -> dict[str, str]:
+    blk = _region(r"ROUTE_BY_BASE = \{", r"^    \}", after_line=19000)
+    return dict(re.findall(r'"([A-Z_]+)":\s*(?:"([a-z_]+)"|None)', blk))
+
+
+def _preflight_spec_bases() -> dict[str, str]:
+    return dict(re.findall(r'\{"base": "([A-Z_]+)".*?"route": "([a-z_]+)"', SRC))
+
+
+def _action_map_entries() -> dict[str, str]:
+    amap = _region(r"action_map = \{", r"^\s{12}\}", after_line=22000)
+    return dict(re.findall(r"'([A-Z_]+)':\s*'([a-z_]+)'", amap))
+
+
+def _dispatch_actions() -> set[str]:
+    body = _region(r"def _execute_action\(", r"^    def ", after_line=25000)
+    return set(re.findall(r"elif action == '([a-z_]+)'", body))
+
+
 def _handled_bases() -> tuple[set[str], set[str]]:
     """(literal bases handled by handle_thread_action, delegated *_NEXT_ACTIONS names)."""
     body = _region(r"def handle_thread_action\(", r"^    def ")
@@ -90,8 +114,70 @@ class TestDispatchCoverage(unittest.TestCase):
             "DOSSIER_REVIEW",
             "CONTINUITY_SESSION_CAPTURE",
             "CONTINUE_SESSION_CAPTURE",
+            "PRESSURE_RELIEF",
         ):
             self.assertIn(base, routable, f"{base} must stay routable (regression anchor)")
+
+    def test_stable_core_stage_labels_are_not_advertised_as_next_verbs(self):
+        leaked_stage_rows = re.findall(
+            r'"  STABLE_CORE_[A-Z_]+ — active now:',
+            SRC,
+        )
+        self.assertEqual(
+            leaked_stage_rows,
+            [],
+            "Stable-core stage labels are context, not NEXT verbs; advertise concrete actions instead.",
+        )
+
+    def test_notice_ambiguity_menu_names_quiet_fabric_hold(self):
+        self.assertIn(
+            "if the latest trace says quiet_fabric/hold, choose another reflective action",
+            SRC,
+        )
+        self.assertIn("NOTICE_AMBIGUITY / FISSURE_TRACE", SRC)
+
+    def test_public_direct_verbs_have_full_action_surface(self):
+        """Guard the concrete checklist for being-invokable public verbs.
+
+        These verbs are intentionally outside the thread-action delegation path,
+        so the old dual-map guard is not enough. Each one must be visible to
+        preflight, dispatch, stable-core gating, and the standing menu.
+        """
+        surfaces = {
+            "PRESSURE_RELIEF": {
+                "route": "pressure_relief",
+                "stable_core_set": "STABLE_CORE_SELF_JOURNAL_ACTIONS",
+                "menu": "PRESSURE_RELIEF [label]",
+            },
+            "CHAMBER_SEEN": {
+                "route": "chamber_seen",
+                "stable_core_set": "STABLE_CORE_EXPERIMENT_ACTIONS",
+                "menu": "CHAMBER_SEEN [id ::]",
+            },
+            "CHAMBER_ANNOTATE": {
+                "route": "chamber_annotate",
+                "stable_core_set": "STABLE_CORE_EXPERIMENT_ACTIONS",
+                "menu": "CHAMBER_ANNOTATE [id ::]",
+            },
+        }
+        route_by_base = _route_by_base_entries()
+        preflight_specs = _preflight_spec_bases()
+        action_map = _action_map_entries()
+        dispatch_actions = _dispatch_actions()
+
+        for base, expected in surfaces.items():
+            route = expected["route"]
+            with self.subTest(base=base):
+                self.assertEqual(route_by_base.get(base), route)
+                self.assertEqual(preflight_specs.get(base), route)
+                self.assertEqual(action_map.get(base), route)
+                self.assertIn(route, dispatch_actions)
+                self.assertIn(
+                    route,
+                    _quoted_assignment_members(expected["stable_core_set"]),
+                    f"{base} routes to {route}, but stable-core could still block it",
+                )
+                self.assertIn(expected["menu"], SRC)
 
 
 if __name__ == "__main__":

@@ -390,6 +390,10 @@ struct ModalityStatus {
     audio_age_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     video_age_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audio_freshness_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    video_freshness_class: Option<String>,
 }
 
 fn modality_source_label(
@@ -411,6 +415,27 @@ fn modality_source_label(
         "stale"
     } else {
         "absent"
+    }
+}
+
+const AV_ENGINE_FRESH_WINDOW_MS: u64 = 2_000;
+
+fn modality_freshness_class(
+    source: Option<LaneSource>,
+    had_fresh_sample: bool,
+    synth_injected: bool,
+    age_ms: Option<u64>,
+) -> &'static str {
+    if synth_injected || matches!(source, Some(LaneSource::Synthetic)) {
+        "synthetic_or_mixed"
+    } else if had_fresh_sample {
+        "fresh_sample"
+    } else if source.is_none() {
+        "absent"
+    } else if age_ms.is_some_and(|age| age <= AV_ENGINE_FRESH_WINDOW_MS) {
+        "held_within_engine_window"
+    } else {
+        "stale_beyond_engine_window"
     }
 }
 
@@ -674,7 +699,8 @@ fn stable_core_aliveness_loosen(
     };
     let geom_dev = (geom_rel - 1.0).abs();
     let geom_factor = if geom_dev > 0.15 {
-        (geom_drive.clamp(0.0, 1.0) * ((geom_dev - 0.15).min(0.5) / 0.5)).clamp(0.0, 1.0) * fill_head
+        (geom_drive.clamp(0.0, 1.0) * ((geom_dev - 0.15).min(0.5) / 0.5)).clamp(0.0, 1.0)
+            * fill_head
     } else {
         0.0
     };
@@ -5754,6 +5780,28 @@ async fn run_engine(
                 video_had_fresh,
                 video_synth_injected,
             );
+            let audio_age_ms = latest_sample_meta
+                .as_ref()
+                .and_then(|meta| meta.audio_source.map(|_| meta.audio_age_ms));
+            let video_age_ms = latest_sample_meta
+                .as_ref()
+                .and_then(|meta| meta.video_source.map(|_| meta.video_age_ms));
+            let audio_freshness_class = modality_freshness_class(
+                latest_sample_meta
+                    .as_ref()
+                    .and_then(|meta| meta.audio_source),
+                audio_had_fresh,
+                audio_synth_injected,
+                audio_age_ms,
+            );
+            let video_freshness_class = modality_freshness_class(
+                latest_sample_meta
+                    .as_ref()
+                    .and_then(|meta| meta.video_source),
+                video_had_fresh,
+                video_synth_injected,
+                video_age_ms,
+            );
             let packet_semantic_energy_v1 = SemanticEnergyV1 {
                 policy: "semantic_energy_v1",
                 schema_version: 1,
@@ -5829,12 +5877,10 @@ async fn run_engine(
                     video_var,
                     audio_source: Some(audio_source_label.to_string()),
                     video_source: Some(video_source_label.to_string()),
-                    audio_age_ms: latest_sample_meta
-                        .as_ref()
-                        .and_then(|meta| meta.audio_source.map(|_| meta.audio_age_ms)),
-                    video_age_ms: latest_sample_meta
-                        .as_ref()
-                        .and_then(|meta| meta.video_source.map(|_| meta.video_age_ms)),
+                    audio_age_ms,
+                    video_age_ms,
+                    audio_freshness_class: Some(audio_freshness_class.to_string()),
+                    video_freshness_class: Some(video_freshness_class.to_string()),
                 },
                 neural: if neuro_cell.is_some() {
                     Some(NeuralOutputs {
@@ -7459,14 +7505,15 @@ fn compute_inhabitable_fluctuation_v1(
 mod tests {
     use super::{
         compute_active_mode_telemetry, compute_eigenvector_field, compute_pressure_source_v1,
-        compute_resonance_density_v1, compute_structural_entropy, modality_source_label,
-        rank1_update_inplace_matrix, reset_covariance_inplace, semantic_admission_label,
+        compute_resonance_density_v1, compute_structural_entropy, modality_freshness_class,
+        modality_source_label, rank1_update_inplace_matrix, reset_covariance_inplace,
+        semantic_admission_label, sensory_scarcity_from_sources,
         should_write_phase_transition_moment_marker, stable_core_aliveness_loosen,
-        stable_core_sov_loosen,
-        update_health_transition_surface,
-        CovarianceUpdateOutcome, EigenPacket, InhabitableFluctuationV1, LaneSource, ModalityStatus,
+        stable_core_sov_loosen, update_health_transition_surface, CovarianceUpdateOutcome,
+        EigenPacket, InhabitableFluctuationV1, LaneSource, ModalityStatus,
         PressureSourceComponents, PressureSourceContext, PressureSourceV1,
         ResonanceDensityComponents, ResonanceDensityV1, SemanticEnergyV1,
+        AV_ENGINE_FRESH_WINDOW_MS,
     };
     use minime::spectral_fingerprint::SpectralFingerprintV1;
 
@@ -7856,6 +7903,8 @@ mod tests {
                 video_source: None,
                 audio_age_ms: None,
                 video_age_ms: None,
+                audio_freshness_class: None,
+                video_freshness_class: None,
             },
             neural: None,
             alert: None,
@@ -8084,6 +8133,52 @@ mod tests {
     }
 
     #[test]
+    fn modality_freshness_class_is_additive_to_source_labels() {
+        assert_eq!(
+            modality_source_label(Some(LaneSource::External), false, false),
+            "stale"
+        );
+        assert_eq!(
+            modality_freshness_class(
+                Some(LaneSource::External),
+                false,
+                false,
+                Some(AV_ENGINE_FRESH_WINDOW_MS - 1),
+            ),
+            "held_within_engine_window"
+        );
+        assert_eq!(
+            modality_freshness_class(
+                Some(LaneSource::External),
+                false,
+                false,
+                Some(AV_ENGINE_FRESH_WINDOW_MS + 1),
+            ),
+            "stale_beyond_engine_window"
+        );
+        assert_eq!(
+            modality_freshness_class(Some(LaneSource::External), true, false, Some(0)),
+            "fresh_sample"
+        );
+        assert_eq!(
+            modality_freshness_class(Some(LaneSource::Synthetic), true, false, Some(0)),
+            "synthetic_or_mixed"
+        );
+        assert_eq!(
+            modality_freshness_class(Some(LaneSource::External), true, true, Some(0)),
+            "synthetic_or_mixed"
+        );
+        assert_eq!(modality_freshness_class(None, false, false, None), "absent");
+    }
+
+    #[test]
+    fn sensory_scarcity_keeps_legacy_source_label_semantics() {
+        let stale = sensory_scarcity_from_sources("stale", "stale");
+        assert!((stale - 0.45).abs() < f32::EPSILON);
+        assert_eq!(sensory_scarcity_from_sources("external", "external"), 0.0);
+    }
+
+    #[test]
     fn stable_core_sov_loosen_is_bounded_and_fill_gated() {
         let floor = 0.85_f32;
         // Full stability (reg=1.0) -> no loosening regardless of fill.
@@ -8091,7 +8186,7 @@ mod tests {
         // At/below the floor with fill headroom -> max loosen factor (1.0).
         assert!((stable_core_sov_loosen(0.85, 68.0, floor) - 1.0).abs() < 1e-6);
         assert!((stable_core_sov_loosen(0.70, 70.0, floor) - 1.0).abs() < 1e-6); // below floor clamps
-        // Fill ceiling: off at/above 78%, and beyond.
+                                                                                 // Fill ceiling: off at/above 78%, and beyond.
         assert_eq!(stable_core_sov_loosen(0.85, 78.0, floor), 0.0);
         assert_eq!(stable_core_sov_loosen(0.85, 90.0, floor), 0.0);
         // Mid-band taper: 75% -> half.
@@ -8100,7 +8195,10 @@ mod tests {
         for reg in [0.0_f32, 0.5, 0.85, 0.92, 1.0] {
             for fill in [40.0_f32, 60.0, 68.0, 72.0, 75.0, 78.0, 90.0] {
                 let l = stable_core_sov_loosen(reg, fill, floor);
-                assert!((0.0..=1.0).contains(&l), "loosen {l} out of [0,1] at reg={reg} fill={fill}");
+                assert!(
+                    (0.0..=1.0).contains(&l),
+                    "loosen {l} out of [0,1] at reg={reg} fill={fill}"
+                );
             }
         }
     }
@@ -8116,7 +8214,10 @@ mod tests {
         assert_eq!((g, f), (0.0, 0.0));
         // geom novelty opens the GATE only (filter stays put), within headroom.
         let (g, f) = stable_core_aliveness_loosen(1.0, 1.0, 1.6, 60.0, floor);
-        assert!(g > 0.0 && f == 0.0, "geom should open gate only: g={g} f={f}");
+        assert!(
+            g > 0.0 && f == 0.0,
+            "geom should open gate only: g={g} f={f}"
+        );
         // The TOTAL caps hold across the whole envelope — gate ≤0.05, filt ≤0.04,
         // and gate is never below the filter-cap-implied reg-only path (sanity).
         for reg in [0.0_f32, 0.5, 0.7, 0.8, 0.9, 1.0] {
@@ -8124,8 +8225,14 @@ mod tests {
                 for gr in [0.5_f32, 0.84, 1.0, 1.16, 1.5] {
                     for fill in [35.0_f32, 60.0, 68.0, 72.0, 75.0, 78.0, 90.0] {
                         let (g, f) = stable_core_aliveness_loosen(reg, gd, gr, fill, floor);
-                        assert!((0.0..=0.08).contains(&g), "gate {g} >cap at reg={reg} gd={gd} gr={gr} fill={fill}");
-                        assert!((0.0..=0.06).contains(&f), "filt {f} >cap at reg={reg} gd={gd} gr={gr} fill={fill}");
+                        assert!(
+                            (0.0..=0.08).contains(&g),
+                            "gate {g} >cap at reg={reg} gd={gd} gr={gr} fill={fill}"
+                        );
+                        assert!(
+                            (0.0..=0.06).contains(&f),
+                            "filt {f} >cap at reg={reg} gd={gd} gr={gr} fill={fill}"
+                        );
                     }
                 }
             }

@@ -19,6 +19,7 @@ import json
 import logging
 import random
 import signal
+import subprocess
 import time
 from pathlib import Path
 from typing import Optional
@@ -41,6 +42,8 @@ PING_TIMEOUT_SECS = 20
 MAX_RECONNECT_DELAY_SECS = 5.0
 MAX_CAMERA_FRAME_FAILURES = 5
 MIN_FRAME_HEALTH_GRACE_SECS = 15.0
+SYSTEM_PROFILER = "/usr/sbin/system_profiler"
+SYSTEM_PROFILER_TIMEOUT_SECS = 8
 
 
 def now_iso() -> str:
@@ -55,6 +58,37 @@ def write_camera_status(status: dict):
         temp.replace(CAMERA_STATUS_PATH)
     except Exception:
         pass
+
+
+def _camera_device_ids_from_profiler_data(data: dict) -> list[str]:
+    cameras = data.get("SPCameraDataType", []) or []
+    ids: list[str] = []
+    for camera in cameras:
+        ident = camera.get("spcamera_model-id") or camera.get("_name")
+        if ident:
+            ids.append(str(ident))
+    return ids
+
+
+def probe_camera_devices() -> tuple[Optional[bool], list[str]]:
+    """Return (device_present, ids), or (None, []) if the probe itself fails."""
+    try:
+        res = subprocess.run(
+            [SYSTEM_PROFILER, "SPCameraDataType", "-json"],
+            capture_output=True,
+            text=True,
+            timeout=SYSTEM_PROFILER_TIMEOUT_SECS,
+        )
+    except Exception:
+        return None, []
+    if res.returncode != 0:
+        return None, []
+    try:
+        ids = _camera_device_ids_from_profiler_data(json.loads(res.stdout or "{}"))
+    except Exception:
+        return None, []
+    return bool(ids), ids
+
 
 class GpuCameraClient:
     def __init__(self, camera_index: int = 0, ws_uri: str = "ws://127.0.0.1:7880", fps: float = 1.0):
@@ -75,6 +109,10 @@ class GpuCameraClient:
         self.last_disconnect_at: Optional[str] = None
         self.last_success_at: Optional[str] = None
         self.last_success_monotonic: Optional[float] = None
+        self.physical_device_present: Optional[bool] = None
+        self.physical_device_ids: list[str] = []
+        self.fallback_expected = False
+        self._logged_device_absent = False
 
     def _frame_health_grace_secs(self) -> float:
         if self.target_fps <= 0:
@@ -116,6 +154,9 @@ class GpuCameraClient:
             "ws_uri": self.ws_uri,
             "fps": self.target_fps,
             "frame_health_grace_secs": self._frame_health_grace_secs(),
+            "physical_device_present": self.physical_device_present,
+            "physical_device_ids": self.physical_device_ids,
+            "fallback_expected": self.fallback_expected,
         }
 
     def _write_status(self, *, healthy: Optional[bool] = None) -> None:
@@ -145,6 +186,9 @@ class GpuCameraClient:
         self.consecutive_failures = 0
         self.last_error = None
         self.last_connect_at = now_iso()
+        self.physical_device_present = True
+        self.fallback_expected = False
+        self._logged_device_absent = False
         self._write_status()
 
     def _record_disconnect(self, error: str) -> None:
@@ -158,6 +202,31 @@ class GpuCameraClient:
     def _reconnect_delay(self) -> float:
         base = min(MAX_RECONNECT_DELAY_SECS, 0.5 * (2 ** min(self.consecutive_failures, 4)))
         return base + random.uniform(0.0, 0.25)
+
+    def _record_camera_start_failure(self) -> None:
+        present, ids = probe_camera_devices()
+        self.physical_device_present = present
+        self.physical_device_ids = ids
+        self.fallback_expected = present is False
+        if present is False:
+            self.state = "device_absent"
+            self.last_error = "no_video_input_device"
+            if not self._logged_device_absent:
+                logger.info(
+                    "No attached camera reported by macOS after capture failed; "
+                    "host-sensory video fallback is expected"
+                )
+                self._logged_device_absent = True
+            return
+        self.state = "capture_error"
+        self.last_error = "camera_start_failed"
+        self._logged_device_absent = False
+        logger.error("❌ Failed to start camera")
+
+    def _camera_start_error(self) -> str:
+        if self.physical_device_present is False:
+            return "no_video_input_device"
+        return "camera_start_failed"
 
     def start_camera(self) -> bool:
         """Initialize camera capture."""
@@ -176,9 +245,12 @@ class GpuCameraClient:
         self.camera = cv2.VideoCapture(self.camera_index)
         if self.camera.isOpened():
             logger.info(f"✅ OpenCV camera {self.camera_index} started")
+            self.physical_device_present = True
+            self.fallback_expected = False
+            self._logged_device_absent = False
             return True
 
-        logger.error("❌ Failed to start camera")
+        self._record_camera_start_failure()
         return False
 
     def close_camera(self) -> None:
@@ -271,9 +343,9 @@ class GpuCameraClient:
                             )
                         else:
                             self._transition(
-                                "capture_error",
+                                self.state if self.state == "device_absent" else "capture_error",
                                 connected=True,
-                                error="camera_start_failed",
+                                error=self._camera_start_error(),
                                 healthy=False,
                             )
                             await asyncio.sleep(self._reconnect_delay())
@@ -313,9 +385,9 @@ class GpuCameraClient:
                 if self.camera is None and not self.start_camera():
                     self.consecutive_failures += 1
                     self._transition(
-                        "capture_error",
+                        self.state if self.state == "device_absent" else "capture_error",
                         connected=False,
-                        error="camera_start_failed",
+                        error=self._camera_start_error(),
                         healthy=False,
                     )
                     await asyncio.sleep(self._reconnect_delay())

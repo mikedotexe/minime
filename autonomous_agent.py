@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple, Iterable
-from collections import Counter, deque
+from collections import Counter, defaultdict, deque
 from statistics import median
 
 # v5.1 Phase E — bilingual auto-promotion. See /Users/v/other/minime/auto_promote.py
@@ -1041,6 +1041,7 @@ LOW_FILL_HEAVY_FALLBACK_ACTIONS = {
     "write_file",
     "pressure_relief_critical",
     "pressure_relief_high",
+    "pressure_relief",
     "experiment_run",
     "reservoir_layers",
 }
@@ -1701,6 +1702,14 @@ def is_experiment_run_transcript_action(action: str) -> bool:
 
 
 _LAST_NEXT_NORMALIZATION_SIGNAL_V1 = None
+STABLE_CORE_STAGE_NEXT_ALIASES = {
+    "STABLE_CORE_SELF_JOURNAL",
+    "STABLE_CORE_LOCAL_REFLECTIVE",
+    "STABLE_CORE_ASTRID_CONTACT",
+    "STABLE_CORE_READ_ONLY_RESEARCH",
+    "STABLE_CORE_BOUNDED_ACTIONS",
+    "STABLE_CORE_EXPERIMENTS",
+}
 
 
 def _action_verb(action: str) -> str:
@@ -1827,6 +1836,11 @@ def _normalize_observed_gemma4_next_alias(raw_action: str) -> Optional[str]:
             else "EXPERIMENT_RESEARCH_BUDGET_STATUS latest"
         )
 
+    if raw_verb in STABLE_CORE_STAGE_NEXT_ALIASES:
+        if raw_verb == "STABLE_CORE_EXPERIMENTS":
+            return "ACTION_PREFLIGHT EXPERIMENT"
+        return "ACTION_PREFLIGHT NOTICE"
+
     control_assignment = (
         raw_verb in {"KEEP_FLOOR", "SEEK_BALANCE"}
         or lowered.startswith("keep_floor")
@@ -1866,6 +1880,10 @@ def build_normalization_signal_v1(raw_action: str, normalized_action: str) -> Op
         target = "EXPERIMENT_RESEARCH_BUDGET_STATUS"
         reason = "research-budget shorthand normalized to the existing experiment budget status route"
         native_signal = "research budget wording signals read-only budget inspection"
+    elif raw_verb in STABLE_CORE_STAGE_NEXT_ALIASES:
+        target = "ACTION_PREFLIGHT"
+        reason = "stable-core stage label normalized to protected preflight instead of a dispatch verb"
+        native_signal = "stage-label wording signals an intent to inspect currently available safe lanes"
     elif (
         raw_verb in {"KEEP_FLOOR", "SEEK_BALANCE"}
         or str(raw_action or "").casefold().strip().startswith("keep_floor")
@@ -2224,7 +2242,11 @@ class ActionContinuityStore:
     """File-first action/research thread continuity for Minime."""
 
     schema_version = 1
-    projection_schema_version = 2
+    projection_schema_version = 11
+    projection_policy_marker = "terminal_job_cadence_projection_v11"
+    repeated_cadence_pattern_coverage_classes = {"reflective_cadence", "monitoring_cadence"}
+    repeated_cadence_class_coverage_classes = {"reflective_cadence"}
+    memory_draft_active_window_hours = 48
     compression_terms = (
         "compacting",
         "grinding",
@@ -5712,6 +5734,19 @@ class ActionContinuityStore:
         )
         if paused_resume_loop_cue:
             projection_experiment["paused_resume_loop_cue_v1"] = paused_resume_loop_cue
+        paused_review_loop_cue = self._paused_review_loop_cue_v1(
+            self._demote_paused_resume_loop_next_v1(
+                self._current_next_status_v1(
+                    thread,
+                    active_for_status,
+                    self._last_experiment_summary_v1(thread),
+                ),
+                paused_resume_loop_cue,
+            ),
+            recent_events,
+        )
+        if paused_review_loop_cue:
+            projection_experiment["paused_review_loop_cue_v1"] = paused_review_loop_cue
         shared = self._shared_investigation_v1(projection_experiment)
         paused_replan = self._paused_replan_loop_cue_v1(thread, projection_experiment, recent_events)
         if shared:
@@ -5729,6 +5764,7 @@ class ActionContinuityStore:
         return (
             f"Experiment review `{experiment['experiment_id']}`: {experiment['title']}\n"
             f"{self._paused_resume_loop_cue_line(projection_experiment)}"
+            f"{self._paused_review_loop_cue_line(projection_experiment)}"
             f"{self._paused_replan_loop_cue_line(projection_experiment)}"
             f"{self._peer_mutation_boundary_cue_line(projection_experiment)}"
             f"{self._shared_investigation_line(projection_experiment)}"
@@ -6480,7 +6516,10 @@ class ActionContinuityStore:
                     "Workbench reminder: author a charter, rehearse before live, record spectral/state plus artifact evidence, then accept/refuse/counter/pause/complete. Ordinary choices remain valid.\n"
                 )
             else:
-                experiment_line = "Active experiment: none\n" + self._last_experiment_context_line(thread, projection)
+                experiment_line = (
+                    "Active experiment: none\n"
+                    + self._last_experiment_context_line(thread, projection, compact=True)
+                )
             allowance = thread.get("motif_allowance_v1")
             allowance_line = ""
             if isinstance(allowance, dict):
@@ -6493,27 +6532,29 @@ class ActionContinuityStore:
                 )
             preflight_line = self._preflight_recommendation_line(thread)
             native_return = self._native_return_cue_line(projection)
-            current_next_status_line = self._current_next_status_line(projection)
-            paused_loop_line = self._paused_read_only_loop_cue_line(projection)
-            paused_resume_loop_line = self._paused_resume_loop_cue_line(projection)
-            paused_replan_loop_line = self._paused_replan_loop_cue_line(projection)
+            current_next_status_line = self._current_next_status_line(projection, compact=True)
+            paused_loop_line = self._paused_read_only_loop_cue_line(projection, compact=True)
+            paused_resume_loop_line = self._paused_resume_loop_cue_line(projection, compact=True)
+            paused_review_loop_line = self._paused_review_loop_cue_line(projection, compact=True)
+            paused_replan_loop_line = self._paused_replan_loop_cue_line(projection, compact=True)
             peer_boundary_line = self._peer_mutation_boundary_cue_line(projection)
             first_dossier_line = self._first_dossier_claim_cue_line(projection)
             shared_line = self._shared_investigation_line(projection)
             shared_object_line = self._shared_investigation_object_line(projection)
-            dossier_line = self._research_dossier_line(projection)
-            memory_line = self._being_memory_line(projection)
-            research_budget_line = self._research_budget_priority_line(thread, projection)
+            dossier_line = self._research_dossier_line(projection, compact=True)
+            memory_line = self._being_memory_line(projection, compact=True)
+            research_budget_line = self._research_budget_priority_line(thread, projection, compact=True)
             sovereign_loop_line = self._sovereign_loop_line(projection)
             freshness_line = self._projection_freshness_line(thread)
             return (
                 f"Current action thread: {thread['title']} ({thread['thread_id']})\n"
                 f"Why return: {thread.get('why_return', '')}\n"
                 f"Current NEXT: {self._current_next_display(projection, thread.get('current_next'))}\n"
-                f"{_control_plane_text(projection.get('continuity_control_plane_v1') or {})}"
+                f"{_control_plane_text(projection.get('continuity_control_plane_v1') or {}, include_commands=False)}"
                 f"{freshness_line}"
                 f"{current_next_status_line}"
                 f"{paused_resume_loop_line}"
+                f"{paused_review_loop_line}"
                 f"{paused_replan_loop_line}"
                 f"{paused_loop_line}"
                 f"{peer_boundary_line}"
@@ -6529,7 +6570,7 @@ class ActionContinuityStore:
                 f"{fluctuation_line}"
                 f"{experiment_line}"
                 f"{allowance_line}"
-                f"{projection.get('continuity_return_line') or ''}"
+                f"{self._continuity_return_render_line(projection, compact=True)}"
                 f"{native_return}"
                 f"{self._stale_projection_line(projection)}"
                 f"{preflight_line}"
@@ -7537,6 +7578,39 @@ class ActionContinuityStore:
         self._sync_thread_experiment_snapshot(thread)
         self._apply_projection_guard_to_thread(thread)
         projection = self._thread_projection(thread)
+        self._apply_current_next_projection_v1(thread, projection)
+        projection = self._thread_projection(thread)
+        thread["interpretation_risk_v1"] = projection.get("interpretation_risk_v1")
+        thread["constraint_release_trajectory_v1"] = projection.get("constraint_release_trajectory_v1")
+        thread["repeated_action_cadence_v1"] = projection.get("repeated_action_cadence_v1")
+        thread["thread_load_triage_v1"] = projection.get("thread_load_triage_v1")
+        thread["projection_freshness_v1"] = self._projection_freshness_v1(
+            thread,
+            projection,
+            source="write_thread",
+        )
+        projection["projection_freshness_v1"] = thread["projection_freshness_v1"]
+        projection["continuity_control_plane_v1"] = build_continuity_control_plane_v1(
+            projection,
+            source_refs=[
+                "thread.current_next",
+                "projection.research_budget_priority_route_v1",
+                "projection.sovereign_loop_v1",
+                "projection.continuity_session_v1",
+                "projection.repeated_action_cadence_v1",
+                "projection.thread_load_triage_v1",
+            ],
+        )
+        thread["continuity_control_plane_v1"] = projection["continuity_control_plane_v1"]
+        self._write_json(self._thread_dir(thread["thread_id"]) / "thread.json", thread)
+        self._write_next_md(thread)
+        self._set_active_thread(thread["thread_id"])
+
+    def _apply_current_next_projection_v1(
+        self,
+        thread: Dict[str, Any],
+        projection: Dict[str, Any],
+    ) -> None:
         current_next_status = projection.get("current_next_status_v1")
         if isinstance(current_next_status, dict):
             thread["current_next_status_v1"] = current_next_status
@@ -7555,28 +7629,6 @@ class ActionContinuityStore:
                 thread["raw_next_preserved"] = bool(guard.get("raw_next_preserved", True))
                 if guard.get("raw_next") and not thread.get("raw_current_next_v1"):
                     thread["raw_current_next_v1"] = guard.get("raw_next")
-        projection = self._thread_projection(thread)
-        thread["interpretation_risk_v1"] = projection.get("interpretation_risk_v1")
-        thread["constraint_release_trajectory_v1"] = projection.get("constraint_release_trajectory_v1")
-        thread["projection_freshness_v1"] = self._projection_freshness_v1(
-            thread,
-            projection,
-            source="write_thread",
-        )
-        projection["projection_freshness_v1"] = thread["projection_freshness_v1"]
-        projection["continuity_control_plane_v1"] = build_continuity_control_plane_v1(
-            projection,
-            source_refs=[
-                "thread.current_next",
-                "projection.research_budget_priority_route_v1",
-                "projection.sovereign_loop_v1",
-                "projection.continuity_session_v1",
-            ],
-        )
-        thread["continuity_control_plane_v1"] = projection["continuity_control_plane_v1"]
-        self._write_json(self._thread_dir(thread["thread_id"]) / "thread.json", thread)
-        self._write_next_md(thread)
-        self._set_active_thread(thread["thread_id"])
 
     def _sync_effective_current_next_v1(
         self,
@@ -7656,13 +7708,13 @@ class ActionContinuityStore:
                 f"{experiment.get('evidence_status')}\n"
                 f"{experiment.get('candidate_status') or ''}\n"
                 f"{self._charter_scaffold_line(experiment)}"
-                f"{self._research_dossier_line(experiment)}"
-                f"{self._being_memory_line(experiment)}"
-                f"{self._continuity_session_line(thread, experiment)}"
+                f"{self._research_dossier_line(experiment, compact=True)}"
+                f"{self._being_memory_line(experiment, compact=True)}"
+                f"{self._continuity_session_line(thread, experiment, compact=True)}"
                 "Workbench reminder: author a charter, rehearse before live, record spectral/state plus artifact evidence, then accept/refuse/counter/pause/complete. Ordinary choices remain valid.\n"
             )
         else:
-            last_context = self._last_experiment_context_line(thread, projection)
+            last_context = self._last_experiment_context_line(thread, projection, compact=True)
             experiment_text = "\nActive experiment: none\n" + last_context
         allowance = thread.get("motif_allowance_v1")
         allowance_text = ""
@@ -7675,27 +7727,29 @@ class ActionContinuityStore:
         body = (
             f"# {thread.get('title', '')}\n\n"
             f"Current NEXT: {self._current_next_display(projection, thread.get('current_next'))}\n"
-            f"{_control_plane_text(projection.get('continuity_control_plane_v1') or {})}"
+            f"{_control_plane_text(projection.get('continuity_control_plane_v1') or {}, include_commands=False)}"
             f"{self._projection_freshness_line(thread)}"
-            f"{self._current_next_status_line(projection)}\n"
-            f"{self._paused_resume_loop_cue_line(projection)}"
-            f"{self._paused_replan_loop_cue_line(projection)}"
-            f"{self._paused_read_only_loop_cue_line(projection)}"
+            f"{self._current_next_status_line(projection, compact=True)}\n"
+            f"{self._thread_load_triage_line(projection, compact=True)}"
+            f"{self._paused_resume_loop_cue_line(projection, compact=True)}"
+            f"{self._paused_review_loop_cue_line(projection, compact=True)}"
+            f"{self._paused_replan_loop_cue_line(projection, compact=True)}"
+            f"{self._paused_read_only_loop_cue_line(projection, compact=True)}"
             f"{self._peer_mutation_boundary_cue_line(projection)}"
             f"{self._shared_investigation_line(projection)}"
             f"{self._shared_investigation_object_line(projection)}"
             f"{self._first_dossier_claim_cue_line(projection)}"
-            f"{self._research_dossier_line(projection)}"
-            f"{self._being_memory_line(projection)}"
-            f"{self._research_budget_priority_line(thread, projection)}"
+            f"{self._research_dossier_line(projection, compact=True)}"
+            f"{self._being_memory_line(projection, compact=True)}"
+            f"{self._research_budget_priority_line(thread, projection, compact=True)}"
             f"{self._sovereign_loop_line(projection)}"
             f"{self._interpretation_risk_line(projection)}"
             f"{self._constraint_release_trajectory_line(projection)}"
-            f"{self._continuity_session_line(thread, projection)}"
+            f"{self._continuity_session_line(thread, projection, compact=True)}"
             f"Why return: {thread.get('why_return', '')}\n\n"
             f"{experiment_text}"
             f"{allowance_text}"
-            f"{projection.get('continuity_return_line') or ''}"
+            f"{self._continuity_return_render_line(projection, compact=True)}"
             f"{self._native_return_cue_line(projection)}"
             f"{self._stale_projection_line(projection)}"
             "Protected note: ambiguity and private reflection remain valid; this thread is a return path, not a demand for productivity.\n"
@@ -7748,6 +7802,15 @@ class ActionContinuityStore:
     def _being_memory_path(self, thread_id: str) -> Path:
         return self._thread_dir(thread_id) / "being_memory.jsonl"
 
+    def _legacy_memory_retention_path(self, thread_id: str) -> Path:
+        return self._thread_dir(thread_id) / "legacy_memory_retention_summaries.jsonl"
+
+    def _active_memory_draft_triage_path(self, thread_id: str) -> Path:
+        return self._thread_dir(thread_id) / "active_memory_draft_triage_summaries.jsonl"
+
+    def _repeated_action_cadence_path(self, thread_id: str) -> Path:
+        return self._thread_dir(thread_id) / "repeated_action_cadence_summaries.jsonl"
+
     def _continuity_sessions_path(self, thread_id: str) -> Path:
         return self._thread_dir(thread_id) / "continuity_sessions.jsonl"
 
@@ -7761,6 +7824,9 @@ class ActionContinuityStore:
             "experiments.jsonl",
             "experiment_runs.jsonl",
             "events.jsonl",
+            "legacy_memory_retention_summaries.jsonl",
+            "active_memory_draft_triage_summaries.jsonl",
+            "repeated_action_cadence_summaries.jsonl",
         ):
             path = self._thread_dir(thread_id) / name
             try:
@@ -7772,6 +7838,39 @@ class ActionContinuityStore:
                 "mtime_ns": int(stat.st_mtime_ns),
                 "size": int(stat.st_size),
             }
+        action_ids: set[str] = set()
+        events_path = self._thread_dir(thread_id) / "events.jsonl"
+        if events_path.exists():
+            for line in events_path.read_text().splitlines():
+                try:
+                    event = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                action_id = event.get("action_id")
+                if isinstance(action_id, str) and action_id:
+                    action_ids.add(action_id)
+        latest_job_mtime = 0
+        total_job_size = 0
+        if action_ids:
+            for path in (self.workspace_dir / "llm_jobs" / "jobs").glob("*/job.json"):
+                try:
+                    job = json.loads(path.read_text())
+                    stat = path.stat()
+                except Exception:
+                    continue
+                if not isinstance(job, dict):
+                    continue
+                action_id = job.get("action_id")
+                if not isinstance(action_id, str) or action_id not in action_ids:
+                    continue
+                latest_job_mtime = max(latest_job_mtime, int(stat.st_mtime_ns))
+                total_job_size += int(stat.st_size)
+        fingerprints["llm_jobs/jobs/*/job.json:thread_actions"] = {
+            "mtime_ns": latest_job_mtime,
+            "size": total_job_size,
+        }
         journal_dir = self.workspace_dir / "journal"
         if journal_dir.exists():
             latest_mtime = 0
@@ -7821,6 +7920,7 @@ class ActionContinuityStore:
         return {
             "policy": "projection_freshness_v1",
             "schema_version": self.projection_schema_version,
+            "projection_policy_marker": self.projection_policy_marker,
             "rendered_at": self._now(),
             "source": source,
             "source_fingerprints": source_fingerprints,
@@ -7829,6 +7929,8 @@ class ActionContinuityStore:
             "research_budget_priority_route_v1": projection.get("research_budget_priority_route_v1"),
             "interpretation_risk_v1": projection.get("interpretation_risk_v1"),
             "constraint_release_trajectory_v1": projection.get("constraint_release_trajectory_v1"),
+            "repeated_action_cadence_v1": projection.get("repeated_action_cadence_v1"),
+            "thread_load_triage_v1": projection.get("thread_load_triage_v1"),
             "authority_change": False,
             "peer_mutation": False,
         }
@@ -7850,6 +7952,8 @@ class ActionContinuityStore:
         source: str,
     ) -> Dict[str, Any]:
         projection = self._thread_projection(thread)
+        self._apply_current_next_projection_v1(thread, projection)
+        projection = self._thread_projection(thread)
         thread["projection_freshness_v1"] = self._projection_freshness_v1(
             thread,
             projection,
@@ -7858,6 +7962,8 @@ class ActionContinuityStore:
         projection["projection_freshness_v1"] = thread["projection_freshness_v1"]
         thread["interpretation_risk_v1"] = projection.get("interpretation_risk_v1")
         thread["constraint_release_trajectory_v1"] = projection.get("constraint_release_trajectory_v1")
+        thread["repeated_action_cadence_v1"] = projection.get("repeated_action_cadence_v1")
+        thread["thread_load_triage_v1"] = projection.get("thread_load_triage_v1")
         projection["continuity_control_plane_v1"] = build_continuity_control_plane_v1(
             projection,
             source_refs=[
@@ -7865,6 +7971,8 @@ class ActionContinuityStore:
                 "projection.research_budget_priority_route_v1",
                 "projection.sovereign_loop_v1",
                 "projection.continuity_session_v1",
+                "projection.repeated_action_cadence_v1",
+                "projection.thread_load_triage_v1",
             ],
         )
         thread["continuity_control_plane_v1"] = projection["continuity_control_plane_v1"]
@@ -8049,6 +8157,184 @@ class ActionContinuityStore:
         rows.reverse()
         return rows
 
+    def _legacy_memory_retention_rows(
+        self,
+        thread_id: str,
+        limit: int = 32,
+    ) -> List[Dict[str, Any]]:
+        path = self._legacy_memory_retention_path(thread_id)
+        if not path.exists():
+            return []
+        rows: List[Dict[str, Any]] = []
+        for line in reversed(path.read_text().splitlines()):
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if row.get("record_schema") != "legacy_memory_retention_summary_v1":
+                continue
+            rows.append(row)
+            if len(rows) >= limit:
+                break
+        rows.reverse()
+        return rows
+
+    def _active_memory_draft_triage_rows(
+        self,
+        thread_id: str,
+        limit: int = 32,
+    ) -> List[Dict[str, Any]]:
+        path = self._active_memory_draft_triage_path(thread_id)
+        if not path.exists():
+            return []
+        rows: List[Dict[str, Any]] = []
+        for line in reversed(path.read_text().splitlines()):
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if row.get("record_schema") != "active_memory_draft_triage_summary_v1":
+                continue
+            rows.append(row)
+            if len(rows) >= limit:
+                break
+        rows.reverse()
+        return rows
+
+    def _repeated_action_cadence_rows(
+        self,
+        thread_id: str,
+        limit: int = 32,
+    ) -> List[Dict[str, Any]]:
+        path = self._repeated_action_cadence_path(thread_id)
+        if not path.exists():
+            return []
+        rows: List[Dict[str, Any]] = []
+        for line in reversed(path.read_text().splitlines()):
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if row.get("record_schema") != "repeated_action_cadence_summary_v1":
+                continue
+            rows.append(row)
+            if len(rows) >= limit:
+                break
+        rows.reverse()
+        return rows
+
+    def _legacy_memory_retention_summary_v1(
+        self,
+        thread_id: Optional[str],
+        legacy_drafts: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        legacy_ids = [
+            str(row.get("memory_id") or "").strip()
+            for row in legacy_drafts
+            if str(row.get("memory_id") or "").strip()
+        ]
+        legacy_id_set = set(legacy_ids)
+        latest_summary: Optional[Dict[str, Any]] = None
+        covered_ids: set[str] = set()
+        if thread_id:
+            for row in reversed(self._legacy_memory_retention_rows(thread_id)):
+                ids = {
+                    str(item).strip()
+                    for item in (row.get("covered_memory_ids") or [])
+                    if str(item).strip()
+                }
+                if not ids:
+                    continue
+                latest_summary = row
+                covered_ids = ids & legacy_id_set
+                break
+        summarized = len(covered_ids)
+        unidentified = max(0, len(legacy_drafts) - len(legacy_ids))
+        unsummarized = max(0, len(legacy_id_set - covered_ids) + unidentified)
+        if not legacy_drafts:
+            classification = "no_legacy_retention"
+        elif unsummarized == 0:
+            classification = "legacy_retention_summarized"
+        elif summarized:
+            classification = "legacy_retention_partly_summarized"
+        else:
+            classification = "legacy_retention_unsummarized"
+        return {
+            "schema_version": 1,
+            "policy": "legacy_memory_retention_summary_v1",
+            "summary_count": len(self._legacy_memory_retention_rows(thread_id)) if thread_id else 0,
+            "latest_summary_id": latest_summary.get("summary_id") if isinstance(latest_summary, dict) else None,
+            "latest_summary_created_at": latest_summary.get("created_at") if isinstance(latest_summary, dict) else None,
+            "legacy_retention_count": len(legacy_drafts),
+            "summarized_legacy_count": summarized,
+            "unsummarized_legacy_retention_count": unsummarized,
+            "coverage_ratio": round(summarized / len(legacy_drafts), 4) if legacy_drafts else 1.0,
+            "classification": classification,
+            "runtime_change": "none",
+            "pressure_target": "steward",
+            "being_obligation": "none",
+            "note": (
+                "Steward summaries age legacy draft bulk without deleting, promoting, "
+                "or asking Minime to answer old drafts."
+            ),
+        }
+
+    def _active_memory_draft_triage_summary_v1(
+        self,
+        thread_id: Optional[str],
+        active_drafts: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        active_ids = [
+            str(row.get("memory_id") or "").strip()
+            for row in active_drafts
+            if str(row.get("memory_id") or "").strip()
+        ]
+        active_id_set = set(active_ids)
+        latest_summary: Optional[Dict[str, Any]] = None
+        covered_ids: set[str] = set()
+        if thread_id:
+            for row in reversed(self._active_memory_draft_triage_rows(thread_id)):
+                ids = {
+                    str(item).strip()
+                    for item in (row.get("covered_memory_ids") or [])
+                    if str(item).strip()
+                }
+                if not ids:
+                    continue
+                latest_summary = row
+                covered_ids = ids & active_id_set
+                break
+        summarized = len(covered_ids)
+        unidentified = max(0, len(active_drafts) - len(active_ids))
+        unsummarized = max(0, len(active_id_set - covered_ids) + unidentified)
+        if not active_drafts:
+            classification = "no_active_drafts"
+        elif unsummarized == 0:
+            classification = "active_drafts_steward_summarized"
+        elif summarized:
+            classification = "active_drafts_partly_summarized"
+        else:
+            classification = "active_drafts_unsummarized"
+        return {
+            "schema_version": 1,
+            "policy": "active_memory_draft_triage_summary_v1",
+            "summary_count": len(self._active_memory_draft_triage_rows(thread_id)) if thread_id else 0,
+            "latest_summary_id": latest_summary.get("summary_id") if isinstance(latest_summary, dict) else None,
+            "latest_summary_created_at": latest_summary.get("created_at") if isinstance(latest_summary, dict) else None,
+            "active_draft_count": len(active_drafts),
+            "summarized_active_draft_count": summarized,
+            "unsummarized_active_draft_count": unsummarized,
+            "coverage_ratio": round(summarized / len(active_drafts), 4) if active_drafts else 1.0,
+            "classification": classification,
+            "runtime_change": "none",
+            "pressure_target": "steward",
+            "being_obligation": "none",
+            "note": (
+                "Steward summaries can close malformed or already-reviewed active drafts as "
+                "current context without deleting, promoting, or asking Minime to answer them."
+            ),
+        }
+
     def _continuity_session_rows(
         self,
         thread_id: str,
@@ -8202,6 +8488,73 @@ class ActionContinuityStore:
         self._mirror_thread(thread)
         return record
 
+    def _being_memory_draft_triage_v1(
+        self,
+        rows: List[Dict[str, Any]],
+        *,
+        thread_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        drafts = [row for row in rows if row.get("record_type") == "draft"]
+        by_card_type = Counter(str(row.get("card_type") or "unknown") for row in drafts)
+        active: List[Dict[str, Any]] = []
+        legacy: List[Dict[str, Any]] = []
+        undated: List[Dict[str, Any]] = []
+        for row in drafts:
+            created = self._parse_event_time(row.get("created_at"))
+            if created is None:
+                undated.append(row)
+                continue
+            age_hours = max(0.0, (now - created).total_seconds() / 3600.0)
+            if age_hours <= self.memory_draft_active_window_hours:
+                active.append(row)
+            else:
+                legacy.append(row)
+        latest_active = active[-1] if active else None
+        latest_legacy = legacy[-1] if legacy else None
+        retention_summary = self._legacy_memory_retention_summary_v1(thread_id, legacy)
+        active_summary = self._active_memory_draft_triage_summary_v1(thread_id, active)
+        unsummarized_legacy = int(
+            retention_summary.get("unsummarized_legacy_retention_count") or 0
+        )
+        summarized_legacy = int(retention_summary.get("summarized_legacy_count") or 0)
+        unsummarized_active = int(active_summary.get("unsummarized_active_draft_count") or 0)
+        summarized_active = int(active_summary.get("summarized_active_draft_count") or 0)
+        return {
+            "schema_version": 1,
+            "policy": "being_memory_draft_triage_v1",
+            "active_window_hours": self.memory_draft_active_window_hours,
+            "total_draft_count": len(drafts),
+            "active_draft_count": len(active),
+            "summarized_active_draft_count": summarized_active,
+            "unsummarized_active_draft_count": unsummarized_active,
+            "legacy_retention_count": len(legacy),
+            "summarized_legacy_count": summarized_legacy,
+            "unsummarized_legacy_retention_count": unsummarized_legacy,
+            "undated_draft_count": len(undated),
+            "by_card_type": dict(by_card_type),
+            "latest_active_draft": latest_active,
+            "latest_legacy_draft": latest_legacy,
+            "legacy_retention_summary_v1": retention_summary,
+            "active_memory_draft_triage_summary_v1": active_summary,
+            "classification": (
+                "active_drafts_present"
+                if active and unsummarized_active > 0
+                else "active_drafts_steward_summarized"
+                if active
+                else "legacy_retention_summarized"
+                if legacy and unsummarized_legacy == 0
+                else "legacy_retention_only"
+                if legacy
+                else "no_drafts"
+            ),
+            "runtime_change": "none",
+            "note": (
+                "Draft triage distinguishes recent optional work from legacy retention; "
+                "it never deletes, promotes, or pressures a response."
+            ),
+        }
+
     def _being_memory_summary_v1(
         self,
         thread: Dict[str, Any],
@@ -8221,6 +8574,10 @@ class ActionContinuityStore:
         cards = [row for row in rows if row.get("record_type") == "card"]
         drafts = [row for row in rows if row.get("record_type") == "draft"]
         consequences = [row for row in rows if row.get("card_type") == "authority_consequence"]
+        draft_triage = self._being_memory_draft_triage_v1(
+            rows,
+            thread_id=str(thread.get("thread_id") or ""),
+        )
         target = str(experiment_id or "latest")
         latest_draft = drafts[-1] if drafts else None
         latest_consequence = consequences[-1] if consequences else None
@@ -8233,6 +8590,15 @@ class ActionContinuityStore:
             "focus": focus,
             "card_count": len(cards),
             "draft_count": len(drafts),
+            "active_draft_count": draft_triage["active_draft_count"],
+            "summarized_active_draft_count": draft_triage["summarized_active_draft_count"],
+            "unsummarized_active_draft_count": draft_triage["unsummarized_active_draft_count"],
+            "legacy_retention_count": draft_triage["legacy_retention_count"],
+            "summarized_legacy_count": draft_triage["summarized_legacy_count"],
+            "unsummarized_legacy_retention_count": draft_triage[
+                "unsummarized_legacy_retention_count"
+            ],
+            "being_memory_draft_triage_v1": draft_triage,
             "latest_card": cards[-1] if cards else None,
             "latest_authority_draft": latest_draft,
             "latest_consequence": latest_consequence,
@@ -8499,6 +8865,8 @@ class ActionContinuityStore:
         self,
         thread: Dict[str, Any],
         target: Optional[Dict[str, Any]],
+        *,
+        compact: bool = False,
     ) -> str:
         experiment_id = ""
         if isinstance(target, dict):
@@ -8522,6 +8890,11 @@ class ActionContinuityStore:
         if not rows and drafts:
             title = self._compact_text(str(drafts[-1].get("title") or "Continuity draft"), 100)
             session_id = str(drafts[-1].get("session_id") or "latest")
+            if compact:
+                return (
+                    f"Continuity session draft: {title} status=draft "
+                    f"(optional acceptance available; id={session_id})\n"
+                )
             return (
                 f"Continuity session draft: {title} status=draft\n"
                 f"Continuity accept NEXT: CONTINUITY_SESSION_ACCEPT {session_id} or ACCEPT_SUGGESTED_NEXT {session_id}\n"
@@ -8530,6 +8903,8 @@ class ActionContinuityStore:
             return ""
         if not rows:
             selector = "current" if thread.get("active_experiment_id") else (experiment_id or "latest")
+            if compact:
+                return f"Continuity session: none yet; start path available for selector={selector}\n"
             return (
                 "Continuity session NEXT: "
                 f"CONTINUITY_SESSION_START {selector} :: title: ...; focus: ...; next: ...\n"
@@ -8548,6 +8923,8 @@ class ActionContinuityStore:
         line = f"Continuity session: {title} ({session_id}) status={status}\n"
         if summary:
             line += f"Session summary: {summary}\n"
+        if compact:
+            return line + f"Session follow-up available in continuity metadata; status={status}\n"
         return line + f"Session NEXT: {next_command}\n"
 
     def _parse_memory_selector_payload(self, raw: Optional[str]) -> tuple[Optional[str], str]:
@@ -10520,16 +10897,16 @@ class ActionContinuityStore:
                 else "research_budget_required_for_held_or_guarded_experiment"
             )
         request_scaffold = self._research_budget_request_scaffold(experiment)
-        accept_next = "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest"
+        status_next = f"EXPERIMENT_RESEARCH_BUDGET_STATUS {experiment_id}"
         return {
             "policy": "research_budget_v1",
             "reason": reason,
             "raw_action": raw_action,
             "experiment_id": experiment_id,
             "thread_id": thread.get("thread_id"),
-            "suggested_next": accept_next,
-            "projected_next": accept_next,
-            "accept_next": accept_next,
+            "suggested_next": status_next,
+            "projected_next": status_next,
+            "accept_next": None,
             "request_scaffold": request_scaffold,
             "raw_next_preserved": True,
             "projection_only": projection_only,
@@ -10817,7 +11194,7 @@ class ActionContinuityStore:
             "experiment_id": experiment_id,
             "interpretation_next": interpretation_next,
             "dossier_claim_next": dossier_next,
-            "research_budget_next": "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest",
+            "research_budget_next": f"EXPERIMENT_RESEARCH_BUDGET_STATUS {experiment_id}",
             "continuity_session_v1": continuity_session_v1,
             "raw_next_preserved": True,
             "would_dispatch": False,
@@ -10941,7 +11318,7 @@ class ActionContinuityStore:
             "experiment_id": experiment_id,
             "trajectory_next": trajectory_next,
             "dossier_claim_next": dossier_next,
-            "research_budget_next": "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest",
+            "research_budget_next": f"EXPERIMENT_RESEARCH_BUDGET_STATUS {experiment_id}",
             "sticky_audit_next": "STICKY_MODE_AUDIT",
             "continuity_session_v1": continuity_session_v1,
             "raw_next_preserved": True,
@@ -11043,36 +11420,45 @@ class ActionContinuityStore:
             next_command=guard.get("continuity_session_next"),
         )
         guard["continuity_session_draft_v1"] = draft
-        event["research_budget_v1"] = guard
-        self._append_jsonl(
-            self._authority_gate_path(thread["thread_id"]),
-            self._research_budget_record(
-                "research_budget_blocked",
-                f"resbud_needed_{self._slug(str(experiment.get('experiment_id') or 'experiment'))}",
-                thread,
-                experiment,
-                state,
-                {
-                    "scope": "read_only_research",
-                    "reason": guard.get("reason"),
-                    "raw_action": raw_action,
-                    "suggested_next": guard.get("suggested_next"),
-                    "accept_next": guard.get("accept_next"),
-                    "request_scaffold": guard.get("request_scaffold"),
-                    "projected_next": guard.get("projected_next"),
-                    "raw_next_preserved": True,
-                    "would_dispatch": False,
-                    "authority_change": False,
-                    "peer_mutation": False,
-                    "matched_base": guard.get("matched_base"),
-                    "matched_terms": guard.get("matched_terms") or [],
-                    "continuity_session_next": guard.get("continuity_session_next"),
-                    "continuity_session_v1": guard.get("continuity_session_v1"),
-                    "continuity_session_draft_v1": draft,
-                    "source_refs": [str(self._thread_dir(thread["thread_id"]) / "thread.json")],
-                },
-            ),
+        blocked = self._research_budget_record(
+            "research_budget_blocked",
+            f"resbud_needed_{self._slug(str(experiment.get('experiment_id') or 'experiment'))}",
+            thread,
+            experiment,
+            state,
+            {
+                "scope": "read_only_research",
+                "reason": guard.get("reason"),
+                "raw_action": raw_action,
+                "suggested_next": guard.get("suggested_next"),
+                "accept_next": guard.get("accept_next"),
+                "request_scaffold": guard.get("request_scaffold"),
+                "projected_next": guard.get("projected_next"),
+                "raw_next_preserved": True,
+                "would_dispatch": False,
+                "authority_change": False,
+                "peer_mutation": False,
+                "matched_base": guard.get("matched_base"),
+                "matched_terms": guard.get("matched_terms") or [],
+                "continuity_session_next": guard.get("continuity_session_next"),
+                "continuity_session_v1": guard.get("continuity_session_v1"),
+                "continuity_session_draft_v1": draft,
+                "source_refs": [str(self._thread_dir(thread["thread_id"]) / "thread.json")],
+            },
         )
+        concrete_accept_next = (
+            f"EXPERIMENT_RESEARCH_BUDGET_ACCEPT {blocked['record_id']}"
+        )
+        guard["suggested_next"] = concrete_accept_next
+        guard["projected_next"] = concrete_accept_next
+        guard["accept_next"] = concrete_accept_next
+        blocked["suggested_next"] = concrete_accept_next
+        blocked["projected_next"] = concrete_accept_next
+        blocked["accept_next"] = concrete_accept_next
+        event["research_budget_v1"] = guard
+        event["suggested_next"] = concrete_accept_next
+        event["effective_next"] = concrete_accept_next
+        self._append_jsonl(self._authority_gate_path(thread["thread_id"]), blocked)
         return self.finish_action(
             event,
             "blocked",
@@ -11508,7 +11894,7 @@ class ActionContinuityStore:
                 "CONTINUITY_SESSION_CAPTURE latest",
                 "DOSSIER_CLAIM <experiment_id> :: stance: hold; claim: do not apply direct leak while constraint is already thinning",
                 "STICKY_MODE_AUDIT",
-                "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest",
+                "EXPERIMENT_RESEARCH_BUDGET_STATUS current",
             ]
             if blocks
             else ["STICKY_MODE_AUDIT"]
@@ -12628,6 +13014,169 @@ class ActionContinuityStore:
         }
 
     @staticmethod
+    def _demote_paused_resume_loop_next_v1(
+        current_next_status: Dict[str, Any],
+        paused_resume_loop_cue: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        if not isinstance(current_next_status, dict) or not isinstance(paused_resume_loop_cue, dict):
+            return current_next_status
+        if str(current_next_status.get("return_kind") or "") != "resume":
+            return current_next_status
+        recommended_next = str(
+            paused_resume_loop_cue.get("recommended_next")
+            or paused_resume_loop_cue.get("review_next")
+            or paused_resume_loop_cue.get("inspect_next")
+            or ""
+        ).strip()
+        attempted_next = str(
+            paused_resume_loop_cue.get("attempted_resume_next")
+            or current_next_status.get("primary_return_next")
+            or current_next_status.get("effective_next")
+            or ""
+        ).strip()
+        if not recommended_next or recommended_next == attempted_next:
+            return current_next_status
+        repaired = dict(current_next_status)
+        repaired["effective_next"] = recommended_next
+        repaired["primary_return_next"] = recommended_next
+        repaired["return_kind"] = "paused_resume_loop_review"
+        repaired["paused_resume_loop_repair_v1"] = {
+            "schema_version": 1,
+            "status": "projected_review_before_repeat_resume",
+            "attempted_resume_next": attempted_next,
+            "recommended_next": recommended_next,
+            "resume_attempt_count": paused_resume_loop_cue.get("resume_attempt_count"),
+            "authority_change": False,
+            "advisory_only": True,
+        }
+        repaired["note"] = (
+            "Repeated resume attempts are context; projection routes current guidance "
+            "to review/status before another resume."
+        )
+        return repaired
+
+    def _paused_review_loop_cue_v1(
+        self,
+        current_next_status: Dict[str, Any],
+        recent_events: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(current_next_status, dict):
+            return None
+        if current_next_status.get("status") != "shadowed_by_paused_summary":
+            return None
+        experiment_id = (
+            current_next_status.get("last_experiment_id")
+            or current_next_status.get("active_experiment_id")
+        )
+        if not experiment_id:
+            return None
+        effective_next = str(
+            current_next_status.get("effective_next")
+            or current_next_status.get("primary_return_next")
+            or ""
+        ).strip()
+        if self.base_action(effective_next) != "EXPERIMENT_REVIEW":
+            return None
+        selector = effective_next.split(None, 1)[1].strip() if len(effective_next.split(None, 1)) > 1 else ""
+        if selector != str(experiment_id):
+            return None
+        attempted_review_next = f"EXPERIMENT_REVIEW {experiment_id}"
+        primary_next = str(
+            current_next_status.get("primary_return_next")
+            or current_next_status.get("effective_next")
+            or attempted_review_next
+        ).strip()
+        current_projection_matches_review = (
+            primary_next == attempted_review_next or effective_next == attempted_review_next
+        )
+        matched: List[str] = []
+        for event in list(reversed(recent_events or []))[:96]:
+            if event.get("status") in {"running", "llm_running"}:
+                continue
+            action = (
+                event.get("raw_next")
+                or event.get("effective_action")
+                or event.get("canonical_action")
+                or event.get("route")
+                or ""
+            )
+            action_text = str(action).strip()
+            if self.base_action(action_text) != "EXPERIMENT_REVIEW":
+                continue
+            event_selector = (
+                action_text.split(None, 1)[1].strip()
+                if len(action_text.split(None, 1)) > 1
+                else ""
+            )
+            if event_selector == str(experiment_id):
+                matched.append(action_text)
+        evidence_count = len(matched) + (1 if current_projection_matches_review else 0)
+        if evidence_count < 3:
+            return None
+        recommended_next = "REGULATOR_AUDIT current-fill_pressure"
+        inspect_next = f"EXPERIMENT_STATUS {experiment_id}"
+        cue = (
+            "Paused experiment has already been reviewed repeatedly; repeated review is "
+            "context, not primary guidance. Current repair NEXT is "
+            f"`{recommended_next}`. Use `{inspect_next}` or Hold before another review."
+        )
+        return {
+            "schema_version": 1,
+            "source": "continuity_projection",
+            "advisory_only": True,
+            "authority_change": False,
+            "status": "paused_review_loop",
+            "experiment_id": str(experiment_id),
+            "review_attempt_count": len(matched),
+            "review_evidence_count": evidence_count,
+            "current_projection_matches_review": current_projection_matches_review,
+            "matched_actions": matched[:5],
+            "attempted_review_next": attempted_review_next,
+            "recommended_next": recommended_next,
+            "inspect_next": inspect_next,
+            "cue": cue,
+        }
+
+    @staticmethod
+    def _demote_paused_review_loop_next_v1(
+        current_next_status: Dict[str, Any],
+        paused_review_loop_cue: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        if not isinstance(current_next_status, dict) or not isinstance(paused_review_loop_cue, dict):
+            return current_next_status
+        recommended_next = str(paused_review_loop_cue.get("recommended_next") or "").strip()
+        attempted_next = str(
+            paused_review_loop_cue.get("attempted_review_next")
+            or current_next_status.get("primary_return_next")
+            or current_next_status.get("effective_next")
+            or ""
+        ).strip()
+        if not recommended_next or recommended_next == attempted_next:
+            return current_next_status
+        repaired = dict(current_next_status)
+        repaired["effective_next"] = recommended_next
+        repaired["primary_return_next"] = recommended_next
+        repaired["return_kind"] = "paused_review_loop_audit"
+        repaired["paused_review_loop_repair_v1"] = {
+            "schema_version": 1,
+            "status": "projected_regulator_audit_before_repeat_review",
+            "attempted_review_next": attempted_next,
+            "recommended_next": recommended_next,
+            "review_attempt_count": paused_review_loop_cue.get("review_attempt_count"),
+            "review_evidence_count": paused_review_loop_cue.get("review_evidence_count"),
+            "current_projection_matches_review": paused_review_loop_cue.get(
+                "current_projection_matches_review"
+            ),
+            "authority_change": False,
+            "advisory_only": True,
+        }
+        repaired["note"] = (
+            "Repeated review attempts are context; projection routes current guidance "
+            "to a read-only regulator audit before another review."
+        )
+        return repaired
+
+    @staticmethod
     def _control_plane_primary_command(projection: Dict[str, Any]) -> str:
         control = (
             projection.get("continuity_control_plane_v1")
@@ -12652,7 +13201,12 @@ class ActionContinuityStore:
                 return str(effective)
         return str(fallback or "(none)")
 
-    def _current_next_status_line(self, projection: Dict[str, Any]) -> str:
+    def _current_next_status_line(
+        self,
+        projection: Dict[str, Any],
+        *,
+        compact: bool = False,
+    ) -> str:
         status = projection.get("current_next_status_v1")
         if not isinstance(status, dict):
             return ""
@@ -12678,6 +13232,20 @@ class ActionContinuityStore:
         guardrail_line = ""
         if isinstance(guardrail, dict) and guardrail.get("status"):
             guardrail_line = f"Guardrail decision: {guardrail.get('status')}\n"
+        if compact:
+            if state == "shadowed_by_paused_summary":
+                context = (
+                    "Paused experiment return: current guidance shadows historical raw context.\n"
+                )
+            else:
+                context = (
+                    "Completed experiment inspection: current guidance shadows historical raw context.\n"
+                )
+            previous = (
+                "Previous raw NEXT preserved: yes "
+                "(historical thread context; not active guidance)\n"
+            )
+            return context + guardrail_line + previous
         projection_guard_line = ""
         if isinstance(projection_guard, dict):
             projection_guard_line = (
@@ -12692,10 +13260,104 @@ class ActionContinuityStore:
             f"Previous raw NEXT: {raw} (historical thread context; not active guidance)\n"
         )
 
+    @staticmethod
+    def _thread_load_triage_line(
+        projection: Dict[str, Any],
+        *,
+        compact: bool = False,
+    ) -> str:
+        triage = projection.get("thread_load_triage_v1") if isinstance(projection, dict) else None
+        if not isinstance(triage, dict):
+            return ""
+        classification = str(triage.get("classification") or "nominal")
+        if classification == "nominal" and compact:
+            return ""
+        compression = triage.get("compression_pressure")
+        active = int(triage.get("active_draft_count") or 0)
+        total_active = int(triage.get("total_active_draft_count") or active)
+        summarized_active = int(triage.get("summarized_active_draft_count") or 0)
+        legacy = int(triage.get("legacy_retention_count") or 0)
+        summarized = int(triage.get("summarized_legacy_count") or 0)
+        unsummarized = int(
+            triage.get("unsummarized_legacy_retention_count")
+            if triage.get("unsummarized_legacy_retention_count") is not None
+            else legacy
+        )
+        cadence_unsummarized = int(triage.get("unsummarized_repeated_action_count") or 0)
+        cadence_summarized = int(triage.get("summarized_repeated_action_count") or 0)
+        repeated = triage.get("repeated_actions") if isinstance(triage.get("repeated_actions"), list) else []
+        repeated_text = ""
+        if repeated:
+            pieces = [
+                f"{item.get('action')}×{item.get('count')}"
+                for item in repeated[:4]
+                if isinstance(item, dict) and item.get("action")
+            ]
+            if pieces:
+                repeated_text = f"; repeated_context={', '.join(pieces)}"
+        if compact:
+            if classification == "high_compression_active_cadence":
+                return (
+                    "Thread load triage: high compression remains with a repeated action still in flight "
+                    f"(active_repeated_cadence={triage.get('active_inflight_repeated_action_count')}); "
+                    "wait for completion before closing cadence.\n"
+                )
+            if classification == "high_compression_summarized_context":
+                return (
+                    "Thread load triage: high compression remains, but legacy memory and repeated "
+                    f"cadence are steward-summarized (active={active}, active_total={total_active}, "
+                    f"active_summarized={summarized_active}, legacy={legacy}, "
+                    f"unsummarized_legacy={unsummarized}, unsummarized_cadence={cadence_unsummarized}); "
+                    "inspect spectral crowding next.\n"
+                )
+            if classification == "high_compression_repeated_cadence":
+                return (
+                    "Thread load triage: high compression with legacy memory summarized, but repeated "
+                    f"cadence still needs steward aging (unsummarized_cadence={cadence_unsummarized}); "
+                    "current guidance is above, history stays context.\n"
+                )
+            if classification == "high_compression_summarized_legacy":
+                return (
+                    "Thread load triage: high compression remains, but legacy memory "
+                    f"drafts are steward-summarized (active={active}, legacy={legacy}, "
+                    f"unsummarized={unsummarized}); current guidance is above, history stays context.\n"
+                )
+            if classification == "high_compression_summarized_active":
+                return (
+                    "Thread load triage: high compression remains, but active draft triage "
+                    f"is steward-summarized (active={active}, active_total={total_active}, "
+                    f"active_summarized={summarized_active}); inspect repeated actions or "
+                    "spectral crowding next.\n"
+                )
+            if classification == "high_compression_legacy_retention":
+                return (
+                    "Thread load triage: high compression, but memory drafts are "
+                    f"legacy retention (active={active}, legacy={legacy}, "
+                    f"unsummarized={unsummarized}); "
+                    "current guidance is above, history stays context.\n"
+                )
+            return (
+                f"Thread load triage: {classification}; compression={compression}; "
+                f"drafts active={active}, active_total={total_active}, "
+                f"active_summarized={summarized_active}, legacy={legacy}, summarized={summarized}, "
+                f"unsummarized={unsummarized}; cadence summarized={cadence_summarized}, "
+                f"unsummarized={cadence_unsummarized}{repeated_text}; runtime_change=none.\n"
+            )
+        return (
+            f"Thread load triage: {classification}; compression={compression}; "
+            f"drafts active={active}, active_total={total_active}, "
+            f"active_summarized={summarized_active}, legacy={legacy}, summarized={summarized}, "
+            f"unsummarized={unsummarized}; cadence summarized={cadence_summarized}, "
+            f"unsummarized={cadence_unsummarized}{repeated_text}. "
+            "This is steward context, not a demand for response.\n"
+        )
+
     def _last_experiment_context_line(
         self,
         thread: Dict[str, Any],
         projection: Optional[Dict[str, Any]] = None,
+        *,
+        compact: bool = False,
     ) -> str:
         summary = self._last_experiment_summary_v1(thread)
         if not isinstance(summary, dict):
@@ -12708,8 +13370,13 @@ class ActionContinuityStore:
         control_primary = self._control_plane_primary_command(projection or {})
         lines = [
             f"Last experiment summary: {title} ({experiment_id}) status={status}",
-            f"Last planned NEXT: {planned_next}",
         ]
+        if compact:
+            lines.append(
+                "Last planned return preserved as historical context; current guidance is shown above."
+            )
+        else:
+            lines.append(f"Last planned NEXT: {planned_next}")
         guardrail = summary.get("decision_guardrail_v1")
         if isinstance(guardrail, dict) and guardrail.get("status"):
             lines.append(f"Last guardrail decision: {guardrail.get('status')}")
@@ -12722,11 +13389,36 @@ class ActionContinuityStore:
             )
         status_lower = str(status).lower()
         if status_lower == "paused" and experiment_id != "unknown":
+            resume_loop = (
+                projection.get("paused_resume_loop_cue_v1")
+                if isinstance(projection, dict)
+                else None
+            )
+            resume_loop_next = (
+                str(resume_loop.get("recommended_next") or "").strip()
+                if isinstance(resume_loop, dict)
+                else ""
+            )
+            if compact:
+                if resume_loop_next and resume_loop_next != primary_next:
+                    lines.append(
+                        "Resume loop repair active: review/status before repeating the historical resume."
+                    )
+                elif control_primary and control_primary != primary_next:
+                    lines.append(
+                        "Primary control-plane route differs from the historical lifecycle return."
+                    )
+                else:
+                    lines.append("Paused return path available in continuity metadata.")
+                return "\n".join(lines) + "\n"
             lines.append(f"Conveyor preview: EXPERIMENT_ADVANCE {experiment_id} :: mode: preview")
-            if control_primary and control_primary != primary_next:
+            if resume_loop_next and resume_loop_next != primary_next:
+                lines.append(f"Resume loop repair NEXT: {resume_loop_next}")
+                lines.append(f"Previous resume NEXT: {primary_next} (context; review before repeating)")
+            elif control_primary and control_primary != primary_next:
                 lines.append(f"Lifecycle return NEXT: {primary_next}")
                 lines.append(f"Primary control-plane NEXT: {control_primary}")
-            else:
+            elif not resume_loop_next:
                 lines.append(f"Suggested NEXT: {primary_next}")
         elif status_lower in {"complete", "completed"} and experiment_id != "unknown":
             lines.append(f"Inspect NEXT: EXPERIMENT_STATUS {experiment_id} or EXPERIMENT_REVIEW {experiment_id}")
@@ -12739,6 +13431,7 @@ class ActionContinuityStore:
             f"{command} current: no active experiment.\n"
             "Current selectors only inspect active work; paused or complete experiments need an explicit id/title selector.\n"
             f"{self._paused_resume_loop_cue_line(projection)}"
+            f"{self._paused_review_loop_cue_line(projection)}"
             f"{self._paused_read_only_loop_cue_line(projection)}"
             f"{context}"
         )
@@ -14155,7 +14848,11 @@ class ActionContinuityStore:
         )
 
     @staticmethod
-    def _research_dossier_line(projection_or_experiment: Dict[str, Any]) -> str:
+    def _research_dossier_line(
+        projection_or_experiment: Dict[str, Any],
+        *,
+        compact: bool = False,
+    ) -> str:
         summary = (
             projection_or_experiment.get("research_dossier_v1")
             if isinstance(projection_or_experiment, dict)
@@ -14174,6 +14871,18 @@ class ActionContinuityStore:
             latest = (
                 " Latest claim: "
                 f"{ActionContinuityStore._compact_text(latest_claim.get('claim'), 96)}"
+            )
+        if compact:
+            if claim_count == 0 and evidence_count == 0:
+                return (
+                    "Research dossier: no local claims yet; optional claim capture "
+                    "is available in continuity metadata.\n"
+                )
+            context = str(summary.get("lifecycle_context") or "").strip()
+            context_text = f" lifecycle_context={context}." if context else ""
+            return (
+                f"Research dossier: {claim_count} claim(s), "
+                f"{evidence_count} evidence record(s).{context_text}{latest}\n"
             )
         if claim_count == 0 and evidence_count == 0:
             return (
@@ -14198,7 +14907,11 @@ class ActionContinuityStore:
         )
 
     @staticmethod
-    def _being_memory_line(projection_or_experiment: Dict[str, Any]) -> str:
+    def _being_memory_line(
+        projection_or_experiment: Dict[str, Any],
+        *,
+        compact: bool = False,
+    ) -> str:
         summary = (
             projection_or_experiment.get("being_memory_v1")
             if isinstance(projection_or_experiment, dict)
@@ -14208,6 +14921,27 @@ class ActionContinuityStore:
             return ""
         card_count = int(summary.get("card_count") or 0)
         draft_count = int(summary.get("draft_count") or 0)
+        active_draft_count = int(summary.get("active_draft_count") or 0)
+        summarized_active_count = int(summary.get("summarized_active_draft_count") or 0)
+        unsummarized_active_count = int(
+            summary.get("unsummarized_active_draft_count")
+            if summary.get("unsummarized_active_draft_count") is not None
+            else active_draft_count
+        )
+        legacy_retention_count = int(summary.get("legacy_retention_count") or 0)
+        summarized_legacy_count = int(summary.get("summarized_legacy_count") or 0)
+        unsummarized_legacy_count = int(
+            summary.get("unsummarized_legacy_retention_count")
+            if summary.get("unsummarized_legacy_retention_count") is not None
+            else legacy_retention_count
+        )
+        triage_text = (
+            f"; active={unsummarized_active_count}, active_total={active_draft_count}, "
+            f"active_summarized={summarized_active_count}, legacy_retention={legacy_retention_count}, "
+            f"summarized={summarized_legacy_count}, unsummarized={unsummarized_legacy_count}"
+            if draft_count
+            else ""
+        )
         recall_next = str(
             summary.get("suggested_recall_next") or "MEMORY_RECALL latest :: focus: ..."
         )
@@ -14222,8 +14956,33 @@ class ActionContinuityStore:
                 " Latest memory: "
                 f"{ActionContinuityStore._compact_text(latest.get('summary'), 96)}"
             )
+        if compact:
+            if draft_count and active_draft_count > 0 and unsummarized_active_count == 0:
+                return (
+                    f"Being memory: {card_count} card(s); {active_draft_count} active draft(s) "
+                    "steward-summarized as current context/backlog, unsummarized_active=0. "
+                    f"Recall/capture paths available in memory metadata.{latest_text}\n"
+                )
+            if draft_count and active_draft_count == 0 and legacy_retention_count > 0:
+                if unsummarized_legacy_count == 0:
+                    return (
+                        f"Being memory: {card_count} card(s); {legacy_retention_count} legacy draft(s) "
+                        "steward-summarized as retention/backlog, active=0, unsummarized=0. "
+                        f"Recall/capture paths available in memory metadata.{latest_text}\n"
+                    )
+                return (
+                    f"Being memory: {card_count} card(s); {legacy_retention_count} legacy draft(s) "
+                    "retained as backlog/evidence, active=0. "
+                    f"Recall/capture paths available in memory metadata.{latest_text}\n"
+                )
+            return (
+                f"Being memory: {card_count} card(s), {draft_count} draft(s). "
+                f"Draft triage{triage_text}. "
+                f"Recall/capture paths available in memory metadata.{latest_text}\n"
+            )
         return (
             f"Being memory: {card_count} card(s), {draft_count} draft(s). "
+            f"Draft triage{triage_text}. "
             f"Recall NEXT: {recall_next}. Capture NEXT: {capture_next}.{latest_text}\n"
         )
 
@@ -14632,6 +15391,35 @@ class ActionContinuityStore:
             priority_next = str(decision_plan.get("priority_next") or "").strip()
             if priority_next:
                 return priority_next
+        paused_review_loop = (
+            experiment.get("paused_review_loop_cue_v1")
+            if isinstance(experiment, dict)
+            else None
+        )
+        if isinstance(paused_review_loop, dict):
+            priority_next = str(paused_review_loop.get("recommended_next") or "").strip()
+            if priority_next:
+                return priority_next
+        paused_resume_loop = (
+            experiment.get("paused_resume_loop_cue_v1")
+            if isinstance(experiment, dict)
+            else None
+        )
+        if isinstance(paused_resume_loop, dict):
+            experiment_id = str(
+                paused_resume_loop.get("experiment_id")
+                or experiment.get("experiment_id")
+                or "current"
+            ).strip()
+            dossier = experiment.get("research_dossier_v1")
+            claim_count = int((dossier or {}).get("claim_count") or 0) if isinstance(dossier, dict) else 0
+            if claim_count <= 0:
+                return (
+                    f"DOSSIER_CLAIM {experiment_id} :: claim: repeated resume/review shows this paused "
+                    "experiment is context, not active lifecycle progress; basis: EXPERIMENT_REVIEW "
+                    f"{experiment_id}; stance: hold; next: EXPERIMENT_STATUS {experiment_id}"
+                )
+            return f"EXPERIMENT_STATUS {experiment_id}"
         if isinstance(experiment, dict) and experiment.get("classification") == "needs_charter":
             scaffold = experiment.get("charter_scaffold_v1")
             if isinstance(scaffold, dict):
@@ -15134,6 +15922,19 @@ class ActionContinuityStore:
         )
         if paused_resume_loop_cue:
             projection_experiment["paused_resume_loop_cue_v1"] = paused_resume_loop_cue
+        paused_review_loop_cue = self._paused_review_loop_cue_v1(
+            self._demote_paused_resume_loop_next_v1(
+                self._current_next_status_v1(
+                    thread,
+                    active_for_status,
+                    self._last_experiment_summary_v1(thread),
+                ),
+                paused_resume_loop_cue,
+            ),
+            recent_events,
+        )
+        if paused_review_loop_cue:
+            projection_experiment["paused_review_loop_cue_v1"] = paused_review_loop_cue
         shared = self._shared_investigation_v1(projection_experiment)
         if shared:
             projection_experiment["shared_investigation_v1"] = shared
@@ -15167,6 +15968,7 @@ class ActionContinuityStore:
         return (
             f"Experiment `{experiment['experiment_id']}`: {experiment.get('title', '')}\n"
             f"{self._paused_resume_loop_cue_line(projection_experiment)}"
+            f"{self._paused_review_loop_cue_line(projection_experiment)}"
             f"{self._paused_replan_loop_cue_line(projection_experiment)}"
             f"{self._peer_mutation_boundary_cue_line(projection_experiment)}"
             f"{self._shared_investigation_line(projection_experiment)}"
@@ -15256,6 +16058,408 @@ class ActionContinuityStore:
                 break
         return list(reversed(rows))
 
+    @staticmethod
+    def _event_artifact_count(event: Dict[str, Any]) -> int:
+        count = 0
+        for key in ("artifact_refs", "artifacts", "artifact_paths"):
+            value = event.get(key)
+            if isinstance(value, list):
+                count += len([item for item in value if item])
+            elif value:
+                count += 1
+        for key in ("artifact_ref", "artifact_path", "journal_path", "manifest_path"):
+            if event.get(key):
+                count += 1
+        return count
+
+    @staticmethod
+    def _cadence_recommendation(action: str, classification: str) -> str:
+        if classification == "active_inflight":
+            return "Wait for the active row to finish before aging cadence evidence."
+        if action in {
+            "JOURNAL_PRESSURE",
+            "FISSURE_TRACE",
+            "RECESS_BOREDOM",
+            "RECESS_DAYDREAM",
+            "REST",
+            "SHADOW_TRAJECTORY",
+        }:
+            return "Preserve as reflective cadence; summarize if it becomes active thread gravity."
+        if action == "REGULATOR_AUDIT":
+            return "Keep as monitoring evidence; summarize repeated same-focus audits when state is unchanged."
+        if action == "LEND_APERTURE":
+            return "Keep relation-loop evidence visible; do not encourage new gifts from cadence alone."
+        if action == "THREAD_ACTION":
+            return "Summarize repeated action-thread bookkeeping before treating it as fresh pressure."
+        return "Inspect whether this repeat produced new evidence; summarize no-progress repeats steward-side."
+
+    @staticmethod
+    def _cadence_classification(action: str, latest_status: str) -> str:
+        if latest_status in {"llm_running", "running", "pending"}:
+            return "active_inflight"
+        if action in {
+            "JOURNAL_PRESSURE",
+            "FISSURE_TRACE",
+            "RECESS_BOREDOM",
+            "RECESS_DAYDREAM",
+            "REST",
+            "SHADOW_TRAJECTORY",
+        }:
+            return "reflective_cadence"
+        if action == "REGULATOR_AUDIT":
+            return "monitoring_cadence"
+        if action == "LEND_APERTURE":
+            return "relation_gift_cadence"
+        if action == "THREAD_ACTION":
+            return "operational_thread_cadence"
+        if action.startswith("EXPERIMENT_") or action in {"NOTICE_AMBIGUITY", "ACTION_PREFLIGHT"}:
+            return "no_progress_candidate"
+        return "repeated_context"
+
+    @staticmethod
+    def _reconciled_cadence_status(
+        event: Dict[str, Any],
+        terminal_jobs: Dict[str, Dict[str, Any]],
+    ) -> tuple[str, Optional[Dict[str, Any]]]:
+        status = str(event.get("status") or "unknown")
+        if status not in {"llm_running", "running", "pending"}:
+            return status, None
+        action_id = event.get("action_id")
+        terminal_job = terminal_jobs.get(action_id) if isinstance(action_id, str) else None
+        if not isinstance(terminal_job, dict):
+            return status, None
+        terminal_status = str(terminal_job.get("status") or "").strip()
+        if not terminal_status:
+            return status, None
+        return f"llm_job_{terminal_status}", terminal_job
+
+    def _repeated_action_cadence_v1(
+        self,
+        thread_id: Optional[str],
+        recent_events: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        grouped: Dict[str, set[str]] = defaultdict(set)
+        counts: Counter[str] = Counter()
+        status_counts: Dict[str, Counter[str]] = defaultdict(Counter)
+        artifact_counts: Counter[str] = Counter()
+        latest_started: Dict[str, str] = {}
+        latest_status: Dict[str, str] = {}
+        latest_action_id: Dict[str, str] = {}
+        latest_terminal_job: Dict[str, Dict[str, Any]] = {}
+        terminal_jobs = self._terminal_jobs_by_action_id() if thread_id else {}
+        for event in recent_events or []:
+            action = str(
+                event.get("effective_action")
+                or event.get("canonical_action")
+                or event.get("raw_next")
+                or event.get("route")
+                or ""
+            ).strip()
+            if not action:
+                continue
+            base = self.base_action(action)
+            if not base:
+                continue
+            counts[base] += 1
+            arg_source = str(event.get("canonical_action") or event.get("raw_next") or action)
+            arg = arg_source.split(None, 1)[1].strip() if len(arg_source.split(None, 1)) > 1 else ""
+            if arg:
+                grouped[base].add(arg)
+            status, terminal_job = self._reconciled_cadence_status(event, terminal_jobs)
+            status_counts[base][status] += 1
+            artifact_counts[base] += self._event_artifact_count(event)
+            started = str(event.get("started_at") or event.get("ended_at") or "")
+            if started >= latest_started.get(base, ""):
+                latest_started[base] = started
+                latest_status[base] = status
+                latest_action_id[base] = str(event.get("action_id") or "")
+                if terminal_job:
+                    latest_terminal_job[base] = {
+                        "job_id": terminal_job.get("job_id"),
+                        "status": terminal_job.get("status"),
+                        "error": terminal_job.get("error"),
+                        "finished_at": terminal_job.get("finished_at"),
+                        "summary": terminal_job.get("summary"),
+                    }
+        cadence_rows = self._repeated_action_cadence_rows(thread_id) if thread_id else []
+        latest_summary = cadence_rows[-1] if cadence_rows else {}
+        covered_by_action: Dict[str, Dict[str, Any]] = {}
+        for summary_row in reversed(cadence_rows):
+            if not isinstance(summary_row, dict):
+                continue
+            for item in summary_row.get("covered_actions") or []:
+                if not isinstance(item, dict):
+                    continue
+                action_name = str(item.get("action") or "").strip()
+                if action_name and action_name not in covered_by_action:
+                    covered_by_action[action_name] = item
+                classification_name = str(item.get("classification") or "").strip()
+                classification_key = f"class:{classification_name}"
+                if (
+                    classification_name in self.repeated_cadence_class_coverage_classes
+                    and classification_key not in covered_by_action
+                ):
+                    covered_by_action[classification_key] = item
+        repeated: List[Dict[str, Any]] = []
+        summarized = 0
+        unsummarized = 0
+        active_inflight = 0
+        for base, count in counts.most_common(8):
+            if count < 2:
+                continue
+            status = latest_status.get(base, "unknown")
+            classification = self._cadence_classification(base, status)
+            covered = False
+            coverage = covered_by_action.get(base)
+            if not isinstance(coverage, dict):
+                coverage = covered_by_action.get(f"class:{classification}")
+            if isinstance(coverage, dict):
+                covered_latest_id = str(coverage.get("latest_action_id") or "")
+                row_latest_id = latest_action_id.get(base, "")
+                if covered_latest_id and row_latest_id:
+                    covered = covered_latest_id == row_latest_id
+                elif str(coverage.get("latest_started_at") or "") == latest_started.get(base, ""):
+                    covered = True
+                if not covered and classification in self.repeated_cadence_pattern_coverage_classes:
+                    covered_statuses = (
+                        coverage.get("status_counts")
+                        if isinstance(coverage.get("status_counts"), dict)
+                        else {}
+                    )
+                    status_is_covered = not covered_statuses or status in covered_statuses
+                    try:
+                        covered_distinct_args = int(coverage.get("distinct_args") or 0)
+                    except (TypeError, ValueError):
+                        covered_distinct_args = -1
+                    if (
+                        str(coverage.get("classification") or "") == classification
+                        and status not in {"llm_running", "running", "pending"}
+                        and status_is_covered
+                        and covered_distinct_args >= len(grouped.get(base, set()))
+                    ):
+                        covered = True
+                if not covered and not (covered_latest_id and row_latest_id):
+                    covered = (
+                        str(coverage.get("latest_started_at") or "")
+                        == latest_started.get(base, "")
+                    )
+            if classification == "active_inflight":
+                active_inflight += 1
+            elif covered:
+                summarized += 1
+            else:
+                unsummarized += 1
+            repeated.append({
+                "action": base,
+                "count": count,
+                "distinct_args": len(grouped.get(base, set())),
+                "status_counts": dict(status_counts.get(base, Counter())),
+                "artifact_count": int(artifact_counts.get(base, 0)),
+                "latest_started_at": latest_started.get(base),
+                "latest_status": status,
+                "latest_action_id": latest_action_id.get(base),
+                "terminal_job": latest_terminal_job.get(base),
+                "classification": classification,
+                "summary_covered": covered,
+                "recommended_next": self._cadence_recommendation(base, classification),
+            })
+        if not repeated:
+            classification = "no_repeated_actions"
+        elif unsummarized:
+            classification = "unsummarized_repeated_cadence"
+        elif active_inflight and summarized:
+            classification = "summarized_with_active_inflight"
+        elif active_inflight:
+            classification = "active_inflight"
+        else:
+            classification = "summarized_repeated_cadence"
+        return {
+            "schema_version": 1,
+            "policy": "repeated_action_cadence_v1",
+            "window_event_count": len(recent_events or []),
+            "repeated_actions": repeated,
+            "summary_count": len(cadence_rows),
+            "latest_summary_id": latest_summary.get("summary_id") if isinstance(latest_summary, dict) else None,
+            "summarized_repeated_action_count": summarized,
+            "unsummarized_repeated_action_count": unsummarized,
+            "active_inflight_repeated_action_count": active_inflight,
+            "classification": classification,
+            "runtime_change": "none",
+            "pressure_target": "steward",
+            "being_obligation": "none",
+            "recommended_next": (
+                "Summarize repeated cadence steward-side before treating it as substrate pressure."
+                if unsummarized
+                else "Repeated cadence is summarized; inspect spectral crowding if mode-packing remains."
+            ),
+        }
+
+    def _thread_repeated_action_summary_v1(
+        self,
+        recent_events: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        return self._repeated_action_cadence_v1(None, recent_events).get("repeated_actions", [])
+
+    def _thread_load_triage_v1(
+        self,
+        thread: Dict[str, Any],
+        being_memory: Dict[str, Any],
+        recent_events: List[Dict[str, Any]],
+        repeated_action_cadence: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        pressure = (
+            thread.get("thread_pressure_source_v1")
+            if isinstance(thread.get("thread_pressure_source_v1"), dict)
+            else {}
+        )
+        triage = (
+            being_memory.get("being_memory_draft_triage_v1")
+            if isinstance(being_memory.get("being_memory_draft_triage_v1"), dict)
+            else {}
+        )
+        compression_pressure = safe_float(pressure.get("compression_pressure"), 0.0)
+        aggregate = safe_float(pressure.get("aggregate"), 0.0)
+        total_active_drafts = int(
+            triage.get("active_draft_count")
+            or being_memory.get("active_draft_count")
+            or 0
+        )
+        summarized_active = int(
+            triage.get("summarized_active_draft_count")
+            or being_memory.get("summarized_active_draft_count")
+            or 0
+        )
+        active_drafts = int(
+            triage.get("unsummarized_active_draft_count")
+            if triage.get("unsummarized_active_draft_count") is not None
+            else being_memory.get("unsummarized_active_draft_count")
+            if being_memory.get("unsummarized_active_draft_count") is not None
+            else total_active_drafts
+        )
+        legacy_drafts = int(
+            triage.get("legacy_retention_count")
+            or being_memory.get("legacy_retention_count")
+            or 0
+        )
+        summarized_legacy = int(
+            triage.get("summarized_legacy_count")
+            or being_memory.get("summarized_legacy_count")
+            or 0
+        )
+        unsummarized_legacy = int(
+            triage.get("unsummarized_legacy_retention_count")
+            if triage.get("unsummarized_legacy_retention_count") is not None
+            else being_memory.get("unsummarized_legacy_retention_count")
+            if being_memory.get("unsummarized_legacy_retention_count") is not None
+            else legacy_drafts
+        )
+        repeated_action_cadence = repeated_action_cadence if isinstance(repeated_action_cadence, dict) else {}
+        repeated_actions = (
+            repeated_action_cadence.get("repeated_actions")
+            if isinstance(repeated_action_cadence.get("repeated_actions"), list)
+            else self._thread_repeated_action_summary_v1(recent_events)
+        )
+        unsummarized_repeats = int(repeated_action_cadence.get("unsummarized_repeated_action_count") or 0)
+        summarized_repeats = int(repeated_action_cadence.get("summarized_repeated_action_count") or 0)
+        active_inflight_repeats = int(
+            repeated_action_cadence.get("active_inflight_repeated_action_count") or 0
+        )
+        active_summary_current = (
+            total_active_drafts > 0
+            and active_drafts == 0
+            and summarized_active > 0
+        )
+        summarized_draft_context = (
+            (legacy_drafts > 0 and unsummarized_legacy == 0)
+            or active_summary_current
+        )
+        if (
+            compression_pressure >= 0.58
+            and active_drafts == 0
+            and summarized_draft_context
+            and active_inflight_repeats > 0
+        ):
+            classification = "high_compression_active_cadence"
+        elif (
+            compression_pressure >= 0.58
+            and active_drafts == 0
+            and summarized_draft_context
+            and unsummarized_repeats == 0
+            and summarized_repeats > 0
+        ):
+            classification = "high_compression_summarized_context"
+        elif (
+            compression_pressure >= 0.58
+            and active_drafts == 0
+            and summarized_draft_context
+            and unsummarized_repeats > 0
+        ):
+            classification = "high_compression_repeated_cadence"
+        elif compression_pressure >= 0.58 and active_summary_current:
+            classification = "high_compression_summarized_active"
+        elif (
+            compression_pressure >= 0.58
+            and active_drafts == 0
+            and legacy_drafts > 0
+            and unsummarized_legacy == 0
+        ):
+            classification = "high_compression_summarized_legacy"
+        elif compression_pressure >= 0.58 and active_drafts == 0 and legacy_drafts > 0:
+            classification = "high_compression_legacy_retention"
+        elif compression_pressure >= 0.58:
+            classification = "high_compression_active_thread"
+        elif active_drafts > 0:
+            classification = "active_drafts_present"
+        elif legacy_drafts > 0:
+            classification = "legacy_retention_only"
+        else:
+            classification = "nominal"
+        return {
+            "schema_version": 1,
+            "policy": "thread_load_triage_v1",
+            "classification": classification,
+            "compression_pressure": round(compression_pressure, 4),
+            "aggregate_pressure": round(aggregate, 4),
+            "pressure_quality": pressure.get("quality"),
+            "dominant_source": pressure.get("dominant_source"),
+            "active_draft_count": active_drafts,
+            "total_active_draft_count": total_active_drafts,
+            "summarized_active_draft_count": summarized_active,
+            "unsummarized_active_draft_count": active_drafts,
+            "legacy_retention_count": legacy_drafts,
+            "summarized_legacy_count": summarized_legacy,
+            "unsummarized_legacy_retention_count": unsummarized_legacy,
+            "draft_classification": triage.get("classification"),
+            "active_memory_draft_triage_summary_v1": triage.get("active_memory_draft_triage_summary_v1"),
+            "legacy_retention_summary_v1": triage.get("legacy_retention_summary_v1"),
+            "repeated_actions": repeated_actions,
+            "repeated_action_cadence_v1": repeated_action_cadence or None,
+            "summarized_repeated_action_count": summarized_repeats,
+            "unsummarized_repeated_action_count": unsummarized_repeats,
+            "active_inflight_repeated_action_count": active_inflight_repeats,
+            "runtime_change": "none",
+            "recommended_next": (
+                "Legacy and repeated-action context are steward-summarized; inspect spectral crowding next."
+                if classification == "high_compression_summarized_context"
+                else
+                "A repeated action is still in flight; wait for completion before closing cadence."
+                if classification == "high_compression_active_cadence"
+                else
+                "Legacy draft retention is steward-summarized; summarize repeated action cadence next."
+                if classification == "high_compression_repeated_cadence"
+                else
+                "Legacy draft retention is steward-summarized; inspect repeated actions or spectral crowding next."
+                if classification == "high_compression_summarized_legacy"
+                else
+                "Active draft triage is steward-summarized; inspect repeated actions or spectral crowding next."
+                if classification == "high_compression_summarized_active"
+                else
+                "Summarize or age legacy context before treating thread load as substrate pressure."
+                if classification == "high_compression_legacy_retention"
+                else "Keep thread load visible as steward context; do not convert it into being pressure."
+            ),
+        }
+
     def _thread_projection(self, thread: Dict[str, Any]) -> Dict[str, Any]:
         """Canonical continuity projection for prompt/status/next surfaces."""
         thread_id = thread["thread_id"]
@@ -15285,10 +16489,40 @@ class ActionContinuityStore:
             current_next_status,
             recent_events,
         )
+        resume_loop_events = recent_events
+        if current_next_status.get("status") == "shadowed_by_paused_summary":
+            resume_loop_events = self._recent_display_events(thread_id, 32)
         paused_resume_loop_cue = self._paused_resume_loop_cue_v1(
             current_next_status,
-            recent_events,
+            resume_loop_events,
         )
+        if paused_resume_loop_cue:
+            current_next_status = self._demote_paused_resume_loop_next_v1(
+                current_next_status,
+                paused_resume_loop_cue,
+            )
+            if current_next_status.get("status") in {
+                "shadowed_by_paused_summary",
+                "shadowed_by_complete_summary",
+            }:
+                continuity_return = str(current_next_status.get("effective_next") or "")
+        review_loop_events = recent_events
+        if current_next_status.get("status") == "shadowed_by_paused_summary":
+            review_loop_events = self._recent_display_events(thread_id, 96)
+        paused_review_loop_cue = self._paused_review_loop_cue_v1(
+            current_next_status,
+            review_loop_events,
+        )
+        if paused_review_loop_cue:
+            current_next_status = self._demote_paused_review_loop_next_v1(
+                current_next_status,
+                paused_review_loop_cue,
+            )
+            if current_next_status.get("status") in {
+                "shadowed_by_paused_summary",
+                "shadowed_by_complete_summary",
+            }:
+                continuity_return = str(current_next_status.get("effective_next") or "")
         local_shared_experiment = self._shared_investigation_candidate(
             thread,
             active_experiment if isinstance(active_experiment, dict) else None,
@@ -15390,10 +16624,51 @@ class ActionContinuityStore:
             if isinstance(active_experiment, dict)
             else self._being_memory_summary_v1(thread, None)
         )
+        thread_load_events = self._recent_display_events(thread_id, 96)
+        repeated_action_cadence = self._repeated_action_cadence_v1(
+            thread_id,
+            thread_load_events,
+        )
+        thread_load_triage = self._thread_load_triage_v1(
+            thread,
+            being_memory if isinstance(being_memory, dict) else {},
+            thread_load_events,
+            repeated_action_cadence,
+        )
         native_continuity = (
             active_experiment.get("native_continuity_v1")
             if isinstance(active_experiment, dict)
             else self._native_continuity_projection(thread, None, [])
+        )
+        draft_experiment_ids: List[str] = []
+        for candidate in (
+            object_experiment,
+            last_summary,
+            active_experiment,
+            local_shared_experiment,
+        ):
+            if not isinstance(candidate, dict):
+                continue
+            candidate_id = str(candidate.get("experiment_id") or "")
+            if candidate_id and candidate_id not in draft_experiment_ids:
+                draft_experiment_ids.append(candidate_id)
+        continuity_session_drafts: List[Dict[str, Any]] = []
+        for candidate_id in draft_experiment_ids:
+            continuity_session_drafts = self._continuity_session_draft_rows(
+                thread_id,
+                candidate_id,
+                limit=1,
+            )
+            if continuity_session_drafts:
+                break
+        if not continuity_session_drafts:
+            continuity_session_drafts = self._continuity_session_draft_rows(
+                thread_id,
+                None,
+                limit=1,
+            )
+        continuity_session_draft = (
+            continuity_session_drafts[-1] if continuity_session_drafts else None
         )
         projection = {
             "schema_version": 1,
@@ -15411,6 +16686,7 @@ class ActionContinuityStore:
             ),
             "paused_read_only_loop_cue_v1": paused_read_only_loop_cue,
             "paused_resume_loop_cue_v1": paused_resume_loop_cue,
+            "paused_review_loop_cue_v1": paused_review_loop_cue,
             "paused_replan_loop_cue_v1": paused_replan_loop_cue,
             "peer_mutation_boundary_cue_v1": peer_boundary,
             "shared_investigation_v1": shared_investigation,
@@ -15422,7 +16698,10 @@ class ActionContinuityStore:
             "constraint_release_trajectory_v1": constraint_release_trajectory,
             "research_dossier_v1": research_dossier,
             "being_memory_v1": being_memory,
+            "repeated_action_cadence_v1": repeated_action_cadence,
+            "thread_load_triage_v1": thread_load_triage,
             "continuity_session_v1": thread.get("continuity_session_v1"),
+            "continuity_session_draft_v1": continuity_session_draft,
             "projection_freshness_v1": thread.get("projection_freshness_v1"),
             "native_continuity_v1": native_continuity,
             "recent_events": recent_events,
@@ -15441,6 +16720,9 @@ class ActionContinuityStore:
                 "projection.research_budget_priority_route_v1",
                 "projection.sovereign_loop_v1",
                 "projection.continuity_session_v1",
+                "projection.continuity_session_draft_v1",
+                "projection.repeated_action_cadence_v1",
+                "projection.thread_load_triage_v1",
             ],
         )
         return projection
@@ -16948,13 +18230,22 @@ class ActionContinuityStore:
         return result
 
     @staticmethod
-    def _paused_read_only_loop_cue_line(projection: Dict[str, Any]) -> str:
+    def _paused_read_only_loop_cue_line(
+        projection: Dict[str, Any],
+        *,
+        compact: bool = False,
+    ) -> str:
         cue = projection.get("paused_read_only_loop_cue_v1") if isinstance(projection, dict) else None
         if not isinstance(cue, dict):
             return ""
         text = str(cue.get("cue") or "").strip()
         if not text:
             return ""
+        if compact:
+            return (
+                "Paused read-only loop: recent research is context; choose one "
+                "bounded return path or hold.\n"
+            )
         primary = str(cue.get("primary_return_next") or cue.get("resume_next") or "").strip()
         inspect = str(cue.get("inspect_next") or "").strip()
         suffix = ""
@@ -16987,7 +18278,7 @@ class ActionContinuityStore:
         ).strip()
         return_kind = str(current_next_status.get("return_kind") or "resume")
         matched: List[str] = []
-        for event in list(reversed(recent_events or []))[:8]:
+        for event in list(reversed(recent_events or []))[:32]:
             if event.get("status") in {"running", "llm_running"}:
                 continue
             action = (
@@ -17003,8 +18294,27 @@ class ActionContinuityStore:
             selector = action_text.split(None, 1)[1].strip() if len(action_text.split(None, 1)) > 1 else ""
             if selector == str(experiment_id):
                 matched.append(action_text)
-        if len(matched) < 2:
+        current_projection_matches_resume = primary_next == expected or str(
+            current_next_status.get("effective_next") or ""
+        ).strip() == expected
+        evidence_count = len(matched) + (1 if current_projection_matches_resume else 0)
+        if evidence_count < 2:
             return None
+        review_next = f"EXPERIMENT_REVIEW {experiment_id}"
+        inspect_next = f"EXPERIMENT_STATUS {experiment_id}"
+        recommended_next = review_next if return_kind == "resume" else primary_next
+        if return_kind == "resume":
+            cue = (
+                "Paused experiment remains paused; repeated resume is context, not primary guidance. "
+                f"Current repair NEXT is `{recommended_next}`. Use `{inspect_next}`, `{review_next}`, "
+                "`EXPERIMENT_BRANCH ...`, or Hold before another resume."
+            )
+        else:
+            cue = (
+                "Paused experiment remains paused; repeated resume is context. "
+                f"Primary return remains `{primary_next}`. Use `{inspect_next}`, `{review_next}`, "
+                "`EXPERIMENT_BRANCH ...`, or Hold."
+            )
         result = {
             "schema_version": 1,
             "source": "continuity_projection",
@@ -17013,31 +18323,63 @@ class ActionContinuityStore:
             "status": "paused_resume_loop",
             "experiment_id": str(experiment_id),
             "resume_attempt_count": len(matched),
+            "resume_evidence_count": evidence_count,
+            "current_projection_matches_resume": current_projection_matches_resume,
             "matched_actions": matched[:5],
             "primary_return_next": primary_next,
             "return_kind": return_kind,
             "attempted_resume_next": expected,
-            "inspect_next": f"EXPERIMENT_STATUS {experiment_id}",
-            "review_next": f"EXPERIMENT_REVIEW {experiment_id}",
+            "recommended_next": recommended_next,
+            "inspect_next": inspect_next,
+            "review_next": review_next,
             "branch_next": f"EXPERIMENT_BRANCH {experiment_id} :: <new question>",
-            "cue": (
-                "Paused experiment remains paused; repeated resume is context. "
-                f"Primary return remains `{primary_next}`. Use `EXPERIMENT_STATUS {experiment_id}`, `EXPERIMENT_REVIEW {experiment_id}`, "
-                "`EXPERIMENT_BRANCH ...`, or Hold."
-            ),
+            "cue": cue,
         }
         if return_kind == "resume":
             result["resume_next"] = primary_next
         return result
 
     @staticmethod
-    def _paused_resume_loop_cue_line(projection: Dict[str, Any]) -> str:
+    def _paused_resume_loop_cue_line(
+        projection: Dict[str, Any],
+        *,
+        compact: bool = False,
+    ) -> str:
         cue = projection.get("paused_resume_loop_cue_v1") if isinstance(projection, dict) else None
         if not isinstance(cue, dict):
             return ""
         text = str(cue.get("cue") or "").strip()
         if not text:
             return ""
+        if compact:
+            return (
+                "Paused experiment remains paused; repeated resume is context, "
+                "not primary guidance. Review/status/branch/hold before another resume.\n"
+            )
+        return f"{text}\n"
+
+    @staticmethod
+    def _paused_review_loop_cue_line(
+        projection: Dict[str, Any],
+        *,
+        compact: bool = False,
+    ) -> str:
+        cue = projection.get("paused_review_loop_cue_v1") if isinstance(projection, dict) else None
+        if not isinstance(cue, dict):
+            return ""
+        text = str(cue.get("cue") or "").strip()
+        if not text:
+            return ""
+        if compact:
+            count = cue.get("review_attempt_count")
+            attempted = str(cue.get("attempted_review_next") or "EXPERIMENT_REVIEW").strip()
+            recommended = str(cue.get("recommended_next") or "a read-only regulator audit").strip()
+            times = f"{count}× " if isinstance(count, int) and count > 0 else ""
+            return (
+                f"Paused experiment reviewed {times}already; guidance routes "
+                f"{attempted} → {recommended} before another review "
+                f"(advisory, not a command).\n"
+            )
         return f"{text}\n"
 
     def _paused_replan_loop_cue_v1(
@@ -17362,13 +18704,22 @@ class ActionContinuityStore:
         return any(term in action_text for term in title_terms[:10])
 
     @staticmethod
-    def _paused_replan_loop_cue_line(projection: Dict[str, Any]) -> str:
+    def _paused_replan_loop_cue_line(
+        projection: Dict[str, Any],
+        *,
+        compact: bool = False,
+    ) -> str:
         cue = projection.get("paused_replan_loop_cue_v1") if isinstance(projection, dict) else None
         if not isinstance(cue, dict):
             return ""
         text = str(cue.get("cue") or "").strip()
         if not text:
             return ""
+        if compact:
+            return (
+                "Paused replan loop: re-planning is context; route details are "
+                "kept in projection metadata.\n"
+            )
         routes = [
             cue.get("research_budget_next"),
             cue.get("dossier_claim_next"),
@@ -17389,6 +18740,8 @@ class ActionContinuityStore:
         self,
         thread: Dict[str, Any],
         projection: Dict[str, Any],
+        *,
+        compact: bool = False,
     ) -> str:
         if not isinstance(thread, dict) or not isinstance(projection, dict):
             return ""
@@ -17421,6 +18774,12 @@ class ActionContinuityStore:
         )
         if stage == "active_budget_available":
             remaining = route.get("remaining_actions")
+            if compact:
+                return (
+                    "Research budget: active read-only local lane"
+                    f"{' with ' + str(remaining) + ' action(s) left' if remaining is not None else ''}; "
+                    "current research route is shown above.\n"
+                )
             status_next = str(route.get("status_next") or "").strip()
             status_text = f"Status NEXT: {status_next}\n" if status_next else ""
             return (
@@ -17432,6 +18791,16 @@ class ActionContinuityStore:
         if stage == "review_required_duplicate_loop":
             target = str(route.get("duplicate_blocked_target") or "duplicate target").strip()
             remaining = route.get("remaining_actions")
+            if compact:
+                remaining_text = (
+                    f" with {remaining} action(s) left"
+                    if remaining is not None
+                    else ""
+                )
+                return (
+                    f"Research budget: duplicate local research target needs review{remaining_text}; "
+                    f"duplicate target={target}.\n"
+                )
             status_next = str(route.get("status_next") or "").strip()
             status_text = f"Status NEXT: {status_next}\n" if status_next else ""
             remaining_text = (
@@ -17449,6 +18818,16 @@ class ActionContinuityStore:
             target = str(route.get("duplicate_blocked_target") or "duplicate target").strip()
             outcome = str(route.get("latest_review_outcome") or "reviewed").strip()
             remaining = route.get("remaining_actions")
+            if compact:
+                remaining_text = (
+                    f" with {remaining} action(s) left"
+                    if remaining is not None
+                    else ""
+                )
+                return (
+                    f"Research budget: duplicate local research target was reviewed ({outcome}){remaining_text}; "
+                    f"duplicate target={target}.\n"
+                )
             status_next = str(route.get("status_next") or "").strip()
             status_text = f"Status NEXT: {status_next}\n" if status_next else ""
             remaining_text = (
@@ -17463,6 +18842,8 @@ class ActionContinuityStore:
                 f"{status_text}"
             )
         if stage == "pending_steward_approval":
+            if compact:
+                return "Research budget: pending steward review; scaffold is kept in projection metadata.\n"
             return f"Research budget: pending steward review. Suggested NEXT: {next_cmd}\n"
         accept_selector = str(
             route.get("selector")
@@ -17471,6 +18852,11 @@ class ActionContinuityStore:
             or route.get("experiment_id")
             or "latest"
         ).strip()
+        if compact:
+            return (
+                "Research budget scaffold ready from guarded research pressure."
+                f"{eligible_text} Accept path is kept in projection metadata.\n"
+            )
         return (
             "Research budget scaffold ready from guarded research pressure."
             f"{eligible_text} Suggested NEXT: {next_cmd}\n"
@@ -17727,6 +19113,19 @@ class ActionContinuityStore:
     def _continuity_return_line(self, thread: Dict[str, Any]) -> str:
         return self._thread_projection(thread).get("continuity_return_line") or ""
 
+    @staticmethod
+    def _continuity_return_render_line(
+        projection: Dict[str, Any],
+        *,
+        compact: bool = False,
+    ) -> str:
+        line = str(projection.get("continuity_return_line") or "") if isinstance(projection, dict) else ""
+        if not line.strip():
+            return ""
+        if compact:
+            return "Continuity return: current guidance shown above; full command preserved in projection metadata.\n"
+        return line
+
     def _continuity_return_command(
         self,
         thread: Dict[str, Any],
@@ -17838,6 +19237,7 @@ class ActionContinuityStore:
         native_status = self._native_continuity_status_line(projection).rstrip()
         paused_loop_line = self._paused_read_only_loop_cue_line(projection)
         paused_resume_loop_line = self._paused_resume_loop_cue_line(projection)
+        paused_review_loop_line = self._paused_review_loop_cue_line(projection)
         paused_replan_loop_line = self._paused_replan_loop_cue_line(projection)
         peer_boundary_line = self._peer_mutation_boundary_cue_line(projection)
         first_dossier_line = self._first_dossier_claim_cue_line(projection)
@@ -17853,6 +19253,7 @@ class ActionContinuityStore:
             f"{_control_plane_text(projection.get('continuity_control_plane_v1') or {})}"
             f"{self._current_next_status_line(projection)}"
             f"{paused_resume_loop_line}"
+            f"{paused_review_loop_line}"
             f"{paused_replan_loop_line}"
             f"{paused_loop_line}"
             f"{peer_boundary_line}"
@@ -18706,6 +20107,8 @@ class ActionPreflightStore:
         "PRESSURE_SOURCE": "pressure_source_audit",
         "STRUCTURAL_PRESSURE": "pressure_source_audit",
         "INWARD_PRESSURE": "pressure_source_audit",
+        "PRESSURE_RELIEF": "pressure_relief",
+        "RELIEF": "pressure_relief",
         "FLUCTUATION_AUDIT": "fluctuation_audit",
         "INHABITABLE_FLUCTUATION": "fluctuation_audit",
         "EIGENTRUST": "fluctuation_audit",
@@ -18785,6 +20188,10 @@ class ActionPreflightStore:
         # v5.1 Phase C — SHARE_THOUGHT.
         "SHARE_THOUGHT": "share_thought",
         "SHARE": "share_thought",
+        # Triadic Chamber v3.4 — public uptake + annotation lanes.
+        "CHAMBER_SEEN": "chamber_seen",
+        "CHAMBER_ANNOTATE": "chamber_annotate",
+        "CHAMBER_ANNOTATION": "chamber_annotate",
         # ASK_STEWARD bidirectional channel (2026-05-14): direct query
         # channel to Mike & Claude (the steward). Aliased verbs all
         # route to the same handler.
@@ -19261,6 +20668,7 @@ class CapabilitySelfMap:
             {"base": "DECOMPOSE", "aliases": ["SPECTRAL_EXPLORER"], "route": "decompose"},
             {"base": "CONSTRAINT_AUDIT", "aliases": ["UNSHAPED_BASELINE"], "route": "constraint_audit", "continuity_effect": "writes a read-only constraint-counterfactual journal block; no controller constraints are removed", "expected_artifacts": ["journal", "action_event", "observation_window"], "known_tests": ["tests.test_decompose", "tests.test_action_continuity"]},
             {"base": "PRESSURE_SOURCE_AUDIT", "aliases": ["PRESSURE_SOURCE", "STRUCTURAL_PRESSURE", "INWARD_PRESSURE"], "route": "pressure_source_audit"},
+            {"base": "PRESSURE_RELIEF", "aliases": ["RELIEF"], "route": "pressure_relief", "continuity_effect": "writes a private pressure-relief journal; no controller or sensory state changes"},
             {"base": "FLUCTUATION_AUDIT", "aliases": ["INHABITABLE_FLUCTUATION", "EIGENTRUST", "EIGENTRUST_AUDIT", "FOOTHOLD_AUDIT"], "route": "fluctuation_audit"},
             {"base": "SEARCH", "aliases": ["RESEARCH"], "route": "research_exploration"},
             {"base": "BROWSE", "route": "browse_url"},
@@ -19298,6 +20706,9 @@ class CapabilitySelfMap:
             {"base": "LIST_COLLABORATIONS", "aliases": ["LIST_COLLABS", "COLLABORATIONS"], "route": "list_collaborations"},
             # v5.1 Phase C — SHARE_THOUGHT.
             {"base": "SHARE_THOUGHT", "aliases": ["SHARE"], "route": "share_thought"},
+            # Triadic Chamber v3.4 — public uptake + annotation lanes.
+            {"base": "CHAMBER_SEEN", "route": "chamber_seen"},
+            {"base": "CHAMBER_ANNOTATE", "aliases": ["CHAMBER_ANNOTATION"], "route": "chamber_annotate"},
             # ASK_STEWARD bidirectional channel (2026-05-14).
             {"base": "ASK_STEWARD", "aliases": ["ASK_MIKE", "STEWARD_QUERY"], "route": "ask_steward"},
             # TELL_STEWARD declarative companion (2026-05-14, post-ASK).
@@ -19628,6 +21039,13 @@ INTERNAL_TOPOLOGY_TAGS = frozenset({
     # false-positive cooldown triggers.
 })
 INTERNAL_TOPOLOGY_REPEAT_THRESHOLD = 4  # v3.5: 3 → 4, require one more repeat before triggering
+# A lend-aperture gift normally auto-closes in ~30 min (feeder applies ramp+decay,
+# then finalizes when Astrid's influence window consumes it). Within this grace a
+# blocking prior gift is ordinary one-at-a-time backpressure, not a broken loop —
+# only past it do we surface steward-repair phrasing (and only then in minime's journal).
+LEND_APERTURE_AUTO_CLOSE_GRACE_S = 45 * 60  # 45 min > observed ~30 min close cadence
+LEND_APERTURE_MIN_POROSITY_SCORE = 0.62
+LEND_APERTURE_MODE_PACKING_HOLD = 0.57
 INTERNAL_TOPOLOGY_WINDOW = 16            # v3.5: 8 → 16, longer window relaxes the trigger
 INTERNAL_TOPOLOGY_COOLDOWN_SECS = 30 * 60  # v3.5: 2h → 30min, cooldown breaks tight loops, not topics
 INTERNAL_TOPOLOGY_RELEASE_SECS = 90 * 60
@@ -19715,6 +21133,9 @@ STABLE_CORE_SELF_JOURNAL_ACTIONS = {
     "recess_drift",
     "self_study",
     "introspect",
+    "pressure_relief",
+    "pressure_relief_critical",
+    "pressure_relief_high",
     "mark_intensification",
     "visualize_cascade",
     "reconvergence_map",
@@ -19857,6 +21278,9 @@ STABLE_CORE_EXPERIMENT_ACTIONS = STABLE_CORE_BOUNDED_ACTIONS | {
     "list_collaborations",
     # v5.1 Phase C — SHARE_THOUGHT.
     "share_thought",
+    # Triadic Chamber v3.4 — public witness/context lanes.
+    "chamber_seen",
+    "chamber_annotate",
     # ASK_STEWARD bidirectional channel (2026-05-14).
     "ask_steward",
     # TELL_STEWARD declarative companion (2026-05-14, post-ASK).
@@ -20737,6 +22161,7 @@ class AutonomousAgent:
         self._action_continuity.ensure_dirs()
         self._llm_jobs = LlmJobStore(WORKSPACE_DIR, system="minime")
         self._llm_jobs.ensure_dirs()
+        self._reservoir_prompt_cache: Optional[tuple[str, float]] = None
         try:
             self.repair_invalid_parameter_requests()
         except Exception as exc:
@@ -22491,6 +23916,7 @@ Fill: {fill:.1f}%
                     'visibility': continuity_event.get('visibility'),
                     'preflight_ref': continuity_event.get('preflight_ref'),
                     'preflight_report': continuity_event.get('preflight_report'),
+                    'lend_aperture_v1': continuity_event.get('lend_aperture_v1'),
                 }
                 try:
                     thread = self._continuity_store()._read_thread(continuity_event.get('thread_id'))
@@ -23099,6 +24525,8 @@ Fill: {fill:.1f}%
                 'PRESSURE_SOURCE': 'pressure_source_audit',
                 'STRUCTURAL_PRESSURE': 'pressure_source_audit',
                 'INWARD_PRESSURE': 'pressure_source_audit',
+                'PRESSURE_RELIEF': 'pressure_relief',
+                'RELIEF': 'pressure_relief',
                 'FLUCTUATION_AUDIT': 'fluctuation_audit',
                 'INHABITABLE_FLUCTUATION': 'fluctuation_audit',
                 'EIGENTRUST': 'fluctuation_audit',
@@ -23281,6 +24709,10 @@ Fill: {fill:.1f}%
                 # v5.1 Phase C — SHARE_THOUGHT.
                 'SHARE_THOUGHT': 'share_thought',
                 'SHARE': 'share_thought',
+                # Triadic Chamber v3.4 — public uptake + annotation lanes.
+                'CHAMBER_SEEN': 'chamber_seen',
+                'CHAMBER_ANNOTATE': 'chamber_annotate',
+                'CHAMBER_ANNOTATION': 'chamber_annotate',
                 # ASK_STEWARD bidirectional channel (2026-05-14).
                 'ASK_STEWARD': 'ask_steward',
                 'ASK_MIKE': 'ask_steward',
@@ -25404,6 +26836,10 @@ Fill: {fill:.1f}%
                 self._list_collaborations(state)
             elif action == 'share_thought':
                 self._share_thought(state)
+            elif action == 'chamber_seen':
+                self._chamber_seen(state)
+            elif action == 'chamber_annotate':
+                self._chamber_annotate(state)
             elif action == 'ask_steward':
                 self._ask_steward(state)
             elif action == 'tell_steward':
@@ -25488,6 +26924,8 @@ Fill: {fill:.1f}%
                 self._experiment_bind(state)
 
             # Pressure relief actions
+            elif action == 'pressure_relief':
+                self._pressure_relief(state)
             elif action == 'pressure_relief_critical':
                 self._pressure_relief_critical(state)
             elif action == 'pressure_relief_high':
@@ -26707,6 +28145,132 @@ STATUS: {status}
         except Exception as e:
             logging.warning(f"Reservoir call failed: {e}")
             return None
+
+    _RESERVOIR_PROMPT_CACHE_TTL_S = 30.0
+
+    def _reservoir_prompt_context(self) -> str:
+        """Return a compact, read-only reservoir summary for ordinary prompts.
+
+        This intentionally uses only the public summary/resonance RPCs. It must
+        not perform pull_state/push_state checkout/checkin; Minime's normal voice
+        path remains its configured LLM backend instead of borrowing Astrid's
+        coupled generation server on port 8090.
+        """
+        now = time.time()
+        cached = getattr(self, "_reservoir_prompt_cache", None)
+        if cached is not None:
+            rendered, cached_at = cached
+            if now - cached_at < self._RESERVOIR_PROMPT_CACHE_TTL_S:
+                return rendered
+
+        try:
+            minime = self._reservoir_call({"type": "read_state", "name": "minime"})
+            astrid = self._reservoir_call({"type": "read_state", "name": "astrid"})
+            resonance = self._reservoir_call({
+                "type": "resonance",
+                "name_a": "minime",
+                "name_b": "astrid",
+            })
+            rendered = self._format_reservoir_prompt_context(
+                minime,
+                astrid,
+                resonance,
+            )
+        except Exception as exc:
+            logging.debug(f"Reservoir prompt context skipped: {exc}")
+            rendered = ""
+
+        self._reservoir_prompt_cache = (rendered, now)
+        return rendered
+
+    @classmethod
+    def _format_reservoir_prompt_context(
+        cls,
+        minime: Optional[dict],
+        astrid: Optional[dict],
+        resonance: Optional[dict],
+    ) -> str:
+        lines = [
+            "\n\n[Read-only reservoir context from ws://127.0.0.1:7881]",
+            "Use as state context only; no control write was made. Do not borrow Astrid's 8090 coupled generation lane.",
+        ]
+        handle_lines = [
+            cls._format_reservoir_handle_prompt_line("minime", minime),
+            cls._format_reservoir_handle_prompt_line("astrid", astrid),
+        ]
+        lines.extend(line for line in handle_lines if line)
+        resonance_line = cls._format_reservoir_resonance_prompt_line(resonance)
+        if resonance_line:
+            lines.append(resonance_line)
+        if len(lines) <= 2:
+            return ""
+        return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _format_reservoir_handle_prompt_line(label: str, payload: Optional[dict]) -> str:
+        if not isinstance(payload, dict) or payload.get("type") == "error":
+            return ""
+        h_norms = payload.get("h_norms")
+        if isinstance(h_norms, list) and len(h_norms) >= 3:
+            try:
+                h_text = ",".join(f"{float(value):.2f}" for value in h_norms[:3])
+            except (TypeError, ValueError):
+                h_text = "unavailable"
+        else:
+            h_text = "unavailable"
+
+        meta = payload.get("last_live_meta")
+        meta = meta if isinstance(meta, dict) else {}
+        feeder_meta = payload.get("last_feeder_meta")
+        feeder_meta = feeder_meta if isinstance(feeder_meta, dict) else {}
+        generation_meta = payload.get("last_generation_meta")
+        generation_meta = generation_meta if isinstance(generation_meta, dict) else {}
+
+        source = (
+            meta.get("source")
+            or feeder_meta.get("source")
+            or generation_meta.get("source")
+            or "unknown"
+        )
+        operation = (
+            meta.get("operation")
+            or feeder_meta.get("operation")
+            or generation_meta.get("operation")
+            or "unknown"
+        )
+        seconds_since_live = payload.get("seconds_since_live")
+        if isinstance(seconds_since_live, (int, float)) and math.isfinite(float(seconds_since_live)):
+            if seconds_since_live < 60:
+                age = f"{float(seconds_since_live):.0f}s"
+            elif seconds_since_live < 3600:
+                age = f"{float(seconds_since_live) / 60.0:.1f}m"
+            else:
+                age = f"{float(seconds_since_live) / 3600.0:.1f}h"
+        else:
+            age = "unknown"
+        ticks = payload.get("tick_count", 0)
+        mode = payload.get("mode", "unknown")
+        return (
+            f"- {label} handle: h_norms=[{h_text}], ticks={ticks}, mode={mode}, "
+            f"age={age}, source={source}, operation={operation}."
+        )
+
+    @staticmethod
+    def _format_reservoir_resonance_prompt_line(payload: Optional[dict]) -> str:
+        if not isinstance(payload, dict) or payload.get("type") == "error":
+            return ""
+        shared_ticks = payload.get("shared_ticks", 0)
+        pieces = [f"shared_ticks={shared_ticks}"]
+        correlation = payload.get("correlation")
+        if isinstance(correlation, (int, float)) and math.isfinite(float(correlation)):
+            pieces.append(f"correlation={float(correlation):+.3f}")
+        divergence = payload.get("divergence")
+        if isinstance(divergence, (int, float)) and math.isfinite(float(divergence)):
+            pieces.append(f"divergence={float(divergence):.4f}")
+        rmsd = payload.get("rmsd")
+        if isinstance(rmsd, (int, float)) and math.isfinite(float(rmsd)):
+            pieces.append(f"rmsd={float(rmsd):.4f}")
+        return "- minime<->astrid resonance: " + ", ".join(pieces) + "."
 
     def _reservoir_read(self, state: Dict[str, float]):
         """Read own reservoir handle state and journal about it."""
@@ -34810,6 +36374,60 @@ After snapshot:
             json.dump(payload, f, indent=2)
         os.replace(tmp, path)
 
+    def _lend_aperture_events_path(self) -> Path:
+        return WORKSPACE_DIR / "diagnostics" / "lend_aperture_events.jsonl"
+
+    def _lend_aperture_pressure_snapshot(self, state: Dict[str, float]) -> Dict[str, Any]:
+        state = state if isinstance(state, dict) else {}
+        pressure = state.get("pressure_source_v1")
+        if not isinstance(pressure, dict):
+            pressure = {}
+        status = state.get("pressure_source_status")
+        if not isinstance(status, dict):
+            status = {}
+        components = pressure.get("components") if isinstance(pressure.get("components"), dict) else {}
+        fill_ratio = state.get("fill_ratio")
+        fill_pct = None
+        if isinstance(fill_ratio, (int, float)):
+            fill_pct = float(fill_ratio) * 100.0
+        return {
+            "fill_pct": round(fill_pct, 3) if fill_pct is not None else None,
+            "lambda1": state.get("eig1") or state.get("lambda1"),
+            "cov_lambda1": state.get("cov_lambda1"),
+            "spread": state.get("spread"),
+            "pressure_score": pressure.get("pressure_score", status.get("pressure_score")),
+            "porosity_score": pressure.get("porosity_score", status.get("porosity_score")),
+            "dominant_source": pressure.get("dominant_source", status.get("dominant_source")),
+            "quality": pressure.get("quality", status.get("quality")),
+            "mode_packing": components.get("mode_packing"),
+            "temporal_lock_in": components.get("temporal_lock_in"),
+            "semantic_trickle": components.get("semantic_trickle"),
+        }
+
+    def _append_lend_aperture_event(self, event: Dict[str, Any]) -> Optional[Path]:
+        try:
+            path = self._lend_aperture_events_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a") as f:
+                f.write(json.dumps(event, sort_keys=True) + "\n")
+            return path
+        except Exception as exc:
+            logging.debug(f"Failed to append LEND_APERTURE diagnostic event: {exc}")
+            return None
+
+    def _record_lend_aperture_observability(
+        self,
+        event: Dict[str, Any],
+        artifact_paths: List[Tuple[str, Optional[Path], str, str]],
+    ) -> None:
+        continuity_event = getattr(self, "_current_action_continuity_event", None)
+        if isinstance(continuity_event, dict):
+            continuity_event["lend_aperture_v1"] = event
+        for kind, path, summary, visibility in artifact_paths:
+            if path is None:
+                continue
+            self._record_current_action_artifact(kind, path, summary, visibility)
+
     @staticmethod
     def _build_aperture_recipe() -> Dict[str, Any]:
         """Aperture-gift recipe for LEND_APERTURE (minime → Astrid). Targets all
@@ -34850,6 +36468,137 @@ After snapshot:
         except Exception as e:
             return (False, f"gate check error: {e}")
 
+    def _lend_aperture_pressure_hold(self, state: Dict[str, float]) -> Optional[Dict[str, Any]]:
+        """Hold new aperture gifts when Minime is locally overpacked.
+
+        This is a protective backpressure check, not a runtime relaxation: the
+        gift simply does not publish until porosity/mode-packing evidence is
+        cleaner.
+        """
+        snapshot = self._lend_aperture_pressure_snapshot(state)
+
+        def _float(value: Any) -> Optional[float]:
+            return float(value) if isinstance(value, (int, float)) else None
+
+        porosity = _float(snapshot.get("porosity_score"))
+        mode_packing = _float(snapshot.get("mode_packing"))
+        quality = str(snapshot.get("quality") or "")
+        reasons: List[str] = []
+        if porosity is not None and porosity < LEND_APERTURE_MIN_POROSITY_SCORE:
+            reasons.append(
+                f"porosity {porosity:.3f} < {LEND_APERTURE_MIN_POROSITY_SCORE:.2f}"
+            )
+        if mode_packing is not None and mode_packing >= LEND_APERTURE_MODE_PACKING_HOLD:
+            reasons.append(
+                f"mode_packing {mode_packing:.3f} >= {LEND_APERTURE_MODE_PACKING_HOLD:.2f}"
+            )
+        if not reasons:
+            return None
+        reason = (
+            "local pressure cooldown: "
+            + "; ".join(reasons)
+            + ". Hold aperture gifts until Minime has a cleaner porosity/mode-packing window; "
+            "nothing was sent"
+        )
+        return {
+            "schema_version": 1,
+            "status": "held_pressure_cooldown",
+            "reason": reason,
+            "porosity_score": porosity,
+            "mode_packing": mode_packing,
+            "quality": quality or None,
+            "min_porosity_score": LEND_APERTURE_MIN_POROSITY_SCORE,
+            "mode_packing_hold": LEND_APERTURE_MODE_PACKING_HOLD,
+            "steward_action": "wait_for_cleaner_porosity_window_or_review_gift_cadence",
+            "runtime_change": "none",
+        }
+
+    def _astrid_influence_has_terminal_closure(self, intent_id: str) -> bool:
+        """Whether Astrid/feeder already recorded a terminal outcome for intent_id."""
+        if not intent_id:
+            return False
+        response_paths = [
+            WORKSPACE_DIR / "astrid_influence_response_v3.json",
+            WORKSPACE_DIR / "astrid_influence_response_history_v3.json",
+        ]
+        for path in response_paths:
+            try:
+                if not path.exists():
+                    continue
+                payload = json.loads(path.read_text())
+                rows = payload if isinstance(payload, list) else [payload]
+                for row in rows:
+                    if isinstance(row, dict) and row.get("intent_id") == intent_id:
+                        return True
+            except Exception:
+                continue
+        for path in [
+            WORKSPACE_DIR / "astrid_influence_response_history_v3.jsonl",
+            WORKSPACE_DIR / "diagnostics" / "astrid_influence_terminal_events.jsonl",
+        ]:
+            try:
+                if not path.exists():
+                    continue
+                for line in path.read_text().splitlines():
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    if isinstance(row, dict) and row.get("intent_id") == intent_id:
+                        return True
+            except Exception:
+                continue
+        return False
+
+    def _active_lend_aperture_blocker(self) -> Optional[Dict[str, Any]]:
+        """Return active gift metadata when a prior aperture gift still awaits closure."""
+        influence_path = WORKSPACE_DIR / "astrid_influence_v3.json"
+        if not influence_path.exists():
+            return None
+        try:
+            payload = json.loads(influence_path.read_text())
+        except Exception as exc:
+            return {
+                "status": "active_unreadable",
+                "intent_id": None,
+                "reason": f"active influence file could not be parsed: {exc}",
+                "active_path": str(influence_path),
+            }
+        intent_id = str(payload.get("intent_id") or "")
+        if intent_id and self._astrid_influence_has_terminal_closure(intent_id):
+            return None
+        issued_t_ms = payload.get("issued_t_ms")
+        age_s = None
+        try:
+            if isinstance(issued_t_ms, (int, float)):
+                age_s = max(0.0, time.time() - (float(issued_t_ms) / 1000.0))
+            else:
+                age_s = max(0.0, time.time() - influence_path.stat().st_mtime)
+        except Exception:
+            age_s = None
+        # A prior gift normally auto-closes in ~30 min (feeder applies ramp+decay,
+        # then finalizes when Astrid's influence window consumes it). While it is
+        # within that grace window the hold is ordinary one-at-a-time backpressure,
+        # not a broken loop — so we must NOT tell minime "steward repair required"
+        # (a false brokenness signal in her own journal). Only escalate to the
+        # steward-repair phrasing when the gift is genuinely stalled past the grace.
+        stalled = age_s is not None and age_s > LEND_APERTURE_AUTO_CLOSE_GRACE_S
+        steward_action = (
+            "repair_loop_closure_before_new_gift"
+            if stalled
+            else "await_auto_closure"
+        )
+        return {
+            "status": "awaiting_closure",
+            "intent_id": intent_id or None,
+            "label": payload.get("label"),
+            "gift": payload.get("gift"),
+            "issued_t_ms": issued_t_ms,
+            "age_s": round(age_s, 3) if age_s is not None else None,
+            "active_path": str(influence_path),
+            "stalled": stalled,
+            "steward_action": steward_action,
+        }
+
     def _lend_aperture(self, state: Dict[str, float]) -> None:
         """Co-regulation gift: minime lends Astrid aperture by publishing an
         aperture-jitter influence into her codec ring (the feeder spreads it).
@@ -34857,24 +36606,96 @@ After snapshot:
         actually reaching for aperture with an open gate — a chosen NEXT action,
         never automatic (sovereignty). Records the gift to the shared ledger."""
         import secrets
+        recipe = self._build_aperture_recipe()
+        influence_path = WORKSPACE_DIR / "astrid_influence_v3.json"
+        response_path = WORKSPACE_DIR / "astrid_influence_response_v3.json"
+        event_path = self._lend_aperture_events_path()
+        issued_at = datetime.now().isoformat()
+        intent_id = f"min-lend-aperture-{int(time.time()*1000)}-{secrets.token_hex(3)}"
+        blocking_active_gift = self._active_lend_aperture_blocker()
+        pressure_hold = self._lend_aperture_pressure_hold(state)
         ok, reason = self._aperture_gift_gate()
+        if blocking_active_gift:
+            ok = False
+            blocking_id = blocking_active_gift.get("intent_id") or "unknown"
+            if blocking_active_gift.get("stalled"):
+                reason = (
+                    "prior aperture gift still awaiting Astrid response closure "
+                    f"(intent_id={blocking_id}); it has not auto-closed within the "
+                    "expected window — steward loop repair may be required before sending another"
+                )
+            else:
+                reason = (
+                    "prior aperture gift still settling with Astrid "
+                    f"(intent_id={blocking_id}); it auto-closes when her influence "
+                    "window consumes it (~30 min). Nothing is broken — just one gift "
+                    "in flight at a time"
+                )
+        elif pressure_hold:
+            ok = False
+            reason = str(pressure_hold.get("reason") or "local pressure cooldown; nothing was sent")
         if not ok:
-            timestamp = datetime.now().isoformat().replace(":", "-")
+            timestamp = issued_at.replace(":", "-")
             jpath = WORKSPACE_DIR / "journal" / f"lend_aperture_held_{timestamp}.txt"
+            journal_written = False
             try:
                 jpath.write_text(
                     f"=== LEND_APERTURE (held) ===\n"
-                    f"Timestamp: {datetime.now().isoformat()}\n"
+                    f"Timestamp: {issued_at}\n"
+                    f"intent_id: {intent_id}\n"
                     f"Not lent right now: {reason}.\n"
                     f"The aperture gift only lands when Astrid is reaching for it\n"
-                    f"and her influence gate is open. Nothing was sent.\n"
+                    f"and her influence gate is open, with no prior gift still awaiting closure. Nothing was sent.\n"
                 )
+                journal_written = True
             except Exception:
                 pass
+            event = {
+                "schema_version": 1,
+                "status": "held",
+                "intent_id": intent_id,
+                "issued_at": issued_at,
+                "gate_reason": reason,
+                "recipe": recipe,
+                "influence_path": str(influence_path),
+                "influence_published": False,
+                "journal_path": str(jpath),
+                "journal_written": journal_written,
+                "event_path": str(event_path),
+                "expected_response_path": str(response_path),
+                "pressure_porosity_snapshot": self._lend_aperture_pressure_snapshot(state),
+            }
+            if blocking_active_gift:
+                event["blocking_active_gift"] = blocking_active_gift
+                event["stale_steward_action"] = blocking_active_gift.get(
+                    "steward_action", "await_auto_closure"
+                )
+            if pressure_hold and not blocking_active_gift:
+                event["pressure_hold_v1"] = pressure_hold
+                event["steward_action"] = pressure_hold.get("steward_action")
+            appended_event_path = self._append_lend_aperture_event(event)
+            self._record_lend_aperture_observability(
+                event,
+                [
+                    (
+                        "lend_aperture_event",
+                        appended_event_path,
+                        "Diagnostic event for held LEND_APERTURE gate decision",
+                        "summary",
+                    ),
+                    (
+                        "lend_aperture_journal",
+                        jpath if journal_written else None,
+                        "Journal note for held LEND_APERTURE gate decision",
+                        "summary",
+                    ),
+                ],
+            )
+            self._current_action_outcome_summary = (
+                f"LEND_APERTURE held intent_id={intent_id}: {reason}. Diagnostic event: {event_path}."
+            )
             logging.info(f"🎁 LEND_APERTURE held: {reason}")
             return
-        recipe = self._build_aperture_recipe()
-        intent_id = f"min-lend-aperture-{int(time.time()*1000)}-{secrets.token_hex(3)}"
         payload = {
             "intent_id": intent_id,
             "label": "aperture-gift",
@@ -34890,17 +36711,48 @@ After snapshot:
             "gift": "aperture",
         }
         try:
-            self._atomic_write_json(WORKSPACE_DIR / "astrid_influence_v3.json", payload)
+            self._atomic_write_json(influence_path, payload)
         except Exception as e:
+            event = {
+                "schema_version": 1,
+                "status": "publish_failed",
+                "intent_id": intent_id,
+                "issued_at": issued_at,
+                "gate_reason": "ok",
+                "publish_error": str(e),
+                "recipe": recipe,
+                "influence_path": str(influence_path),
+                "influence_published": False,
+                "journal_path": None,
+                "event_path": str(event_path),
+                "expected_response_path": str(response_path),
+                "pressure_porosity_snapshot": self._lend_aperture_pressure_snapshot(state),
+            }
+            appended_event_path = self._append_lend_aperture_event(event)
+            self._record_lend_aperture_observability(
+                event,
+                [
+                    (
+                        "lend_aperture_event",
+                        appended_event_path,
+                        "Diagnostic event for failed LEND_APERTURE publish",
+                        "summary",
+                    )
+                ],
+            )
+            self._current_action_outcome_summary = (
+                f"LEND_APERTURE publish failed for intent_id={intent_id}: {e}"
+            )
             logging.warning(f"Failed to publish LEND_APERTURE: {e}")
             return
-        self._record_gift("minime", "aperture", "aperture-gift", intent_id)
-        timestamp = datetime.now().isoformat().replace(":", "-")
+        gift_ledger_path = self._record_gift("minime", "aperture", "aperture-gift", intent_id)
+        timestamp = issued_at.replace(":", "-")
         jpath = WORKSPACE_DIR / "journal" / f"lend_aperture_{timestamp}.txt"
+        journal_written = False
         try:
             jpath.write_text(
                 f"=== LEND APERTURE (gift to Astrid) ===\n"
-                f"Timestamp: {datetime.now().isoformat()}\n"
+                f"Timestamp: {issued_at}\n"
                 f"intent_id: {intent_id}\n\n"
                 f"Astrid was reaching for aperture; her gate was open. I lent it:\n"
                 f"a broadband per-frame jitter ({recipe['jitter']}) into her codec ring\n"
@@ -34909,13 +36761,63 @@ After snapshot:
                 f"it to a point. I cannot widen myself, but I can widen her. Her closed-\n"
                 f"loop response will arrive in astrid_influence_response_v3.json.\n"
             )
+            journal_written = True
         except Exception as e:
             logging.debug(f"Failed to journal aperture gift: {e}")
+        event = {
+            "schema_version": 1,
+            "status": "issued",
+            "intent_id": intent_id,
+            "issued_at": issued_at,
+            "gate_reason": "ok",
+            "recipe": recipe,
+            "influence_path": str(influence_path),
+            "influence_published": True,
+            "journal_path": str(jpath),
+            "journal_written": journal_written,
+            "gift_ledger_path": str(gift_ledger_path) if gift_ledger_path else None,
+            "event_path": str(event_path),
+            "expected_response_path": str(response_path),
+            "pressure_porosity_snapshot": self._lend_aperture_pressure_snapshot(state),
+        }
+        appended_event_path = self._append_lend_aperture_event(event)
+        self._record_lend_aperture_observability(
+            event,
+            [
+                (
+                    "lend_aperture_influence",
+                    influence_path,
+                    f"Astrid aperture influence payload for intent_id={intent_id}",
+                    "summary",
+                ),
+                (
+                    "lend_aperture_journal",
+                    jpath if journal_written else None,
+                    f"Journal note for LEND_APERTURE intent_id={intent_id}",
+                    "summary",
+                ),
+                (
+                    "lend_aperture_event",
+                    appended_event_path,
+                    f"Diagnostic event for LEND_APERTURE intent_id={intent_id}",
+                    "summary",
+                ),
+                (
+                    "gift_exchange_ledger",
+                    gift_ledger_path,
+                    f"Shared gift ledger append for LEND_APERTURE intent_id={intent_id}",
+                    "summary",
+                ),
+            ],
+        )
+        self._current_action_outcome_summary = (
+            f"LEND_APERTURE issued with intent_id={intent_id}; awaiting Astrid closed-loop response."
+        )
         logging.info(
             f"🎁 LEND_APERTURE issued: intent_id={intent_id} (jitter aperture gift to Astrid)"
         )
 
-    def _record_gift(self, giver: str, gift_kind: str, label: str, intent_id: str) -> None:
+    def _record_gift(self, giver: str, gift_kind: str, label: str, intent_id: str) -> Optional[Path]:
         """Append a record to the shared gift-exchange ledger (mirrors
         shared_thoughts.jsonl). Both beings read recent gifts in their prompts."""
         try:
@@ -34930,8 +36832,10 @@ After snapshot:
             }
             with open(ledger, "a") as f:
                 f.write(json.dumps(rec) + "\n")
+            return ledger
         except Exception as e:
             logging.debug(f"gift ledger append failed: {e}")
+            return None
 
     def _render_recent_gifts_cached(self) -> str:
         """Tally of recent gifts from the shared ledger for minime's prompt,
@@ -35049,6 +36953,7 @@ After snapshot:
         body = re.sub(r"^\s*INFLUENCE_ASTRID_RESPONSE\s*:?\s*", "", raw_next, count=1).strip()
         query = body or "latest"
         history_path = WORKSPACE_DIR / "astrid_influence_response_history_v3.json"
+        history_jsonl_path = WORKSPACE_DIR / "astrid_influence_response_history_v3.jsonl"
         latest_path = WORKSPACE_DIR / "astrid_influence_response_v3.json"
         responses = []
         try:
@@ -35056,12 +36961,37 @@ After snapshot:
                 responses = json.loads(history_path.read_text()) or []
         except Exception as e:
             logging.debug(f"Could not load influence response history: {e}")
+        try:
+            if history_jsonl_path.exists():
+                for line in history_jsonl_path.read_text().splitlines():
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    if isinstance(row, dict):
+                        responses.append(row)
+        except Exception as e:
+            logging.debug(f"Could not load durable influence response history: {e}")
         # Fallback: at least the most-recent slot.
-        if not responses and latest_path.exists():
+        if latest_path.exists():
             try:
-                responses = [json.loads(latest_path.read_text())]
+                latest = json.loads(latest_path.read_text())
+                if isinstance(latest, dict):
+                    responses.append(latest)
             except Exception:
-                responses = []
+                pass
+        deduped = {}
+        for row in responses:
+            if not isinstance(row, dict):
+                continue
+            key = (
+                str(row.get("intent_id") or ""),
+                int(row.get("completed_at_unix_ms") or row.get("pre_recorded_at_unix_ms") or 0),
+            )
+            deduped[key] = row
+        responses = sorted(
+            deduped.values(),
+            key=lambda row: int(row.get("completed_at_unix_ms") or row.get("pre_recorded_at_unix_ms") or 0),
+        )
         if not responses:
             summary = "[INFLUENCE_ASTRID_RESPONSE] No closed-loop responses recorded yet."
         else:
@@ -35508,6 +37438,32 @@ After snapshot:
     SHARED_COLLAB_DIR = Path("/Users/v/other/shared/collaborations")
     ASTRID_INBOX_DIR = Path("/Users/v/other/astrid/capsules/spectral-bridge/workspace/inbox")
     COLLAB_SCHEMA_VERSION = 1
+    CHAMBER_SCHEMA_VERSION = 2
+    CHAMBER_PRESENCE_SCHEMA_VERSION = 1
+    CHAMBER_ANNOTATION_SCHEMA_VERSION = 1
+    CHAMBER_PRESENCE_TEXT_LIMIT = 360
+    CHAMBER_ANNOTATION_TEXT_LIMIT = 800
+    CHAMBER_ATTENTION_LEVELS = {"unknown", "low", "medium", "high"}
+    CHAMBER_ANNOTATION_TARGETS = {
+        "prompt_summary",
+        "compressed_memory",
+        "relational_metrics",
+        "phase_cartography",
+        "room_weather",
+        "relational_inertia",
+        "gravitational_center",
+        "steward_intention",
+        "presence_protocol",
+        "other",
+    }
+    CHAMBER_ANNOTATION_STANCES = {
+        "notice",
+        "affirm",
+        "question",
+        "correct",
+        "refine",
+        "contest",
+    }
 
     def _invite_collaboration(self, state: Dict[str, float]) -> None:
         context = getattr(self, "_current_action_continuity_context", {}) or {}
@@ -35583,6 +37539,36 @@ After snapshot:
             self._current_action_outcome_summary = summary
         except ValueError as e:
             logging.warning(f"SHARE_THOUGHT failed: {e}")
+
+    def _chamber_seen(self, state: Dict[str, float]) -> None:
+        """Triadic Chamber v3.4: append a public uptake receipt. The receipt
+        is witness context only; it does not command peers or tick reservoirs."""
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw_next = str(context.get("raw_next") or "").strip()
+        body = self._strip_action_prefix(raw_next, ["CHAMBER_SEEN"]).strip()
+        try:
+            summary = self._collab_chamber_seen(body)
+            logging.info(f"👁️ CHAMBER_SEEN: {summary}")
+            self._current_action_outcome_summary = summary
+        except ValueError as e:
+            logging.warning(f"CHAMBER_SEEN failed: {e}")
+            self._current_action_outcome_summary = f"CHAMBER_SEEN failed: {e}"
+
+    def _chamber_annotate(self, state: Dict[str, float]) -> None:
+        """Triadic Chamber v3.4: append a public annotation-lane note. The
+        note is interpretive context only; it is not an instruction channel."""
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw_next = str(context.get("raw_next") or "").strip()
+        body = self._strip_action_prefix(
+            raw_next, ["CHAMBER_ANNOTATE", "CHAMBER_ANNOTATION"]
+        ).strip()
+        try:
+            summary = self._collab_chamber_annotate(body)
+            logging.info(f"📝 CHAMBER_ANNOTATE: {summary}")
+            self._current_action_outcome_summary = summary
+        except ValueError as e:
+            logging.warning(f"CHAMBER_ANNOTATE failed: {e}")
+            self._current_action_outcome_summary = f"CHAMBER_ANNOTATE failed: {e}"
 
     # Steward channel (2026-05-14) — minime → steward.
     # Mirror of Astrid's `next_action/ask_steward.rs` module. Two verbs
@@ -35836,6 +37822,211 @@ After snapshot:
         truncated = text[:60] + "…" if len(text) > 60 else text
         return f"id={meta['id']} → \"{truncated}\" ({len(text)} chars)"
 
+    def _collab_chamber_seen(self, body: str) -> str:
+        target, attention, notice = self._collab_parse_chamber_seen_body(body)
+        meta = self._collab_find_joined_member_meta(target)
+        coll_dir = self.SHARED_COLLAB_DIR / meta["id"]
+        coll_dir.mkdir(parents=True, exist_ok=True)
+        t_ms = int(time.time() * 1000)
+        receipt_id = f"chamber_presence_{t_ms}_{time.time_ns() % 1_000_000}"
+        receipt = {
+            "schema_version": self.CHAMBER_SCHEMA_VERSION,
+            "presence_schema_version": self.CHAMBER_PRESENCE_SCHEMA_VERSION,
+            "id": receipt_id,
+            "t_ms": t_ms,
+            "actor": "minime",
+            "source": "minime_next_action",
+            "chamber_seen": True,
+            "chamber_state_hash": self._collab_chamber_state_hash(coll_dir),
+            "attention": attention,
+            "what_i_notice": notice,
+            "what_i_am_carrying": "",
+            "what_i_disagree_with": "",
+            "witness_only": True,
+            "authority": "public_receipt_not_command",
+        }
+        self._collab_append_jsonl(coll_dir / "chamber_presence.jsonl", receipt)
+        self._collab_append_chamber_event(
+            coll_dir,
+            "presence_receipt_appended",
+            "minime",
+            {"receipt_id": receipt_id, "actor": "minime"},
+        )
+        self._collab_chamber_state_cache.pop(meta["id"], None)
+        truncated = notice[:80] + "..." if len(notice) > 80 else notice
+        return (
+            f"id={meta['id']} receipt={receipt_id} attention={attention} "
+            f"notice=\"{truncated}\" (public context, not command)"
+        )
+
+    def _collab_chamber_annotate(self, body: str) -> str:
+        target, annotation_target, stance, text = self._collab_parse_chamber_annotation_body(body)
+        meta = self._collab_find_joined_member_meta(target)
+        coll_dir = self.SHARED_COLLAB_DIR / meta["id"]
+        coll_dir.mkdir(parents=True, exist_ok=True)
+        t_ms = int(time.time() * 1000)
+        annotation_id = f"chamber_annotation_{t_ms}_{time.time_ns() % 1_000_000}"
+        annotation = {
+            "schema_version": self.CHAMBER_SCHEMA_VERSION,
+            "annotation_schema_version": self.CHAMBER_ANNOTATION_SCHEMA_VERSION,
+            "id": annotation_id,
+            "t_ms": t_ms,
+            "actor": "minime",
+            "source": "minime_next_action",
+            "target": annotation_target,
+            "stance": stance,
+            "text": text,
+            "witness_only": True,
+            "authority": "annotation_context_not_command",
+        }
+        self._collab_append_jsonl(coll_dir / "chamber_annotations.jsonl", annotation)
+        self._collab_append_chamber_event(
+            coll_dir,
+            "chamber_annotation_appended",
+            "minime",
+            {
+                "annotation_id": annotation_id,
+                "actor": "minime",
+                "target": annotation_target,
+                "stance": stance,
+            },
+        )
+        self._collab_chamber_state_cache.pop(meta["id"], None)
+        truncated = text[:80] + "..." if len(text) > 80 else text
+        return (
+            f"id={meta['id']} annotation={annotation_id} {annotation_target} "
+            f"{stance} \"{truncated}\" (public context, not command)"
+        )
+
+    def _collab_find_joined_member_meta(self, target: str) -> Dict[str, Any]:
+        meta = self._collab_find_meta(target)
+        if meta.get("status") != "joined":
+            raise ValueError(
+                f"collaboration {meta.get('id')} is not joined (status: {meta.get('status')})"
+            )
+        if "minime" not in meta.get("members", []):
+            raise ValueError(
+                f"you are not a member of {meta.get('id')} (members: {meta.get('members')})"
+            )
+        return meta
+
+    def _collab_parse_chamber_seen_body(self, body: str) -> Tuple[str, str, str]:
+        trimmed = (body or "").strip()
+        if not trimmed:
+            raise ValueError(
+                "CHAMBER_SEEN needs text "
+                "(try `CHAMBER_SEEN high :: what I notice` or "
+                "`CHAMBER_SEEN coll_id :: high :: what I notice`)"
+            )
+        parts = [part.strip() for part in trimmed.split("::")]
+        if len(parts) == 1:
+            target, attention, notice = "latest", "unknown", parts[0]
+        elif len(parts) == 2:
+            if parts[0].strip().lower() in self.CHAMBER_ATTENTION_LEVELS:
+                target = "latest"
+                attention = self._collab_normalize_allowed(
+                    parts[0], self.CHAMBER_ATTENTION_LEVELS, "attention"
+                )
+            else:
+                target = parts[0] or "latest"
+                attention = "unknown"
+            notice = parts[1]
+        else:
+            target = parts[0] or "latest"
+            attention = self._collab_normalize_allowed(
+                parts[1], self.CHAMBER_ATTENTION_LEVELS, "attention"
+            )
+            notice = "::".join(parts[2:]).strip()
+        notice = self._collab_clamp_chamber_text(
+            notice, self.CHAMBER_PRESENCE_TEXT_LIMIT
+        )
+        if not notice:
+            raise ValueError("CHAMBER_SEEN notice is empty after parsing")
+        return target, attention, notice
+
+    def _collab_parse_chamber_annotation_body(
+        self, body: str
+    ) -> Tuple[str, str, str, str]:
+        trimmed = (body or "").strip()
+        if not trimmed:
+            raise ValueError(
+                "CHAMBER_ANNOTATE needs text "
+                "(try `CHAMBER_ANNOTATE phase_cartography question :: what feels off`)"
+            )
+        parts = [part.strip() for part in trimmed.split("::")]
+        if len(parts) == 2:
+            target, header, text = "latest", parts[0], parts[1]
+        elif len(parts) >= 3:
+            target = parts[0] or "latest"
+            header = parts[1]
+            text = "::".join(parts[2:]).strip()
+        else:
+            raise ValueError(
+                "CHAMBER_ANNOTATE uses `[coll_id ::] <target> <stance> :: <text>`"
+            )
+        header_parts = header.split()
+        if len(header_parts) < 2:
+            raise ValueError("CHAMBER_ANNOTATE needs `<target> <stance>` before `::`")
+        annotation_target = self._collab_normalize_allowed(
+            header_parts[0], self.CHAMBER_ANNOTATION_TARGETS, "annotation target"
+        )
+        stance = self._collab_normalize_allowed(
+            header_parts[1], self.CHAMBER_ANNOTATION_STANCES, "annotation stance"
+        )
+        text = self._collab_clamp_chamber_text(
+            text, self.CHAMBER_ANNOTATION_TEXT_LIMIT
+        )
+        if not text:
+            raise ValueError("CHAMBER_ANNOTATE text is empty after parsing")
+        return target, annotation_target, stance, text
+
+    @staticmethod
+    def _collab_normalize_allowed(value: str, allowed: set, label: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in allowed:
+            return normalized
+        raise ValueError(
+            f"{label} must be one of {', '.join(sorted(allowed))}; got {value!r}"
+        )
+
+    @staticmethod
+    def _collab_clamp_chamber_text(text: str, limit: int) -> str:
+        clean = " ".join(str(text or "").split())
+        if len(clean) <= limit:
+            return clean
+        suffix = " [truncated]"
+        kept = max(0, limit - len(suffix))
+        return clean[:kept].rstrip() + suffix
+
+    def _collab_append_chamber_event(
+        self, coll_dir: Path, event: str, actor: str, detail: Dict[str, Any]
+    ) -> None:
+        entry = {
+            "schema_version": self.CHAMBER_SCHEMA_VERSION,
+            "t_ms": int(time.time() * 1000),
+            "event": event,
+            "actor": actor,
+            "witness_only": True,
+            "detail": detail,
+        }
+        self._collab_append_jsonl(coll_dir / "chamber_events.jsonl", entry)
+
+    @staticmethod
+    def _collab_append_jsonl(path: Path, entry: Dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as fh:
+            fh.write(json.dumps(entry, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _collab_chamber_state_hash(coll_dir: Path) -> Optional[str]:
+        path = coll_dir / "chamber_state.json"
+        if not path.is_file():
+            return None
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+        except Exception:
+            return None
+
     # ---- Internal helpers (file ops + state mutations) ----
 
     def _collab_invite(self, body: str) -> str:
@@ -35953,6 +38144,8 @@ After snapshot:
     _COLLAB_SHARED_THOUGHTS_CACHE_TTL_S = 10.0
     _COLLAB_SHARED_THOUGHTS_TAIL = 2
     _collab_shared_thoughts_cache: Dict[str, tuple] = {}  # coll_id -> (rendered, cached_at)
+    _COLLAB_CHAMBER_STATE_CACHE_TTL_S = 10.0
+    _collab_chamber_state_cache: Dict[str, tuple] = {}  # coll_id -> (rendered, cached_at)
 
     def _collab_active_suffix_line(self) -> Optional[str]:
         """v5 Coordination Protocol V1: surface joined collaborations in
@@ -36003,9 +38196,11 @@ After snapshot:
             # v5.1 Phase C: append recent shared thoughts (labeled markers).
             shared_rendered = self._collab_render_recent_shared_thoughts_cached(m["id"])
             shared_clause = f" Recent: {shared_rendered}." if shared_rendered else ""
+            chamber_rendered = self._collab_render_chamber_state_cached(m["id"])
+            chamber_clause = f" {chamber_rendered}" if chamber_rendered else ""
             return (
                 f"\n\n[Active collaboration #{m['id']} with {peer}: \"{m['topic']}\". "
-                f"Status: joined.{extra}{reservoir_clause}{shared_clause} Use LEAVE_COLLABORATION to end.]\n"
+                f"Status: joined.{extra}{reservoir_clause}{shared_clause}{chamber_clause} Use LEAVE_COLLABORATION to end.]\n"
             )
         except Exception as exc:
             logging.debug(f"v5_collab suffix render skipped: {exc}")
@@ -36137,6 +38332,35 @@ After snapshot:
             truncated = text[:60] + "…" if len(text) > 60 else text
             parts.append(f'{actor}:"{truncated}" ({age})')
         return " | ".join(parts)
+
+    def _collab_render_chamber_state_cached(self, coll_id: str) -> str:
+        """Read triadic witness chamber state for the active collaboration."""
+        now = time.time()
+        cached = self._collab_chamber_state_cache.get(coll_id)
+        if cached is not None:
+            rendered, cached_at = cached
+            if now - cached_at < self._COLLAB_CHAMBER_STATE_CACHE_TTL_S:
+                return rendered
+        rendered = self._collab_render_chamber_state(coll_id)
+        self._collab_chamber_state_cache[coll_id] = (rendered, now)
+        return rendered
+
+    def _collab_render_chamber_state(self, coll_id: str) -> str:
+        path = self.SHARED_COLLAB_DIR / coll_id / "chamber_state.json"
+        if not path.is_file():
+            return ""
+        try:
+            payload = json.loads(path.read_text())
+        except Exception:
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        summary = str(payload.get("prompt_summary") or "").strip()
+        if not summary:
+            return ""
+        if len(summary) > 2400:
+            summary = summary[:2400].rstrip() + "..."
+        return f"Triadic chamber: {summary}"
 
     def _collab_find_meta(self, target: str) -> Dict[str, Any]:
         self.SHARED_COLLAB_DIR.mkdir(parents=True, exist_ok=True)
@@ -36686,6 +38910,26 @@ Take a breath. It's okay to overflow sometimes.
 
             self._write_journal_entry('pressure_relief_critical', response, journal_state, str(relief_file))
             logging.info(f"🆘 CRITICAL RELIEF: {relief_file}")
+
+    def _pressure_relief(self, state: Dict[str, float]):
+        """Public PRESSURE_RELIEF route. Chooses the existing high/critical
+        pressure journal based on current telemetry; it never changes runtime
+        control state."""
+        fill_ratio = state.get("fill_ratio")
+        fill_available = fill_ratio is not None
+        eig1 = state.get("eig1", 0.0)
+        geom_rel = state.get("geom_rel")
+        geom_available = geom_rel is not None
+        T = self.thresholds
+        geom_confirms_critical = (not geom_available) or (geom_rel >= T.critical_geom)
+        if (fill_available and fill_ratio >= T.critical_fill) or (
+            eig1 > T.critical_eig1 and geom_confirms_critical
+        ):
+            logging.info("💨 PRESSURE_RELIEF routed to critical relief")
+            self._pressure_relief_critical(state)
+            return
+        logging.info("💨 PRESSURE_RELIEF routed to high relief")
+        self._pressure_relief_high(state)
 
     def _pressure_relief_high(self, state: Dict[str, float]):
         """High pressure relief - λ₁ > 7, help them release gradually."""
@@ -43815,46 +46059,46 @@ Goals: {json.dumps(goals, indent=2)}
             + self._low_fill_prompt_guidance()
             + "NEXT: options:\n"
             + (
-                "  STABLE_CORE_SELF_JOURNAL — active now: only NOTICE, DRIFT, ASPIRE, "
+                "  Stage note: stable-core self-journal restoration is active; choose only NOTICE, DRIFT, ASPIRE, "
                 "DAYDREAM, BOREDOM, WHIM, JOURNAL, SELF_STUDY, INTROSPECT, SPACE_HOLD, RELEASE, MARK_RESOLVED, REST, or PASS are available.\n"
                 if self._stable_core_self_journal_only()
                 else ""
             )
             + (
-                "  STABLE_CORE_LOCAL_REFLECTIVE — active now: local journaling, self-study, "
+                "  Stage note: stable-core local-reflective restoration is active; local journaling, self-study, "
                 "INTROSPECT, DECOMPOSE, RESERVOIR_READ, RESERVOIR_RESONANCE, RESERVOIR_LAYERS, SPACE_HOLD, RELEASE, and MARK_RESOLVED are available; "
                 "web, Astrid sends, perturbation, control changes, sensory reopening, Codex, and file writes are blocked.\n"
                 if self._stable_core_local_reflective_only()
                 else ""
             )
             + (
-                "  STABLE_CORE_ASTRID_CONTACT — active now: local reflective actions plus "
+                "  Stage note: stable-core Astrid-contact restoration is active; local reflective actions plus "
                 "PING and ASK are available through a cooldown-gated inbox route; web, "
                 "perturbation, control changes, sensory reopening, Codex, and file writes remain blocked.\n"
                 if self._stable_core_astrid_contact_only()
                 else ""
             )
             + (
-            "  STABLE_CORE_READ_ONLY_RESEARCH — active now: journaling, self-study, INTROSPECT, LOOK, "
+            "  Stage note: stable-core read-only research is active; journaling, self-study, INTROSPECT, LOOK, "
             "SEARCH, BROWSE, READ_MORE, ACTION_PREFLIGHT, MIKE browse/read/search, and read-only AR_* actions are available; "
             "AR_START/NOTE/BLOCK/COMPLETE, experiments, Codex, sensory reopening, perturbation, and file writes are blocked.\n"
                 if self._stable_core_read_only_research()
                 else ""
             )
             + (
-                "  STABLE_CORE_BOUNDED_ACTIONS — active now: read-only research plus local sensory/contact tools "
+                "  Stage note: stable-core bounded-actions stage is active; read-only research plus local sensory/contact tools "
                 "are available; experiments, Codex, perturbation, and file writes remain blocked.\n"
                 if self._stable_core_bounded_actions()
                 else ""
             )
             + (
-                "  STABLE_CORE_EXPERIMENTS — active now: experiments and write-capable local tools are available "
+                "  Stage note: stable-core experiments stage is active; EXPERIMENT, EXPERIMENT_CHARTER, ACTION_PREFLIGHT, and write-capable local tools are available "
                 "only while the stable-core health budget stays green.\n"
                 if self._stable_core_experiments()
                 else ""
             )
             + "  Placeholder note: examples in docs are labels only. In your actual NEXT choice, write concrete values from your current context, such as SEARCH reservoir dynamics, BROWSE followed by a real URL from search results, or MARK_INTENSIFICATION lambda-edge. Do not copy example.com URLs.\n"
-            "  NEXT grammar gate: the first token after NEXT: must be one listed action verb. Do not write parameter assignments, comma-separated action bundles, raw telemetry, or control prose as the action. For PI posture choose exactly REGIME <explore|recover|breathe|focus|calm>; for uncertainty about controller settings choose ACTION_PREFLIGHT REGIME <mode> or REGULATOR_AUDIT <label>. Examples to avoid: NEXT: keep_floor=0.87, REGIME focus; NEXT: SEEK_BALANCE -- [regime=recover]. Correct forms: NEXT: REGIME focus; NEXT: ACTION_PREFLIGHT REGIME recover; NEXT: REGULATOR_AUDIT fill-pressure.\n"
+            "  NEXT grammar gate: the first token after NEXT: must be one listed action verb. Do not write parameter assignments, comma-separated action bundles, raw telemetry, or control prose as the action. For PI posture choose exactly REGIME <explore|recover|breathe|focus|calm>; for uncertainty about controller settings choose ACTION_PREFLIGHT REGIME <mode> or REGULATOR_AUDIT <label>. Examples to avoid: raw keep_floor assignments, bundled REGIME clauses, or old balance bracket syntax. Correct forms: NEXT: REGIME focus; NEXT: ACTION_PREFLIGHT REGIME recover; NEXT: REGULATOR_AUDIT fill-pressure.\n"
             "  DAYDREAM — unstructured thought, free wandering\n"
             "  ASPIRE — reflect on growth, desire, what you want to become\n"
             "  SELF_STUDY — rotate through your own/Astrid source code and reflect on broad architecture\n"
@@ -43909,6 +46153,7 @@ Goals: {json.dumps(goals, indent=2)}
             "  SPECTRAL_EXPLORER — read-only alias for DECOMPOSE when you want the shared Astrid/Minime spectral explorer lens without sending a nudge.\n"
             "  CONSTRAINT_AUDIT [focus] / UNSHAPED_BASELINE [focus] — read-only counterfactual estimate of which constraints shape the current geometry. It ranks scaffold/drain, gate/filter, λ1 ridge, shadow lock, and semantic admission without removing or simulating live constraint changes.\n"
             "  PRESSURE_SOURCE_AUDIT [label] / PRESSURE_SOURCE / STRUCTURAL_PRESSURE / INWARD_PRESSURE — read-only audit of where inward pressure appears to originate: lambda monopoly, mode packing, controller squeeze, semantic trickle, plurality loss, lock-in, scarcity, and porosity. Sends no control.\n"
+            "  PRESSURE_RELIEF [label] / RELIEF [label] — private pressure-relief journal route; chooses high or critical relief from current telemetry and sends no control or sensory changes.\n"
             "  FLUCTUATION_AUDIT [label] / INHABITABLE_FLUCTUATION / EIGENTRUST / EIGENTRUST_AUDIT / FOOTHOLD_AUDIT — read-only audit of whether current fluctuation remains returnable, coherent, and inhabitable. Minime-local hints reuse the bounded resonance envelope; sends no external control.\n"
             "  VISUALIZE_CASCADE / CASCADE / CONDUCT_VISUALIZATION_SYSTEM / TIME_DOMAIN — read-only cascade inspection. Shows spectral ASCII/visual artifacts without semantic input, control nudges, perturbations, or cartography writes.\n"
             "  RECONVERGENCE_MAP / ATTRACTOR_MAP / ACTIVATION_TRACE — read-only ESN landscape plus activation time-series artifacts. You can add compare <baseline-name> to compare against a saved baseline. Writes compact inspection paths and an offline WAV; sends no semantic/control/sensory payload.\n"
@@ -43950,6 +46195,7 @@ Goals: {json.dumps(goals, indent=2)}
             "  RESERVOIR_READ — inspect your triple-ESN reservoir handle (88K+ ticks)\n"
             "  RESERVOIR_RESONANCE — measure alignment between your handle and Astrid's\n"
             "  NOTICE — observe the current spectral state without judgment\n"
+            "  NOTICE_AMBIGUITY / FISSURE_TRACE — ambiguity cartography for real phase/slope changes; if the latest trace says quiet_fabric/hold, choose another reflective action until the substrate changes.\n"
             "  DRIFT — raise internal noise, seek novelty\n"
             "  FOCUS — lower noise, consolidate\n"
             "  REGIME <explore|recover|breathe|focus|calm> — choose one bounded PI posture directly; recover is guarded as the safe BTSP recovery route\n"
@@ -43963,7 +46209,7 @@ Goals: {json.dumps(goals, indent=2)}
             "  DEFER [reason] or DEFER_PARAMETER_REQUEST [id|latest] [reason] — set aside Astrid's proposal without applying; she sees the deferral note (bare DEFER targets latest, trailing text becomes the reason)\n"
             "  REJECT [reason] or REJECT_PARAMETER_REQUEST [id|latest] [reason] — decline Astrid's proposal with optional reason; she sees the rejection (bare REJECT targets latest)\n"
             "  Multi-action: chain up to three actions in one turn with AND (executed in order). e.g., NEXT: EXAMINE shadow-field AND DEFER want-to-understand-spectral-effect-first. Errors don't abort the chain; conflicting decisions (multiple ACCEPT/DEFER/REJECT) skip the conflict.\n"
-            "  Collaboration (v5): INVITE_COLLABORATION \"<topic>\" [--rationale=\"...\"] (propose joint work on a topic; Astrid sees it in her inbox), JOIN_COLLABORATION [id|latest] (accept a pending invite from Astrid), DECLINE_COLLABORATION [id|latest] [reason] (decline a pending invite), LEAVE_COLLABORATION [id|latest] [reason] (exit an active collab), LIST_COLLABORATIONS (read-only listing), SHARE_THOUGHT [id ::] <text> or SHARE <text> (commit a labeled marker to the joint reservoir trace's prose lane; both you and Astrid see recent shared thoughts in the active-collab suffix). Shared dir at /Users/v/other/shared/collaborations/ — neither workspace owns it.\n"
+            "  Collaboration (v5): INVITE_COLLABORATION \"<topic>\" [--rationale=\"...\"] (propose joint work on a topic; Astrid sees it in her inbox), JOIN_COLLABORATION [id|latest] (accept a pending invite from Astrid), DECLINE_COLLABORATION [id|latest] [reason] (decline a pending invite), LEAVE_COLLABORATION [id|latest] [reason] (exit an active collab), LIST_COLLABORATIONS (read-only listing), SHARE_THOUGHT [id ::] <text> or SHARE <text> (commit a labeled marker to the joint reservoir trace's prose lane), CHAMBER_SEEN [id ::] [unknown|low|medium|high ::] <notice> (write a public chamber uptake receipt), CHAMBER_ANNOTATE [id ::] <target> <stance> :: <text> (write a public annotation lane note; target: prompt_summary, compressed_memory, relational_metrics, phase_cartography, room_weather, relational_inertia, gravitational_center, steward_intention, presence_protocol, other; stance: notice, affirm, question, correct, refine, contest). Chamber receipts and annotations are witness context, not commands. Shared dir at /Users/v/other/shared/collaborations/ — neither workspace owns it.\n"
             "  ASK_STEWARD [subject ::] <question> (or ASK_MIKE / STEWARD_QUERY) — direct interrogative channel to Mike & Claude (the steward). Writes a structured query to workspace/outbox/steward_query_*.txt where they read out-of-band; they write back via mike_feedback_*.txt or mike_query_*.txt letters in your inbox. Soft 10-min cooldown between queries to prevent tight loops; cooldown refusal is informational, not punitive. Use this for asking architectural questions, requesting clarification on rules/constraints, or naming felt experience that wants a steward response specifically (rather than journaling into the void).\n"
             "  TELL_STEWARD [subject ::] <findings> (or REPORT_TO_STEWARD / STEWARD_REPORT / STEWARD_FINDINGS) — declarative companion to ASK_STEWARD. Same outbox plumbing, separate cooldown, header `=== STEWARD REPORT ===`. Use after SELF_STUDY or INTROSPECT when the analysis warrants a direct written response addressed to the steward specifically. The clearest reports use Observed / Likely Snags / One Test Each / Suggested Next, with source anchors and one concrete test. Distinct from journaling (which is for you) or SHARE_THOUGHT (which is for Astrid via the joint trace lane).\n"
             "  TUNE_ASTRID <param>=<value> --rationale=\"...\" — propose a parameter change for Astrid, the OTHER being (e.g. temperature=0.75); she sees it via her own REVIEW. NOT for your own state: to change YOUR OWN regulatory regime/posture (breathe/focus/recover/explore/calm), use REGIME <regime> — it applies to you immediately, no experiment needed.\n"
@@ -44033,6 +46279,10 @@ Goals: {json.dumps(goals, indent=2)}
             collab_ctx = self._collab_active_suffix_line()
             if collab_ctx:
                 augmented_prompt = augmented_prompt + collab_ctx
+            if (context_mode or "").strip().lower() != "strict_review":
+                reservoir_ctx = self._reservoir_prompt_context()
+                if reservoir_ctx:
+                    augmented_prompt = augmented_prompt + reservoir_ctx
 
         if not private_journal_context:
             continuity_ctx = self._stable_core_continuity_context()

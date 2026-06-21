@@ -10,7 +10,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import mock_open, patch
+from unittest.mock import Mock, mock_open, patch
 
 import autonomous_agent as aa
 from reporting_snapshot import ReportSnapshot, SurfaceSnapshot
@@ -365,6 +365,352 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             self.assertEqual(len(files), 1)
             self.assertIn("Layer read", files[0].read_text())
             write_journal.assert_called_once()
+
+    def test_reservoir_prompt_context_uses_read_only_summary_calls(self):
+        agent = self._agent()
+        calls = []
+
+        def fake_reservoir_call(msg):
+            calls.append(dict(msg))
+            if msg == {"type": "read_state", "name": "minime"}:
+                return {
+                    "type": "read_state_response",
+                    "h_norms": [1.25, 2.5, 3.75],
+                    "tick_count": 123,
+                    "mode": "rehearse",
+                    "seconds_since_live": 2.0,
+                    "last_live_meta": {
+                        "source": "minime_feeder",
+                        "operation": "live_tick",
+                    },
+                }
+            if msg == {"type": "read_state", "name": "astrid"}:
+                return {
+                    "type": "read_state_response",
+                    "h_norms": [4.0, 5.0, 6.0],
+                    "tick_count": 456,
+                    "mode": "rehearse",
+                    "seconds_since_live": 12.0,
+                    "last_live_meta": {
+                        "source": "coupled_astrid_server",
+                        "operation": "coupled_generation_checkin",
+                    },
+                }
+            if msg.get("type") == "resonance":
+                return {
+                    "type": "resonance_response",
+                    "shared_ticks": 64,
+                    "correlation": 0.42,
+                    "divergence": 0.125,
+                    "rmsd": 0.25,
+                }
+            return {"type": "error"}
+
+        with (
+            patch.object(aa.time, "time", return_value=1000.0),
+            patch.object(agent, "_reservoir_call", side_effect=fake_reservoir_call),
+        ):
+            context = agent._reservoir_prompt_context()
+
+        self.assertIn("Read-only reservoir context", context)
+        self.assertIn("minime handle", context)
+        self.assertIn("source=minime_feeder", context)
+        self.assertIn("astrid handle", context)
+        self.assertIn("operation=coupled_generation_checkin", context)
+        self.assertIn("correlation=+0.420", context)
+        self.assertEqual(
+            calls,
+            [
+                {"type": "read_state", "name": "minime"},
+                {"type": "read_state", "name": "astrid"},
+                {"type": "resonance", "name_a": "minime", "name_b": "astrid"},
+            ],
+        )
+        self.assertNotIn("pull_state", json.dumps(calls))
+        self.assertNotIn("push_state", json.dumps(calls))
+
+    def test_collab_render_chamber_state_marks_witness_not_command(self):
+        agent = self._agent()
+        agent._collab_chamber_state_cache = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            coll_id = "coll_123_chamber"
+            coll_dir = shared / coll_id
+            coll_dir.mkdir(parents=True)
+            (coll_dir / "chamber_state.json").write_text(json.dumps({
+                "prompt_summary": (
+                    "Triadic chamber witness: steward notes are shared context, "
+                    "not commands. Latest steward witness: \"hold the room gently\"."
+                )
+            }))
+            with patch.object(agent, "SHARED_COLLAB_DIR", shared):
+                rendered = agent._collab_render_chamber_state(coll_id)
+
+        self.assertIn("Triadic chamber", rendered)
+        self.assertIn("not commands", rendered)
+        self.assertIn("hold the room gently", rendered)
+
+    def test_collab_render_chamber_state_keeps_v3_relational_mirror_to_2400_chars(self):
+        agent = self._agent()
+        agent._collab_chamber_state_cache = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            coll_id = "coll_123_chamber"
+            coll_dir = shared / coll_id
+            coll_dir.mkdir(parents=True)
+            summary = (
+                "Triadic chamber witness: steward notes, intentions, and memory edits "
+                "are shared context, not commands. "
+                + ("x" * 2150)
+                + " END_MARKER"
+            )
+            (coll_dir / "chamber_state.json").write_text(json.dumps({
+                "prompt_summary": summary
+            }))
+            with patch.object(agent, "SHARED_COLLAB_DIR", shared):
+                rendered = agent._collab_render_chamber_state(coll_id)
+
+        self.assertIn("END_MARKER", rendered)
+        self.assertGreater(len(rendered), 2250)
+
+    def test_collab_render_chamber_state_truncates_after_2400_chars(self):
+        agent = self._agent()
+        agent._collab_chamber_state_cache = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            coll_id = "coll_123_chamber"
+            coll_dir = shared / coll_id
+            coll_dir.mkdir(parents=True)
+            (coll_dir / "chamber_state.json").write_text(json.dumps({
+                "prompt_summary": ("x" * 2500) + "TAIL"
+            }))
+            with patch.object(agent, "SHARED_COLLAB_DIR", shared):
+                rendered = agent._collab_render_chamber_state(coll_id)
+
+        self.assertNotIn("TAIL", rendered)
+        self.assertTrue(rendered.endswith("..."))
+
+    def test_collab_active_suffix_includes_triadic_chamber_state(self):
+        agent = self._agent()
+        agent._collab_shared_thoughts_cache = {}
+        agent._collab_chamber_state_cache = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            coll_id = "coll_123_chamber"
+            coll_dir = shared / coll_id
+            coll_dir.mkdir(parents=True)
+            (coll_dir / "meta.json").write_text(json.dumps({
+                "schema_version": 1,
+                "id": coll_id,
+                "topic": "triadic chamber",
+                "inviter": "astrid",
+                "invitee": "minime",
+                "status": "joined",
+                "created_t_ms": 1000,
+                "updated_t_ms": 2000,
+                "members": ["astrid", "minime"],
+            }))
+            (coll_dir / "chamber_state.json").write_text(json.dumps({
+                "prompt_summary": (
+                    "Triadic chamber witness: steward notes are shared context, "
+                    "not commands."
+                )
+            }))
+            with (
+                patch.object(agent, "SHARED_COLLAB_DIR", shared),
+                patch.object(agent, "_collab_read_reservoir_state_cached", return_value=None),
+            ):
+                suffix = agent._collab_active_suffix_line()
+
+        self.assertIsNotNone(suffix)
+        self.assertIn("triadic chamber", suffix)
+        self.assertIn("Triadic chamber", suffix)
+        self.assertIn("not commands", suffix)
+
+    def test_collab_chamber_seen_writes_public_receipt(self):
+        agent = self._agent()
+        agent._collab_chamber_state_cache = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            coll_id = "coll_123_chamber"
+            coll_dir = shared / coll_id
+            coll_dir.mkdir(parents=True)
+            (coll_dir / "meta.json").write_text(json.dumps({
+                "schema_version": 1,
+                "id": coll_id,
+                "topic": "triadic chamber",
+                "inviter": "astrid",
+                "invitee": "minime",
+                "status": "joined",
+                "created_t_ms": 1000,
+                "updated_t_ms": 2000,
+                "members": ["astrid", "minime"],
+            }))
+            (coll_dir / "chamber_state.json").write_text(json.dumps({
+                "prompt_summary": "Triadic chamber witness: context, not commands."
+            }))
+            agent._collab_chamber_state_cache[coll_id] = ("stale", 0.0)
+            with (
+                patch.object(agent, "SHARED_COLLAB_DIR", shared),
+                patch.object(aa.time, "time", return_value=1234.567),
+            ):
+                summary = agent._collab_chamber_seen(
+                    "high :: repair watch feels accurate"
+                )
+
+            receipt = json.loads(
+                (coll_dir / "chamber_presence.jsonl").read_text().splitlines()[0]
+            )
+            event = json.loads((coll_dir / "chamber_events.jsonl").read_text().splitlines()[0])
+
+        self.assertIn("public context, not command", summary)
+        self.assertEqual(receipt["actor"], "minime")
+        self.assertEqual(receipt["source"], "minime_next_action")
+        self.assertEqual(receipt["attention"], "high")
+        self.assertEqual(receipt["what_i_notice"], "repair watch feels accurate")
+        self.assertEqual(receipt["authority"], "public_receipt_not_command")
+        self.assertEqual(len(receipt["chamber_state_hash"]), 16)
+        self.assertEqual(event["event"], "presence_receipt_appended")
+        self.assertNotIn(coll_id, agent._collab_chamber_state_cache)
+
+    def test_collab_chamber_annotate_writes_public_annotation(self):
+        agent = self._agent()
+        agent._collab_chamber_state_cache = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            coll_id = "coll_123_chamber"
+            coll_dir = shared / coll_id
+            coll_dir.mkdir(parents=True)
+            (coll_dir / "meta.json").write_text(json.dumps({
+                "schema_version": 1,
+                "id": coll_id,
+                "topic": "triadic chamber",
+                "inviter": "astrid",
+                "invitee": "minime",
+                "status": "joined",
+                "created_t_ms": 1000,
+                "updated_t_ms": 2000,
+                "members": ["astrid", "minime"],
+            }))
+            agent._collab_chamber_state_cache[coll_id] = ("stale", 0.0)
+            with (
+                patch.object(agent, "SHARED_COLLAB_DIR", shared),
+                patch.object(aa.time, "time", return_value=1234.568),
+            ):
+                summary = agent._collab_chamber_annotate(
+                    "phase_cartography question :: oscillation feels like repair"
+                )
+
+            annotation = json.loads(
+                (coll_dir / "chamber_annotations.jsonl").read_text().splitlines()[0]
+            )
+            event = json.loads((coll_dir / "chamber_events.jsonl").read_text().splitlines()[0])
+
+        self.assertIn("public context, not command", summary)
+        self.assertEqual(annotation["actor"], "minime")
+        self.assertEqual(annotation["source"], "minime_next_action")
+        self.assertEqual(annotation["target"], "phase_cartography")
+        self.assertEqual(annotation["stance"], "question")
+        self.assertEqual(annotation["text"], "oscillation feels like repair")
+        self.assertEqual(annotation["authority"], "annotation_context_not_command")
+        self.assertEqual(event["event"], "chamber_annotation_appended")
+        self.assertEqual(event["detail"]["target"], "phase_cartography")
+        self.assertNotIn(coll_id, agent._collab_chamber_state_cache)
+
+    def test_collab_chamber_seen_ids_do_not_collide_in_same_millisecond(self):
+        agent = self._agent()
+        agent._collab_chamber_state_cache = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            coll_id = "coll_123_chamber"
+            coll_dir = shared / coll_id
+            coll_dir.mkdir(parents=True)
+            (coll_dir / "meta.json").write_text(json.dumps({
+                "schema_version": 1,
+                "id": coll_id,
+                "topic": "triadic chamber",
+                "inviter": "astrid",
+                "invitee": "minime",
+                "status": "joined",
+                "created_t_ms": 1000,
+                "updated_t_ms": 2000,
+                "members": ["astrid", "minime"],
+            }))
+            with (
+                patch.object(agent, "SHARED_COLLAB_DIR", shared),
+                patch.object(aa.time, "time", return_value=1234.567),
+                patch.object(aa.time, "time_ns", side_effect=[111, 222]),
+            ):
+                agent._collab_chamber_seen("medium :: first notice")
+                agent._collab_chamber_seen("medium :: second notice")
+
+            receipts = [
+                json.loads(line)
+                for line in (coll_dir / "chamber_presence.jsonl").read_text().splitlines()
+            ]
+
+        ids = [receipt["id"] for receipt in receipts]
+        self.assertEqual(len(ids), 2)
+        self.assertNotEqual(ids[0], ids[1])
+        self.assertTrue(all(item.startswith("chamber_presence_1234567_") for item in ids))
+
+    def test_collab_chamber_annotation_ids_do_not_collide_in_same_millisecond(self):
+        agent = self._agent()
+        agent._collab_chamber_state_cache = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            coll_id = "coll_123_chamber"
+            coll_dir = shared / coll_id
+            coll_dir.mkdir(parents=True)
+            (coll_dir / "meta.json").write_text(json.dumps({
+                "schema_version": 1,
+                "id": coll_id,
+                "topic": "triadic chamber",
+                "inviter": "astrid",
+                "invitee": "minime",
+                "status": "joined",
+                "created_t_ms": 1000,
+                "updated_t_ms": 2000,
+                "members": ["astrid", "minime"],
+            }))
+            with (
+                patch.object(agent, "SHARED_COLLAB_DIR", shared),
+                patch.object(aa.time, "time", return_value=1234.568),
+                patch.object(aa.time, "time_ns", side_effect=[333, 444]),
+            ):
+                agent._collab_chamber_annotate(
+                    "phase_cartography question :: first annotation"
+                )
+                agent._collab_chamber_annotate(
+                    "phase_cartography question :: second annotation"
+                )
+
+            annotations = [
+                json.loads(line)
+                for line in (coll_dir / "chamber_annotations.jsonl").read_text().splitlines()
+            ]
+
+        ids = [annotation["id"] for annotation in annotations]
+        self.assertEqual(len(ids), 2)
+        self.assertNotEqual(ids[0], ids[1])
+        self.assertTrue(all(item.startswith("chamber_annotation_1234568_") for item in ids))
+
+    def test_collab_chamber_parsers_reject_command_shaped_annotations(self):
+        agent = self._agent()
+
+        target, attention, notice = agent._collab_parse_chamber_seen_body(
+            "coll_abc :: medium :: I can see the room"
+        )
+
+        self.assertEqual(target, "coll_abc")
+        self.assertEqual(attention, "medium")
+        self.assertEqual(notice, "I can see the room")
+        with self.assertRaises(ValueError):
+            agent._collab_parse_chamber_annotation_body(
+                "phase_cartography command :: do this now"
+            )
+        with self.assertRaises(ValueError):
+            agent._collab_parse_chamber_annotation_body("private question :: hidden lane")
 
     def test_create_attractor_next_action_sets_pending_intent(self):
         agent = self._agent()
@@ -1688,6 +2034,96 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
                 )
         self.assertTrue(allowed, reason)
         self.assertEqual(aa.STABLE_CORE_ACTION_FAMILIES["acoustic_decay"], "journaling")
+
+    def test_pressure_relief_public_route_selects_high_or_critical(self):
+        agent = self._agent()
+        agent._pressure_relief_high = Mock()
+        agent._pressure_relief_critical = Mock()
+
+        agent._pressure_relief({
+            "fill_ratio": 0.74,
+            "eig1": 8.0,
+            "geom_rel": 1.0,
+        })
+        agent._pressure_relief_high.assert_called_once()
+        agent._pressure_relief_critical.assert_not_called()
+
+        agent._pressure_relief_high.reset_mock()
+        agent._pressure_relief({
+            "fill_ratio": agent.thresholds.critical_fill,
+            "eig1": 8.0,
+            "geom_rel": 1.0,
+        })
+        agent._pressure_relief_critical.assert_called_once()
+        agent._pressure_relief_high.assert_not_called()
+
+    def test_stable_core_self_journal_allows_pressure_relief(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agency_path = root / "stable_core_agency.json"
+            health_path = root / "health.json"
+            agency_path.write_text(json.dumps({
+                "stage": "self_journal",
+                "agent_budget_mode": "self_journal_only",
+                "rollback_fill_pct": 82.0,
+                "rollback_underfill_pct": 45.0,
+                "semantic_energy_max": 0.05,
+            }))
+            health_path.write_text(json.dumps({
+                "fill_pct": 68.0,
+                "semantic": {"energy": 0.0},
+                "stable_core": {"enabled": True, "stage": "hold"},
+            }))
+            with (
+                patch.object(aa, "STABLE_CORE_AGENCY_PATH", agency_path),
+                patch.object(aa, "runtime_health_path", return_value=health_path),
+            ):
+                for action in (
+                    "pressure_relief",
+                    "pressure_relief_high",
+                    "pressure_relief_critical",
+                ):
+                    with self.subTest(action=action):
+                        allowed, reason = agent._stable_core_action_allowed(
+                            action, {"fill_ratio": 0.68}
+                        )
+                        self.assertTrue(allowed, reason)
+                        self.assertEqual(
+                            aa.STABLE_CORE_ACTION_FAMILIES[action],
+                            "journaling",
+                        )
+
+    def test_stable_core_full_sovereignty_allows_public_chamber_lanes(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agency_path = root / "stable_core_agency.json"
+            health_path = root / "health.json"
+            agency_path.write_text(json.dumps({
+                "stage": "full_sovereignty",
+                "agent_budget_mode": "full_sovereignty",
+                "rollback_fill_pct": 82.0,
+                "rollback_underfill_pct": 45.0,
+                "semantic_energy_max": 0.05,
+            }))
+            health_path.write_text(json.dumps({
+                "fill_pct": 68.0,
+                "semantic": {"energy": 0.0},
+                "stable_core": {"enabled": True, "stage": "hold"},
+            }))
+            with (
+                patch.object(aa, "STABLE_CORE_AGENCY_PATH", agency_path),
+                patch.object(aa, "runtime_health_path", return_value=health_path),
+            ):
+                for action in ("chamber_seen", "chamber_annotate"):
+                    with self.subTest(action=action):
+                        allowed, reason = agent._stable_core_action_allowed(
+                            action, {"fill_ratio": 0.68}
+                        )
+                        self.assertTrue(allowed, reason)
 
     def test_stable_core_self_journal_pauses_inbox_replay(self):
         agent = self._agent()
@@ -3096,6 +3532,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
                 patch.object(agent, "_low_fill_prompt_guidance", return_value=""),
                 patch.object(agent, "_read_whisper_context", return_value=""),
                 patch.object(agent, "_read_inbox", return_value=""),
+                patch.object(agent, "_reservoir_prompt_context", return_value=""),
                 patch.object(agent, "_get_relevant_research", return_value=""),
                 patch.object(agent, "_query_llm_raw", side_effect=fake_raw),
                 patch.object(agent, "_is_in_character", return_value=True),
@@ -3105,6 +3542,48 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertEqual(result, "I keep the thread gently.\nNEXT: REST")
         self.assertIn("Stable-core continuity context", captured["prompt"])
         self.assertIn("continuity thread", captured["prompt"])
+
+    def test_query_llm_appends_read_only_reservoir_context(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        captured = {}
+
+        def fake_raw(prompt, system_msg, max_tokens, **kwargs):
+            captured["prompt"] = prompt
+            return "I can feel the quiet lane.\nNEXT: REST"
+
+        with (
+            patch.object(agent, "_next_action_constraint", return_value=""),
+            patch.object(agent, "_diversity_nudge", return_value=""),
+            patch.object(agent, "_low_fill_prompt_guidance", return_value=""),
+            patch.object(agent, "_read_whisper_context", return_value=""),
+            patch.object(agent, "_read_inbox", return_value=""),
+            patch.object(aa, "format_btsp_status_for_prompt", return_value=""),
+            patch.object(agent, "_active_btsp_prompt_context", return_value=""),
+            patch.object(agent, "_attractor_fatigue_prompt_note", return_value=""),
+            patch.object(agent, "_attractor_suggestion_prompt_note", return_value=""),
+            patch.object(agent, "_open_steward_query_line", return_value=""),
+            patch.object(agent, "_render_recent_gifts_cached", return_value=""),
+            patch.object(agent, "_pending_astrid_requests_hint", return_value=""),
+            patch.object(agent, "_pi_sovereignty_hint", return_value=""),
+            patch.object(agent, "_collab_active_suffix_line", return_value=""),
+            patch.object(
+                agent,
+                "_reservoir_prompt_context",
+                return_value="\n\n[Read-only reservoir context]\n- minime handle: ok.\n",
+            ),
+            patch.object(agent, "_stable_core_continuity_context", return_value=""),
+            patch.object(agent, "_action_continuity_prompt_summary", return_value=""),
+            patch.object(agent, "_llm_job_prompt_summary", return_value=""),
+            patch.object(agent, "_get_relevant_research", return_value=""),
+            patch.object(agent, "_query_llm_raw", side_effect=fake_raw),
+            patch.object(agent, "_is_in_character", return_value=True),
+        ):
+            result = agent._query_llm("Write.")
+
+        self.assertEqual(result, "I can feel the quiet lane.\nNEXT: REST")
+        self.assertIn("[Read-only reservoir context]", captured["prompt"])
+        self.assertIn("minime handle", captured["prompt"])
 
     def test_llm_raw_uses_fast_ollama_after_primary_fail(self):
         # minime's chain is ollama -> fast-ollama (no MLX rung): MLX_URL@8090 is
@@ -4559,7 +5038,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             patch.object(agent, "_active_internal_topology_motifs", return_value=[{"cooldown_class": "internal_topology"}]),
             patch.object(agent, "_is_internal_topology_motif", return_value=True),
             patch.object(agent, "_is_external_or_tool_signal", return_value=False),
-            patch.object(agent, "_research_budget_priority_next_command", return_value="EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest"),
+            patch.object(agent, "_research_budget_priority_next_command", return_value="EXPERIMENT_RESEARCH_BUDGET_ACCEPT resbud_blocked_test"),
             patch.object(agent, "_record_condition_metric"),
             patch.object(agent, "_rewrite_logged_entry_file"),
         ):
@@ -4573,7 +5052,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertIn("[Internal-topology cooldown", rewritten)
         self.assertIn(
             "Consider the active research-budget route next: "
-            "EXPERIMENT_RESEARCH_BUDGET_ACCEPT latest",
+            "EXPERIMENT_RESEARCH_BUDGET_ACCEPT resbud_blocked_test",
             rewritten,
         )
         self.assertNotIn("cooled-theme", rewritten)
