@@ -5925,6 +5925,48 @@ class ActionContinuityStore:
             experiment.get("experiment_id") if isinstance(experiment, dict) else None,
             8,
         )
+        review_info = summary.get("dossier_review_v1") if isinstance(summary.get("dossier_review_v1"), dict) else {}
+        review_status = str(review_info.get("review_status") or "unknown")
+        latest_review_claim = str(review_info.get("latest_claim_id") or summary.get("latest_claim_id") or "latest")
+        evidence_for_latest = int(review_info.get("evidence_count_for_latest_claim") or 0)
+        review_line = (
+            f"Review status: {review_status}; latest_claim={latest_review_claim}; "
+            f"evidence_for_latest={evidence_for_latest}"
+        )
+        stance_counts = review_info.get("evidence_stance_counts")
+        stance_counts = stance_counts if isinstance(stance_counts, dict) else {}
+        stance_counts_text = ", ".join(
+            f"{key}={stance_counts[key]}"
+            for key in sorted(stance_counts)
+        ) or "none"
+        review_extra = ""
+        if review:
+            latest_claim = summary.get("latest_claim")
+            latest_claim_line = ""
+            if isinstance(latest_claim, dict):
+                latest_claim_line = (
+                    f"Latest claim: {latest_review_claim} "
+                    f"[{review_info.get('latest_claim_stance') or latest_claim.get('stance') or 'hold'}]: "
+                    f"{self._compact_text(latest_claim.get('claim'))}\n"
+                )
+            next_action = str(review_info.get("suggested_research_next") or "").strip()
+            next_line = (
+                f"Next dossier action: {next_action}\n"
+                if review_status in {"needs_first_claim", "needs_more_evidence", "conflicted"} and next_action
+                else ""
+            )
+            candidate_line = (
+                "Candidate memory: true; no automatic memory/lifecycle route was emitted.\n"
+                if review_info.get("candidate_memory")
+                else "Candidate memory: false; no automatic memory/lifecycle route was emitted.\n"
+            )
+            review_extra = (
+                f"{latest_claim_line}"
+                f"Evidence stance counts: {stance_counts_text}\n"
+                f"Review summary: {review_info.get('review_summary') or 'No review summary available.'}\n"
+                f"{next_line}"
+                f"{candidate_line}"
+            )
         lines = []
         for record in records[-8:]:
             if record.get("record_type") == "claim":
@@ -5948,6 +5990,8 @@ class ActionContinuityStore:
             f"{title} `{experiment_label}`\n"
             f"Claims: {summary.get('claim_count', 0)} | Evidence: {summary.get('evidence_count', 0)}\n"
             f"{summary.get('priority_note')}\n"
+            f"{review_line}\n"
+            f"{review_extra}"
             f"Recent records:\n{body}\n"
             f"Suggested claim: {summary.get('suggested_claim_next')}\n"
             f"Suggested evidence: {summary.get('suggested_evidence_next')}"
@@ -7597,6 +7641,9 @@ class ActionContinuityStore:
                 "projection.research_budget_priority_route_v1",
                 "projection.sovereign_loop_v1",
                 "projection.continuity_session_v1",
+                "projection.continuity_session_draft_v1",
+                "projection.first_dossier_claim_cue_v1",
+                "projection.research_dossier_v1",
                 "projection.repeated_action_cadence_v1",
                 "projection.thread_load_triage_v1",
             ],
@@ -7893,9 +7940,6 @@ class ActionContinuityStore:
         return max((int(item.get("mtime_ns") or 0) for item in fingerprints.values()), default=0)
 
     def _projection_projected_route_v1(self, projection: Dict[str, Any]) -> str:
-        route = projection.get("research_budget_priority_route_v1")
-        if isinstance(route, dict) and route.get("next"):
-            return str(route.get("next"))
         control = projection.get("continuity_control_plane_v1")
         if isinstance(control, dict):
             primary = control.get("primary_route")
@@ -7904,6 +7948,9 @@ class ActionContinuityStore:
         current_next = projection.get("current_next_status_v1")
         if isinstance(current_next, dict) and current_next.get("effective_next"):
             return str(current_next.get("effective_next"))
+        route = projection.get("research_budget_priority_route_v1")
+        if isinstance(route, dict) and route.get("next"):
+            return str(route.get("next"))
         return str(projection.get("continuity_return") or projection.get("current_next") or "")
 
     def _projection_freshness_v1(
@@ -7971,6 +8018,9 @@ class ActionContinuityStore:
                 "projection.research_budget_priority_route_v1",
                 "projection.sovereign_loop_v1",
                 "projection.continuity_session_v1",
+                "projection.continuity_session_draft_v1",
+                "projection.first_dossier_claim_cue_v1",
+                "projection.research_dossier_v1",
                 "projection.repeated_action_cadence_v1",
                 "projection.thread_load_triage_v1",
             ],
@@ -12081,6 +12131,30 @@ class ActionContinuityStore:
         if isinstance(experiment, dict):
             runs = self._recent_experiment_runs(thread["thread_id"], str(experiment_id), 8)
             lifecycle = self._experiment_classification(experiment, runs)
+        suggested_claim_next = self._dossier_claim_next_scaffold_v1(
+            experiment,
+            target,
+            lifecycle,
+            has_claims=bool(claims),
+        )
+        suggested_evidence_next = (
+            f"DOSSIER_EVIDENCE {target} :: claim_id: {latest_claim_id}; evidence: ...; "
+            "lane: spectral_condition; artifact: ...; counterevidence: ..."
+        )
+        dossier_maturity = self._dossier_maturity_v1(
+            target,
+            latest_claim,
+            evidence,
+            suggested_claim_next,
+            suggested_evidence_next,
+        )
+        dossier_review = self._dossier_review_v1(
+            target,
+            latest_claim,
+            evidence,
+            suggested_claim_next,
+            suggested_evidence_next,
+        )
         return {
             "schema_version": 1,
             "record_schema": "research_dossier_v1",
@@ -12095,15 +12169,135 @@ class ActionContinuityStore:
             "lifecycle_context": lifecycle,
             "lifecycle_authority": "context_only",
             "authority_change": False,
-            "suggested_claim_next": (
-                f"DOSSIER_CLAIM {target} :: claim: ...; basis: ...; "
-                "stance: support|counter|branch|hold; next: ..."
-            ),
-            "suggested_evidence_next": (
-                f"DOSSIER_EVIDENCE {target} :: claim_id: {latest_claim_id}; evidence: ...; "
-                "lane: spectral_condition; artifact: ...; counterevidence: ..."
-            ),
+            "suggested_claim_next": suggested_claim_next,
+            "suggested_evidence_next": suggested_evidence_next,
+            "dossier_maturity_v1": dossier_maturity,
+            "dossier_review_v1": dossier_review,
             "priority_note": self._research_dossier_priority_note(lifecycle),
+        }
+
+    @staticmethod
+    def _dossier_evidence_for_latest_claim(
+        latest_claim: Optional[Dict[str, Any]],
+        evidence_records: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(latest_claim, dict):
+            return []
+        latest_claim_id = str(latest_claim.get("claim_id") or "latest")
+        return [
+            record
+            for record in evidence_records
+            if str(record.get("claim_id") or "") == latest_claim_id
+        ]
+
+    @staticmethod
+    def _dossier_maturity_v1(
+        target: str,
+        latest_claim: Optional[Dict[str, Any]],
+        evidence_records: List[Dict[str, Any]],
+        suggested_claim_next: str,
+        suggested_evidence_next: str,
+    ) -> Dict[str, Any]:
+        latest_claim_id = str(latest_claim.get("claim_id") or "latest") if latest_claim else "latest"
+        latest_stance = str(latest_claim.get("stance") or "hold") if latest_claim else None
+        evidence_for_latest = ActionContinuityStore._dossier_evidence_for_latest_claim(
+            latest_claim,
+            evidence_records,
+        )
+        evidence_stance_counts = dict(Counter(
+            str(record.get("stance") or "support")
+            for record in evidence_for_latest
+        ))
+        if not isinstance(latest_claim, dict):
+            status = "needs_first_claim"
+            suggested_research_next = suggested_claim_next
+        elif not evidence_for_latest:
+            status = "claim_needs_evidence"
+            suggested_research_next = suggested_evidence_next
+        elif len(evidence_for_latest) == 1:
+            status = "claim_has_evidence"
+            suggested_research_next = f"DOSSIER_REVIEW {target}"
+        else:
+            status = "reviewable_dossier"
+            suggested_research_next = f"DOSSIER_REVIEW {target}"
+        return {
+            "schema_version": 1,
+            "status": status,
+            "latest_claim_id": latest_claim_id,
+            "latest_stance": latest_stance,
+            "evidence_count_for_latest_claim": len(evidence_for_latest),
+            "evidence_stance_counts": evidence_stance_counts,
+            "suggested_research_next": suggested_research_next,
+            "authority_change": False,
+        }
+
+    @staticmethod
+    def _dossier_review_v1(
+        target: str,
+        latest_claim: Optional[Dict[str, Any]],
+        evidence_records: List[Dict[str, Any]],
+        suggested_claim_next: str,
+        suggested_evidence_next: str,
+    ) -> Dict[str, Any]:
+        latest_claim_id = str(latest_claim.get("claim_id") or "latest") if latest_claim else "latest"
+        latest_stance = str(latest_claim.get("stance") or "hold") if latest_claim else None
+        evidence_for_latest = ActionContinuityStore._dossier_evidence_for_latest_claim(
+            latest_claim,
+            evidence_records,
+        )
+        stance_counts = dict(Counter(
+            str(record.get("stance") or "support")
+            for record in evidence_for_latest
+        ))
+        counter_count = int(stance_counts.get("counter") or 0)
+        support_count = int(stance_counts.get("support") or 0)
+        non_counter_count = len([
+            record
+            for record in evidence_for_latest
+            if str(record.get("stance") or "support") != "counter"
+        ])
+        candidate_memory = (
+            non_counter_count >= 2
+            and support_count >= 1
+            and counter_count == 0
+        )
+        if not isinstance(latest_claim, dict):
+            review_status = "needs_first_claim"
+            suggested_research_next = suggested_claim_next
+            review_summary = "No dossier claim exists yet; capture a cite-backed claim before review."
+        elif not evidence_for_latest:
+            review_status = "needs_more_evidence"
+            suggested_research_next = suggested_evidence_next
+            review_summary = f"Latest claim {latest_claim_id} has no evidence; add dossier evidence before review."
+        elif counter_count > 0:
+            review_status = "conflicted"
+            suggested_research_next = suggested_evidence_next
+            review_summary = f"Latest claim {latest_claim_id} has counter evidence; review remains conflicted."
+        elif candidate_memory:
+            review_status = "candidate_memory"
+            suggested_research_next = f"DOSSIER_REVIEW {target}"
+            review_summary = (
+                f"Latest claim {latest_claim_id} has {len(evidence_for_latest)} evidence record(s), "
+                "support, and no counter evidence; it is a candidate memory."
+            )
+        else:
+            review_status = "review_ready"
+            suggested_research_next = f"DOSSIER_REVIEW {target}"
+            review_summary = (
+                f"Latest claim {latest_claim_id} has {len(evidence_for_latest)} evidence record(s); "
+                "review is ready but not a memory candidate yet."
+            )
+        return {
+            "schema_version": 1,
+            "review_status": review_status,
+            "latest_claim_id": latest_claim_id,
+            "latest_claim_stance": latest_stance,
+            "evidence_count_for_latest_claim": len(evidence_for_latest),
+            "evidence_stance_counts": stance_counts,
+            "candidate_memory": candidate_memory,
+            "review_summary": review_summary,
+            "suggested_research_next": suggested_research_next,
+            "authority_change": False,
         }
 
     @staticmethod
@@ -12122,6 +12316,31 @@ class ActionContinuityStore:
                 "Dossier capture is allowed as context; charter repair remains the lifecycle priority."
             )
         return "Dossier capture preserves referable claims without changing experiment lifecycle."
+
+    @classmethod
+    def _dossier_claim_next_scaffold_v1(
+        cls,
+        experiment: Optional[Dict[str, Any]],
+        target: str,
+        lifecycle: Optional[str],
+        *,
+        has_claims: bool,
+    ) -> str:
+        fallback = (
+            f"DOSSIER_CLAIM {target} :: claim: ...; basis: ...; "
+            "stance: support|counter|branch|hold; next: ..."
+        )
+        if has_claims or lifecycle != "paused" or not isinstance(experiment, dict):
+            return fallback
+        experiment_id = str(experiment.get("experiment_id") or target or "current").strip() or "current"
+        title = cls._dossier_field_text(experiment.get("title"), 90)
+        question = cls._dossier_field_text(experiment.get("question"), 150)
+        basis = "; ".join(part for part in [title, question, "status=paused"] if part)
+        return (
+            f"DOSSIER_CLAIM {experiment_id} :: claim: paused experiment is referable context, "
+            f"not active lifecycle progress; basis: {basis}; stance: hold; next: "
+            f"EXPERIMENT_STATUS {experiment_id} or EXPERIMENT_REVIEW {experiment_id}"
+        )
 
     @staticmethod
     def _dossier_field(raw: str, labels: List[str]) -> Optional[str]:
@@ -14848,6 +15067,19 @@ class ActionContinuityStore:
         )
 
     @staticmethod
+    def _dossier_maturity_line(summary: Dict[str, Any], *, compact: bool = False) -> str:
+        maturity = summary.get("dossier_maturity_v1") if isinstance(summary, dict) else None
+        if not isinstance(maturity, dict):
+            return ""
+        status = str(maturity.get("status") or "unknown").strip() or "unknown"
+        if compact:
+            return f"Dossier maturity: {status}; suggested research NEXT kept in metadata.\n"
+        latest_claim_id = str(maturity.get("latest_claim_id") or "latest").strip() or "latest"
+        suggested = str(maturity.get("suggested_research_next") or "").strip()
+        suffix = f" Suggested research NEXT: {suggested}" if suggested else ""
+        return f"Dossier maturity: {status}; latest_claim={latest_claim_id}.{suffix}\n"
+
+    @staticmethod
     def _research_dossier_line(
         projection_or_experiment: Dict[str, Any],
         *,
@@ -14872,38 +15104,45 @@ class ActionContinuityStore:
                 " Latest claim: "
                 f"{ActionContinuityStore._compact_text(latest_claim.get('claim'), 96)}"
             )
+        maturity_line = ActionContinuityStore._dossier_maturity_line(summary, compact=compact)
         if compact:
             if claim_count == 0 and evidence_count == 0:
                 return (
                     "Research dossier: no local claims yet; optional claim capture "
                     "is available in continuity metadata.\n"
+                    f"{maturity_line}"
                 )
             context = str(summary.get("lifecycle_context") or "").strip()
             context_text = f" lifecycle_context={context}." if context else ""
             return (
                 f"Research dossier: {claim_count} claim(s), "
                 f"{evidence_count} evidence record(s).{context_text}{latest}\n"
+                f"{maturity_line}"
             )
         if claim_count == 0 and evidence_count == 0:
             return (
                 "Research dossier: no local claims yet. "
                 f"{priority} Suggested NEXT: {claim_next}\n"
+                f"{maturity_line}"
             )
         if summary.get("lifecycle_context") == "needs_evidence":
             return (
                 f"Research dossier: {claim_count} claim(s), {evidence_count} evidence record(s). "
                 f"{priority} Lifecycle priority: EXPERIMENT_EVIDENCE current. "
                 f"Optional dossier NEXT: {evidence_next}{latest}\n"
+                f"{maturity_line}"
             )
         if summary.get("lifecycle_context") == "needs_decision":
             return (
                 f"Research dossier: {claim_count} claim(s), {evidence_count} evidence record(s). "
                 f"{priority} Lifecycle priority: EXPERIMENT_DECIDE current. "
                 f"Optional dossier NEXT: {claim_next}{latest}\n"
+                f"{maturity_line}"
             )
         return (
             f"Research dossier: {claim_count} claim(s), {evidence_count} evidence record(s). "
             f"{priority} Suggested NEXT: {evidence_next}{latest}\n"
+            f"{maturity_line}"
         )
 
     @staticmethod
@@ -15420,6 +15659,21 @@ class ActionContinuityStore:
                     f"{experiment_id}; stance: hold; next: EXPERIMENT_STATUS {experiment_id}"
                 )
             return f"EXPERIMENT_STATUS {experiment_id}"
+        first_dossier = (
+            experiment.get("first_dossier_claim_cue_v1")
+            if isinstance(experiment, dict)
+            else None
+        )
+        if isinstance(first_dossier, dict):
+            command = str(first_dossier.get("suggested_claim_next") or "").strip()
+            if command:
+                return command
+        dossier = experiment.get("research_dossier_v1") if isinstance(experiment, dict) else None
+        if isinstance(dossier, dict) and int(dossier.get("claim_count") or 0) <= 0:
+            lifecycle = str(dossier.get("lifecycle_context") or experiment.get("classification") or "").strip()
+            command = str(dossier.get("suggested_claim_next") or "").strip()
+            if lifecycle == "paused" and command:
+                return command
         if isinstance(experiment, dict) and experiment.get("classification") == "needs_charter":
             scaffold = experiment.get("charter_scaffold_v1")
             if isinstance(scaffold, dict):
@@ -16721,6 +16975,8 @@ class ActionContinuityStore:
                 "projection.sovereign_loop_v1",
                 "projection.continuity_session_v1",
                 "projection.continuity_session_draft_v1",
+                "projection.first_dossier_claim_cue_v1",
+                "projection.research_dossier_v1",
                 "projection.repeated_action_cadence_v1",
                 "projection.thread_load_triage_v1",
             ],
