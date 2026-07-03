@@ -29,6 +29,8 @@ from btsp_sovereignty import (
     matching_candidate_for_next,
     normalize_next_action,
     parse_proposal_envelope,
+    proposal_envelope_from_dict,
+    proposal_envelope_to_dict,
 )
 
 
@@ -47,6 +49,30 @@ BTSP_ENVELOPE_JSON_START
 	  "reason_codes": ["agency_recovery", "auto_advisory"],
 	  "lineage": ["episode:btsp_ep", "source:astrid:btsp_agency_recovery_v3"],
 	  "evidence_window": {"matched_cues": ["grinding"]},
+	  "replay_read": {
+	    "summary": "Replay read: same-fingerprint outcomes are overwhelmingly reconcentrating."
+	  },
+	  "anti_loop_reason": "same_fingerprint_overwhelmingly_reconcentrating",
+	  "anti_loop_prompt": "This exact BTSP signal mostly recovered by reconcentrating.",
+	  "anti_loop_routes": ["BTSP_STUDY_FIRST", "BTSP_REFUSAL", "BTSP_COUNTER", "new_evidence"],
+		  "causal_lab_v3": {
+		    "active": true,
+		    "summary": "Causal lab V3: pre-registering a similar-fingerprint holdout.",
+			    "ghost_note": "I would have opened the ordinary BTSP advisory here, but replay says this family has reconcentrated; holding for study/refusal/counter/new evidence.",
+			    "resolution_status": "pre_registered_holdout",
+			    "resolution_summary": "No later structured BTSP outcome has resolved this holdout yet.",
+			    "negative_space_summary": "Negative-space evidence: 2 consolidation bucket(s), 2 quiet/softening, 0 continued holds, 0 worsening; latest=quiet_stabilized.",
+			    "forgiveness_state": {
+			      "remission_score": 1.0,
+			      "remission_status": "consentful_trial_eligible",
+			      "suppression_weight": 0.0,
+			      "consentful_trial_eligible": true,
+			      "forgiveness_summary": "Evidence remission is strong enough to keep the ordinary duplicate withheld while making a consentful study/refusal/counter/new-evidence trial route visible."
+			    },
+			    "question": "Does holding duplicate proposals produce softening?"
+			  },
+	  "causal_lab_question": "Does holding duplicate proposals produce softening?",
+	  "causal_lab_routes": ["BTSP_STUDY_FIRST", "BTSP_REFUSAL", "BTSP_COUNTER", "new_evidence"],
 	  "candidates": [
     {
       "response_id": "minime_notice_first",
@@ -75,6 +101,31 @@ def test_parse_proposal_envelope_and_exact_actions():
     assert envelope.reason_codes == ("agency_recovery", "auto_advisory")
     assert envelope.lineage[0] == "episode:btsp_ep"
     assert envelope.evidence_window["matched_cues"] == ["grinding"]
+    assert envelope.replay_read["summary"].startswith("Replay read")
+    assert envelope.anti_loop_reason == "same_fingerprint_overwhelmingly_reconcentrating"
+    assert envelope.anti_loop_prompt.startswith("This exact BTSP signal")
+    assert envelope.anti_loop_routes == (
+        "BTSP_STUDY_FIRST",
+        "BTSP_REFUSAL",
+        "BTSP_COUNTER",
+        "new_evidence",
+    )
+    assert envelope.causal_lab_v3["active"] is True
+    assert envelope.causal_lab_v3["ghost_note"].startswith("I would have opened")
+    assert envelope.causal_lab_v3["resolution_status"] == "pre_registered_holdout"
+    assert envelope.causal_lab_v3["negative_space_summary"].startswith(
+        "Negative-space evidence"
+    )
+    assert envelope.causal_lab_v3["forgiveness_state"]["remission_status"] == (
+        "consentful_trial_eligible"
+    )
+    assert envelope.causal_lab_question.startswith("Does holding")
+    assert envelope.causal_lab_routes == (
+        "BTSP_STUDY_FIRST",
+        "BTSP_REFUSAL",
+        "BTSP_COUNTER",
+        "new_evidence",
+    )
     assert [candidate.response_id for candidate in envelope.candidates] == [
         "minime_notice_first",
         "minime_recover_regime",
@@ -91,6 +142,27 @@ def test_matching_candidate_for_next_supports_regime_space_syntax():
 
     assert match is not None
     assert match.response_id == "minime_recover_regime"
+
+
+def test_proposal_envelope_round_trips_v3_lab_fields():
+    envelope = parse_proposal_envelope(_proposal_note())
+    assert envelope is not None
+
+    restored = proposal_envelope_from_dict(proposal_envelope_to_dict(envelope))
+
+    assert restored is not None
+    assert restored.causal_lab_v3["summary"].startswith("Causal lab V3")
+    assert restored.causal_lab_v3["ghost_note"].startswith("I would have opened")
+    assert restored.causal_lab_v3["resolution_summary"].startswith("No later structured")
+    assert restored.causal_lab_v3["negative_space_summary"].startswith(
+        "Negative-space evidence"
+    )
+    assert (
+        restored.causal_lab_v3["forgiveness_state"]["remission_status"]
+        == "consentful_trial_eligible"
+    )
+    assert restored.causal_lab_question.startswith("Does holding")
+    assert restored.causal_lab_routes == envelope.causal_lab_routes
 
 
 def test_augment_reply_tags_exact_notice_acceptance():
@@ -298,6 +370,10 @@ def test_btsp_inbox_context_adds_roundtrip_support_lines():
 
     assert "BTSP round-trip support" in formatted
     assert "Agency hypothesis" in formatted
+    assert "Causal lab ghost: I would have opened the ordinary BTSP advisory here" in formatted
+    assert "Causal lab resolution: pre_registered_holdout" in formatted
+    assert "Causal lab negative space: Negative-space evidence" in formatted
+    assert "Causal lab forgiveness: remission=consentful_trial_eligible" in formatted
     assert "minime_notice_first: NEXT: NOTICE" in formatted
     assert "minime_recover_regime: NEXT: REGIME recover" in formatted
     assert "BTSP_COUNTER NEXT: REGIME recover" in formatted
@@ -315,6 +391,38 @@ def test_active_proposal_reminder_renders_agency_memory():
     assert "BTSP_STUDY_FIRST need evidence first" in reminder
     assert "BTSP_REFUSAL study_first" in reminder
     assert "Counteroffers are valid metadata" in reminder
+
+
+def test_btsp_status_prompt_renders_causal_lab_ghost_and_resolution(tmp_path: Path):
+    status_path = tmp_path / "btsp_signal_status.json"
+    status_path.write_text(
+        """{
+          "detail": "A BTSP early-warning signal matched, and replay/causal-lab policy is withholding the duplicate ordinary advisory.",
+          "causal_lab_v3": {
+            "active": true,
+            "summary": "Causal lab V3: pre-registering an exact-fingerprint holdout.",
+	            "ghost_note": "I would have opened the ordinary BTSP advisory here, but replay says this family has reconcentrated; holding for study/refusal/counter/new evidence.",
+	            "resolution_status": "still_reconcentrating",
+	            "resolution_summary": "At least 3 later structured BTSP outcomes remain reconcentrating with zero softening or widening.",
+	            "negative_space_summary": "Negative-space evidence: 1 consolidation bucket(s), 1 quiet/softening, 0 continued holds, 0 worsening; latest=quiet_stabilized.",
+	            "forgiveness_state": {
+	              "remission_score": 0.5,
+	              "remission_status": "softened_hold",
+	              "suppression_weight": 0.5,
+	              "consentful_trial_eligible": false,
+	              "forgiveness_summary": "Some quiet/softening evidence has softened the hold, but reconcentrating or continued-hold evidence still argues for restraint."
+	            }
+	          }
+	        }"""
+    )
+
+    rendered = format_btsp_status_for_prompt(status_path)
+
+    assert "[BTSP signal status]" in rendered
+    assert "I would have opened the ordinary BTSP advisory here" in rendered
+    assert "causal_lab_resolution=still_reconcentrating" in rendered
+    assert "causal_lab_negative_space=Negative-space evidence" in rendered
+    assert "remission=softened_hold" in rendered
 
 
 def test_active_proposal_reminder_prioritizes_refusal_after_observed_next():

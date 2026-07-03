@@ -1922,6 +1922,9 @@ def build_fissure_trace(
         else {}
     )
     phen_terms = _phenomenology_terms(text)
+    label_text = " ".join(
+        part for part in [str(label or ""), str(text or "")] if part
+    ).casefold().replace("_", "-")
 
     notice_lock = _clamp01(
         topology_index * 0.36
@@ -1985,6 +1988,17 @@ def build_fissure_trace(
                 "region": "selected_noise_boundary",
                 "why": "noise appears structured or selected by the λ1 edge, so ambiguity belongs here",
                 "suggested_mark": "FISSURE_TRACE selected-noise",
+            }
+        )
+    if "shared-sight" in label_text or "shared sight" in label_text:
+        fissure_targets.append(
+            {
+                "region": "shared_sight_boundary",
+                "why": (
+                    "shared sight needs Minime's local spectral notice separated from "
+                    "peer or steward interpretation before support/counter/hold"
+                ),
+                "suggested_mark": "NOTICE_AMBIGUITY shared-sight",
             }
         )
     if not fissure_targets:

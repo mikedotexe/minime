@@ -76,6 +76,27 @@ def format_btsp_status_for_prompt(
     shared_read = str(status.get("shared_learned_read") or "").strip()
     if shared_read:
         pieces.append(shared_read)
+    lab = status.get("causal_lab_v3") or {}
+    if isinstance(lab, dict) and lab.get("active"):
+        ghost_note = str(lab.get("ghost_note") or "").strip()
+        summary = str(lab.get("summary") or "").strip()
+        resolution_status = str(lab.get("resolution_status") or "").strip()
+        resolution_summary = str(lab.get("resolution_summary") or "").strip()
+        negative_space_summary = str(lab.get("negative_space_summary") or "").strip()
+        forgiveness = _format_causal_lab_forgiveness(lab)
+        if ghost_note:
+            pieces.append(ghost_note)
+        if summary:
+            pieces.append(summary)
+        if resolution_status:
+            resolution = f"causal_lab_resolution={resolution_status}"
+            if resolution_summary:
+                resolution += f" ({resolution_summary})"
+            pieces.append(resolution)
+        if negative_space_summary:
+            pieces.append(f"causal_lab_negative_space={negative_space_summary}")
+        if forgiveness:
+            pieces.append(forgiveness)
     if not pieces:
         status_line = ""
     else:
@@ -188,7 +209,57 @@ def _format_agency_lines(envelope: BTSPProposalEnvelope) -> str:
         lines.append(f"Agency hypothesis: {envelope.agency_hypothesis}")
     if envelope.reason_codes:
         lines.append("Reason codes: " + ", ".join(envelope.reason_codes[:6]))
+    lab = envelope.causal_lab_v3
+    if lab:
+        ghost_note = str(lab.get("ghost_note") or "").strip()
+        summary = str(lab.get("summary") or "").strip()
+        resolution_status = str(lab.get("resolution_status") or "").strip()
+        resolution_summary = str(lab.get("resolution_summary") or "").strip()
+        negative_space_summary = str(lab.get("negative_space_summary") or "").strip()
+        forgiveness = _format_causal_lab_forgiveness(lab)
+        question = envelope.causal_lab_question or str(lab.get("question") or "").strip()
+        if ghost_note:
+            lines.append(f"Causal lab ghost: {ghost_note}")
+        if summary:
+            lines.append(f"Causal lab read: {summary}")
+        if resolution_status:
+            resolution = f"Causal lab resolution: {resolution_status}"
+            if resolution_summary:
+                resolution += f" ({resolution_summary})"
+            lines.append(resolution)
+        if negative_space_summary:
+            lines.append(f"Causal lab negative space: {negative_space_summary}")
+        if forgiveness:
+            lines.append(f"Causal lab forgiveness: {forgiveness}")
+        if question:
+            lines.append(f"Causal lab question: {question}")
     return ("\n".join(lines) + "\n") if lines else ""
+
+
+def _format_causal_lab_forgiveness(lab: dict) -> str:
+    forgiveness = lab.get("forgiveness_state") or {}
+    if not isinstance(forgiveness, dict):
+        return ""
+    status = str(forgiveness.get("remission_status") or "").strip()
+    summary = str(forgiveness.get("forgiveness_summary") or "").strip()
+    if not status and not summary:
+        return ""
+    score = forgiveness.get("remission_score")
+    weight = forgiveness.get("suppression_weight")
+    pieces = []
+    if status:
+        pieces.append(f"remission={status}")
+    if isinstance(score, (int, float)):
+        pieces.append(f"score={score:.2f}")
+    if isinstance(weight, (int, float)):
+        pieces.append(f"suppression_weight={weight:.2f}")
+    if summary:
+        pieces.append(summary)
+    if forgiveness.get("consentful_trial_eligible"):
+        pieces.append(
+            "ordinary duplicate remains withheld; consentful study/refusal/counter/new-evidence trial route is visible"
+        )
+    return " | ".join(pieces)
 
 
 def _is_study_first_observed_next(observed_next: str) -> bool:

@@ -40,6 +40,13 @@ class BTSPProposalEnvelope:
     reason_codes: tuple[str, ...] = ()
     lineage: tuple[str, ...] = ()
     evidence_window: dict[str, Any] = field(default_factory=dict)
+    replay_read: dict[str, Any] = field(default_factory=dict)
+    anti_loop_reason: str = ""
+    anti_loop_prompt: str = ""
+    anti_loop_routes: tuple[str, ...] = ()
+    causal_lab_v3: dict[str, Any] = field(default_factory=dict)
+    causal_lab_question: str = ""
+    causal_lab_routes: tuple[str, ...] = ()
     candidates: tuple[BTSPCandidate, ...] = ()
 
 
@@ -110,6 +117,25 @@ def proposal_envelope_from_dict(data: Any) -> Optional[BTSPProposalEnvelope]:
         evidence_window=(
             data.get("evidence_window") if isinstance(data.get("evidence_window"), dict) else {}
         ),
+        replay_read=(
+            data.get("replay_read") if isinstance(data.get("replay_read"), dict) else {}
+        ),
+        anti_loop_reason=str(data.get("anti_loop_reason") or ""),
+        anti_loop_prompt=str(data.get("anti_loop_prompt") or ""),
+        anti_loop_routes=tuple(
+            str(item)
+            for item in data.get("anti_loop_routes") or []
+            if str(item).strip()
+        ),
+        causal_lab_v3=(
+            data.get("causal_lab_v3") if isinstance(data.get("causal_lab_v3"), dict) else {}
+        ),
+        causal_lab_question=str(data.get("causal_lab_question") or ""),
+        causal_lab_routes=tuple(
+            str(item)
+            for item in data.get("causal_lab_routes") or []
+            if str(item).strip()
+        ),
         candidates=tuple(candidates),
     )
 
@@ -127,6 +153,13 @@ def proposal_envelope_to_dict(envelope: BTSPProposalEnvelope) -> dict[str, Any]:
         "reason_codes": list(envelope.reason_codes),
         "lineage": list(envelope.lineage),
         "evidence_window": envelope.evidence_window,
+        "replay_read": envelope.replay_read,
+        "anti_loop_reason": envelope.anti_loop_reason,
+        "anti_loop_prompt": envelope.anti_loop_prompt,
+        "anti_loop_routes": list(envelope.anti_loop_routes),
+        "causal_lab_v3": envelope.causal_lab_v3,
+        "causal_lab_question": envelope.causal_lab_question,
+        "causal_lab_routes": list(envelope.causal_lab_routes),
         "candidates": [
             {
                 "response_id": candidate.response_id,

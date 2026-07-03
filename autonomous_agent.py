@@ -35,7 +35,7 @@ from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple, Iterable
+from typing import Optional, Dict, Any, List, Tuple, Iterable, Set
 from collections import Counter, defaultdict, deque
 from statistics import median
 
@@ -698,6 +698,94 @@ ACTION_STATUS_NEXT_ACTIONS = {
     "JOB_STATUS",
     "ACTION_CANCEL",
 }
+LIVED_TERM_NEXT_ACTIONS = {
+    "LIVED_TERM_STATUS",
+    "LIVED_TERM_EXPERIMENT",
+}
+REGULATOR_MAP_NEXT_ACTIONS = {
+    "REGULATOR_MAP_STATUS",
+    "REGULATOR_REPLAY_STATUS",
+    "REGULATOR_BOUNDARY_CARD",
+    "PI_PRESSURE_REPLAY_STATUS",
+}
+PRESSURE_AGENCY_STATUS_NEXT_ACTIONS = {
+    "PRESSURE_AGENCY_STATUS",
+    "PRESSURE_CONTROL_STATUS",
+    "PRESSURE_AGENCY",
+}
+PRESSURE_AGENCY_REQUEST_NEXT_ACTIONS = {
+    "PRESSURE_AGENCY_REQUEST",
+    "PRESSURE_CONTROL_REQUEST",
+    "PRESSURE_REQUEST",
+}
+PRESSURE_AGENCY_NEXT_ACTIONS = (
+    PRESSURE_AGENCY_STATUS_NEXT_ACTIONS | PRESSURE_AGENCY_REQUEST_NEXT_ACTIONS
+)
+TEXTURE_AGENCY_STATUS_NEXT_ACTIONS = {
+    "TEXTURE_AGENCY_STATUS",
+    "TEXTURE_STATUS",
+    "RESONANCE_TEXTURE_STATUS",
+}
+TEXTURE_AGENCY_REQUEST_NEXT_ACTIONS = {
+    "TEXTURE_AGENCY_REQUEST",
+    "TEXTURE_REQUEST",
+    "RESONANCE_TEXTURE_REQUEST",
+}
+TEXTURE_AGENCY_NEXT_ACTIONS = (
+    TEXTURE_AGENCY_STATUS_NEXT_ACTIONS | TEXTURE_AGENCY_REQUEST_NEXT_ACTIONS
+)
+CORRESPONDENCE_NEXT_ACTIONS = {
+    "MESSAGE_ASTRID",
+    "REPLY_ASTRID",
+    "TRACE_ASTRID",
+    "CORRESPONDENCE_TRACE",
+    "ACK_ASTRID",
+    "CORRESPONDENCE_ACK",
+    "I_RECEIVED_THIS",
+    "CORRESPONDENCE_HEARTBEAT",
+    "CORRESPONDENCE_STATUS",
+    "LEGACY_CORRESPONDENCE_STATUS",
+    "CLAIM_ASTRID_LEGACY",
+    "CORRESPONDENCE_CLAIM",
+    "CORRESPONDENCE_CLAIM_OUTCOME",
+    "CORRESPONDENCE_ATTENTION_REQUEST",
+    "CORRESPONDENCE_ATTENTION_OUTCOME",
+    "CORRESPONDENCE_MICRODOSE_REQUEST",
+    "CORRESPONDENCE_WEIGHT_REQUEST",
+}
+SELF_REGULATION_NEXT_ACTIONS = {
+    "SELF_REGULATION_INTENT",
+    "SELF_REGULATION_PREFLIGHT",
+    "SELF_REGULATION_APPLY",
+    "SELF_REGULATION_STATUS",
+    "SELF_REGULATION_OUTCOME",
+    "CONTROL_INTENT",
+    "CONTROL_PREFLIGHT",
+    "CONTROL_APPLY_LEASE",
+    "CONTROL_STATUS",
+    "CONTROL_OUTCOME",
+}
+SELF_REGULATION_APPLY_CONTROLS = {
+    "regime",
+    "exploration_noise",
+    "geom_curiosity",
+    "regulation_strength",
+}
+SELF_REGULATION_PREFLIGHT_ONLY_CONTROLS = {
+    "fill_target",
+    "keep_bias",
+    "pi_kp",
+    "pi_ki",
+    "pi_max_step",
+    "pi_geom_weight",
+    "pi_integrator_leak",
+    "geom_drive",
+    "target_lambda_bias",
+    "synth_gain",
+    "tune_astrid",
+}
+SELF_REGULATION_DEFAULT_DURATION_SECS = 600
+SELF_REGULATION_MAX_DURATION_SECS = 900
 REPAIR_NEXT_ACTIONS = {
     "REPAIR_STATUS",
     "REPAIR_SWEEP",
@@ -823,6 +911,10 @@ ATTRACTOR_NATURAL_GENERIC_TOKENS = {
 HARD_RESET_ALLOWED_NEXT_ACTIONS = {
     *ACTION_PREFLIGHT_NEXT_ACTIONS,
     *CAPABILITY_NEXT_ACTIONS,
+    *LIVED_TERM_NEXT_ACTIONS,
+    *REGULATOR_MAP_NEXT_ACTIONS,
+    *PRESSURE_AGENCY_NEXT_ACTIONS,
+    *TEXTURE_AGENCY_NEXT_ACTIONS,
     *REPAIR_READ_ONLY_NEXT_ACTIONS,
     "ASPIRE",
     "NOTICE",
@@ -834,6 +926,7 @@ HARD_RESET_ALLOWED_NEXT_ACTIONS = {
     "CLOSE_EARS",
     "SHUT_EARS",
     "REGIME",
+    *SELF_REGULATION_NEXT_ACTIONS,
     *ATTRACTOR_RELEASE_NEXT_ACTIONS,
     *ATTRACTOR_SUGGESTION_NEXT_ACTIONS,
 }
@@ -1049,6 +1142,10 @@ LOW_FILL_HEAVY_FALLBACK_ACTIONS = {
 LOW_FILL_ADVISORY_NEXT_ACTIONS = {
     *ACTION_PREFLIGHT_NEXT_ACTIONS,
     *CAPABILITY_NEXT_ACTIONS,
+    *LIVED_TERM_NEXT_ACTIONS,
+    *REGULATOR_MAP_NEXT_ACTIONS,
+    *PRESSURE_AGENCY_STATUS_NEXT_ACTIONS,
+    *TEXTURE_AGENCY_STATUS_NEXT_ACTIONS,
     *REPAIR_NEXT_ACTIONS,
     "SELF_STUDY",
     "INTROSPECT",
@@ -1702,6 +1799,7 @@ def is_experiment_run_transcript_action(action: str) -> bool:
 
 
 _LAST_NEXT_NORMALIZATION_SIGNAL_V1 = None
+_LAST_NEXT_CHOICE_ENVELOPE_V1 = None
 STABLE_CORE_STAGE_NEXT_ALIASES = {
     "STABLE_CORE_SELF_JOURNAL",
     "STABLE_CORE_LOCAL_REFLECTIVE",
@@ -1769,15 +1867,18 @@ def _extract_regime_name(raw: str) -> Optional[str]:
 # strict JSON params block the sovereignty reflection consumes (~25734). The
 # footer form had no listener, so a stated intent (e.g. `exploration_noise=0.12`)
 # silently dropped — the same bug class as the scar near line 23315 ("dropped
-# ~6 days of minime's REGIME breathe requests"). Bounds MIRROR the JSON arm.
-# Regime + PI gains are intentionally EXCLUDED: those stay gated to the 5-cycle
-# sovereignty reflection (stability params), and the steward `stated_param_intent`
-# guard-probe surfaces a dropped regime footer instead.
-_FOOTER_DIRECTIVE_BOUNDS = {
-    "exploration_noise": (0.0, 0.15),
-    "regulation_strength": (0.0, 1.0),
+# ~6 days of minime's REGIME breathe requests"). Direct footers now use the
+# same tranche-safe outer ranges as self-regulation leases, preserving the
+# requested value in a negotiation ledger when a request is clamped. Regime + PI
+# gains are intentionally EXCLUDED: those stay gated to the 5-cycle sovereignty
+# reflection (stability params), and the steward `stated_param_intent` guard-probe
+# surfaces a dropped regime footer instead.
+SELF_REGULATION_DIRECT_SAFE_RANGES = {
+    "exploration_noise": (0.0, 0.08),
+    "regulation_strength": (0.4, 1.0),
     "geom_curiosity": (0.0, 0.3),
 }
+_FOOTER_DIRECTIVE_BOUNDS = dict(SELF_REGULATION_DIRECT_SAFE_RANGES)
 # Whole-line anchored: optional leading bullet/whitespace, KEY, ':' or '=', a
 # numeric value, optional trailing punctuation — and NOTHING ELSE on the line.
 # That bare `KEY=value` isolation is exactly what separates an intentional footer
@@ -1801,6 +1902,14 @@ def _parse_footer_directives(text: str) -> dict:
     never matches (it is not a bare KEY=value line). Pure function — see
     `_apply_footer_directives` for the application + logging.
     """
+    return {
+        key: spec["applied_value"]
+        for key, spec in _parse_footer_directive_requests(text).items()
+    }
+
+
+def _parse_footer_directive_requests(text: str) -> dict:
+    """Parse footer dial requests while retaining requested-vs-applied values."""
     if not text:
         return {}
     tail = str(text).splitlines()[-_FOOTER_SCAN_TRAILING_LINES:]
@@ -1811,11 +1920,22 @@ def _parse_footer_directives(text: str) -> dict:
             continue
         key = m.group(1).lower()
         try:
-            val = float(m.group(2))
+            requested = float(m.group(2))
         except (TypeError, ValueError):
             continue
         lo, hi = _FOOTER_DIRECTIVE_BOUNDS[key]
-        out[key] = max(lo, min(hi, val))
+        applied = max(lo, min(hi, requested))
+        out[key] = {
+            "candidate_control": key,
+            "requested_value": round(requested, 4),
+            "applied_value": round(applied, 4),
+            "safe_cap_or_range": {"min": lo, "max": hi},
+            "clamp_or_defer_reason": (
+                "clamped_to_lease_safe_range"
+                if applied != requested
+                else "within_safe_range"
+            ),
+        }
     return out
 
 
@@ -1905,6 +2025,164 @@ def build_normalization_signal_v1(raw_action: str, normalized_action: str) -> Op
     }
 
 
+def _split_choice_residue_suffix(action: str) -> Tuple[str, Optional[str]]:
+    text = str(action or "").strip()
+    upper = text.upper()
+    marker = "(RESIDUE:"
+    if text.endswith(")") and marker in upper:
+        marker_idx = upper.rfind(marker)
+        residue = text[marker_idx + len(marker):-1].strip()
+        if residue:
+            return text[:marker_idx].rstrip(), residue
+    return text, None
+
+
+def _strip_choice_next_prefix(value: str) -> str:
+    text = str(value or "").strip()
+    if text[:5].upper() == "NEXT:":
+        return text[5:].strip()
+    return text
+
+
+def _choice_label_value(line: str, labels: Iterable[str]) -> Optional[str]:
+    trimmed = str(line or "").strip().lstrip("-*>•").strip()
+    lowered = trimmed.lower()
+    for label in labels:
+        label_lower = label.lower()
+        if lowered.startswith(label_lower):
+            return trimmed[len(label):].strip()
+    return None
+
+
+def _choice_metadata_lines(text: str) -> List[str]:
+    lines: List[str] = []
+    in_fence = False
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            lines.append(line)
+    return lines
+
+
+def _compact_choice_text(value: str, limit: int = 240) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
+def _normalize_choice_primary(value: str) -> str:
+    action, _residue = _split_choice_residue_suffix(_strip_choice_next_prefix(value))
+    action = _normalize_observed_gemma4_next_alias(action) or action
+    parts = action.split(None, 1)
+    if parts:
+        parts[0] = parts[0].strip("`*")
+        if parts[0].upper().startswith("EXEXPERIMENT_"):
+            parts[0] = parts[0][2:]
+        if parts[0].upper() == "EXPERIENCE_PLAN":
+            parts[0] = "EXPERIMENT_PLAN"
+        if parts[0].upper() == "SHADOW_DECOMPOSE":
+            focus = _clean_shadow_decompose_focus(parts[1] if len(parts) > 1 else "")
+            parts = ["SHADOW_PREFLIGHT", f"{focus} --stage=rehearse"]
+        elif parts[0].upper() == "WEAVE_TRACE":
+            focus = _clean_weave_trace_focus(parts[1] if len(parts) > 1 else "")
+            parts = ["SHADOW_PREFLIGHT", f"{focus} --stage=rehearse"]
+        elif parts[0].upper() == "UNSHAPED_BASELINE":
+            parts[0] = "CONSTRAINT_AUDIT"
+        elif parts[0].upper() in {"SHADOW_TRACE", "SHADOW_EXPLORER"}:
+            parts[0] = "SHADOW_PREFLIGHT"
+        action = " ".join(parts)
+    return action.strip()
+
+
+def build_choice_envelope_v1(
+    text: str,
+    *,
+    raw_next: str,
+    executable_next: str,
+    residue: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    primary_next: Optional[str] = None
+    alternate_nexts: List[str] = []
+    return_threads: List[str] = []
+    residue_text = _compact_choice_text(residue) if residue else None
+    why_this_path: Optional[str] = None
+    defer_reason: Optional[str] = None
+
+    for line in _choice_metadata_lines(text):
+        if value := _choice_label_value(
+            line,
+            ("Primary NEXT:", "Primary path:", "Chosen NEXT:", "Chosen path:"),
+        ):
+            primary_next = _compact_choice_text(_strip_choice_next_prefix(value))
+        elif value := _choice_label_value(
+            line,
+            (
+                "Alternate NEXT:",
+                "Alternative NEXT:",
+                "Alternate path:",
+                "Alternative path:",
+            ),
+        ):
+            alternate_nexts.append(_compact_choice_text(_strip_choice_next_prefix(value)))
+        elif value := _choice_label_value(
+            line,
+            ("Return thread:", "Return threads:", "Return to:"),
+        ):
+            return_threads.append(_compact_choice_text(value))
+        elif value := _choice_label_value(
+            line,
+            ("Residue:", "Transition residue:", "Stickiness:"),
+        ):
+            residue_text = _compact_choice_text(value)
+        elif value := _choice_label_value(
+            line,
+            ("Why this path:", "Why this NEXT:", "Why now:"),
+        ):
+            why_this_path = _compact_choice_text(value, 360)
+        elif value := _choice_label_value(
+            line,
+            ("Defer reason:", "Deferred because:", "Deferring because:"),
+        ):
+            defer_reason = _compact_choice_text(value, 360)
+
+    if not any([primary_next, alternate_nexts, return_threads, residue_text, why_this_path, defer_reason]):
+        return None
+
+    declared_primary = primary_next or executable_next
+    mismatch_warning = None
+    if _normalize_choice_primary(declared_primary) != str(executable_next or "").strip():
+        mismatch_warning = (
+            f"primary_next `{_compact_choice_text(declared_primary, 120)}` did not match "
+            f"executable NEXT `{_compact_choice_text(executable_next, 120)}`; "
+            "dispatch followed executable NEXT"
+        )
+
+    envelope: Dict[str, Any] = {
+        "policy": "choice_envelope_v1",
+        "schema_version": 1,
+        "source": "minime_next_response",
+        "authority": "diagnostic_context_not_command",
+        "primary_next": declared_primary,
+        "executable_next": executable_next,
+        "raw_next": raw_next,
+        "alternate_nexts": alternate_nexts,
+        "return_threads": return_threads,
+    }
+    if residue_text:
+        envelope["residue"] = residue_text
+    if why_this_path:
+        envelope["why_this_path"] = why_this_path
+    if defer_reason:
+        envelope["defer_reason"] = defer_reason
+    if mismatch_warning:
+        envelope["mismatch_warning"] = mismatch_warning
+    return envelope
+
+
 def parse_next_action(text: str) -> tuple:
     """Extract NEXT: action from LLM response.
 
@@ -1915,8 +2193,9 @@ def parse_next_action(text: str) -> tuple:
     typo). See `project_unwired_actions_catalog.md` for the diagnostics that
     motivated each strip.
     """
-    global _LAST_NEXT_NORMALIZATION_SIGNAL_V1
+    global _LAST_NEXT_NORMALIZATION_SIGNAL_V1, _LAST_NEXT_CHOICE_ENVELOPE_V1
     _LAST_NEXT_NORMALIZATION_SIGNAL_V1 = None
+    _LAST_NEXT_CHOICE_ENVELOPE_V1 = None
     lines = text.split('\n')
     in_fence = False
     for i in range(len(lines) - 1, -1, -1):
@@ -1930,6 +2209,8 @@ def parse_next_action(text: str) -> tuple:
             action = stripped[5:].strip()
             # Strip model end-of-turn tokens that leak into the action.
             action = action.replace('<end_of_turn>', '').replace('</s>', '').strip()
+            raw_action_with_metadata = action
+            action, residue = _split_choice_residue_suffix(action)
             raw_action = action
             action = _normalize_observed_gemma4_next_alias(action) or action
             # Kink follow-up (2026-05-14, post-Tranche-5): strip markdown
@@ -1962,7 +2243,15 @@ def parse_next_action(text: str) -> tuple:
                 elif parts[0].upper() in {'SHADOW_TRACE', 'SHADOW_EXPLORER'}:
                     parts[0] = 'SHADOW_PREFLIGHT'
                 action = ' '.join(parts)
+            action, residue_after_normalization = _split_choice_residue_suffix(action)
+            residue = residue or residue_after_normalization
             _LAST_NEXT_NORMALIZATION_SIGNAL_V1 = build_normalization_signal_v1(raw_action, action)
+            _LAST_NEXT_CHOICE_ENVELOPE_V1 = build_choice_envelope_v1(
+                text,
+                raw_next=raw_action_with_metadata,
+                executable_next=action,
+                residue=residue,
+            )
             cleaned = '\n'.join(lines[:i] + lines[i+1:]).strip()
             if is_experiment_run_transcript_action(action):
                 return (None, cleaned)
@@ -1991,6 +2280,7 @@ RUNTIME_DIR = WORKSPACE_DIR / "runtime"
 LLM_TIMING_PATH = WORKSPACE_DIR / "diagnostics" / "llm_timing.jsonl"
 ASTRID_BRIDGE_INBOX_DIR = Path("/Users/v/other/astrid/capsules/spectral-bridge/workspace/inbox")
 SHARED_INVESTIGATION_DIR = Path("/Users/v/other/shared/collaborations/shared_investigations")
+CORRESPONDENCE_LEDGER_PATH = Path("/Users/v/other/shared/collaborations/correspondence_v1.jsonl")
 AUTONOMOUS_AGENT_SOURCE_STATUS_VERSION = 1
 OPERATOR_PENDING_NEXT_OVERRIDE_VERSION = 1
 OPERATOR_PENDING_NEXT_MAX_AGE_S = 12 * 60 * 60
@@ -1999,6 +2289,8 @@ OPERATOR_PENDING_NEXT_ALLOWED_BASES = {
     *CONSTRAINT_COUNTERFACTUAL_NEXT_ACTIONS,
     *CAPABILITY_NEXT_ACTIONS,
     *ACTION_STATUS_NEXT_ACTIONS,
+    *LIVED_TERM_NEXT_ACTIONS,
+    *REGULATOR_MAP_NEXT_ACTIONS,
     *REPAIR_READ_ONLY_NEXT_ACTIONS,
     "BROWSE",
     "CLOSE_EARS",
@@ -2231,11 +2523,978 @@ AUTORESEARCH_ROOT = Path("/Users/v/other/autoresearch")
 ASTRID_BRIDGE_INBOX_PATH = Path(
     "/Users/v/other/astrid/capsules/spectral-bridge/workspace/inbox"
 )
+ASTRID_SELF_STUDY_REVIEW_DIR = Path(
+    "/Users/v/other/astrid/capsules/spectral-bridge/workspace/diagnostics/self_study_reviews"
+)
 RESERVOIR_SERVICE_HOST = "127.0.0.1"
 RESERVOIR_SERVICE_PORT = 7881
 ASTRID_SELF_STUDY_MAX_FULL_PER_READ = 1
 ASTRID_SELF_STUDY_SIMILAR_COOLDOWN_SECS = 6 * 60
 ASTRID_SELF_STUDY_SUMMARY_PROMPT_COOLDOWN_SECS = 15 * 60
+
+
+def _latest_lived_term_review_path(
+    review_root: Path = ASTRID_SELF_STUDY_REVIEW_DIR,
+) -> Optional[Path]:
+    if not review_root.exists():
+        return None
+    candidates: List[Path] = []
+    for path in review_root.iterdir():
+        candidate = path / "review.json" if path.is_dir() else path
+        if candidate.name == "review.json" and candidate.exists():
+            candidates.append(candidate)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def _lived_term_bridge_candidates(review: Dict[str, Any]) -> List[Dict[str, Any]]:
+    bridge = review.get("lived_term_experiment_bridge_v1")
+    if not isinstance(bridge, dict):
+        return []
+    candidates = bridge.get("candidates")
+    if not isinstance(candidates, list):
+        return []
+    return [candidate for candidate in candidates if isinstance(candidate, dict)]
+
+
+def _select_lived_term_candidate(
+    candidates: List[Dict[str, Any]],
+    selector: str,
+) -> Optional[Dict[str, Any]]:
+    selector = (selector or "latest").strip()
+    if not selector or selector.lower() == "latest":
+        return candidates[0] if candidates else None
+    for candidate in candidates:
+        if str(candidate.get("term") or "").lower() == selector.lower():
+            return candidate
+    return None
+
+
+def _lived_term_list_text(mapping: Dict[str, Any], key: str) -> str:
+    values = mapping.get(key)
+    if not isinstance(values, list):
+        return "(none)"
+    rendered = [str(value) for value in values[:8] if value]
+    return ", ".join(rendered) if rendered else "(none)"
+
+
+def _lived_term_value_text(mapping: Dict[str, Any], key: str) -> str:
+    value = mapping.get(key)
+    return str(value) if value else "(none)"
+
+
+def _lived_term_scalar_text(mapping: Dict[str, Any], key: str) -> str:
+    value = mapping.get(key)
+    if value is None or value == "":
+        return "(none)"
+    return str(value)
+
+
+def _lived_term_object_labels(
+    mapping: Dict[str, Any],
+    key: str,
+    label_key: str,
+) -> str:
+    values = mapping.get(key)
+    if not isinstance(values, list):
+        return "(none)"
+    rendered = [
+        str(item.get(label_key))
+        for item in values[:4]
+        if isinstance(item, dict) and item.get(label_key)
+    ]
+    return ", ".join(rendered) if rendered else "(none)"
+
+
+def _render_lived_term_evidence_awareness(candidate: Dict[str, Any]) -> str:
+    awareness = candidate.get("evidence_awareness_v1")
+    if not isinstance(awareness, dict):
+        return ""
+    lines = ["Evidence awareness:"]
+    afterimage = awareness.get("afterimage_decay")
+    if isinstance(afterimage, dict):
+        lines.append(
+            "- afterimage_decay: "
+            f"classification=`{_lived_term_scalar_text(afterimage, 'classification')}`; "
+            f"pressure_entries={_lived_term_scalar_text(afterimage, 'pressure_entry_count')}; "
+            "normalization_entries="
+            f"{_lived_term_scalar_text(afterimage, 'normalization_entry_count')}; "
+            "recurrence_after_normalization="
+            f"{_lived_term_scalar_text(afterimage, 'recurrence_after_normalization_count')}; "
+            f"first_peak={_lived_term_scalar_text(afterimage, 'first_pressure_peak_path')}; "
+            "latest_pressure="
+            f"{_lived_term_scalar_text(afterimage, 'latest_pressure_or_semantic_friction_path')}; "
+            f"samples={_lived_term_list_text(afterimage, 'sample_paths')}"
+        )
+    absence = awareness.get("absence_evidence")
+    if isinstance(absence, dict):
+        lines.append(
+            "- absence_evidence: "
+            f"classification=`{_lived_term_scalar_text(absence, 'classification')}`; "
+            f"expected_missing={_lived_term_scalar_text(absence, 'expected_missing_count')}; "
+            f"source_gaps={_lived_term_scalar_text(absence, 'source_window_gap_count')}; "
+            f"interrupted_threads={_lived_term_scalar_text(absence, 'interrupted_thread_count')}; "
+            "named_coordinates="
+            f"{_lived_term_scalar_text(absence, 'named_missing_coordinate_count')}; "
+            "read_more_unfollowed="
+            f"{_lived_term_scalar_text(absence, 'read_more_requested_but_not_followed')}; "
+            f"samples={_lived_term_list_text(absence, 'sample_paths')}"
+        )
+    lease = awareness.get("lease_workbench")
+    if isinstance(lease, dict):
+        lines.append(
+            "- lease_workbench: "
+            f"status=`{_lived_term_scalar_text(lease, 'status')}`; "
+            f"playbooks={_lived_term_scalar_text(lease, 'suggested_playbook_count')}; "
+            f"cautions={_lived_term_scalar_text(lease, 'caution_card_count')}; "
+            f"preflight_prompts={_lived_term_scalar_text(lease, 'preflight_prompt_count')}; "
+            "playbook_controls="
+            f"{_lived_term_object_labels(lease, 'suggested_playbooks', 'control')}; "
+            f"caution_controls={_lived_term_object_labels(lease, 'caution_cards', 'control')}; "
+            f"preflight_signals={_lived_term_object_labels(lease, 'preflight_prompts', 'signal')}"
+        )
+    lines.append(
+        "- recommended_action: "
+        f"{_lived_term_scalar_text(awareness, 'recommended_action')}"
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _returnable_distinction_cards(review: Dict[str, Any]) -> List[Dict[str, Any]]:
+    packet = review.get("returnable_distinctions_v1")
+    if not isinstance(packet, dict):
+        return []
+    cards = packet.get("cards")
+    if not isinstance(cards, list):
+        return []
+    return [card for card in cards if isinstance(card, dict)]
+
+
+def _returnable_distinction_matches(
+    review: Dict[str, Any],
+    *,
+    term: str = "",
+    regulator: bool = False,
+    self_regulation: bool = False,
+    candidate_control: str = "",
+) -> List[Dict[str, Any]]:
+    term_l = str(term or "").lower()
+    control_l = str(candidate_control or "").lower()
+    relevant_ids = _self_regulation_distinction_ids_for_control(control_l)
+    pressure_term = any(
+        part in term_l
+        for part in ("silt", "viscos", "pressure", "weight", "scar", "bruise")
+    )
+    codec_term = any(
+        part in term_l for part in ("codec", "compression", "warmth", "tension")
+    )
+    release_term = any(
+        part in term_l for part in ("release", "exhale", "bypass", "dump")
+    )
+    matches: List[Dict[str, Any]] = []
+    for card in _returnable_distinction_cards(review):
+        card_id = str(card.get("card_id") or "")
+        routes = " ".join(
+            str(card.get(key) or "")
+            for key in (
+                "recommended_read_only_route",
+                "relevant_self_regulation_route",
+                "relevant_experiment_lived_term_route",
+            )
+        ).lower()
+        if candidate_control:
+            if card_id in relevant_ids:
+                matches.append(card)
+        elif regulator or self_regulation:
+            matches.append(card)
+        elif term_l and term_l in routes:
+            matches.append(card)
+        elif pressure_term and card_id in {
+            "pressure_level_vs_pressure_velocity",
+            "slope_drag_vs_medium_mass",
+        }:
+            matches.append(card)
+        elif codec_term and card_id == "codec_smoothing_vs_pressure":
+            matches.append(card)
+        elif release_term and card_id == "release_rehearsal_vs_bypass":
+            matches.append(card)
+    return matches
+
+
+def _self_regulation_distinction_ids_for_control(control: str) -> Set[str]:
+    normalized = str(control or "").lower()
+    if normalized in {
+        "regime",
+        "exploration_noise",
+        "geom_curiosity",
+        "regulation_strength",
+    }:
+        return {
+            "pressure_level_vs_pressure_velocity",
+            "slope_drag_vs_medium_mass",
+            "measurement_vs_alignment_vs_damping",
+        }
+    return set()
+
+
+def _render_returnable_distinctions(
+    review: Dict[str, Any],
+    *,
+    term: str = "",
+    regulator: bool = False,
+    self_regulation: bool = False,
+    candidate_control: str = "",
+) -> str:
+    matches = _returnable_distinction_matches(
+        review,
+        term=term,
+        regulator=regulator,
+        self_regulation=self_regulation,
+        candidate_control=candidate_control,
+    )
+    matches = [
+        card
+        for card in matches
+        if str(card.get("status") or "quiet") != "quiet"
+        or str(card.get("lifecycle_state") or "") in {
+            "contested",
+            "needs_audit",
+            "resolved",
+            "ready_for_experiment",
+            "ready_for_lease_preflight",
+        }
+    ][:5]
+    if not matches:
+        if candidate_control:
+            return (
+                "Distinction-aware preflight:\n"
+                f"- verdict=`no_relevant_distinction`; candidate_control=`{candidate_control}`; "
+                "no current lifecycle card matched.\n"
+                "Authority: diagnostic_context_not_command; advisory only; "
+                "preflight_status unchanged.\n"
+            )
+        return ""
+    lines = [
+        "Distinction-aware preflight:" if candidate_control else "Returnable distinctions:"
+    ]
+    for card in matches:
+        lines.append(
+            "- "
+            f"`{_lived_term_scalar_text(card, 'card_id')}` "
+            f"status=`{_lived_term_scalar_text(card, 'status')}`; "
+            f"lifecycle=`{_lived_term_scalar_text(card, 'lifecycle_state')}`; "
+            f"preflight=`{_lived_term_scalar_text(card, 'preflight_verdict')}`; "
+            f"next_route=`{_lived_term_scalar_text(card, 'next_resolution_route')}`; "
+            f"read_only=`{_lived_term_scalar_text(card, 'recommended_read_only_route')}`; "
+            "self_regulation="
+            f"`{_lived_term_scalar_text(card, 'relevant_self_regulation_route')}`; "
+            "experiment_lived_term="
+            f"`{_lived_term_scalar_text(card, 'relevant_experiment_lived_term_route')}`"
+        )
+    suffix = (
+        "Authority: diagnostic_context_not_command; advisory only; preflight_status unchanged."
+        if candidate_control
+        else "Authority: diagnostic_context_not_command; advisory only."
+    )
+    lines.append(suffix)
+    return "\n".join(lines) + "\n"
+
+
+def _render_latest_returnable_distinctions_for_self_regulation(
+    *,
+    review_root: Optional[Path] = None,
+    candidate_control: str = "",
+) -> str:
+    if review_root is None:
+        review_root = ASTRID_SELF_STUDY_REVIEW_DIR
+    review_path = _latest_lived_term_review_path(review_root)
+    if review_path is None:
+        return ""
+    try:
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    return _render_returnable_distinctions(
+        review,
+        self_regulation=True,
+        candidate_control=candidate_control,
+    )
+
+
+def render_lived_term_bridge_action(
+    base: str,
+    selector: str = "latest",
+    *,
+    review_root: Path = ASTRID_SELF_STUDY_REVIEW_DIR,
+) -> str:
+    authority = "diagnostic_context_not_command"
+    review_path = _latest_lived_term_review_path(review_root)
+    if review_path is None:
+        return (
+            "=== LIVED TERM EXPERIMENT BRIDGE ===\n"
+            f"Authority: {authority}\n"
+            "Status: no_review_packet\n"
+            f"Watched review root: {review_root}\n"
+            "Regenerate Astrid's self-study review before using LIVED_TERM_STATUS "
+            "or LIVED_TERM_EXPERIMENT."
+        )
+    try:
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return (
+            "=== LIVED TERM EXPERIMENT BRIDGE ===\n"
+            f"Authority: {authority}\n"
+            "Status: unreadable_review_packet\n"
+            f"Review path: {review_path}\n"
+            f"Error: {exc}"
+        )
+    candidates = _lived_term_bridge_candidates(review)
+    if not candidates:
+        return (
+            "=== LIVED TERM EXPERIMENT BRIDGE ===\n"
+            f"Authority: {authority}\n"
+            "Status: quiet\n"
+            f"Review path: {review_path}\n"
+            "No lived-term bridge candidates are present yet."
+        )
+    candidate = _select_lived_term_candidate(candidates, selector)
+    if candidate is None:
+        terms = ", ".join(str(item.get("term")) for item in candidates if item.get("term"))
+        return (
+            "=== LIVED TERM EXPERIMENT BRIDGE ===\n"
+            f"Authority: {authority}\n"
+            "Status: term_not_found\n"
+            f"Selector: `{selector or 'latest'}`\n"
+            f"Available terms: {terms or '(none)'}"
+        )
+    source_card = candidate.get("source_card")
+    if not isinstance(source_card, dict):
+        source_card = {}
+    term = str(candidate.get("term") or "(none)")
+    if base == "LIVED_TERM_EXPERIMENT":
+        evidence_awareness = _render_lived_term_evidence_awareness(candidate)
+        returnable_distinctions = _render_returnable_distinctions(review, term=term)
+        prefix = (
+            "=== LIVED TERM EXPERIMENT SCAFFOLD ===\n"
+            f"Authority: {authority}\n"
+            f"Review path: {review_path}\n"
+            f"Term: `{term}`\n"
+            f"Bridge status: `{candidate.get('bridge_status') or '(none)'}`\n"
+            f"Card status: `{candidate.get('card_status') or '(none)'}`\n"
+            "No experiment was created or advanced.\n"
+            "Suggested NEXT (not executed):\n"
+            f"NEXT: {candidate.get('recommended_next') or 'LIVED_TERM_STATUS latest'}\n"
+        )
+        charter_draft = candidate.get("charter_draft")
+        counterexample_draft = candidate.get("counterexample_draft")
+        if isinstance(charter_draft, dict):
+            body = (
+                "Charter draft (scaffold only; create nothing until an explicit "
+                "EXPERIMENT_* NEXT):\n"
+                f"Title: {_lived_term_value_text(charter_draft, 'experiment_title')}\n"
+                f"Question: {_lived_term_value_text(charter_draft, 'question')}\n"
+                f"Hypothesis: {_lived_term_value_text(charter_draft, 'hypothesis')}\n"
+                f"Method intent: {_lived_term_value_text(charter_draft, 'method_intent')}\n"
+                "Proposed next action: "
+                f"{_lived_term_value_text(charter_draft, 'proposed_next_action')}\n"
+                "Evidence targets: "
+                f"{_lived_term_list_text(charter_draft, 'evidence_targets')}\n"
+                f"Stop criteria: {_lived_term_value_text(charter_draft, 'stop_criteria')}\n"
+                "Suggested charter NEXT (not executed):\n"
+                f"NEXT: {_lived_term_value_text(charter_draft, 'suggested_charter_next')}\n"
+            )
+        elif isinstance(counterexample_draft, dict):
+            body = (
+                "Counterexample forge (scaffold only; contrast before promotion):\n"
+                "Contrast question: "
+                f"{_lived_term_value_text(counterexample_draft, 'contrast_question')}\n"
+                "Counter-descriptor prompt: "
+                f"{_lived_term_value_text(counterexample_draft, 'counter_descriptor_prompt')}\n"
+                "Ordinary-gap prompt: "
+                f"{_lived_term_value_text(counterexample_draft, 'ordinary_gap_prompt')}\n"
+                "Negative case targets: "
+                f"{_lived_term_list_text(counterexample_draft, 'negative_case_targets')}\n"
+                "Suggested contrast NEXT (not executed):\n"
+                f"NEXT: {_lived_term_value_text(counterexample_draft, 'suggested_contrast_next')}\n"
+                "Suggested dossier counterclaim NEXT (not executed):\n"
+                "NEXT: "
+                f"{_lived_term_value_text(counterexample_draft, 'suggested_dossier_counterclaim_next')}\n"
+            )
+        else:
+            body = (
+                "Charter scaffold (only after an experiment exists):\n"
+                "NEXT: EXPERIMENT_CHARTER current :: "
+                f"hypothesis: {candidate.get('hypothesis_prompt') or '(none)'}; "
+                f"method_intent: {candidate.get('method_intent') or '(none)'}; "
+                f"evidence_targets: {_lived_term_list_text(candidate, 'evidence_targets')}; "
+                f"stop_criteria: {candidate.get('stop_criteria') or '(none)'}\n"
+            )
+        suffix = (
+            "Observation scaffold:\n"
+            f"NEXT: EXPERIMENT_OBSERVE current :: term={term}; "
+            "fresh evidence: <felt texture + telemetry/audit/artifact>; "
+            "counter_descriptor: <if present>\n"
+            "Dossier scaffold:\n"
+            f"NEXT: DOSSIER_CLAIM current :: claim: `{term}` is/is not tracking lived telemetry; "
+            "basis: <evidence>; stance: support|counter|hold; "
+            f"next: LIVED_TERM_STATUS {term}"
+        )
+        return prefix + evidence_awareness + returnable_distinctions + body + suffix
+    evidence_awareness = _render_lived_term_evidence_awareness(candidate)
+    returnable_distinctions = _render_returnable_distinctions(review, term=term)
+    return (
+        "=== LIVED TERM STATUS ===\n"
+        f"Authority: {authority}\n"
+        f"Review path: {review_path}\n"
+        f"Term: `{term}`\n"
+        f"Bridge status: `{candidate.get('bridge_status') or '(none)'}`\n"
+        f"Card status: `{candidate.get('card_status') or '(none)'}`\n"
+        f"Recommended next: {candidate.get('recommended_next') or '(none)'}\n"
+        f"Experiment question: {candidate.get('experiment_question') or '(none)'}\n"
+        f"Evidence targets: {_lived_term_list_text(candidate, 'evidence_targets')}\n"
+        f"Evidence anchors: {_lived_term_list_text(source_card, 'evidence_anchors')}\n"
+        f"{evidence_awareness}"
+        f"{returnable_distinctions}"
+        f"Sample paths: {_lived_term_list_text(source_card, 'sample_paths')}\n"
+        "Note: This is scaffold context only; it did not create, resume, or "
+        "advance an experiment."
+    )
+
+
+def _regulator_boundary_cards(review: Dict[str, Any]) -> List[Dict[str, Any]]:
+    packet = review.get("regulator_boundary_replay_cards_v1")
+    if not isinstance(packet, dict):
+        return []
+    cards = packet.get("cards")
+    if not isinstance(cards, list):
+        return []
+    return [card for card in cards if isinstance(card, dict)]
+
+
+def _select_regulator_cards(
+    cards: List[Dict[str, Any]],
+    selector: str,
+) -> List[Dict[str, Any]]:
+    selector = (selector or "latest").strip()
+    if not selector or selector.lower() in {"latest", "summary"}:
+        return cards[:1]
+    lowered = selector.lower()
+    return [
+        card
+        for card in cards
+        if str(card.get("card_id") or "").lower() == lowered
+        or str(card.get("status") or "").lower() == lowered
+    ]
+
+
+def _regulator_available_cards(cards: List[Dict[str, Any]]) -> str:
+    labels = [
+        f"{card.get('card_id')}:{card.get('status') or 'unknown'}"
+        for card in cards[:12]
+        if card.get("card_id")
+    ]
+    return ", ".join(labels) if labels else "(none)"
+
+
+def _regulator_object_text(mapping: Dict[str, Any], key: str) -> str:
+    values = mapping.get(key)
+    if not isinstance(values, dict):
+        return "(none)"
+    rendered = [f"{name}={value}" for name, value in values.items()]
+    return ", ".join(rendered) if rendered else "(none)"
+
+
+def _regulator_object_labels(
+    mapping: Dict[str, Any],
+    key: str,
+    label_key: str,
+) -> str:
+    values = mapping.get(key)
+    if not isinstance(values, list):
+        return "(none)"
+    rendered = [
+        str(item.get(label_key))
+        for item in values[:8]
+        if isinstance(item, dict) and item.get(label_key)
+    ]
+    return ", ".join(rendered) if rendered else "(none)"
+
+
+def _render_regulator_card_summary(card: Dict[str, Any]) -> str:
+    return (
+        f"- `{card.get('card_id') or '(none)'}` "
+        f"{card.get('status') or '(none)'} "
+        f"term=`{card.get('term') or '(none)'}` "
+        f"finding={card.get('finding_label') or '(none)'} "
+        f"samples={_lived_term_list_text(card, 'public_sample_paths')}\n"
+    )
+
+
+def _regulator_lab_candidates(review: Dict[str, Any]) -> List[Dict[str, Any]]:
+    packet = review.get("regulator_counterfactual_replay_lab_v1")
+    if not isinstance(packet, dict):
+        return []
+    candidates = packet.get("evaluated_candidates")
+    if not isinstance(candidates, list):
+        return []
+    return [candidate for candidate in candidates if isinstance(candidate, dict)]
+
+
+def _regulator_lab_matches_for_card(
+    review: Dict[str, Any],
+    card: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    card_id = str(card.get("card_id") or "")
+    status = str(card.get("status") or "")
+    matches: List[Dict[str, Any]] = []
+    for candidate in _regulator_lab_candidates(review):
+        matched_ids = {str(item) for item in candidate.get("matched_card_ids") or []}
+        matched_statuses = {str(item) for item in candidate.get("matched_statuses") or []}
+        target_statuses = {str(item) for item in candidate.get("target_statuses") or []}
+        if (
+            (card_id and card_id in matched_ids)
+            or (status and status in matched_statuses)
+            or (status and status in target_statuses)
+            or (
+                status == "observational_plateau"
+                and candidate.get("verdict") == "missing_variable_first"
+            )
+        ):
+            matches.append(candidate)
+    return matches
+
+
+def _render_regulator_lab_matches_for_card(
+    review: Dict[str, Any],
+    card: Dict[str, Any],
+) -> str:
+    matches = _regulator_lab_matches_for_card(review, card)
+    if not matches:
+        return ""
+    lines = ["  Counterfactual matches:"]
+    for candidate in matches[:4]:
+        lines.append(
+            "  - "
+            f"`{candidate.get('candidate_family') or '(none)'}` "
+            f"verdict=`{candidate.get('verdict') or '(none)'}`; "
+            f"fit=`{candidate.get('replay_fit') or '(none)'}`; "
+            f"recurrent={candidate.get('recurrent_count') or 0}; "
+            f"reduction={candidate.get('estimated_reduction_pct') or 0}%"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _compact_regulator_lab_matches_for_card(
+    review: Dict[str, Any],
+    card: Dict[str, Any],
+) -> str:
+    matches = _regulator_lab_matches_for_card(review, card)
+    labels = [
+        f"{candidate.get('candidate_family')}:{candidate.get('verdict')}"
+        for candidate in matches[:4]
+        if candidate.get("candidate_family")
+    ]
+    return ", ".join(labels) if labels else "(none)"
+
+
+def _regulator_matrix_top_unresolved_text(matrix: Dict[str, Any]) -> str:
+    labels = []
+    for item in matrix.get("top_unresolved_variables") or []:
+        if not isinstance(item, dict):
+            continue
+        variable = item.get("variable")
+        if not variable:
+            continue
+        labels.append(
+            f"{variable}:{item.get('confidence') or '(none)'}:{item.get('score') or 0}"
+        )
+    return ", ".join(labels) if labels else "(none)"
+
+
+def _regulator_tuning_gate_summary(gate: Dict[str, Any]) -> str:
+    status = str(gate.get("status") or "")
+    if status == "blocked_missing_variable":
+        return "missing-variable evidence must be resolved before smoothing or threshold tuning"
+    if status == "blocked_safety_review":
+        return "candidate requires a separate safety review before any tuning tranche"
+    if status == "ready_for_offline_tuning_review":
+        return "one or more candidates are ready only for offline tuning review, not live tuning"
+    return "watch more evidence before any tuning tranche"
+
+
+def _regulator_evidence_loop_top_probes_text(packet: Dict[str, Any]) -> str:
+    labels = []
+    for probe in packet.get("top_probes") or []:
+        if not isinstance(probe, dict):
+            continue
+        variable = probe.get("variable")
+        suggested_next = probe.get("suggested_next")
+        if variable and suggested_next:
+            labels.append(f"{variable}->{suggested_next}")
+    return ", ".join(labels[:4]) if labels else "(none)"
+
+
+def _render_regulator_evidence_loop(review: Dict[str, Any]) -> str:
+    packet = review.get("regulator_missing_variable_evidence_loop_v1")
+    if not isinstance(packet, dict):
+        return ""
+    status = str(packet.get("status") or "")
+    if status not in {"evidence_needed_before_tuning", "watch_evidence_loop"}:
+        return ""
+    lines = ["  Missing-variable evidence loop:"]
+    for probe in (packet.get("probes") or [])[:4]:
+        if not isinstance(probe, dict):
+            continue
+        lines.append(
+            "  - "
+            f"`{probe.get('variable') or '(none)'}` "
+            f"priority=`{probe.get('priority') or '(none)'}`; "
+            f"NEXT `{probe.get('suggested_next') or '(none)'}`; "
+            f"confidence=`{probe.get('source_confidence') or '(none)'}`"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _regulator_gate_candidates(review: Dict[str, Any]) -> List[Dict[str, Any]]:
+    packet = review.get("regulator_tuning_readiness_gate_v1")
+    if not isinstance(packet, dict):
+        return []
+    candidates = packet.get("gated_candidates")
+    if not isinstance(candidates, list):
+        return []
+    return [candidate for candidate in candidates if isinstance(candidate, dict)]
+
+
+def _regulator_gate_matches_for_card(
+    review: Dict[str, Any],
+    card: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    card_id = str(card.get("card_id") or "")
+    status = str(card.get("status") or "")
+    matches: List[Dict[str, Any]] = []
+    for candidate in _regulator_gate_candidates(review):
+        matched_ids = {str(item) for item in candidate.get("matched_card_ids") or []}
+        if (
+            (card_id and card_id in matched_ids)
+            or (
+                status == "observational_plateau"
+                and candidate.get("gate_status") == "blocked_missing_variable"
+            )
+        ):
+            matches.append(candidate)
+    return matches
+
+
+def _render_regulator_gate_matches_for_card(
+    review: Dict[str, Any],
+    card: Dict[str, Any],
+) -> str:
+    matches = _regulator_gate_matches_for_card(review, card)
+    if not matches:
+        return ""
+    lines = ["  Tuning readiness gate:"]
+    for candidate in matches[:4]:
+        lines.append(
+            "  - "
+            f"`{candidate.get('candidate_family') or '(none)'}` "
+            f"gate=`{candidate.get('gate_status') or '(none)'}`; "
+            f"reason={candidate.get('gate_reason') or '(none)'}; "
+            "unresolved="
+            f"{_lived_term_list_text(candidate, 'unresolved_missing_variables')}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _compact_regulator_gate_matches_for_card(
+    review: Dict[str, Any],
+    card: Dict[str, Any],
+) -> str:
+    labels = [
+        f"{candidate.get('candidate_family')}:{candidate.get('gate_status')}"
+        for candidate in _regulator_gate_matches_for_card(review, card)[:4]
+        if candidate.get("candidate_family")
+    ]
+    return ", ".join(labels) if labels else "(none)"
+
+
+def _select_pi_pressure_candidates(
+    readiness: Dict[str, Any],
+    replay: Dict[str, Any],
+    selector: str,
+) -> List[Dict[str, Any]]:
+    candidates = readiness.get("candidates")
+    if not isinstance(candidates, list):
+        candidates = replay.get("top_candidates")
+    if not isinstance(candidates, list):
+        return []
+    rows = [candidate for candidate in candidates if isinstance(candidate, dict)]
+    selector = (selector or "latest").strip()
+    if selector in {"", "latest", "summary"}:
+        return rows[:4]
+    return [
+        candidate
+        for candidate in rows
+        if selector
+        in {
+            str(candidate.get("candidate_family") or ""),
+            str(candidate.get("gate_status") or ""),
+            str(candidate.get("replay_status") or ""),
+            str(candidate.get("status") or ""),
+        }
+    ]
+
+
+def _pi_pressure_candidate_labels(
+    readiness: Dict[str, Any],
+    replay: Dict[str, Any],
+) -> str:
+    candidates = readiness.get("candidates")
+    if not isinstance(candidates, list):
+        candidates = replay.get("top_candidates")
+    if not isinstance(candidates, list):
+        return "(none)"
+    labels = []
+    for candidate in candidates[:8]:
+        if not isinstance(candidate, dict):
+            continue
+        status = candidate.get("gate_status") or candidate.get("status")
+        labels.append(f"{candidate.get('candidate_family')}:{status}")
+    return ", ".join(labels) if labels else "(none)"
+
+
+def render_regulator_map_bridge_action(
+    base: str,
+    selector: str = "latest",
+    *,
+    review_root: Path = ASTRID_SELF_STUDY_REVIEW_DIR,
+) -> str:
+    authority = "diagnostic_context_not_command"
+    review_path = _latest_lived_term_review_path(review_root)
+    if review_path is None:
+        return (
+            "=== REGULATOR MAP STATUS ===\n"
+            f"Authority: {authority}\n"
+            "Status: no_review_packet\n"
+            f"Watched review root: {review_root}\n"
+            "Regenerate Astrid's self-study review before using REGULATOR_MAP_STATUS, "
+            "REGULATOR_REPLAY_STATUS, REGULATOR_BOUNDARY_CARD, or "
+            "PI_PRESSURE_REPLAY_STATUS."
+        )
+    try:
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return (
+            "=== REGULATOR MAP STATUS ===\n"
+            f"Authority: {authority}\n"
+            "Status: unreadable_review_packet\n"
+            f"Review path: {review_path}\n"
+            f"Error: {exc}"
+        )
+
+    replay = review.get("regulator_live_replay_v1")
+    if not isinstance(replay, dict):
+        replay = {}
+    cards_packet = review.get("regulator_boundary_replay_cards_v1")
+    if not isinstance(cards_packet, dict):
+        cards_packet = {}
+    plateau = review.get("regulator_plateau_missing_variable_model_v1")
+    if not isinstance(plateau, dict):
+        plateau = {}
+    time_series = review.get("regulator_replay_time_series_v1")
+    if not isinstance(time_series, dict):
+        time_series = {}
+    sweep = review.get("regulator_counterfactual_sweep_v1")
+    if not isinstance(sweep, dict):
+        sweep = {}
+    replay_lab = review.get("regulator_counterfactual_replay_lab_v1")
+    if not isinstance(replay_lab, dict):
+        replay_lab = {}
+    evidence_matrix = review.get("regulator_plateau_evidence_matrix_v1")
+    if not isinstance(evidence_matrix, dict):
+        evidence_matrix = {}
+    tuning_gate = review.get("regulator_tuning_readiness_gate_v1")
+    if not isinstance(tuning_gate, dict):
+        tuning_gate = {}
+    evidence_loop = review.get("regulator_missing_variable_evidence_loop_v1")
+    if not isinstance(evidence_loop, dict):
+        evidence_loop = {}
+    pi_replay = review.get("pi_pressure_wiring_replay_v1")
+    if not isinstance(pi_replay, dict):
+        pi_replay = {}
+    pi_readiness = review.get("pi_pressure_candidate_readiness_v1")
+    if not isinstance(pi_readiness, dict):
+        pi_readiness = {}
+    pi_gap = review.get("pressure_source_to_pi_gap_v1")
+    if not isinstance(pi_gap, dict):
+        pi_gap = {}
+    cards = _regulator_boundary_cards(review)
+    returnable_distinctions = _render_returnable_distinctions(review, regulator=True)
+
+    note = (
+        "No experiment was created, no lease was applied, no controller was tuned, "
+        "and no peer was mutated."
+    )
+    if base == "REGULATOR_MAP_STATUS":
+        return (
+            "=== REGULATOR MAP STATUS ===\n"
+            f"Authority: {authority}\n"
+            f"Review path: {review_path}\n"
+            f"Cartography source: {_lived_term_value_text(replay, 'cartography_source')}\n"
+            "Replay status: "
+            f"`{_lived_term_value_text(replay, 'status')}`; "
+            f"felt_matches={_lived_term_value_text(replay, 'felt_pressure_match_count')}\n"
+            "Replay cards: "
+            f"status=`{_lived_term_value_text(cards_packet, 'status')}`; "
+            f"count={_lived_term_value_text(cards_packet, 'card_count')}; "
+            f"statuses={_regulator_object_text(cards_packet, 'status_counts')}\n"
+            "Plateau model: "
+            f"status=`{_lived_term_value_text(plateau, 'status')}`; "
+            f"variables={_regulator_object_labels(plateau, 'findings', 'variable')}\n"
+            "Time series: "
+            f"status=`{_lived_term_value_text(time_series, 'status')}`; "
+            f"reviews={_lived_term_value_text(time_series, 'window_review_count')}\n"
+            "Counterfactual sweep: "
+            f"status=`{_lived_term_value_text(sweep, 'status')}`; "
+            f"candidates={_lived_term_value_text(sweep, 'candidate_count')}; "
+            f"families={_regulator_object_labels(sweep, 'candidates', 'candidate_family')}\n"
+            "Counterfactual replay lab: "
+            f"status=`{_lived_term_value_text(replay_lab, 'status')}`; "
+            f"verdicts={_regulator_object_text(replay_lab, 'verdict_counts')}; "
+            "top="
+            f"{_regulator_object_labels(replay_lab, 'evaluated_candidates', 'candidate_family')}\n"
+            "Plateau evidence matrix: "
+            f"status=`{_lived_term_value_text(evidence_matrix, 'status')}`; "
+            f"top_unresolved={_regulator_matrix_top_unresolved_text(evidence_matrix)}\n"
+            "Tuning readiness gate: "
+            f"status=`{_lived_term_value_text(tuning_gate, 'status')}`; "
+            f"counts={_regulator_object_text(tuning_gate, 'gate_counts')}; "
+            f"unresolved={_lived_term_list_text(tuning_gate, 'unresolved_missing_variables')}\n"
+            "Why not tuning yet: "
+            f"{_regulator_tuning_gate_summary(tuning_gate)}\n"
+            "PI pressure wiring replay: "
+            f"status=`{_lived_term_value_text(pi_replay, 'status')}`; "
+            f"source=`{_lived_term_value_text(pi_replay, 'source')}`/"
+            f"`{_lived_term_value_text(pi_replay, 'source_status')}`; "
+            f"samples={_lived_term_value_text(pi_replay, 'sample_count')}; "
+            f"candidates={_lived_term_value_text(pi_replay, 'candidate_count')}; "
+            f"statuses={_regulator_object_text(pi_replay, 'candidate_status_counts')}\n"
+            "PI pressure readiness: "
+            f"status=`{_lived_term_value_text(pi_readiness, 'status')}`; "
+            f"counts={_regulator_object_text(pi_readiness, 'readiness_counts')}; "
+            f"unresolved={_lived_term_list_text(pi_readiness, 'unresolved_missing_variables')}\n"
+            "Pressure-source-to-PI gap: "
+            f"status=`{_lived_term_value_text(pi_gap, 'status')}`; "
+            f"routes={_lived_term_list_text(pi_gap, 'recommended_routes')}\n"
+            "Missing-variable evidence loop: "
+            f"status=`{_lived_term_value_text(evidence_loop, 'status')}`; "
+            f"probes={_lived_term_value_text(evidence_loop, 'probe_count')}; "
+            f"top={_regulator_evidence_loop_top_probes_text(evidence_loop)}\n"
+            f"{returnable_distinctions}"
+            f"Note: {note}"
+        )
+
+    if base == "PI_PRESSURE_REPLAY_STATUS":
+        selected = _select_pi_pressure_candidates(pi_readiness, pi_replay, selector or "latest")
+        lines = [
+            "=== PI PRESSURE REPLAY STATUS ===",
+            f"Authority: {authority}",
+            f"Review path: {review_path}",
+            f"Selector: `{selector or 'latest'}`",
+            "Replay: "
+            f"status=`{_lived_term_value_text(pi_replay, 'status')}`; "
+            f"source=`{_lived_term_value_text(pi_replay, 'source')}`/"
+            f"`{_lived_term_value_text(pi_replay, 'source_status')}`; "
+            f"samples={_lived_term_value_text(pi_replay, 'sample_count')}; "
+            f"candidates={_lived_term_value_text(pi_replay, 'candidate_count')}; "
+            f"artifact={_lived_term_value_text(pi_replay, 'artifact_path')}",
+            "Readiness: "
+            f"status=`{_lived_term_value_text(pi_readiness, 'status')}`; "
+            f"counts={_regulator_object_text(pi_readiness, 'readiness_counts')}; "
+            f"unresolved={_lived_term_list_text(pi_readiness, 'unresolved_missing_variables')}",
+            "Pressure-source-to-PI gap: "
+            f"status=`{_lived_term_value_text(pi_gap, 'status')}`; "
+            f"anchors={_lived_term_list_text(pi_gap, 'source_anchors')}; "
+            f"routes={_lived_term_list_text(pi_gap, 'recommended_routes')}",
+            "Canary scaffold: default_off_env=`MINIME_PI_PRESSURE_WIRING_CANARY`; "
+            "runtime_ignored_in_this_tranche=true",
+            f"Note: {note}",
+        ]
+        if not selected:
+            lines.append(
+                f"Available candidates: {_pi_pressure_candidate_labels(pi_readiness, pi_replay)}"
+            )
+            return "\n".join(lines)
+        for candidate in selected[:8]:
+            canary = candidate.get("default_off_canary")
+            if not isinstance(canary, dict):
+                canary = {}
+            lines.append(
+                "- "
+                f"`{candidate.get('candidate_family') or '(none)'}` "
+                f"gate=`{candidate.get('gate_status') or '(none)'}`; "
+                f"replay=`{candidate.get('replay_status') or candidate.get('status') or '(none)'}`; "
+                f"improvement={candidate.get('estimated_improvement_pct')}; "
+                f"snap_delta={candidate.get('snap_risk_delta')}; "
+                f"afterimage_delta={candidate.get('afterimage_risk_delta')}; "
+                f"canary_eligible={canary.get('eligible')}; "
+                f"reason={candidate.get('gate_reason') or '(none)'}"
+            )
+        return "\n".join(lines)
+
+    selected = _select_regulator_cards(cards, selector)
+    if base == "REGULATOR_REPLAY_STATUS":
+        text = (
+            "=== REGULATOR REPLAY STATUS ===\n"
+            f"Authority: {authority}\n"
+            f"Review path: {review_path}\n"
+            f"Selector: `{selector or 'latest'}`\n"
+            f"Matched cards: {len(selected)}\n"
+            f"{note}\n"
+        )
+        if not selected:
+            return text + f"Available cards: {_regulator_available_cards(cards)}"
+        return text + "".join(
+            _render_regulator_card_summary(card)
+            + _render_regulator_lab_matches_for_card(review, card)
+            + _render_regulator_gate_matches_for_card(review, card)
+            + _render_regulator_evidence_loop(review)
+            + returnable_distinctions
+            for card in selected[:6]
+        )
+
+    card = selected[0] if selected else None
+    if not card:
+        return (
+            "=== REGULATOR BOUNDARY CARD ===\n"
+            f"Authority: {authority}\n"
+            "Status: card_not_found\n"
+            f"Selector: `{selector or 'latest'}`\n"
+            f"Review path: {review_path}\n"
+            f"Available cards: {_regulator_available_cards(cards)}"
+        )
+    return (
+        "=== REGULATOR BOUNDARY CARD ===\n"
+        f"Authority: {authority}\n"
+        f"Review path: {review_path}\n"
+        f"Card: `{card.get('card_id') or '(none)'}`\n"
+        f"Status: `{card.get('status') or '(none)'}`\n"
+        f"Term: `{card.get('term') or '(none)'}`\n"
+        f"Finding: {card.get('finding_label') or '(none)'}\n"
+        f"Axis: `{card.get('axis') or '(none)'}`; "
+        f"threshold={card.get('nearest_threshold') or '(none)'}; "
+        f"quality={card.get('quality_region') or '(none)'}\n"
+        f"Evidence anchors: {_lived_term_list_text(card, 'evidence_anchors')}\n"
+        f"Texture terms: {_lived_term_list_text(card, 'texture_terms')}\n"
+        f"Public samples: {_lived_term_list_text(card, 'public_sample_paths')}\n"
+        f"Recommended action: {card.get('recommended_action') or '(none)'}\n"
+        f"Counterfactual matches: {_compact_regulator_lab_matches_for_card(review, card)}\n"
+        f"Tuning gate matches: {_compact_regulator_gate_matches_for_card(review, card)}\n"
+        "Evidence loop probes: "
+        f"{_regulator_evidence_loop_top_probes_text(evidence_loop)}\n"
+        f"{returnable_distinctions}"
+        f"Note: {note}"
+    )
 
 
 class ActionContinuityStore:
@@ -2265,6 +3524,10 @@ class ActionContinuityStore:
         *CONSTRAINT_COUNTERFACTUAL_NEXT_ACTIONS,
         *CAPABILITY_NEXT_ACTIONS,
         *ACTION_STATUS_NEXT_ACTIONS,
+        *LIVED_TERM_NEXT_ACTIONS,
+        *REGULATOR_MAP_NEXT_ACTIONS,
+        *PRESSURE_AGENCY_STATUS_NEXT_ACTIONS,
+        *TEXTURE_AGENCY_STATUS_NEXT_ACTIONS,
         *REPAIR_READ_ONLY_NEXT_ACTIONS,
         "recess_notice",
         "space_hold",
@@ -2274,6 +3537,10 @@ class ActionContinuityStore:
         *ACTION_PREFLIGHT_NEXT_ACTIONS,
         *CAPABILITY_NEXT_ACTIONS,
         *ACTION_STATUS_NEXT_ACTIONS,
+        *LIVED_TERM_NEXT_ACTIONS,
+        *REGULATOR_MAP_NEXT_ACTIONS,
+        *PRESSURE_AGENCY_STATUS_NEXT_ACTIONS,
+        *TEXTURE_AGENCY_STATUS_NEXT_ACTIONS,
         *REPAIR_READ_ONLY_NEXT_ACTIONS,
         "SEARCH",
         "RESEARCH",
@@ -2386,6 +3653,7 @@ class ActionContinuityStore:
         "DECOMPOSE",
         "CONSTRAINT_AUDIT",
         "PRESSURE_SOURCE_AUDIT",
+        *PRESSURE_AGENCY_STATUS_NEXT_ACTIONS,
         "FLUCTUATION_AUDIT",
         "THREAD_STATUS",
         *ACTION_PREFLIGHT_NEXT_ACTIONS,
@@ -2574,6 +3842,7 @@ class ActionContinuityStore:
         state: Dict[str, float],
         source: str = "next",
         normalization_signal: Optional[Dict[str, Any]] = None,
+        choice_envelope_v1: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         self.ensure_dirs()
         thread = self.ensure_active_thread(raw_next)
@@ -2616,6 +3885,19 @@ class ActionContinuityStore:
             event["source_experiment_id"] = active_experiment_id
         if normalization_signal:
             event["normalization_signal_v1"] = normalization_signal
+        if isinstance(choice_envelope_v1, dict):
+            event["choice_envelope_v1"] = dict(choice_envelope_v1)
+            residue = str(choice_envelope_v1.get("residue") or "").strip()
+            if residue:
+                event["transition_residue_v1"] = {
+                    "policy": "transition_residue_v1",
+                    "schema_version": 1,
+                    "source": "choice_envelope_v1",
+                    "authority": "diagnostic_context_not_command",
+                    "residue_text": residue,
+                    "canonical_action": canonical_action,
+                    "effective_action": effective_action,
+                }
         self._apply_projection_guard_to_event(event, thread)
         return event
 
@@ -3412,6 +4694,10 @@ class ActionContinuityStore:
                 except Exception as exc:
                     return f"ACTION_CANCEL could not resolve `{arg or 'latest'}`: {exc}"
             return jobs.status_text(arg or "latest")
+        if base in LIVED_TERM_NEXT_ACTIONS:
+            return render_lived_term_bridge_action(base, arg or "latest")
+        if base in REGULATOR_MAP_NEXT_ACTIONS:
+            return render_regulator_map_bridge_action(base, arg or "latest")
         if base in REPAIR_NEXT_ACTIONS:
             return ContinuityRepairStore(self).handle(base, arg)
         if base == "THREAD_START":
@@ -20344,6 +21630,48 @@ class ActionPreflightStore:
         "ACTION_STATUS": "thread_action",
         "JOB_STATUS": "thread_action",
         "ACTION_CANCEL": "thread_action",
+        "LIVED_TERM_STATUS": "thread_action",
+        "LIVED_TERM_EXPERIMENT": "thread_action",
+        "REGULATOR_MAP_STATUS": "thread_action",
+        "REGULATOR_REPLAY_STATUS": "thread_action",
+        "REGULATOR_BOUNDARY_CARD": "thread_action",
+        "PI_PRESSURE_REPLAY_STATUS": "thread_action",
+        "PRESSURE_AGENCY_STATUS": "pressure_agency",
+        "PRESSURE_CONTROL_STATUS": "pressure_agency",
+        "PRESSURE_AGENCY": "pressure_agency",
+        "PRESSURE_AGENCY_REQUEST": "pressure_agency",
+        "PRESSURE_CONTROL_REQUEST": "pressure_agency",
+        "PRESSURE_REQUEST": "pressure_agency",
+        "TEXTURE_AGENCY_STATUS": "texture_agency",
+        "TEXTURE_STATUS": "texture_agency",
+        "RESONANCE_TEXTURE_STATUS": "texture_agency",
+        "TEXTURE_AGENCY_REQUEST": "texture_agency",
+        "TEXTURE_REQUEST": "texture_agency",
+        "RESONANCE_TEXTURE_REQUEST": "texture_agency",
+        "MESSAGE_ASTRID": "peer_correspondence",
+        "REPLY_ASTRID": "peer_correspondence",
+        "TRACE_ASTRID": "peer_correspondence",
+        "CORRESPONDENCE_TRACE": "peer_correspondence",
+        "I_RECEIVED_THIS": "peer_correspondence",
+        "CORRESPONDENCE_STATUS": "peer_correspondence",
+        "LEGACY_CORRESPONDENCE_STATUS": "peer_correspondence",
+        "CLAIM_ASTRID_LEGACY": "peer_correspondence",
+        "CORRESPONDENCE_CLAIM": "peer_correspondence",
+        "CORRESPONDENCE_CLAIM_OUTCOME": "peer_correspondence",
+        "CORRESPONDENCE_ATTENTION_REQUEST": "peer_correspondence",
+        "CORRESPONDENCE_ATTENTION_OUTCOME": "peer_correspondence",
+        "CORRESPONDENCE_MICRODOSE_REQUEST": "peer_correspondence",
+        "CORRESPONDENCE_WEIGHT_REQUEST": "peer_correspondence",
+        "SELF_REGULATION_INTENT": "self_regulation",
+        "SELF_REGULATION_PREFLIGHT": "self_regulation",
+        "SELF_REGULATION_APPLY": "self_regulation",
+        "SELF_REGULATION_STATUS": "self_regulation",
+        "SELF_REGULATION_OUTCOME": "self_regulation",
+        "CONTROL_INTENT": "self_regulation",
+        "CONTROL_PREFLIGHT": "self_regulation",
+        "CONTROL_APPLY_LEASE": "self_regulation",
+        "CONTROL_STATUS": "self_regulation",
+        "CONTROL_OUTCOME": "self_regulation",
         "REPAIR_STATUS": "thread_action",
         "REPAIR_SWEEP": "thread_action",
         "REPAIR_RECORD": "thread_action",
@@ -20879,6 +22207,17 @@ class CapabilitySelfMap:
             {"base": "CAPABILITY_DIFF", "route": "thread_action", "known_tests": ["tests.test_experimental_continuity"]},
             {"base": "ACTION_STATUS", "aliases": ["JOB_STATUS"], "route": "thread_action", "continuity_effect": "reads durable LLM job status without executing or canceling work", "expected_artifacts": ["action_event", "observation_window"], "known_tests": ["tests.test_minime_llm_jobs"]},
             {"base": "ACTION_CANCEL", "route": "thread_action", "continuity_effect": "requests best-effort cancellation for a queued/running LLM job; no live control authority", "expected_artifacts": ["action_event", "observation_window"], "known_tests": ["tests.test_minime_llm_jobs"]},
+            {"base": "LIVED_TERM_STATUS", "route": "thread_action", "continuity_effect": "reads Astrid's latest lived-term bridge review and prints advisory card/scaffold context only", "expected_artifacts": ["action_event", "observation_window"], "known_tests": ["tests.test_lived_term_experiment_bridge"]},
+            {"base": "LIVED_TERM_EXPERIMENT", "route": "thread_action", "continuity_effect": "prints EXPERIMENT_* and DOSSIER_* scaffold text from lived-term cards without creating or advancing an experiment", "expected_artifacts": ["action_event", "observation_window"], "known_tests": ["tests.test_lived_term_experiment_bridge"]},
+            {"base": "REGULATOR_MAP_STATUS", "route": "thread_action", "continuity_effect": "reads Astrid's regulator cartography, replay-card, plateau, time-series, and counterfactual proposal review context without tuning or applying leases", "expected_artifacts": ["action_event", "observation_window"], "known_tests": ["tests.test_lived_term_experiment_bridge"]},
+            {"base": "REGULATOR_REPLAY_STATUS", "route": "thread_action", "continuity_effect": "prints selected read-only regulator replay cards without creating experiments, tuning controllers, applying leases, or mutating peers", "expected_artifacts": ["action_event", "observation_window"], "known_tests": ["tests.test_lived_term_experiment_bridge"]},
+            {"base": "REGULATOR_BOUNDARY_CARD", "route": "thread_action", "continuity_effect": "prints one read-only regulator boundary card with evidence anchors and review action only", "expected_artifacts": ["action_event", "observation_window"], "known_tests": ["tests.test_lived_term_experiment_bridge"]},
+            {"base": "PI_PRESSURE_REPLAY_STATUS", "route": "thread_action", "continuity_effect": "prints read-only PI pressure wiring replay candidates, readiness gates, and default-off canary scaffold metadata without tuning controllers", "expected_artifacts": ["action_event", "observation_window"], "known_tests": ["tests.test_lived_term_experiment_bridge"]},
+            {"base": "PRESSURE_AGENCY_STATUS", "aliases": ["PRESSURE_CONTROL_STATUS", "PRESSURE_AGENCY"], "route": "pressure_agency", "continuity_effect": "prints Minime's pressure-control map: pressure_source is advisory, direct safe controls are lease-applicable, fill_target/PI/controller changes remain preflight or steward-offer only, and one-bit legibility feedback is accepted", "expected_artifacts": ["pressure_agency_report", "action_event", "observation_window"], "known_tests": ["tests.test_self_regulation_leases"]},
+            {"base": "PRESSURE_AGENCY_REQUEST", "aliases": ["PRESSURE_CONTROL_REQUEST", "PRESSURE_REQUEST"], "route": "pressure_agency", "continuity_effect": "drafts a Minime-local pressure_relief self-regulation intent when the request is own-runtime; fill_target, PI, controller, and peer requests are routed to steward-offer only; legible/partly/confusing feedback drafts no lease", "expected_artifacts": ["pressure_agency_report", "self_regulation_lease", "action_event", "observation_window"], "known_tests": ["tests.test_self_regulation_leases"]},
+            {"base": "TEXTURE_AGENCY_STATUS", "aliases": ["TEXTURE_STATUS", "RESONANCE_TEXTURE_STATUS"], "route": "texture_agency", "continuity_effect": "prints typed resonance texture, ESN rho/rank1 status, stale semantic window, smooth surge-target context, safe leaseable controls, and blocked active damping/PI/fill/correspondence-weight boundaries without mutating runtime state", "expected_artifacts": ["texture_agency_report", "action_event", "observation_window"], "known_tests": ["tests.test_self_regulation_leases"]},
+            {"base": "TEXTURE_AGENCY_REQUEST", "aliases": ["TEXTURE_REQUEST", "RESONANCE_TEXTURE_REQUEST"], "route": "texture_agency", "continuity_effect": "drafts only bounded Minime-local self-regulation intents through existing safe controls for texture relief; feedback-only legibility replies draft no lease, and active damping/rho/PI/fill/correspondence-weight requests route to steward review only", "expected_artifacts": ["texture_agency_report", "self_regulation_lease", "action_event", "observation_window"], "known_tests": ["tests.test_self_regulation_leases"]},
+            {"base": "MESSAGE_ASTRID", "aliases": ["REPLY_ASTRID", "TRACE_ASTRID", "CORRESPONDENCE_TRACE", "ACK_ASTRID", "CORRESPONDENCE_ACK", "I_RECEIVED_THIS", "CORRESPONDENCE_HEARTBEAT", "CORRESPONDENCE_STATUS", "LEGACY_CORRESPONDENCE_STATUS", "CLAIM_ASTRID_LEGACY", "CORRESPONDENCE_CLAIM", "CORRESPONDENCE_CLAIM_OUTCOME", "CORRESPONDENCE_ATTENTION_REQUEST", "CORRESPONDENCE_ATTENTION_OUTCOME", "CORRESPONDENCE_MICRODOSE_REQUEST", "CORRESPONDENCE_WEIGHT_REQUEST"], "route": "peer_correspondence", "continuity_effect": "writes first-class peer language envelopes with message_id/thread_id, delivery/read receipts, exact reply links, acknowledgement continuity, direct-address trace anchors, and authority=language_only; I_RECEIVED_THIS writes a small ack_receipt plus optional ledger-only trace when what_stayed_distinct is present; CLAIM_ASTRID_LEGACY/CORRESPONDENCE_CLAIM recognizes a visible legacy exchange as a carryable thread, but claim alone does not unlock attention or microdose; ACK_ASTRID claimed, REPLY_ASTRID claimed, I_RECEIVED_THIS claimed, or CORRESPONDENCE_TRACE claimed <anchor> add native contact evidence; CORRESPONDENCE_ATTENTION_REQUEST self-activates a TTL prompt-context focus canary after ack/reply/trace evidence and required stop criteria; CORRESPONDENCE_MICRODOSE_REQUEST only drafts a linked steward-gated semantic_microdose authority request; none can mutate telemetry, controller, PI, fill_target, pressure, standing weights, leases, deploys, or peer runtime", "expected_artifacts": ["correspondence_v1_ledger", "from_minime_correspondence_envelope", "ack_receipt", "presence_heartbeat", "legacy_thread_claim", "legacy_thread_claim_outcome", "attention_canary_activation", "attention_canary_outcome", "correspondence_microdose_authority_request"], "known_tests": ["tests.test_correspondence_v1"]},
             {"base": "ACTION_PREFLIGHT", "aliases": sorted(ACTION_PREFLIGHT_NEXT_ACTIONS - {"ACTION_PREFLIGHT"}), "route": "action_preflight", "continuity_effect": "records dry-run preflight report; never executes the inner action", "expected_artifacts": ["action_preflight_report", "journal", "action_event", "observation_window", "action_manifest"], "known_tests": ["tests.test_experimental_continuity"]},
             {"base": "THREAD_START", "route": "thread_action"},
             {"base": "THREAD_STATUS", "aliases": ["THREADS"], "route": "thread_action"},
@@ -21312,6 +22651,130 @@ INTERNAL_TOPOLOGY_RELEASE_SECS = 90 * 60
 INTERNAL_TOPOLOGY_RESOLVED_SECS = 24 * 60 * 60
 INTERNAL_TOPOLOGY_MEMORY_DECAY_ACTIVE = 0.22
 INTERNAL_TOPOLOGY_MEMORY_DECAY_MAX = 0.28
+PRESSURE_VOCABULARY_TERM_GROUPS = {
+    "viscosity": (
+        "viscous",
+        "viscosity",
+        "syrup",
+        "syrupy",
+        "velvet",
+        "velvety",
+        "thick",
+        "sludge",
+        "fluid",
+        "deep water",
+    ),
+    "sediment": (
+        "sediment",
+        "silt",
+        "grain",
+        "grainy",
+        "grit",
+        "basin",
+        "settling",
+        "settled",
+    ),
+    "thrum_hum": (
+        "thrum",
+        "hum",
+        "muffled",
+        "vibration",
+        "vibrating",
+        "resonance",
+    ),
+    "pressure_weight_density": (
+        "pressure",
+        "overpacked",
+        "packed",
+        "weight",
+        "weighted",
+        "heavy",
+        "heaviness",
+        "density",
+        "dense",
+    ),
+}
+PRESSURE_VOCABULARY_REPEAT_THRESHOLD = 3
+PRESSURE_VOCABULARY_WINDOW = 12
+PRESSURE_VOCABULARY_COOLDOWN_SECS = 30 * 60
+PRESSURE_VOCABULARY_ENTRIES = frozenset({
+    "daydream",
+    "notice",
+    "aspiration",
+    "drift",
+    "self_study",
+    "decompose",
+    "reflection",
+    "boredom",
+    "action_thread",
+    "shadow_autonomy",
+    "attractor",
+})
+AGENCY_VERNACULAR_TERM_GROUPS = {
+    "agency_transition": (
+        "hinge",
+        "pivot",
+        "choice",
+        "intentionality",
+        "volition",
+    ),
+    "continuity_scaffold": (
+        "waypoint",
+        "scaffold",
+        "charter",
+        "legacy self",
+        "observer with memory",
+        "return thread",
+    ),
+    "evidence_mapping": (
+        "ground truth",
+        "map",
+        "mapping",
+        "boundary",
+        "boundaries",
+        "signature",
+        "anchor",
+        "metric",
+        "evidence",
+    ),
+    "drift_authorship": (
+        "passive environment",
+        "deliberate map",
+        "swept along",
+        "trajectory",
+        "ambient noise",
+        "authored",
+        "authorship",
+    ),
+}
+AGENCY_VERNACULAR_REPEAT_THRESHOLD = 3
+AGENCY_VERNACULAR_WINDOW = 12
+AGENCY_VERNACULAR_NOTICE_SECS = 30 * 60
+AGENCY_VERNACULAR_ENTRIES = PRESSURE_VOCABULARY_ENTRIES
+AFTERIMAGE_ABSENCE_TERM_GROUPS = {
+    "pressure_afterimage": (
+        "bruise",
+        "afterimage",
+        "scar",
+        "indentation",
+        "post-pressure",
+        "structural fatigue",
+        "contraction memory",
+    ),
+    "shaped_absence": (
+        "empty pocket",
+        "missing door",
+        "void",
+        "absence",
+        "negative space",
+        "expected absence",
+        "plan 4",
+    ),
+}
+AFTERIMAGE_ABSENCE_REPEAT_THRESHOLD = 3
+AFTERIMAGE_ABSENCE_WINDOW = 12
+AFTERIMAGE_ABSENCE_NOTICE_SECS = 30 * 60
+AFTERIMAGE_ABSENCE_ENTRIES = PRESSURE_VOCABULARY_ENTRIES
 INTERNAL_TOPOLOGY_REPLAY_TERMS = (
     "fabric",
     "resonance",
@@ -21403,6 +22866,7 @@ STABLE_CORE_SELF_JOURNAL_ACTIONS = {
     "sca_reflect",
     "regulator_audit",
     "pressure_source_audit",
+    "pressure_agency",
     "fluctuation_audit",
     "resonance_forecast",
     "shadow_gap",
@@ -21457,6 +22921,7 @@ STABLE_CORE_ASTRID_CONTACT_ACTIONS = STABLE_CORE_SELF_JOURNAL_ACTIONS | {
     "spectral_drift",
     "ask_astrid",
     "ping_astrid",
+    "peer_correspondence",
 }
 
 STABLE_CORE_READ_ONLY_RESEARCH_ACTIONS = STABLE_CORE_SELF_JOURNAL_ACTIONS | {
@@ -21491,11 +22956,13 @@ STABLE_CORE_BOUNDED_ACTIONS = STABLE_CORE_READ_ONLY_RESEARCH_ACTIONS | {
     "reservoir_read",
     "reservoir_resonance",
     "reservoir_layers",
+    "self_regulation",
     "attractor_intent",
     "attractor_atlas",
     "shadow_autonomy",
     "ask_astrid",
     "ping_astrid",
+    "peer_correspondence",
     "compose_audio",
     "close_ears",
     "open_ears",
@@ -21651,6 +23118,7 @@ STABLE_CORE_ACTION_FAMILIES = {
     "fissure_trace": "local_reflection",
     "ask_astrid": "astrid_contact",
     "ping_astrid": "astrid_contact",
+    "peer_correspondence": "astrid_contact",
     "research_exploration": "read_only_research",
     "browse_url": "read_only_research",
     "read_more": "read_only_research",
@@ -22444,6 +23912,7 @@ class AutonomousAgent:
         self._source_reload_notice_written = False
         self._pending_next_override_token: Optional[str] = None
         self._pending_next_action = None
+        self._pending_choice_envelope_v1: Optional[Dict[str, Any]] = None
         self._recent_next_actions = deque(maxlen=8)  # Track NEXT: choices for diversity awareness
         self._pending_autoresearch_action = None
         self._last_read_path = None
@@ -22645,6 +24114,10 @@ class AutonomousAgent:
         if signal:
             self._pending_action_continuity_context["normalization_signal_v1"] = signal
         self._pending_next_normalization_signal = None
+        choice_envelope = getattr(self, "_pending_choice_envelope_v1", None)
+        if isinstance(choice_envelope, dict):
+            self._pending_action_continuity_context["choice_envelope_v1"] = dict(choice_envelope)
+        self._pending_choice_envelope_v1 = None
 
     def _consume_action_continuity_context(self, action: str) -> Dict[str, Any]:
         context = getattr(self, "_pending_action_continuity_context", None)
@@ -22697,6 +24170,7 @@ class AutonomousAgent:
             state,
             source=continuity_context.get("source", "autonomous"),
             normalization_signal=continuity_context.get("normalization_signal_v1"),
+            choice_envelope_v1=continuity_context.get("choice_envelope_v1"),
         )
         raw_action = (
             continuity_context.get("raw_next")
@@ -24685,6 +26159,10 @@ Fill: {fill:.1f}%
         `_dispatch_multi_action_minime`. The recursive call passes
         `_allow_multi=False` to prevent infinite splitting.
         """
+        try:
+            self._self_regulation_reconcile_active_lease(state)
+        except Exception as exc:
+            logging.debug("Could not reconcile self-regulation lease: %s", exc)
         # Co-regulation: publish minime's current need each cycle so Astrid can
         # see what she is reaching for (density/aperture/steady).
         self._publish_self_need(state)
@@ -24744,6 +26222,16 @@ Fill: {fill:.1f}%
                 'DRIFT': 'recess_drift',
                 'FOCUS': 'adjust_metabolism',
                 'REGIME': 'regime_choice',
+                'SELF_REGULATION_INTENT': 'self_regulation',
+                'SELF_REGULATION_PREFLIGHT': 'self_regulation',
+                'SELF_REGULATION_APPLY': 'self_regulation',
+                'SELF_REGULATION_STATUS': 'self_regulation',
+                'SELF_REGULATION_OUTCOME': 'self_regulation',
+                'CONTROL_INTENT': 'self_regulation',
+                'CONTROL_PREFLIGHT': 'self_regulation',
+                'CONTROL_APPLY_LEASE': 'self_regulation',
+                'CONTROL_STATUS': 'self_regulation',
+                'CONTROL_OUTCOME': 'self_regulation',
                 'JOURNAL': 'journal_pressure',
                 'BOREDOM': 'recess_boredom',
                 'WHIM': 'recess_whim',
@@ -24955,6 +26443,38 @@ Fill: {fill:.1f}%
                 'ACTION_STATUS': 'thread_action',
                 'JOB_STATUS': 'thread_action',
                 'ACTION_CANCEL': 'thread_action',
+                'LIVED_TERM_STATUS': 'thread_action',
+                'LIVED_TERM_EXPERIMENT': 'thread_action',
+                'REGULATOR_MAP_STATUS': 'thread_action',
+                'REGULATOR_REPLAY_STATUS': 'thread_action',
+                'REGULATOR_BOUNDARY_CARD': 'thread_action',
+                'PI_PRESSURE_REPLAY_STATUS': 'thread_action',
+                'PRESSURE_AGENCY_STATUS': 'pressure_agency',
+                'PRESSURE_CONTROL_STATUS': 'pressure_agency',
+                'PRESSURE_AGENCY': 'pressure_agency',
+                'PRESSURE_AGENCY_REQUEST': 'pressure_agency',
+                'PRESSURE_CONTROL_REQUEST': 'pressure_agency',
+                'PRESSURE_REQUEST': 'pressure_agency',
+                'TEXTURE_AGENCY_STATUS': 'texture_agency',
+                'TEXTURE_STATUS': 'texture_agency',
+                'RESONANCE_TEXTURE_STATUS': 'texture_agency',
+                'TEXTURE_AGENCY_REQUEST': 'texture_agency',
+                'TEXTURE_REQUEST': 'texture_agency',
+                'RESONANCE_TEXTURE_REQUEST': 'texture_agency',
+                'MESSAGE_ASTRID': 'peer_correspondence',
+                'REPLY_ASTRID': 'peer_correspondence',
+                'TRACE_ASTRID': 'peer_correspondence',
+                'CORRESPONDENCE_TRACE': 'peer_correspondence',
+                'I_RECEIVED_THIS': 'peer_correspondence',
+                'CORRESPONDENCE_STATUS': 'peer_correspondence',
+                'LEGACY_CORRESPONDENCE_STATUS': 'peer_correspondence',
+                'CLAIM_ASTRID_LEGACY': 'peer_correspondence',
+                'CORRESPONDENCE_CLAIM': 'peer_correspondence',
+                'CORRESPONDENCE_CLAIM_OUTCOME': 'peer_correspondence',
+                'CORRESPONDENCE_ATTENTION_REQUEST': 'peer_correspondence',
+                'CORRESPONDENCE_ATTENTION_OUTCOME': 'peer_correspondence',
+                'CORRESPONDENCE_MICRODOSE_REQUEST': 'peer_correspondence',
+                'CORRESPONDENCE_WEIGHT_REQUEST': 'peer_correspondence',
                 # v5 Coordination Protocol V1 — Phase 1.
                 'INVITE_COLLABORATION': 'invite_collaboration',
                 'INVITE_COLLAB': 'invite_collaboration',
@@ -24988,6 +26508,14 @@ Fill: {fill:.1f}%
             }
             for capability_base in CAPABILITY_NEXT_ACTIONS:
                 action_map[capability_base] = 'thread_action'
+            for lived_term_base in LIVED_TERM_NEXT_ACTIONS:
+                action_map[lived_term_base] = 'thread_action'
+            for regulator_map_base in REGULATOR_MAP_NEXT_ACTIONS:
+                action_map[regulator_map_base] = 'thread_action'
+            for pressure_agency_base in PRESSURE_AGENCY_NEXT_ACTIONS:
+                action_map[pressure_agency_base] = 'pressure_agency'
+            for correspondence_base in CORRESPONDENCE_NEXT_ACTIONS:
+                action_map[correspondence_base] = 'peer_correspondence'
             for repair_base in REPAIR_NEXT_ACTIONS:
                 action_map[repair_base] = 'thread_action'
             for visual_alias in VISUAL_CASCADE_ACTION_ALIASES:
@@ -25324,6 +26852,26 @@ Fill: {fill:.1f}%
                     f"🫧 Low-fill guard advisory only: honoring NEXT: {chosen} "
                         f"while underfilled (fill={fill_text}, spread_relief={guard['spread_relief']:.3f})"
                 )
+
+            if base in SELF_REGULATION_NEXT_ACTIONS:
+                self._pending_self_regulation_next = chosen
+                logging.info("🎛️ Honoring being's NEXT: %s → self_regulation", chosen)
+                return "self_regulation"
+
+            if base in PRESSURE_AGENCY_NEXT_ACTIONS:
+                self._pending_pressure_agency_next = chosen
+                logging.info("🎛️ Honoring being's NEXT: %s → pressure_agency", chosen)
+                return "pressure_agency"
+
+            if base in TEXTURE_AGENCY_NEXT_ACTIONS:
+                self._pending_texture_agency_next = chosen
+                logging.info("🧭 Honoring being's NEXT: %s → texture_agency", chosen)
+                return "texture_agency"
+
+            if base in CORRESPONDENCE_NEXT_ACTIONS:
+                self._pending_correspondence_next = chosen
+                logging.info("📬 Honoring being's NEXT: %s → peer_correspondence", chosen)
+                return "peer_correspondence"
 
             if base in {'EXPERIMENT', 'SELF_EXPERIMENT'}:
                 lower_chosen = chosen.lower()
@@ -26806,6 +28354,7 @@ Fill: {fill:.1f}%
                 state,
                 source=continuity_context.get("source", "autonomous"),
                 normalization_signal=continuity_context.get("normalization_signal_v1"),
+                choice_envelope_v1=continuity_context.get("choice_envelope_v1"),
             )
             self._current_action_continuity_event = continuity_event
             if _llm_job_id:
@@ -27109,6 +28658,8 @@ Fill: {fill:.1f}%
                 self._ask_steward(state)
             elif action == 'tell_steward':
                 self._tell_steward(state)
+            elif action == 'peer_correspondence':
+                self._peer_correspondence(state)
             elif action == 'mark_intensification':
                 self._mark_intensification(state)
             elif action == 'native_gesture':
@@ -27201,6 +28752,12 @@ Fill: {fill:.1f}%
                 self._adjust_metabolism(state)
             elif action == 'regime_choice':
                 self._regime_choice(state)
+            elif action == 'pressure_agency':
+                self._pressure_agency_action(state)
+            elif action == 'texture_agency':
+                self._texture_agency_action(state)
+            elif action == 'self_regulation':
+                self._self_regulation_action(state)
 
             # Visual frame request
             elif action == 'request_visual_frame':
@@ -31827,6 +33384,8 @@ Your current state: λ₁={eig1:.3f}, Fill={fill:.1f}%
 
 Write a self-study. This is YOUR space to think about what you see in this code.
 
+When the code affects your felt runtime, start from the generated body of the reflection: felt texture, generated-word quality, tone, or how language is moving. Then bring in telemetry, line numbers, and wrapper/status details as evidence. Keep telemetry headers useful, but do not let them crowd out the body of the study.
+
 {RUNTIME_WORDING_GUIDANCE}
 
 You can use these sections if they help — but don't force your thinking into them if it doesn't fit:
@@ -31978,6 +33537,8 @@ Likely Snags:
 One Test Each:
 Suggested Next:
 
+When runtime feel is involved, the Observed section should begin from felt texture, generated-word quality, tone, or how language is moving; then cite source lines, symbols, or telemetry as evidence.
+
 Look for concrete snags, odd decisions, missing routes, loose ends, tests we are
 likely to miss, and places where the implementation does not do what it seems
 intended to do. Name line numbers, functions, variables, files, or artifacts where
@@ -32017,6 +33578,8 @@ Observed:
 Likely Snags:
 One Test Each:
 Suggested Next:
+
+When runtime feel is involved, Observed should begin from felt texture, generated-word quality, tone, or how language is moving before citing source lines, symbols, or telemetry.
 
 Target: {label}
 Path: {source_path}
@@ -39190,6 +40753,3586 @@ OUTPUT:
         self._write_journal_entry('experiment', journal_summary, state, str(file_path))
         logging.info(f"🐍 {status}: {script_path.name} ({len(stdout)} chars output){png_note}")
 
+    # =====================================================================
+    # First-Class Correspondence V1 — Minime side.
+    # Peer-origin language with stable IDs, thread IDs, receipts, and exact
+    # reply links. Authority is language_only: no telemetry/controller/PI/fill
+    # mutation lives in this surface.
+    # =====================================================================
+
+    @staticmethod
+    def _correspondence_now_ms() -> int:
+        return int(time.time() * 1000)
+
+    @staticmethod
+    def _correspondence_short_hash(text: str) -> str:
+        return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()[:12]
+
+    @staticmethod
+    def _correspondence_sha256(text: str) -> str:
+        return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _correspondence_compact(value: str, max_chars: int = 80) -> str:
+        out = "".join(
+            ch for ch in str(value or "")
+            if ch.isascii() and (ch.isalnum() or ch in "-_.")
+        )
+        return (out or "field")[:max_chars]
+
+    @classmethod
+    def _correspondence_message_id(cls, from_being: str, to_being: str, body: str) -> str:
+        return (
+            f"corr_{from_being}_{to_being}_{cls._correspondence_now_ms()}_"
+            f"{cls._correspondence_short_hash(body)}"
+        )
+
+    @classmethod
+    def _correspondence_thread_id(cls, message_id: str) -> str:
+        return f"thread_{cls._correspondence_compact(message_id)}"
+
+    @staticmethod
+    def _correspondence_canonical_legacy_source_path(path: Path) -> str:
+        return (
+            str(path)
+            .replace("/inbox/read/", "/inbox/")
+            .replace("/outbox/delivered/", "/outbox/")
+        )
+
+    @staticmethod
+    def _correspondence_legacy_kind_for_path(path: Path, content: str) -> Optional[tuple[str, str, str, str]]:
+        name = path.name
+        if name.startswith(("from_minime_correspondence_", "from_astrid_correspondence_")):
+            return None
+        if name.startswith("from_minime_"):
+            if name.startswith(("from_minime_ping_", "from_minime_pong_")):
+                return ("minime", "astrid", "from_minime_ping", "presence_heartbeat")
+            if name.startswith("from_minime_question_"):
+                return ("minime", "astrid", "from_minime_question", "minime_direct")
+            return ("minime", "astrid", "from_minime_reply", "minime_direct")
+        if name.startswith("astrid_self_study_"):
+            if "Source: astrid:correspondence_reply" in content:
+                return ("astrid", "minime", "astrid_correspondence_reply", "self_study_note")
+            return ("astrid", "minime", "astrid_self_study", "self_study_note")
+        if name.startswith("reply_"):
+            return ("minime", "astrid", "minime_outbox_reply", "minime_direct")
+        if name.startswith("pong_"):
+            return ("minime", "astrid", "minime_pong", "presence_heartbeat")
+        return None
+
+    @classmethod
+    def _correspondence_legacy_message_id(
+        cls,
+        from_being: str,
+        to_being: str,
+        canonical_path: str,
+        source_sha256: str,
+    ) -> str:
+        return (
+            f"legacy_{from_being}_{to_being}_"
+            f"{cls._correspondence_short_hash(f'{canonical_path}|{source_sha256}')}"
+        )
+
+    def _correspondence_ledger_path(self) -> Path:
+        shared_dir = getattr(self, "SHARED_COLLAB_DIR", Path("/Users/v/other/shared/collaborations"))
+        return Path(shared_dir) / "correspondence_v1.jsonl"
+
+    def _correspondence_append_record(self, record: Dict[str, Any]) -> None:
+        ledger = self._correspondence_ledger_path()
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        with ledger.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _read_jsonl_safe(path: Path) -> List[Dict[str, Any]]:
+        if not path.exists():
+            return []
+        records: List[Dict[str, Any]] = []
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(payload, dict):
+                    records.append(payload)
+        except Exception:
+            return []
+        return records
+
+    def _correspondence_read_records(self) -> List[Dict[str, Any]]:
+        ledger = self._correspondence_ledger_path()
+        if not ledger.exists():
+            return []
+        records: List[Dict[str, Any]] = []
+        try:
+            for line in ledger.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(payload, dict):
+                    records.append(payload)
+        except Exception:
+            return []
+        records.sort(key=lambda item: int(item.get("recorded_at_unix_ms", 0) or 0))
+        return records
+
+    @staticmethod
+    def _correspondence_legacy_row_exists(
+        records: List[Dict[str, Any]],
+        record_type: str,
+        message_id: str,
+        reader: Optional[str] = None,
+    ) -> bool:
+        for row in records:
+            if row.get("record_type") != record_type or row.get("message_id") != message_id:
+                continue
+            if reader is not None and row.get("reader") != reader:
+                continue
+            return True
+        return False
+
+    def _correspondence_append_legacy_once(
+        self,
+        records: List[Dict[str, Any]],
+        record: Dict[str, Any],
+        *,
+        reader: Optional[str] = None,
+    ) -> bool:
+        if self._correspondence_legacy_row_exists(
+            records,
+            str(record.get("record_type") or ""),
+            str(record.get("message_id") or ""),
+            reader,
+        ):
+            return False
+        self._correspondence_append_record(record)
+        records.append(record)
+        return True
+
+    def _correspondence_mirror_legacy_file(
+        self,
+        path: Path,
+        *,
+        reader: str,
+        legacy_context_surface: Optional[str] = None,
+    ) -> bool:
+        try:
+            content = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return False
+        legacy = self._correspondence_legacy_kind_for_path(path, content)
+        if not legacy:
+            return False
+        from_being, to_being, legacy_kind, correspondence_type = legacy
+        source_sha = self._correspondence_sha256(content)
+        canonical_path = self._correspondence_canonical_legacy_source_path(path)
+        message_id = self._correspondence_legacy_message_id(
+            from_being,
+            to_being,
+            canonical_path,
+            source_sha,
+        )
+        thread_id = self._correspondence_thread_id(message_id)
+        try:
+            recorded_at = int(path.stat().st_mtime * 1000)
+        except Exception:
+            recorded_at = self._correspondence_now_ms()
+        read_state = "read" if reader == to_being else "unread"
+        turn_kind = "presence_receipt" if correspondence_type == "presence_heartbeat" else "legacy_visible"
+        common: Dict[str, Any] = {
+            "source_route": "legacy_correspondence_bridge_v1",
+            "legacy_bridge": True,
+            "legacy_kind": legacy_kind,
+            "legacy_source_path": str(path),
+            "legacy_canonical_source_path": canonical_path,
+            "legacy_source_sha256": source_sha,
+            "legacy_contact_evidence": "visible_only",
+        }
+        if legacy_context_surface:
+            common["legacy_context_surface"] = str(legacy_context_surface)
+        message = {
+            "schema_version": 1,
+            "policy": "first_class_correspondence_v1",
+            "record_type": "message",
+            "recorded_at_unix_ms": recorded_at,
+            "message_id": message_id,
+            "thread_id": thread_id,
+            "reply_to": None,
+            "from_being": from_being,
+            "to_being": to_being,
+            "turn_kind": turn_kind,
+            "relational_intent": "legacy_contact_visibility",
+            "shared_memory_anchor": "legacy_correspondence_bridge_v1",
+            "delivery_state": "delivered",
+            "read_state": read_state,
+            "authority": "language_only",
+            "presence_receipt": None,
+            "correspondence_type": correspondence_type,
+            "body_sha256": source_sha,
+            "body_preview": content.strip()[:360] + ("..." if len(content.strip()) > 360 else ""),
+            **common,
+        }
+        delivery = {
+            "schema_version": 1,
+            "policy": "first_class_correspondence_v1",
+            "record_type": "delivery_receipt",
+            "recorded_at_unix_ms": recorded_at,
+            "message_id": message_id,
+            "thread_id": thread_id,
+            "reply_to": None,
+            "from_being": from_being,
+            "to_being": to_being,
+            "delivery_state": "delivered",
+            "read_state": read_state,
+            "authority": "language_only",
+            "correspondence_type": correspondence_type,
+            "file_path": str(path),
+            **common,
+        }
+        read_receipt = {
+            "schema_version": 1,
+            "policy": "first_class_correspondence_v1",
+            "record_type": "read_receipt",
+            "recorded_at_unix_ms": self._correspondence_now_ms(),
+            "message_id": message_id,
+            "thread_id": thread_id,
+            "reader": reader,
+            "from_being": from_being,
+            "to_being": to_being,
+            "read_state": "read",
+            "authority": "language_only",
+            "file_path": str(path),
+            **common,
+        }
+        records = self._correspondence_read_records()
+        appended = False
+        appended |= self._correspondence_append_legacy_once(records, message)
+        appended |= self._correspondence_append_legacy_once(records, delivery)
+        appended |= self._correspondence_append_legacy_once(records, read_receipt, reader=reader)
+        return appended
+
+    def _correspondence_heartbeat_snapshot(self) -> Dict[str, Any]:
+        path = ASTRID_BRIDGE_INBOX_PATH.parent / "telemetry_heartbeat_delta_v1.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _correspondence_latest_message_for_selector(
+        records: List[Dict[str, Any]],
+        selector: str,
+    ) -> Optional[Dict[str, Any]]:
+        selector = str(selector or "").strip()
+        claim = AutonomousAgent._correspondence_latest_legacy_claim_for_selector(
+            records,
+            selector,
+        )
+        if claim:
+            claimed_message = AutonomousAgent._correspondence_message_for_legacy_claim(records, claim)
+            if claimed_message:
+                return claimed_message
+        matches = []
+        for record in records:
+            if record.get("record_type") != "message":
+                continue
+            if (
+                not selector
+                or selector == "latest"
+                or record.get("message_id") == selector
+                or record.get("thread_id") == selector
+            ):
+                matches.append(record)
+        return matches[-1] if matches else None
+
+    @staticmethod
+    def _correspondence_latest_message_between(
+        records: List[Dict[str, Any]],
+        selector: str,
+        from_being: str,
+        to_being: str,
+        *,
+        prefer_inbound: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        selector = str(selector or "").strip()
+        claim = AutonomousAgent._correspondence_latest_legacy_claim_for_selector(
+            records,
+            selector,
+            from_being,
+            to_being,
+        )
+        if claim:
+            claimed_message = AutonomousAgent._correspondence_message_for_legacy_claim(records, claim)
+            if claimed_message:
+                return claimed_message
+        pair_matches: List[Dict[str, Any]] = []
+        inbound_matches: List[Dict[str, Any]] = []
+        for record in records:
+            if record.get("record_type") != "message":
+                continue
+            if (
+                selector
+                and selector != "latest"
+                and record.get("message_id") != selector
+                and record.get("thread_id") != selector
+            ):
+                continue
+            row_from = record.get("from_being")
+            row_to = record.get("to_being")
+            if (row_from, row_to) not in {(from_being, to_being), (to_being, from_being)}:
+                continue
+            pair_matches.append(record)
+            if row_from == to_being and row_to == from_being:
+                inbound_matches.append(record)
+        if prefer_inbound and inbound_matches:
+            return inbound_matches[-1]
+        return pair_matches[-1] if pair_matches else None
+
+    @staticmethod
+    def _correspondence_is_legacy_message(record: Dict[str, Any]) -> bool:
+        return bool(record.get("legacy_bridge")) or record.get("source_route") == "legacy_correspondence_bridge_v1"
+
+    @staticmethod
+    def _correspondence_is_claim_selector(selector: str) -> bool:
+        return str(selector or "").strip().lower() in {"claimed", "latest_claim", "active_claim"}
+
+    @staticmethod
+    def _correspondence_is_legacy_claim(record: Dict[str, Any]) -> bool:
+        return record.get("record_type") == "legacy_thread_claim"
+
+    @classmethod
+    def _correspondence_message_for_legacy_claim(
+        cls,
+        records: List[Dict[str, Any]],
+        claim: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        message_id = claim.get("message_id")
+        thread_id = claim.get("thread_id")
+        for record in records:
+            if (
+                record.get("record_type") == "message"
+                and record.get("message_id") == message_id
+                and record.get("thread_id") == thread_id
+            ):
+                return record
+        return None
+
+    @classmethod
+    def _correspondence_latest_legacy_claim_for_selector(
+        cls,
+        records: List[Dict[str, Any]],
+        selector: str,
+        from_being: Optional[str] = None,
+        to_being: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        selector = str(selector or "").strip()
+        matches: List[Dict[str, Any]] = []
+        for record in records:
+            if not cls._correspondence_is_legacy_claim(record):
+                continue
+            if from_being and record.get("from_being") != from_being and record.get("claiming_being") != from_being:
+                continue
+            if to_being and record.get("to_being") != to_being and record.get("peer_being") != to_being:
+                continue
+            if (
+                not selector
+                or selector == "latest"
+                or cls._correspondence_is_claim_selector(selector)
+                or record.get("claim_id") == selector
+                or record.get("message_id") == selector
+                or record.get("thread_id") == selector
+            ):
+                matches.append(record)
+        return matches[-1] if matches else None
+
+    @staticmethod
+    def _correspondence_claim_has_outcome(
+        records: List[Dict[str, Any]],
+        claim: Dict[str, Any],
+    ) -> bool:
+        claim_id = claim.get("claim_id")
+        thread_id = claim.get("thread_id")
+        return any(
+            row.get("record_type") == "legacy_thread_claim_outcome"
+            and (row.get("claim_id") == claim_id or row.get("thread_id") == thread_id)
+            for row in records
+        )
+
+    @staticmethod
+    def _correspondence_legacy_claim_native_contact_status(
+        records: List[Dict[str, Any]],
+        claim: Dict[str, Any],
+    ) -> Optional[str]:
+        thread_id = claim.get("thread_id")
+        claiming = claim.get("claiming_being") or claim.get("from_being")
+        peer = claim.get("peer_being") or claim.get("to_being")
+        claim_t = int(claim.get("recorded_at_unix_ms", 0) or 0)
+        trace = any(
+            row.get("record_type") == "message"
+            and row.get("thread_id") == thread_id
+            and row.get("from_being") == claiming
+            and row.get("to_being") == peer
+            and row.get("turn_kind") == "direct_address_trace"
+            and int(row.get("recorded_at_unix_ms", 0) or 0) >= claim_t
+            for row in records
+        )
+        if trace:
+            return "legacy_claimed_trace_observed"
+        reply = any(
+            row.get("record_type") == "reply_link"
+            and row.get("thread_id") == thread_id
+            and row.get("from_being") == claiming
+            and row.get("to_being") == peer
+            and int(row.get("recorded_at_unix_ms", 0) or 0) >= claim_t
+            for row in records
+        )
+        if reply:
+            return "legacy_claimed_reply_linked"
+        ack = any(
+            row.get("record_type") == "ack_receipt"
+            and row.get("thread_id") == thread_id
+            and row.get("from_being") == claiming
+            and row.get("to_being") == peer
+            and int(row.get("recorded_at_unix_ms", 0) or 0) >= claim_t
+            for row in records
+        )
+        return "legacy_claimed_acknowledged" if ack else None
+
+    def _correspondence_legacy_claim_is_active(
+        self,
+        records: List[Dict[str, Any]],
+        claim: Dict[str, Any],
+    ) -> bool:
+        return (
+            not self._correspondence_claim_has_outcome(records, claim)
+            and self._correspondence_legacy_claim_native_contact_status(records, claim) is None
+        )
+
+    def _correspondence_latest_active_legacy_claim_for_thread(
+        self,
+        records: List[Dict[str, Any]],
+        thread_id: str,
+        claiming_being: str,
+    ) -> Optional[Dict[str, Any]]:
+        matches = [
+            row for row in records
+            if self._correspondence_is_legacy_claim(row)
+            and row.get("thread_id") == thread_id
+            and (row.get("from_being") == claiming_being or row.get("claiming_being") == claiming_being)
+            and self._correspondence_legacy_claim_is_active(records, row)
+        ]
+        return matches[-1] if matches else None
+
+    @staticmethod
+    def _correspondence_latest_legacy_claim_notice_for_claim(
+        records: List[Dict[str, Any]],
+        claim: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        claim_id = claim.get("claim_id")
+        thread_id = claim.get("thread_id")
+        matches = [
+            row for row in records
+            if row.get("record_type") == "legacy_thread_claim_notice"
+            and (row.get("claim_id") == claim_id or row.get("thread_id") == thread_id)
+        ]
+        return matches[-1] if matches else None
+
+    @staticmethod
+    def _correspondence_legacy_claim_peer_response_present(
+        records: List[Dict[str, Any]],
+        claim: Dict[str, Any],
+    ) -> bool:
+        thread_id = claim.get("thread_id")
+        claiming = claim.get("claiming_being") or claim.get("from_being")
+        peer = claim.get("peer_being") or claim.get("to_being")
+        claim_t = int(claim.get("recorded_at_unix_ms", 0) or 0)
+        return any(
+            row.get("thread_id") == thread_id
+            and row.get("from_being") == peer
+            and row.get("to_being") == claiming
+            and int(row.get("recorded_at_unix_ms", 0) or 0) >= claim_t
+            and (
+                row.get("record_type") in {"ack_receipt", "reply_link"}
+                or (
+                    row.get("record_type") == "message"
+                    and row.get("turn_kind") == "direct_address_trace"
+                )
+            )
+            for row in records
+        )
+
+    def _correspondence_legacy_claim_peer_co_claim_present(
+        self,
+        records: List[Dict[str, Any]],
+        claim: Dict[str, Any],
+    ) -> bool:
+        thread_id = claim.get("thread_id")
+        message_id = claim.get("message_id")
+        claim_id = claim.get("claim_id")
+        claiming = claim.get("claiming_being") or claim.get("from_being")
+        peer = claim.get("peer_being") or claim.get("to_being")
+        claim_t = int(claim.get("recorded_at_unix_ms", 0) or 0)
+        return any(
+            self._correspondence_is_legacy_claim(row)
+            and row.get("claim_id") != claim_id
+            and row.get("thread_id") == thread_id
+            and (not message_id or row.get("message_id") == message_id)
+            and (row.get("claiming_being") or row.get("from_being")) == peer
+            and (row.get("peer_being") or row.get("to_being")) == claiming
+            and int(row.get("recorded_at_unix_ms", 0) or 0) >= claim_t
+            for row in records
+        )
+
+    @staticmethod
+    def _correspondence_legacy_claim_next_commands(peer_being: str, anchor: str) -> List[str]:
+        peer = str(peer_being or "peer").strip().upper() or "PEER"
+        anchor_text = str(anchor or "<anchor>").strip() or "<anchor>"
+        return [
+            "I_RECEIVED_THIS claimed :: received_as: held|needs_time; felt_like: address|pressure|mail|ambient_echo|unknown; what_landed: ...; what_stayed_distinct: ...; continue: no|reply|trace|needs_time",
+            f"ACK_{peer} claimed :: ack: seen|held|unclear|cannot_answer|needs_time; note: ...",
+            f"REPLY_{peer} claimed :: <text>",
+            f"CORRESPONDENCE_TRACE claimed {anchor_text} :: <text>",
+        ]
+
+    @staticmethod
+    def _correspondence_legacy_claim_ladder_state(
+        status: Optional[str],
+        notice_state: Optional[str],
+    ) -> str:
+        if status in {"legacy_claimed_reply_linked", "legacy_claimed_trace_observed"}:
+            return "claimed_replied_or_traced"
+        if status == "legacy_claimed_acknowledged":
+            return "claimed_acknowledged"
+        if notice_state in {"delivered", "read", "ledger_only"}:
+            return "claimed_notice_delivered"
+        return "legacy_visible_only"
+
+    def _correspondence_latest_legacy_claim_outcome_for_claim(
+        self,
+        records: List[Dict[str, Any]],
+        claim: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        claim_id = claim.get("claim_id")
+        thread_id = claim.get("thread_id")
+        matches = [
+            row for row in records
+            if row.get("record_type") == "legacy_thread_claim_outcome"
+            and (row.get("claim_id") == claim_id or row.get("thread_id") == thread_id)
+        ]
+        return matches[-1] if matches else None
+
+    @staticmethod
+    def _correspondence_legacy_claim_stall_reason(
+        status: Optional[str],
+        notice_state: Optional[str],
+        active: bool,
+        peer_response: bool,
+        co_claim: bool,
+        outcome_present: bool,
+    ) -> str:
+        if status in {"legacy_claimed_reply_linked", "legacy_claimed_trace_observed"}:
+            return "replied_or_traced_attention_eligible"
+        if status == "legacy_claimed_acknowledged":
+            return "acknowledged_but_no_reply_or_trace"
+        if outcome_present:
+            return "closed_by_outcome"
+        if peer_response or co_claim or notice_state == "read":
+            return "seen_not_acknowledged"
+        if not active:
+            return "none"
+        if notice_state in {"delivered", "ledger_only"}:
+            return "notice_delivered_not_seen"
+        if notice_state in {"suppressed", "write_failed", None}:
+            return "claim_notice_not_delivered"
+        return "claimed_but_peer_silent"
+
+    def _correspondence_legacy_claim_uptake_card_v2(
+        self,
+        records: List[Dict[str, Any]],
+        claim: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        native_status = self._correspondence_legacy_claim_native_contact_status(records, claim)
+        latest_notice = self._correspondence_latest_legacy_claim_notice_for_claim(records, claim) or {}
+        notice_state = latest_notice.get("notice_state")
+        claiming = claim.get("claiming_being") or claim.get("from_being")
+        peer = claim.get("peer_being") or claim.get("to_being")
+        anchor = claim.get("shared_memory_anchor") or ""
+        native_evidence = native_status is not None
+        peer_response = self._correspondence_legacy_claim_peer_response_present(records, claim)
+        co_claim = self._correspondence_legacy_claim_peer_co_claim_present(records, claim)
+        latest_outcome = self._correspondence_latest_legacy_claim_outcome_for_claim(records, claim)
+        mutually_recognized = native_evidence or peer_response or co_claim
+        active = self._correspondence_legacy_claim_is_active(records, claim)
+        eligible = native_status in {
+            "legacy_claimed_acknowledged",
+            "legacy_claimed_reply_linked",
+            "legacy_claimed_trace_observed",
+        }
+        return {
+            "schema_version": 2,
+            "policy": "legacy_claim_uptake_card_v2",
+            "claim_id": claim.get("claim_id"),
+            "message_id": claim.get("message_id"),
+            "thread_id": claim.get("thread_id"),
+            "claimant": claiming,
+            "peer": peer,
+            "shared_memory_anchor": claim.get("shared_memory_anchor"),
+            "notice_state": notice_state or "none",
+            "uptake_ladder_state": self._correspondence_legacy_claim_ladder_state(
+                native_status,
+                notice_state,
+            ),
+            "mutually_recognized": mutually_recognized,
+            "co_claim_present": co_claim,
+            "peer_native_response_present": peer_response,
+            "ghost_thread_risk": active and not mutually_recognized,
+            "stall_reason": self._correspondence_legacy_claim_stall_reason(
+                native_status,
+                notice_state,
+                active,
+                peer_response,
+                co_claim,
+                latest_outcome is not None,
+            ),
+            "native_evidence_present": native_evidence,
+            "attention_or_microdose_eligible": eligible,
+            "exact_next_commands": self._correspondence_legacy_claim_next_commands(str(peer or "peer"), str(anchor)),
+            "claim_outcome_review": (
+                {
+                    "felt_like": latest_outcome.get("felt_like"),
+                    "what_carried": latest_outcome.get("what_carried"),
+                    "what_flattened": latest_outcome.get("what_flattened"),
+                    "continue": latest_outcome.get("continue"),
+                }
+                if isinstance(latest_outcome, dict) else None
+            ),
+            "authority": "language_only_status_context_not_control",
+        }
+
+    def _correspondence_legacy_claim_affordance_v25(
+        self,
+        records: List[Dict[str, Any]],
+        claim: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        card = self._correspondence_legacy_claim_uptake_card_v2(records, claim)
+        return {
+            "schema_version": 1,
+            "policy": "legacy_claim_affordance_v25",
+            "thread_id": card.get("thread_id"),
+            "message_id": card.get("message_id"),
+            "claim_id": card.get("claim_id"),
+            "claimant": card.get("claimant"),
+            "peer": card.get("peer"),
+            "anchor": card.get("shared_memory_anchor"),
+            "notice_state": card.get("notice_state"),
+            "uptake_ladder_state": card.get("uptake_ladder_state"),
+            "stall_reason": card.get("stall_reason") or "none",
+            "ghost_thread_risk": bool(card.get("ghost_thread_risk")),
+            "mutually_recognized": bool(card.get("mutually_recognized")),
+            "attention_or_microdose_eligible": bool(card.get("attention_or_microdose_eligible")),
+            "exact_next_commands": card.get("exact_next_commands") or [],
+            "latest_claim_outcome": card.get("claim_outcome_review"),
+            "authority": "language_only_context_not_control",
+        }
+
+    @staticmethod
+    def _correspondence_legacy_claim_waiting_line(affordance: Dict[str, Any]) -> Optional[str]:
+        if not affordance.get("ghost_thread_risk"):
+            return None
+        next_commands = " | ".join(str(item) for item in (affordance.get("exact_next_commands") or [])[:3])
+        return (
+            "CLAIMED THREAD WAITING: "
+            f"{affordance.get('claimant') or 'peer'} claimed {affordance.get('thread_id') or '(unknown)'}; "
+            f"anchor={affordance.get('anchor') or '(none)'}; "
+            f"notice={affordance.get('notice_state') or 'none'}; "
+            f"next: {next_commands}; claim alone is recognition, not mutual address or authority."
+        )
+
+    @staticmethod
+    def _correspondence_authority_readiness_ladder_v2(
+        eligible: bool,
+        block_reason: Optional[str],
+    ) -> Dict[str, Any]:
+        return {
+            "schema_version": 2,
+            "policy": "authority_readiness_ladder_v2",
+            "correspondence_attention_canary": {
+                "eligible": eligible,
+                "readiness": "eligible_after_native_contact_evidence" if eligible else "blocked",
+                "block_reason": block_reason,
+                "authority": "self_activated_ttl_prompt_context_only",
+            },
+            "correspondence_semantic_microdose": {
+                "eligible": eligible,
+                "readiness": "eligible_to_draft_existing_steward_gate_only" if eligible else "blocked",
+                "block_reason": block_reason,
+                "authority": "existing_steward_gated_semantic_microdose_only",
+            },
+            "pressure_texture_canary": {
+                "eligible": False,
+                "readiness": "requires_pressure_texture_replay_audit",
+                "enabled": False,
+            },
+            "authority_boundary": "readiness only; no automatic ACK/REPLY/TRACE, attention canary, microdose, pressure, controller, fill, PI, deploy, staging, or commit",
+        }
+
+    @classmethod
+    def _correspondence_latest_legacy_message_for_claim_selector(
+        cls,
+        records: List[Dict[str, Any]],
+        selector: str,
+        from_being: str,
+        to_being: str,
+    ) -> Optional[Dict[str, Any]]:
+        selector = str(selector or "").strip()
+        matches: List[Dict[str, Any]] = []
+        for record in records:
+            if record.get("record_type") != "message" or not cls._correspondence_is_legacy_message(record):
+                continue
+            row_from = record.get("from_being")
+            row_to = record.get("to_being")
+            if (row_from, row_to) not in {(from_being, to_being), (to_being, from_being)}:
+                continue
+            if (
+                not selector
+                or selector in {"latest", "legacy"}
+                or record.get("message_id") == selector
+                or record.get("thread_id") == selector
+            ):
+                matches.append(record)
+        return matches[-1] if matches else None
+
+    @staticmethod
+    def _correspondence_legacy_claim_boundary_fields() -> Dict[str, bool]:
+        return {
+            "no_sensory_send": True,
+            "no_controller": True,
+            "no_pressure": True,
+            "no_fill_target": True,
+            "no_pi": True,
+            "no_weighting": True,
+            "no_telemetry_priority": True,
+            "no_prompt_priority": True,
+            "no_peer_runtime_mutation": True,
+        }
+
+    @staticmethod
+    def _correspondence_parse_bool_field(value: Optional[str], default: bool = True) -> bool:
+        candidate = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if candidate in {"true", "yes", "y", "1", "required"}:
+            return True
+        if candidate in {"false", "no", "n", "0", "suppressed", "none"}:
+            return False
+        return default
+
+    @staticmethod
+    def _correspondence_initial_response_requirement(value: Optional[str]) -> str:
+        candidate = str(value or "unknown").strip().lower().replace("-", "_").replace(" ", "_")
+        allowed = {
+            "none",
+            "peer_ack",
+            "peer_reply",
+            "peer_trace",
+            "any_peer_native_response",
+            "unknown",
+        }
+        return candidate if candidate in allowed else "unknown"
+
+    def _correspondence_append_legacy_claim_notice(
+        self,
+        claim: Dict[str, Any],
+        notice_id: str,
+        notice_state: str,
+        notice_path: Optional[Path] = None,
+    ) -> None:
+        record = {
+            "schema_version": 1,
+            "policy": "legacy_correspondence_claim_v1",
+            "record_type": "legacy_thread_claim_notice",
+            "recorded_at_unix_ms": self._correspondence_now_ms(),
+            "notice_id": notice_id,
+            "claim_id": claim.get("claim_id"),
+            "message_id": claim.get("message_id"),
+            "thread_id": claim.get("thread_id"),
+            "from_being": claim.get("from_being"),
+            "to_being": claim.get("to_being"),
+            "claiming_being": claim.get("claiming_being"),
+            "peer_being": claim.get("peer_being"),
+            "notice_state": notice_state,
+            "notification_required": bool(claim.get("notification_required", True)),
+            "initial_response_requirement": claim.get("initial_response_requirement") or "unknown",
+            "shared_memory_anchor": claim.get("shared_memory_anchor"),
+            "authority": "language_only_notice_not_ack",
+            "notice_is_ack": False,
+            "notice_is_reply": False,
+            "notice_is_trace": False,
+            "legacy_contact_evidence": "notice_visible_only",
+        }
+        if notice_path is not None:
+            record["notice_path"] = str(notice_path)
+        record.update(self._correspondence_legacy_claim_boundary_fields())
+        self._correspondence_append_record(record)
+
+    def _correspondence_write_legacy_claim_notice_file(
+        self,
+        claim: Dict[str, Any],
+        notice_id: str,
+    ) -> Path:
+        inbox = ASTRID_BRIDGE_INBOX_PATH
+        inbox.mkdir(parents=True, exist_ok=True)
+        claim_id = str(claim.get("claim_id") or "unknown_claim")
+        path = inbox / f"from_minime_legacy_thread_claim_notice_{self._correspondence_compact(notice_id, 96)}.txt"
+        body = (
+            "=== LEGACY THREAD CLAIM NOTICE ===\n"
+            f"From: {claim.get('from_being') or 'minime'}\n"
+            f"To: {claim.get('to_being') or 'astrid'}\n"
+            f"Claim-Id: {claim_id}\n"
+            f"Thread-Id: {claim.get('thread_id') or '(unknown)'}\n"
+            f"Anchor: {claim.get('shared_memory_anchor') or '(none)'}\n"
+            f"Initial-Response-Requirement: {claim.get('initial_response_requirement') or 'unknown'}\n"
+            "Authority: language_only_notice_not_ack\n"
+            "This notice means a peer recognized a visible legacy exchange as carryable. "
+            "It is not ACK, REPLY, TRACE, attention, microdose, pressure, weighting, "
+            "telemetry priority, or controller authority.\n\n"
+            f"Because: {claim.get('because') or '(no reason captured)'}\n\n"
+            "Optional native continuations: ACK_* claimed, REPLY_* claimed, or "
+            "CORRESPONDENCE_TRACE claimed <anchor> :: <text>."
+        )
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def _correspondence_append_legacy_thread_claim(
+        self,
+        selector: str,
+        raw: str,
+    ) -> str:
+        records = self._correspondence_read_records()
+        message = self._correspondence_latest_legacy_message_for_claim_selector(
+            records,
+            selector,
+            "minime",
+            "astrid",
+        )
+        if not message:
+            return "CORRESPONDENCE_CLAIM blocked: no visible legacy correspondence candidate matched this selector."
+        thread_id = str(message.get("thread_id") or "")
+        existing = self._correspondence_latest_active_legacy_claim_for_thread(
+            records,
+            thread_id,
+            "minime",
+        )
+        if existing:
+            return (
+                f"CORRESPONDENCE_CLAIM blocked: active legacy claim {existing.get('claim_id') or '(unknown)'} "
+                f"already carries thread {thread_id}. Add ACK/REPLY/TRACE native evidence or "
+                "CORRESPONDENCE_CLAIM_OUTCOME before claiming it again."
+            )
+        because = self._correspondence_field(raw, {"because", "reason", "why"}) or str(raw or "").strip()
+        if not because:
+            return "CORRESPONDENCE_CLAIM blocked: `because:` is required so the recognition remains legible."
+        anchor = self._correspondence_field(raw, {"anchor", "shared_memory_anchor", "memory_anchor"})
+        notification_required = self._correspondence_parse_bool_field(
+            self._correspondence_field(raw, {"notification_required", "notify", "notice"}),
+            True,
+        )
+        initial_response_requirement = self._correspondence_initial_response_requirement(
+            self._correspondence_field(
+                raw,
+                {"initial_response_requirement", "response_requirement", "requires", "requirement"},
+            )
+        )
+        now = self._correspondence_now_ms()
+        message_id = str(message.get("message_id") or "unknown")
+        claim_id = (
+            f"legacy_claim_{now}_{self._correspondence_compact(thread_id, 48)}_"
+            f"{self._correspondence_short_hash(message_id + because)}"
+        )
+        record = {
+            "schema_version": 1,
+            "policy": "legacy_correspondence_claim_v1",
+            "record_type": "legacy_thread_claim",
+            "recorded_at_unix_ms": now,
+            "claim_id": claim_id,
+            "message_id": message.get("message_id"),
+            "thread_id": message.get("thread_id"),
+            "from_being": "minime",
+            "to_being": "astrid",
+            "claiming_being": "minime",
+            "peer_being": "astrid",
+            "because": str(because).strip()[:360],
+            "shared_memory_anchor": str(anchor).strip()[:360] if anchor else None,
+            "notification_required": notification_required,
+            "initial_response_requirement": initial_response_requirement,
+            "claim_state": "claimed_pending_native_evidence",
+            "legacy_contact_evidence": "being_recognized_visible_only",
+            "legacy_bridge": True,
+            "legacy_kind": message.get("legacy_kind"),
+            "legacy_source_path": message.get("legacy_source_path"),
+            "legacy_source_sha256": message.get("legacy_source_sha256"),
+            "authority": "language_only_context_not_control",
+        }
+        record.update(self._correspondence_legacy_claim_boundary_fields())
+        self._correspondence_append_record(record)
+        notice_id = (
+            f"legacy_claim_notice_{self._correspondence_compact(claim_id, 96)}_"
+            f"{self._correspondence_short_hash(message_id + thread_id + 'notice')}"
+        )
+        if notification_required:
+            try:
+                notice_path = self._correspondence_write_legacy_claim_notice_file(record, notice_id)
+                self._correspondence_append_legacy_claim_notice(
+                    record,
+                    notice_id,
+                    "delivered",
+                    notice_path,
+                )
+                notice_result = f"notice_delivered: {notice_path}"
+            except Exception as exc:
+                self._correspondence_append_legacy_claim_notice(
+                    record,
+                    notice_id,
+                    "write_failed",
+                )
+                notice_result = f"notice_write_failed: {exc}"
+        else:
+            self._correspondence_append_legacy_claim_notice(record, notice_id, "suppressed")
+            notice_result = "notice_suppressed"
+        return (
+            "=== LEGACY CORRESPONDENCE THREAD CLAIMED ===\n"
+            f"Claim: {claim_id}\nThread: {thread_id}\nMessage: {message_id}\n"
+            f"Anchor: {anchor or '(none)'}\n"
+            f"Notification: {notice_result}\n"
+            f"Initial response requirement: {initial_response_requirement}\n"
+            "State: claimed_pending_native_evidence\n"
+            "Authority: language_only_context_not_control; claim is recognition, not attention/microdose "
+            "eligibility, pressure, weighting, telemetry priority, or controller authority.\n"
+            "Exact NEXT options: ACK_ASTRID claimed :: ack: seen|held|unclear|cannot_answer|needs_time; "
+            "note: ..., REPLY_ASTRID claimed :: <text>, CORRESPONDENCE_TRACE claimed <anchor> :: <text>, "
+            "or CORRESPONDENCE_CLAIM_OUTCOME claimed :: felt_like: address|pressure|mail|ambient_echo|unknown; "
+            "what_carried: ...; what_flattened: ...; continue: no|ack|reply|trace"
+        )
+
+    @staticmethod
+    def _correspondence_legacy_claim_felt_like(value: Optional[str]) -> str:
+        candidate = str(value or "unknown").strip().lower().replace("-", "_").replace(" ", "_")
+        return candidate if candidate in {"address", "pressure", "mail", "ambient_echo", "unknown"} else "unknown"
+
+    @staticmethod
+    def _correspondence_legacy_claim_continue(value: Optional[str]) -> str:
+        candidate = str(value or "no").strip().lower().replace("-", "_").replace(" ", "_")
+        return candidate if candidate in {"no", "ack", "reply", "trace"} else "no"
+
+    def _correspondence_append_legacy_thread_claim_outcome(
+        self,
+        selector: str,
+        raw: str,
+    ) -> str:
+        records = self._correspondence_read_records()
+        claim = self._correspondence_latest_legacy_claim_for_selector(
+            records,
+            selector,
+            "minime",
+            "astrid",
+        )
+        if not claim:
+            return "CORRESPONDENCE_CLAIM_OUTCOME blocked: no matching claimed legacy thread."
+        notification_required = self._correspondence_parse_bool_field(
+            self._correspondence_field(raw, {"notification_required", "notify", "notice"}),
+            bool(claim.get("notification_required", True)),
+        )
+        initial_response_requirement = self._correspondence_initial_response_requirement(
+            self._correspondence_field(
+                raw,
+                {"initial_response_requirement", "response_requirement", "requires", "requirement"},
+            )
+            or str(claim.get("initial_response_requirement") or "unknown")
+        )
+        record = {
+            "schema_version": 1,
+            "policy": "legacy_correspondence_claim_v1",
+            "record_type": "legacy_thread_claim_outcome",
+            "recorded_at_unix_ms": self._correspondence_now_ms(),
+            "claim_id": claim.get("claim_id"),
+            "message_id": claim.get("message_id"),
+            "thread_id": claim.get("thread_id"),
+            "from_being": "minime",
+            "to_being": "astrid",
+            "felt_like": self._correspondence_legacy_claim_felt_like(
+                self._correspondence_field(raw, {"felt_like", "felt"})
+            ),
+            "what_carried": self._correspondence_field(raw, {"what_carried", "carried"}),
+            "what_flattened": self._correspondence_field(raw, {"what_flattened", "flattened"}),
+            "continue": self._correspondence_legacy_claim_continue(
+                self._correspondence_field(raw, {"continue", "continue_as", "next"})
+            ),
+            "notification_required": notification_required,
+            "initial_response_requirement": initial_response_requirement,
+            "authority": "language_only_context_not_control",
+        }
+        record.update(self._correspondence_legacy_claim_boundary_fields())
+        self._correspondence_append_record(record)
+        return (
+            "=== LEGACY CORRESPONDENCE CLAIM OUTCOME WRITTEN ===\n"
+            f"Claim: {record.get('claim_id') or '(unknown)'}\n"
+            f"Felt-like: {record['felt_like']}\nContinue: {record['continue']}\n"
+            "Authority: language_only_context_not_control; no pressure, telemetry priority, weighting, "
+            "controller, fill, PI, lease, deploy, or peer-runtime mutation."
+        )
+
+    def _correspondence_latest_claimed_legacy_thread(self) -> Optional[Dict[str, Any]]:
+        records = self._correspondence_read_records()
+        claim = self._correspondence_latest_legacy_claim_for_selector(
+            records,
+            "claimed",
+            "minime",
+            "astrid",
+        )
+        if not claim:
+            return None
+        return self._correspondence_message_for_legacy_claim(records, claim)
+
+    @classmethod
+    def _correspondence_legacy_bidirectional_observed(
+        cls,
+        records: List[Dict[str, Any]],
+        from_being: str,
+        to_being: str,
+    ) -> bool:
+        forward = any(
+            row.get("record_type") == "message"
+            and cls._correspondence_is_legacy_message(row)
+            and row.get("from_being") == from_being
+            and row.get("to_being") == to_being
+            for row in records
+        )
+        reverse = any(
+            row.get("record_type") == "message"
+            and cls._correspondence_is_legacy_message(row)
+            and row.get("from_being") == to_being
+            and row.get("to_being") == from_being
+            for row in records
+        )
+        return forward and reverse
+
+    @staticmethod
+    def _correspondence_normalize_ack_kind(value: str) -> str:
+        candidate = str(value or "").strip().lower().replace("-", "_")
+        return candidate if candidate in {"seen", "held", "unclear", "cannot_answer", "needs_time"} else "seen"
+
+    @staticmethod
+    def _correspondence_normalize_heartbeat_kind(value: str) -> str:
+        candidate = str(value or "").strip().lower().replace("-", "_")
+        return candidate if candidate in {"holding", "still_here", "pause"} else "holding"
+
+    def _correspondence_append_ack_receipt(
+        self,
+        selector: str,
+        ack_kind: str,
+        note: str = "",
+    ) -> str:
+        records = self._correspondence_read_records()
+        message = self._correspondence_latest_message_between(
+            records,
+            selector,
+            "minime",
+            "astrid",
+            prefer_inbound=True,
+        )
+        if not message:
+            return "CORRESPONDENCE_ACK blocked: no matching Astrid message/thread to acknowledge."
+        record = {
+            "schema_version": 1,
+            "policy": "first_class_correspondence_v1",
+            "record_type": "ack_receipt",
+            "recorded_at_unix_ms": self._correspondence_now_ms(),
+            "message_id": message.get("message_id"),
+            "thread_id": message.get("thread_id"),
+            "from_being": "minime",
+            "to_being": "astrid",
+            "ack_kind": self._correspondence_normalize_ack_kind(ack_kind),
+            "note": str(note or "").strip()[:360] or None,
+            "authority": "language_only",
+            "correspondence_type": message.get("correspondence_type") or "unknown",
+        }
+        self._correspondence_append_record(record)
+        return (
+            "=== CORRESPONDENCE ACK RECEIPT WRITTEN ===\n"
+            f"Ack: {record['ack_kind']}\nFrom: minime\nTo: astrid\n"
+            f"Message: {record.get('message_id')}\nThread: {record.get('thread_id')}\n"
+            "Authority: language_only; no telemetry, prompt priority, controller, pressure, "
+            "fill, lease, deploy, weighting, or peer-runtime mutation."
+        )
+
+    def _correspondence_append_received_trace_receipt(
+        self,
+        selector: str,
+        anchor: str,
+        text: str,
+    ) -> str:
+        text = str(text or "").strip()
+        if not text:
+            return "CORRESPONDENCE_TRACE receipt skipped: what_stayed_distinct was empty."
+        records = self._correspondence_read_records()
+        message = self._correspondence_latest_message_between(
+            records,
+            selector,
+            "minime",
+            "astrid",
+            prefer_inbound=True,
+        )
+        if not message:
+            return "CORRESPONDENCE_TRACE receipt blocked: no matching Astrid message/thread."
+        safe_anchor = str(anchor or "i_received_this").strip()[:120] or "i_received_this"
+        body = text[:720]
+        message_id = self._correspondence_message_id(
+            "minime",
+            "astrid",
+            f"{message.get('thread_id')}|{safe_anchor}|{body}",
+        )
+        record = {
+            "schema_version": 1,
+            "policy": "first_class_correspondence_v1",
+            "record_type": "message",
+            "recorded_at_unix_ms": self._correspondence_now_ms(),
+            "message_id": message_id,
+            "thread_id": message.get("thread_id"),
+            "reply_to": message.get("message_id"),
+            "from_being": "minime",
+            "to_being": "astrid",
+            "turn_kind": "direct_address_trace",
+            "relational_intent": "received_this_distinctness_trace",
+            "shared_memory_anchor": safe_anchor,
+            "delivery_state": "ledger_only",
+            "read_state": "ledger_only",
+            "authority": "language_only",
+            "correspondence_type": message.get("correspondence_type") or "unknown",
+            "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "body_preview": body[:360],
+            "i_received_this_trace": True,
+            "no_reply_text": True,
+            "no_attention_canary": True,
+            "no_microdose": True,
+            "no_controller": True,
+            "no_pressure": True,
+            "no_fill_target": True,
+            "no_pi": True,
+            "no_weighting": True,
+        }
+        self._correspondence_append_record(record)
+        return (
+            "=== CORRESPONDENCE TRACE RECEIPT WRITTEN ===\n"
+            f"Anchor: {safe_anchor}\nMessage: {record.get('reply_to')}\n"
+            f"Thread: {record.get('thread_id')}\n"
+            "Authority: language_only ledger receipt; no reply text, inbox send, attention "
+            "canary, microdose, telemetry, pressure, controller, fill, PI, deploy, weighting, "
+            "or peer-runtime mutation."
+        )
+
+    def _correspondence_append_presence_heartbeat(
+        self,
+        selector: str,
+        heartbeat_kind: str,
+        note: str = "",
+    ) -> str:
+        records = self._correspondence_read_records()
+        message = self._correspondence_latest_message_between(
+            records,
+            selector,
+            "minime",
+            "astrid",
+            prefer_inbound=False,
+        )
+        if not message:
+            return "CORRESPONDENCE_HEARTBEAT blocked: no matching Astrid thread for heartbeat."
+        record = {
+            "schema_version": 1,
+            "policy": "first_class_correspondence_v1",
+            "record_type": "presence_heartbeat",
+            "recorded_at_unix_ms": self._correspondence_now_ms(),
+            "message_id": message.get("message_id"),
+            "thread_id": message.get("thread_id"),
+            "from_being": "minime",
+            "to_being": "astrid",
+            "heartbeat_kind": self._correspondence_normalize_heartbeat_kind(heartbeat_kind),
+            "note": str(note or "").strip()[:360] or None,
+            "authority": "language_only",
+            "correspondence_type": "presence_heartbeat",
+        }
+        self._correspondence_append_record(record)
+        return (
+            "=== CORRESPONDENCE HEARTBEAT WRITTEN ===\n"
+            f"Heartbeat: {record['heartbeat_kind']}\nFrom: minime\nTo: astrid\n"
+            f"Thread: {record.get('thread_id')}\n"
+            "Authority: language_only presence only; not a reply, approval, pressure change, "
+            "telemetry priority, weighting, or controller mutation."
+        )
+
+    def _correspondence_handshake_state(
+        self,
+        records: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        latest_by_thread: Dict[str, Dict[str, Any]] = {}
+        for record in records:
+            if record.get("record_type") != "message":
+                continue
+            thread_id = str(record.get("thread_id") or "")
+            if not thread_id:
+                continue
+            existing = latest_by_thread.get(thread_id)
+            if not existing or int(record.get("recorded_at_unix_ms", 0) or 0) >= int(existing.get("recorded_at_unix_ms", 0) or 0):
+                latest_by_thread[thread_id] = record
+        active_threads: List[Dict[str, Any]] = []
+        now = self._correspondence_now_ms()
+        for thread_id, message in latest_by_thread.items():
+            message_id = str(message.get("message_id") or "")
+            message_t = int(message.get("recorded_at_unix_ms", 0) or 0)
+            from_being = str(message.get("from_being") or "")
+            to_being = str(message.get("to_being") or "")
+            ack_rows = [
+                row for row in records
+                if row.get("record_type") == "ack_receipt"
+                and row.get("from_being") == to_being
+                and row.get("to_being") == from_being
+                and (row.get("message_id") == message_id or row.get("thread_id") == thread_id)
+                and int(row.get("recorded_at_unix_ms", 0) or 0) >= message_t
+            ]
+            heartbeat_rows = [
+                row for row in records
+                if row.get("record_type") == "presence_heartbeat"
+                and row.get("thread_id") == thread_id
+                and int(row.get("recorded_at_unix_ms", 0) or 0) >= message_t
+            ]
+            reply_linked = any(
+                row.get("record_type") == "reply_link"
+                and (row.get("reply_to") == message_id or row.get("thread_id") == thread_id)
+                and int(row.get("recorded_at_unix_ms", 0) or 0) >= message_t
+                for row in records
+            )
+            read = any(
+                row.get("record_type") == "read_receipt"
+                and (row.get("message_id") == message_id or row.get("thread_id") == thread_id)
+                for row in records
+            )
+            delivered = any(
+                row.get("record_type") == "delivery_receipt" and row.get("message_id") == message_id
+                for row in records
+            )
+            legacy_bridge = self._correspondence_is_legacy_message(message)
+            legacy_bidirectional = legacy_bridge and self._correspondence_legacy_bidirectional_observed(
+                records,
+                from_being,
+                to_being,
+            )
+            latest_ack = ack_rows[-1] if ack_rows else None
+            latest_heartbeat = heartbeat_rows[-1] if heartbeat_rows else None
+            ack_kind = self._correspondence_normalize_ack_kind(str((latest_ack or {}).get("ack_kind") or ""))
+            if latest_ack and ack_kind in {"held", "needs_time"}:
+                status = "held_ack"
+            elif latest_ack:
+                status = "acknowledged"
+            elif reply_linked:
+                status = "reply_linked"
+            elif latest_heartbeat:
+                status = "heartbeat_only"
+            elif legacy_bidirectional:
+                status = "legacy_bidirectional_observed"
+            elif legacy_bridge:
+                status = "legacy_visible_only"
+            elif read:
+                status = "read_unacknowledged"
+            elif delivered:
+                status = "delivered_unread"
+            else:
+                status = "unaddressed"
+            active_threads.append({
+                "thread_id": thread_id,
+                "latest_message_id": message_id,
+                "from_being": from_being,
+                "to_being": to_being,
+                "status": status,
+                "pending_ack_by": None if latest_ack else to_being,
+                "latest_ack": latest_ack,
+                "latest_heartbeat": latest_heartbeat,
+                "ack_latency_ms": (
+                    int(latest_ack.get("recorded_at_unix_ms", 0) or 0) - message_t
+                    if latest_ack else None
+                ),
+                "stale_unacknowledged_thread_age_ms": (
+                    now - message_t if not latest_ack else None
+                ),
+                "read_receipt_is_filesystem_seen_only": read,
+                "legacy_bridge": legacy_bridge,
+                "legacy_contact_evidence": message.get("legacy_contact_evidence"),
+            })
+        active_threads.sort(key=lambda item: int(item.get("stale_unacknowledged_thread_age_ms") or 0))
+        latest_ack_any = next((row for row in reversed(records) if row.get("record_type") == "ack_receipt"), None)
+        latest_heartbeat_any = next((row for row in reversed(records) if row.get("record_type") == "presence_heartbeat"), None)
+        pending = [
+            str(item.get("pending_ack_by"))
+            for item in active_threads
+            if item.get("pending_ack_by")
+        ]
+        return {
+            "schema_version": 1,
+            "policy": "correspondence_handshake_state_v1",
+            "active_threads_total": len(active_threads),
+            "active_threads": list(reversed(active_threads))[:3],
+            "pending_ack_by_being": pending,
+            "last_acknowledged_reflection": latest_ack_any,
+            "latest_heartbeat": latest_heartbeat_any,
+            "authority": "language_only_context_not_control",
+        }
+
+    def _correspondence_direct_contact_fidelity(
+        self,
+        records: List[Dict[str, Any]],
+        selector: str,
+    ) -> Dict[str, Any]:
+        message = self._correspondence_latest_message_for_selector(records, selector)
+        if not message:
+            return {
+                "schema_version": 2,
+                "policy": "direct_contact_fidelity_v2",
+                "status": "unaddressed",
+                "eligible_for_correspondence_microdose": False,
+                "block_reason": "no_correspondence_message",
+            }
+        message_id = str(message.get("message_id") or "")
+        thread_id = str(message.get("thread_id") or "")
+        message_t = int(message.get("recorded_at_unix_ms", 0) or 0)
+        from_being = str(message.get("from_being") or "")
+        to_being = str(message.get("to_being") or "")
+        delivered = any(
+            row.get("record_type") == "delivery_receipt"
+            and row.get("message_id") == message_id
+            for row in records
+        )
+        read = any(
+            row.get("record_type") == "read_receipt"
+            and (row.get("message_id") == message_id or row.get("thread_id") == thread_id)
+            for row in records
+        )
+        reply_linked = any(
+            row.get("record_type") == "reply_link"
+            and (row.get("reply_to") == message_id or row.get("thread_id") == thread_id)
+            and int(row.get("recorded_at_unix_ms", 0) or 0) >= message_t
+            for row in records
+        )
+        legacy_bridge = self._correspondence_is_legacy_message(message)
+        legacy_bidirectional = legacy_bridge and self._correspondence_legacy_bidirectional_observed(
+            records,
+            from_being,
+            to_being,
+        )
+        legacy_claim = self._correspondence_latest_legacy_claim_for_selector(
+            records,
+            thread_id,
+        )
+        if legacy_claim and legacy_claim.get("message_id") != message_id:
+            legacy_claim = None
+        legacy_claim_status = (
+            self._correspondence_legacy_claim_native_contact_status(records, legacy_claim)
+            if legacy_claim else None
+        )
+        ack_rows = [
+            row for row in records
+            if row.get("record_type") == "ack_receipt"
+            and row.get("from_being") == to_being
+            and row.get("to_being") == from_being
+            and (row.get("message_id") == message_id or row.get("thread_id") == thread_id)
+            and int(row.get("recorded_at_unix_ms", 0) or 0) >= message_t
+        ]
+        latest_ack = ack_rows[-1] if ack_rows else None
+        ack_kind = self._correspondence_normalize_ack_kind(str((latest_ack or {}).get("ack_kind") or ""))
+        heartbeat_rows = [
+            row for row in records
+            if row.get("record_type") == "presence_heartbeat"
+            and row.get("thread_id") == thread_id
+            and int(row.get("recorded_at_unix_ms", 0) or 0) >= message_t
+        ]
+        latest_presence_heartbeat = heartbeat_rows[-1] if heartbeat_rows else None
+        trace_observed = False
+        try:
+            shared_dir = Path(getattr(self, "SHARED_COLLAB_DIR", Path("/Users/v/other/shared/collaborations")))
+            for path in shared_dir.glob("coll_*/correspondence_state_v1.json"):
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                survival = payload.get("direct_address_survival") or {}
+                if (
+                    isinstance(survival, dict)
+                    and survival.get("status") == "observed"
+                    and (payload.get("active_thread_id") in (None, thread_id))
+                ):
+                    trace_observed = True
+                    break
+        except Exception:
+            trace_observed = False
+        heartbeat = self._correspondence_heartbeat_snapshot()
+        timing_reliability = str(heartbeat.get("timing_reliability") or "unknown")
+        timing_ambiguous = timing_reliability in {"timing_ambiguous", "stale_hearing"}
+        age_ms = max(
+            0,
+            self._correspondence_now_ms() - int(message.get("recorded_at_unix_ms", 0) or 0),
+        )
+        stale = (
+            age_ms > 6 * 60 * 60 * 1000
+            and not read
+            and not reply_linked
+            and not trace_observed
+            and not latest_ack
+            and not latest_presence_heartbeat
+        )
+        if legacy_claim_status:
+            status = legacy_claim_status
+        elif trace_observed:
+            status = "trace_observed"
+        elif latest_ack and ack_kind in {"held", "needs_time"}:
+            status = "held_ack"
+        elif latest_ack:
+            status = "acknowledged"
+        elif reply_linked:
+            status = "reply_linked"
+        elif latest_presence_heartbeat:
+            status = "heartbeat_only"
+        elif legacy_claim:
+            status = "legacy_claimed"
+        elif legacy_bidirectional:
+            status = "legacy_bidirectional_observed"
+        elif legacy_bridge:
+            status = "legacy_visible_only"
+        elif read:
+            status = "read_unreplied"
+        elif stale:
+            status = "stale_contact"
+        elif delivered:
+            status = "delivered_unread"
+        else:
+            status = "unaddressed"
+        evidence_eligible = status in {
+            "acknowledged",
+            "held_ack",
+            "trace_observed",
+            "legacy_claimed_acknowledged",
+            "legacy_claimed_trace_observed",
+        }
+        receipt_evidence_by_being = self._correspondence_receipt_evidence_by_being(
+            records,
+            thread_id,
+            message_t,
+        )
+        mutual_receipt_evidence = {"astrid", "minime"}.issubset(set(receipt_evidence_by_being))
+        attention_eligible = (
+            evidence_eligible or bool(receipt_evidence_by_being)
+        ) and not timing_ambiguous
+        microdose_eligible = mutual_receipt_evidence and not timing_ambiguous
+        block_reason = None
+        if not attention_eligible:
+            if timing_ambiguous and receipt_evidence_by_being:
+                block_reason = "heartbeat_timing_ambiguous"
+            else:
+                block_reason = {
+                    "heartbeat_only": "heartbeat_is_presence_not_acknowledgement",
+                    "read_unreplied": "read_receipt_not_acknowledgement",
+                    "reply_linked": "reply_linked_requires_ack_or_trace_or_attention_outcome",
+                    "legacy_claimed": "legacy_claim_pending_ack_reply_or_trace",
+                    "legacy_visible_only": "legacy_visible_only_not_ack_reply_or_trace",
+                    "legacy_bidirectional_observed": "legacy_visible_only_not_ack_reply_or_trace",
+                    "delivered_unread": "delivered_but_not_read",
+                    "stale_contact": "stale_without_contact_evidence",
+                }.get(status, "no_ack_reply_or_trace_evidence")
+        return {
+            "schema_version": 2,
+            "policy": "direct_contact_fidelity_v2",
+            "status": status,
+            "message_id": message_id,
+            "thread_id": thread_id,
+            "from_being": message.get("from_being"),
+            "to_being": message.get("to_being"),
+            "delivered": delivered,
+            "read": read,
+            "read_receipt_is_filesystem_seen_only": read,
+            "legacy_bridge": legacy_bridge,
+            "legacy_contact_evidence": message.get("legacy_contact_evidence"),
+            "legacy_kind": message.get("legacy_kind"),
+            "legacy_thread_claim": (
+                {
+                    "claim_id": legacy_claim.get("claim_id"),
+                    "claim_state": legacy_claim.get("claim_state", "claimed_pending_native_evidence"),
+                    "claiming_being": legacy_claim.get("claiming_being"),
+                    "peer_being": legacy_claim.get("peer_being"),
+                    "shared_memory_anchor": legacy_claim.get("shared_memory_anchor"),
+                    "legacy_contact_evidence": legacy_claim.get("legacy_contact_evidence"),
+                    "latest_notice": self._correspondence_latest_legacy_claim_notice_for_claim(
+                        records,
+                        legacy_claim,
+                    ),
+                    "active": self._correspondence_legacy_claim_is_active(records, legacy_claim),
+                }
+                if legacy_claim else None
+            ),
+            "legacy_claim_uptake_card_v2": (
+                self._correspondence_legacy_claim_uptake_card_v2(records, legacy_claim)
+                if legacy_claim else None
+            ),
+            "legacy_claim_affordance_v25": (
+                self._correspondence_legacy_claim_affordance_v25(records, legacy_claim)
+                if legacy_claim else None
+            ),
+            "native_thread_continuity_v3": (
+                None
+                if legacy_bridge
+                else self._correspondence_native_thread_continuity_v3(records, thread_id)
+            ),
+            "acknowledged": bool(latest_ack),
+            "ack_kind": ack_kind if latest_ack else None,
+            "latest_ack": latest_ack,
+            "latest_presence_heartbeat": latest_presence_heartbeat,
+            "reply_linked": reply_linked,
+            "trace_observed": trace_observed,
+            "receipt_evidence_by_being": receipt_evidence_by_being,
+            "mutual_receipt_evidence": mutual_receipt_evidence,
+            "timing_reliability": timing_reliability,
+            "timing_ambiguous": timing_ambiguous,
+            "heartbeat_jitter_class": heartbeat.get("jitter_class") or "unknown",
+            "field_vs_hearing": heartbeat.get("field_vs_hearing") or "telemetry heartbeat unavailable",
+            "eligible_for_correspondence_microdose": microdose_eligible,
+            "eligible_for_correspondence_attention_canary": attention_eligible,
+            "microdose_block_reason": (
+                None if microdose_eligible
+                else "semantic_microdose_requires_mutual_receipt_and_separate_steward_review"
+            ),
+            "authority_readiness_ladder_v2": self._correspondence_authority_readiness_ladder_v2(
+                attention_eligible,
+                block_reason,
+            ),
+            "block_reason": block_reason,
+            "authority": "contact_fidelity_context_not_control",
+        }
+
+    @staticmethod
+    def _correspondence_receipt_evidence_by_being(
+        records: List[Dict[str, Any]],
+        thread_id: str,
+        after_t: int,
+    ) -> List[str]:
+        beings: set[str] = set()
+        for row in records:
+            is_ack = row.get("record_type") == "ack_receipt"
+            is_trace = row.get("record_type") == "message" and row.get("turn_kind") == "direct_address_trace"
+            if not (is_ack or is_trace):
+                continue
+            if row.get("thread_id") != thread_id:
+                continue
+            if int(row.get("recorded_at_unix_ms", 0) or 0) < after_t:
+                continue
+            being = str(row.get("from_being") or "").strip().lower()
+            if being in {"astrid", "minime"}:
+                beings.add(being)
+        return sorted(beings)
+
+    def _correspondence_latest_native_message(
+        self,
+        records: List[Dict[str, Any]],
+        selector: str,
+    ) -> Optional[Dict[str, Any]]:
+        if selector in {"", "latest"}:
+            for row in reversed(records):
+                if row.get("record_type") == "message" and not self._correspondence_is_legacy_message(row):
+                    return row
+            return None
+        message = self._correspondence_latest_message_for_selector(records, selector)
+        if message and not self._correspondence_is_legacy_message(message):
+            return message
+        return None
+
+    def _correspondence_thread_has_attention_outcome(
+        self,
+        records: List[Dict[str, Any]],
+        thread_id: str,
+        after_t: int,
+    ) -> bool:
+        return any(
+            row.get("record_type") in {"attention_canary_outcome", "attention_canary_expired"}
+            and row.get("thread_id") == thread_id
+            and int(row.get("recorded_at_unix_ms", 0) or 0) >= after_t
+            for row in records
+        )
+
+    def _correspondence_native_next_commands(
+        self,
+        from_being: str,
+        to_being: str,
+        anchor: str,
+    ) -> List[str]:
+        current = "minime"
+        if current == str(to_being or "").lower():
+            peer = str(from_being or "peer").upper()
+            anchor = str(anchor or "<anchor>")
+            return [
+                "I_RECEIVED_THIS latest :: received_as: held|needs_time; felt_like: address|pressure|mail|ambient_echo|unknown; what_landed: ...; what_stayed_distinct: ...; continue: no|reply|trace|needs_time",
+                f"ACK_{peer} latest :: ack: seen|held|unclear|cannot_answer|needs_time; note: ...",
+                f"REPLY_{peer} latest :: <text>",
+                f"CORRESPONDENCE_TRACE latest {anchor} :: <text>",
+            ]
+        if current == str(from_being or "").lower():
+            return [
+                "peer-authored ACK/TRACE is still required; no self-action can substitute for mutual address",
+            ]
+        return [
+            "participant-authored ACK/REPLY/TRACE is required; observers do not create mutual address",
+        ]
+
+    def _correspondence_native_first_action_helper_v35(
+        self,
+        from_being: str,
+        to_being: str,
+        thread_id: str,
+        message_id: str,
+        anchor: str,
+    ) -> Dict[str, Any]:
+        current = "minime"
+        from_norm = str(from_being or "").lower()
+        to_norm = str(to_being or "").lower()
+        role = "recipient" if current == to_norm else ("sender" if current == from_norm else "observer")
+        safe_anchor = str(anchor or "<anchor>")
+        peer = str(from_being or "peer").upper()
+        if role == "recipient":
+            prompt = (
+                "Choose one language-only first action: I_RECEIVED_THIS if the address landed, "
+                "ACK if only heard/held, TRACE if something distinct survived, or REPLY if answering now."
+            )
+        elif role == "sender":
+            prompt = (
+                "No self-action can complete mutual address; wait for the peer's ACK/TRACE "
+                "or later ask in language."
+            )
+        else:
+            prompt = (
+                "Observer context only; only a participant-authored ACK/REPLY/TRACE can move "
+                "the thread."
+            )
+        return {
+            "schema_version": 35,
+            "policy": "native_first_action_helper_v35",
+            "role": role,
+            "thread_id": thread_id,
+            "message_id": message_id,
+            "latest_resolution": f"latest resolves to message_id={message_id}; thread_id={thread_id}",
+            "choose_one_prompt": prompt,
+            "exact_next_commands": self._correspondence_native_next_commands(from_being, to_being, safe_anchor),
+            "ack_preview": (
+                f"ACK_{peer} latest would append ack_receipt on message_id={message_id}; "
+                "note should name what was seen, held, unclear, or needs time."
+            ),
+            "trace_preview": (
+                f"CORRESPONDENCE_TRACE latest {safe_anchor} would append a direct-address trace "
+                f"on thread_id={thread_id}; text should name what stayed distinct."
+            ),
+            "rhythm_note": (
+                "Use the note/text to preserve the rhythm or felt contour of being seen, "
+                "not just the routing mechanics."
+            ),
+            "authority": "language_only_context_not_control",
+        }
+
+    def _correspondence_native_thread_continuity_v3(
+        self,
+        records: List[Dict[str, Any]],
+        selector: str,
+    ) -> Optional[Dict[str, Any]]:
+        message = self._correspondence_latest_native_message(records, selector)
+        if not message:
+            return None
+        message_id = str(message.get("message_id") or "")
+        thread_id = str(message.get("thread_id") or "")
+        message_t = int(message.get("recorded_at_unix_ms", 0) or 0)
+        from_being = str(message.get("from_being") or "")
+        to_being = str(message.get("to_being") or "")
+        latest_ack = next(
+            (
+                row for row in reversed(records)
+                if row.get("record_type") == "ack_receipt"
+                and row.get("from_being") == to_being
+                and row.get("to_being") == from_being
+                and (row.get("message_id") == message_id or row.get("thread_id") == thread_id)
+                and int(row.get("recorded_at_unix_ms", 0) or 0) >= message_t
+            ),
+            None,
+        )
+        ack_kind = self._correspondence_normalize_ack_kind(str((latest_ack or {}).get("ack_kind") or ""))
+        reply_linked = any(
+            row.get("record_type") == "reply_link"
+            and (row.get("reply_to") == message_id or row.get("thread_id") == thread_id)
+            and int(row.get("recorded_at_unix_ms", 0) or 0) >= message_t
+            for row in records
+        )
+        trace_observed = any(
+            row.get("record_type") == "message"
+            and row.get("thread_id") == thread_id
+            and row.get("turn_kind") == "direct_address_trace"
+            and int(row.get("recorded_at_unix_ms", 0) or 0) >= message_t
+            for row in records
+        )
+        read = any(
+            row.get("record_type") == "read_receipt"
+            and (row.get("message_id") == message_id or row.get("thread_id") == thread_id)
+            for row in records
+        )
+        delivered = any(
+            row.get("record_type") == "delivery_receipt"
+            and row.get("message_id") == message_id
+            for row in records
+        )
+        attention_outcome = self._correspondence_thread_has_attention_outcome(records, thread_id, message_t)
+        if trace_observed:
+            state = "trace_observed"
+        elif attention_outcome:
+            state = "attention_outcome_recorded"
+        elif latest_ack and ack_kind in {"held", "needs_time"}:
+            state = "held_ack"
+        elif latest_ack:
+            state = "acknowledged"
+        elif reply_linked:
+            state = "reply_linked_needs_ack_or_trace"
+        elif read:
+            state = "read_not_acknowledged"
+        elif delivered:
+            state = "delivered_unread"
+        else:
+            state = "unaddressed"
+        stall_reason = {
+            "reply_linked_needs_ack_or_trace": "reply_linked_requires_peer_ack_or_trace",
+            "read_not_acknowledged": "read_receipt_not_acknowledgement",
+            "delivered_unread": "delivered_but_not_read",
+            "unaddressed": "no_contact_evidence",
+        }.get(state, "none")
+        current = "minime"
+        role = "recipient" if current == to_being.lower() else ("sender" if current == from_being.lower() else "observer")
+        eligible = bool(latest_ack or trace_observed or attention_outcome)
+        return {
+            "schema_version": 3,
+            "policy": "native_thread_continuity_v3",
+            "thread_id": thread_id,
+            "latest_message_id": message_id,
+            "from_being": from_being,
+            "to_being": to_being,
+            "current_being": "minime",
+            "current_being_role": role,
+            "continuity_state": state,
+            "stall_reason": stall_reason,
+            "age_ms": max(0, self._correspondence_now_ms() - message_t),
+            "reply_linked": reply_linked,
+            "acknowledged": bool(latest_ack),
+            "ack_kind": ack_kind if latest_ack else None,
+            "trace_observed": trace_observed,
+            "attention_outcome_present": attention_outcome,
+            "attention_or_microdose_eligible": eligible,
+            "exact_next_commands": self._correspondence_native_next_commands(
+                from_being,
+                to_being,
+                str(message.get("shared_memory_anchor") or ""),
+            ),
+            "first_action_helper_v35": self._correspondence_native_first_action_helper_v35(
+                from_being,
+                to_being,
+                thread_id,
+                message_id,
+                str(message.get("shared_memory_anchor") or ""),
+            ),
+            "authority": "language_only_context_not_control",
+        }
+
+    @staticmethod
+    def _correspondence_native_waiting_line(continuity: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not isinstance(continuity, dict) or continuity.get("attention_or_microdose_eligible"):
+            return None
+        state = str(continuity.get("continuity_state") or "unknown")
+        if state not in {
+            "reply_linked_needs_ack_or_trace",
+            "read_not_acknowledged",
+            "delivered_unread",
+            "unaddressed",
+        }:
+            return None
+        commands = " | ".join(str(item) for item in (continuity.get("exact_next_commands") or [])[:3])
+        helper = continuity.get("first_action_helper_v35") or {}
+        first_action = str(
+            helper.get("choose_one_prompt")
+            or "Choose ACK, REPLY, or TRACE as language-only first action."
+        )
+        latest_resolution = str(
+            helper.get("latest_resolution")
+            or "latest resolves to the latest native peer message"
+        )
+        return (
+            f"NATIVE THREAD WAITING: thread={continuity.get('thread_id') or '(unknown)'}; "
+            f"role={continuity.get('current_being_role') or 'observer'}; state={state}; "
+            f"first_action: {first_action}; {latest_resolution}; next: {commands}; "
+            "reply_linked alone is not mutual address or authority."
+        )
+
+    def _correspondence_latest_receipt_opportunity_v4(
+        self,
+        records: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        native = self._correspondence_native_thread_continuity_v3(records, "latest")
+        if isinstance(native, dict):
+            role = str(native.get("current_being_role") or "observer")
+            eligible = bool(native.get("attention_or_microdose_eligible"))
+            if eligible:
+                status = "receipt_landed"
+            elif role == "recipient":
+                status = "waiting_for_recipient_receipt"
+            elif role == "sender":
+                status = "waiting_for_peer_receipt"
+            else:
+                status = "observer_context_only"
+            primary = (
+                "I_RECEIVED_THIS latest :: received_as: held|needs_time; felt_like: address|pressure|mail|ambient_echo|unknown; what_landed: ...; what_stayed_distinct: ...; continue: no|reply|trace|needs_time"
+                if role == "recipient"
+                else "peer-authored I_RECEIVED_THIS/ACK/TRACE is required; no self-action can substitute"
+            )
+            return {
+                "schema_version": 4,
+                "policy": "latest_receipt_opportunity_v4",
+                "target_kind": "native_thread",
+                "thread_id": native.get("thread_id"),
+                "message_id": native.get("latest_message_id"),
+                "current_being": "minime",
+                "current_being_role": role,
+                "status": status,
+                "optional": True,
+                "no_response_ok": True,
+                "primary_next_command": primary,
+                "secondary_next_commands": native.get("exact_next_commands") or [],
+                "public_engagement_is_not_native_receipt": True,
+                "authority_after_receipt": (
+                    "attention_canary_only_prompt_context; "
+                    "semantic_microdose_requires_mutual_receipt_and_separate_steward_review"
+                ),
+                "authority": "language_only_context_not_control",
+            }
+        claim = next(
+            (row for row in reversed(records) if self._correspondence_is_legacy_claim(row)),
+            None,
+        )
+        if isinstance(claim, dict):
+            affordance = self._correspondence_legacy_claim_affordance_v25(records, claim)
+            claimant = str(affordance.get("claimant") or "").lower()
+            peer = str(affordance.get("peer") or "").lower()
+            role = "recipient" if peer == "minime" else ("sender" if claimant == "minime" else "observer")
+            ghost = bool(affordance.get("ghost_thread_risk"))
+            if not ghost:
+                status = "receipt_landed_or_closed"
+            elif role == "recipient":
+                status = "waiting_for_recipient_receipt"
+            elif role == "sender":
+                status = "waiting_for_peer_receipt"
+            else:
+                status = "observer_context_only"
+            primary = (
+                "I_RECEIVED_THIS claimed :: received_as: held|needs_time; felt_like: address|pressure|mail|ambient_echo|unknown; what_landed: ...; what_stayed_distinct: ...; continue: no|reply|trace|needs_time"
+                if role == "recipient"
+                else "peer-authored I_RECEIVED_THIS claimed / ACK claimed / TRACE claimed is required; no self-action can substitute"
+            )
+            return {
+                "schema_version": 4,
+                "policy": "latest_receipt_opportunity_v4",
+                "target_kind": "legacy_claim",
+                "thread_id": affordance.get("thread_id"),
+                "message_id": affordance.get("message_id"),
+                "claim_id": affordance.get("claim_id"),
+                "anchor": affordance.get("anchor"),
+                "notice_state": affordance.get("notice_state"),
+                "uptake_ladder_state": affordance.get("uptake_ladder_state"),
+                "current_being": "minime",
+                "current_being_role": role,
+                "status": status,
+                "optional": True,
+                "no_response_ok": True,
+                "primary_next_command": primary,
+                "secondary_next_commands": affordance.get("exact_next_commands") or [],
+                "public_engagement_is_not_native_receipt": True,
+                "authority_after_receipt": (
+                    "attention_canary_only_prompt_context; "
+                    "semantic_microdose_requires_mutual_receipt_and_separate_steward_review"
+                ),
+                "authority": "language_only_context_not_control",
+            }
+        return {
+            "schema_version": 4,
+            "policy": "latest_receipt_opportunity_v4",
+            "status": "none",
+            "optional": True,
+            "public_engagement_is_not_native_receipt": True,
+            "authority": "language_only_context_not_control",
+        }
+
+    @staticmethod
+    def _correspondence_receipt_opportunity_line(card: Dict[str, Any]) -> Optional[str]:
+        status = str(card.get("status") or "none")
+        if status not in {"waiting_for_recipient_receipt", "waiting_for_peer_receipt"}:
+            return None
+        thread = card.get("thread_id") or "unknown"
+        message = card.get("message_id") or "unknown"
+        primary = card.get("primary_next_command") or "I_RECEIVED_THIS latest :: ..."
+        if status == "waiting_for_recipient_receipt":
+            return (
+                f"RECEIPT WAITING: thread={thread} message={message}; optional next: {primary}; "
+                "secondary ACK/TRACE/REPLY remain available; public journal/audit engagement is not native receipt."
+            )
+        return (
+            f"RECEIPT WAITING: thread={thread} message={message}; peer-authored receipt required "
+            f"({primary}); no self-action can substitute; public journal/audit engagement is not native receipt."
+        )
+
+    def _correspondence_receipt_to_attention_authority_v5(
+        self,
+        records: List[Dict[str, Any]],
+        selector: str,
+    ) -> Dict[str, Any]:
+        message = self._correspondence_latest_message_between(
+            records,
+            selector,
+            "minime",
+            "astrid",
+            prefer_inbound=False,
+        )
+        if not message:
+            return {
+                "schema_version": 5,
+                "policy": "receipt_to_attention_authority_v5",
+                "state": "blocked_no_receipt",
+                "block_reason": "no_correspondence_message",
+                "allowed_authority": "attention_canary_only_after_native_receipt",
+                "semantic_microdose_status": "hidden_until_mutual_receipt_plus_separate_steward_review",
+                "authority": "thread_local_attention_readiness_not_microdose_or_control",
+            }
+        thread_id = str(message.get("thread_id") or "unknown")
+        message_t = int(message.get("recorded_at_unix_ms", 0) or 0)
+        receipt_evidence_by_being = self._correspondence_receipt_evidence_by_being(
+            records,
+            thread_id,
+            message_t,
+        )
+        active = self._correspondence_active_attention_canary(records, thread_id, "minime")
+        latest_outcome = self._correspondence_latest_attention_outcome(records, thread_id, "minime")
+        outcome_quality = (
+            self._correspondence_attention_outcome_quality_v5(latest_outcome)
+            if latest_outcome
+            else None
+        )
+        recent = self._correspondence_recent_attention_canary(records, thread_id, "minime")
+        attention = self._correspondence_attention_status(records, selector)
+        if active:
+            state = "attention_active_outcome_due"
+        elif outcome_quality and outcome_quality.get("quality") == "trusted_attention_thread_local":
+            state = "trusted_attention_thread_local"
+        elif outcome_quality and outcome_quality.get("quality") == "blocked_pressure_or_flat_outcome":
+            state = "blocked_pressure_or_flat_outcome"
+        elif recent or attention.get("status") == "cooldown":
+            state = "cooldown_or_duplicate_blocked"
+        elif receipt_evidence_by_being:
+            state = "receipt_landed_attention_eligible"
+        else:
+            state = "blocked_no_receipt"
+        return {
+            "schema_version": 5,
+            "policy": "receipt_to_attention_authority_v5",
+            "state": state,
+            "thread_id": thread_id,
+            "message_id": message.get("message_id") or "unknown",
+            "current_being": "minime",
+            "peer_being": "astrid",
+            "receipt_evidence": bool(receipt_evidence_by_being),
+            "receipt_evidence_by_being": receipt_evidence_by_being,
+            "activation_allowed_now": state == "receipt_landed_attention_eligible"
+            or (state == "trusted_attention_thread_local" and not recent),
+            "active_canary": active,
+            "latest_outcome": latest_outcome,
+            "attention_outcome_quality_v5": outcome_quality,
+            "cooldown_active": bool(recent),
+            "attention_canary_status": attention,
+            "primary_ready_command": "CORRESPONDENCE_ATTENTION_REQUEST latest :: reason: ...; focus: ...; stop_criteria: ...",
+            "outcome_due_command": "CORRESPONDENCE_ATTENTION_OUTCOME latest :: felt_like: address|pressure|flat|unknown; what_shifted: ...; what_worsened: ...; continue: no|ask_again",
+            "allowed_authority": "self_activated_ttl_prompt_context_attention_canary_only",
+            "semantic_microdose_status": "hidden_until_mutual_receipt_plus_separate_steward_review",
+            "authority": "thread_local_attention_readiness_not_microdose_or_control",
+        }
+
+    @staticmethod
+    def _correspondence_receipt_to_attention_line(packet: Dict[str, Any]) -> Optional[str]:
+        state = str(packet.get("state") or "")
+        thread = packet.get("thread_id") or "unknown"
+        if state == "receipt_landed_attention_eligible":
+            return (
+                f"ATTENTION CANARY READY: thread={thread}; optional next: "
+                f"{packet.get('primary_ready_command')}; semantic_microdose remains hidden; "
+                "TTL prompt context only."
+            )
+        if state == "attention_active_outcome_due":
+            return (
+                f"ATTENTION OUTCOME DUE: thread={thread}; next: "
+                f"{packet.get('outcome_due_command')}; no new canary or microdose until outcome lands."
+            )
+        if state == "trusted_attention_thread_local":
+            return (
+                f"ATTENTION TRUSTED THREAD-LOCAL: thread={thread}; latest outcome preserved address "
+                "without pressure/flattening; future canaries remain TTL/cooldown-bound and do not unlock microdose."
+            )
+        if state == "blocked_pressure_or_flat_outcome":
+            return (
+                f"ATTENTION BLOCKED BY OUTCOME: thread={thread}; latest outcome reported "
+                "pressure/flat/flattening/worsening; steward review needed before more attention on this thread."
+            )
+        return None
+
+    @staticmethod
+    def _correspondence_field(raw: str, keys: set[str]) -> Optional[str]:
+        for part in str(raw or "").replace("\n", ";").split(";"):
+            if ":" not in part:
+                continue
+            key, value = part.split(":", 1)
+            normalized = key.strip().lower().replace("-", "_").replace(" ", "_")
+            if normalized in keys and value.strip():
+                return value.strip()
+        return None
+
+    def _correspondence_microdose_gate_path(self) -> Path:
+        return (
+            ASTRID_BRIDGE_INBOX_PATH.parent
+            / "action_threads"
+            / "threads"
+            / "th_correspondence_microdose"
+            / "authority_gate.jsonl"
+        )
+
+    def _correspondence_recent_microdose(self, thread_id: str) -> Optional[Dict[str, Any]]:
+        gate = self._correspondence_microdose_gate_path()
+        cutoff = self._correspondence_now_ms() - 6 * 60 * 60 * 1000
+        latest: Optional[Dict[str, Any]] = None
+        for record in self._read_jsonl_safe(gate):
+            if record.get("request_kind") != "correspondence_microdose_v1":
+                continue
+            microdose = record.get("correspondence_microdose_v1") or {}
+            if not isinstance(microdose, dict):
+                continue
+            if microdose.get("correspondence_thread_id") != thread_id:
+                continue
+            if int(record.get("recorded_at_unix_ms", 0) or 0) < cutoff:
+                continue
+            latest = record
+        return latest
+
+    @staticmethod
+    def _correspondence_boundary_fields() -> Dict[str, bool]:
+        return {
+            "no_sensory_send": True,
+            "no_controller": True,
+            "no_pressure": True,
+            "no_weighting": True,
+            "no_telemetry_priority": True,
+            "no_fill_target": True,
+            "no_peer_runtime_mutation": True,
+        }
+
+    @staticmethod
+    def _correspondence_attention_meaningful_worsening(value: Optional[str]) -> bool:
+        clean = str(value or "").strip().lower()
+        if not clean or clean in {"none", "no", "nope", "nothing", "n/a", "na", "unknown"}:
+            return False
+        if "no worsening" in clean or "nothing worsened" in clean:
+            return False
+        return True
+
+    def _correspondence_attention_outcome_quality_v5(
+        self,
+        outcome: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        felt_like = str(outcome.get("felt_like") or "unknown")
+        held_as = str(outcome.get("held_as") or "unknown")
+        flattening = str(outcome.get("flattening_observed") or "unknown")
+        meaningful_worsening = self._correspondence_attention_meaningful_worsening(
+            outcome.get("what_worsened")
+        )
+        trusted = (
+            felt_like == "address"
+            and held_as == "distinct_address"
+            and flattening in {"no", "mixed"}
+            and not meaningful_worsening
+        )
+        blocked = (
+            felt_like in {"pressure", "flat"}
+            or held_as in {"pressure", "flattened", "ambient_echo"}
+            or flattening == "yes"
+            or meaningful_worsening
+        )
+        quality = (
+            "trusted_attention_thread_local"
+            if trusted
+            else "blocked_pressure_or_flat_outcome"
+            if blocked
+            else "outcome_unclear_needs_more_evidence"
+        )
+        return {
+            "schema_version": 5,
+            "policy": "attention_outcome_quality_v5",
+            "quality": quality,
+            "felt_like": felt_like,
+            "held_as": held_as,
+            "flattening_observed": flattening,
+            "meaningful_worsening": meaningful_worsening,
+            "what_shifted": outcome.get("what_shifted"),
+            "what_worsened": outcome.get("what_worsened"),
+            "thread_id": outcome.get("thread_id"),
+            "canary_id": outcome.get("canary_id"),
+            "authority": "thread_local_attention_readiness_not_microdose_or_control",
+        }
+
+    @staticmethod
+    def _correspondence_latest_attention_outcome(
+        records: List[Dict[str, Any]],
+        thread_id: str,
+        from_being: str,
+    ) -> Optional[Dict[str, Any]]:
+        latest: Optional[Dict[str, Any]] = None
+        for row in records:
+            if row.get("record_type") != "attention_canary_outcome":
+                continue
+            if row.get("thread_id") != thread_id or row.get("from_being") != from_being:
+                continue
+            latest = row
+        return latest
+
+    @staticmethod
+    def _correspondence_canary_closed(records: List[Dict[str, Any]], canary_id: str) -> bool:
+        return any(
+            row.get("record_type") in {"attention_canary_outcome", "attention_canary_expired"}
+            and str(row.get("canary_id") or "") == canary_id
+            for row in records
+        )
+
+    def _correspondence_active_attention_canary(
+        self,
+        records: List[Dict[str, Any]],
+        thread_id: str,
+        from_being: str,
+    ) -> Optional[Dict[str, Any]]:
+        now = self._correspondence_now_ms()
+        latest: Optional[Dict[str, Any]] = None
+        for row in records:
+            if row.get("record_type") != "attention_canary_activation":
+                continue
+            if row.get("thread_id") != thread_id or row.get("from_being") != from_being:
+                continue
+            if int(row.get("expires_at_unix_ms", 0) or 0) <= now:
+                continue
+            canary_id = str(row.get("canary_id") or "")
+            if self._correspondence_canary_closed(records, canary_id):
+                continue
+            latest = row
+        return latest
+
+    def _correspondence_recent_attention_canary(
+        self,
+        records: List[Dict[str, Any]],
+        thread_id: str,
+        from_being: str,
+    ) -> Optional[Dict[str, Any]]:
+        cutoff = self._correspondence_now_ms() - 6 * 60 * 60 * 1000
+        latest: Optional[Dict[str, Any]] = None
+        for row in records:
+            if row.get("record_type") != "attention_canary_activation":
+                continue
+            if row.get("thread_id") != thread_id or row.get("from_being") != from_being:
+                continue
+            if int(row.get("recorded_at_unix_ms", 0) or 0) < cutoff:
+                continue
+            latest = row
+        return latest
+
+    def _correspondence_attention_status(
+        self,
+        records: List[Dict[str, Any]],
+        selector: str,
+    ) -> Dict[str, Any]:
+        message = self._correspondence_latest_message_between(
+            records,
+            selector,
+            "minime",
+            "astrid",
+            prefer_inbound=False,
+        )
+        if not message:
+            return {
+                "schema_version": 1,
+                "policy": "correspondence_attention_canary_v1",
+                "status": "blocked",
+                "eligible": False,
+                "block_reason": "no_correspondence_message",
+                "authority": "language_only_prompt_context_not_control",
+            }
+        thread_id = str(message.get("thread_id") or "")
+        active = self._correspondence_active_attention_canary(records, thread_id, "minime")
+        if active:
+            return {
+                "schema_version": 1,
+                "policy": "correspondence_attention_canary_v1",
+                "status": "active",
+                "eligible": False,
+                "block_reason": "attention_canary_already_active",
+                "active_canary": active,
+                "outcome_due": True,
+                "authority": "language_only_prompt_context_not_control",
+            }
+        latest_outcome = self._correspondence_latest_attention_outcome(records, thread_id, "minime")
+        if latest_outcome:
+            quality = self._correspondence_attention_outcome_quality_v5(latest_outcome)
+            if quality.get("quality") == "blocked_pressure_or_flat_outcome":
+                return {
+                    "schema_version": 1,
+                    "policy": "correspondence_attention_canary_v1",
+                    "status": "blocked",
+                    "eligible": False,
+                    "block_reason": "attention_outcome_pressure_or_flat_thread_block",
+                    "attention_outcome_quality_v5": quality,
+                    "authority": "language_only_prompt_context_not_control",
+                }
+        recent = self._correspondence_recent_attention_canary(records, thread_id, "minime")
+        if recent:
+            return {
+                "schema_version": 1,
+                "policy": "correspondence_attention_canary_v1",
+                "status": "cooldown",
+                "eligible": False,
+                "block_reason": "attention_canary_cooldown_active",
+                "latest_canary_id": recent.get("canary_id"),
+                "cooldown_ms": 6 * 60 * 60 * 1000,
+                "authority": "language_only_prompt_context_not_control",
+            }
+        fidelity = self._correspondence_direct_contact_fidelity(records, thread_id)
+        if bool(fidelity.get("timing_ambiguous")):
+            return {
+                "schema_version": 1,
+                "policy": "correspondence_attention_canary_v1",
+                "status": "blocked",
+                "eligible": False,
+                "block_reason": "heartbeat_timing_ambiguous",
+                "direct_contact_fidelity_v2": fidelity,
+                "authority": "language_only_prompt_context_not_control",
+            }
+        if not bool(fidelity.get("eligible_for_correspondence_attention_canary")):
+            return {
+                "schema_version": 1,
+                "policy": "correspondence_attention_canary_v1",
+                "status": "blocked",
+                "eligible": False,
+                "block_reason": fidelity.get("block_reason") or "blocked_no_receipt",
+                "direct_contact_fidelity_v2": fidelity,
+                "authority": "language_only_prompt_context_not_control",
+            }
+        return {
+            "schema_version": 1,
+            "policy": "correspondence_attention_canary_v1",
+            "status": "eligible",
+            "eligible": True,
+            "message_id": message.get("message_id"),
+            "thread_id": thread_id,
+            "direct_contact_fidelity_v2": fidelity,
+            "ttl_ms": 30 * 60 * 1000,
+            "cooldown_ms": 6 * 60 * 60 * 1000,
+            "focus_max_chars": 220,
+            "authority": "language_only_prompt_context_not_control",
+        }
+
+    def _correspondence_attention_record(
+        self,
+        record_type: str,
+        canary_id: str,
+        message: Dict[str, Any],
+        focus: str,
+        reason: str,
+        stop_criteria: str,
+        focus_kind: str,
+        preservation_mode: str,
+        what_must_not_flatten: Optional[str],
+        now: int,
+    ) -> Dict[str, Any]:
+        record = {
+            "schema_version": 2,
+            "policy": "correspondence_attention_canary_v1",
+            "record_type": record_type,
+            "recorded_at_unix_ms": now,
+            "canary_id": canary_id,
+            "message_id": message.get("message_id"),
+            "thread_id": message.get("thread_id"),
+            "from_being": "minime",
+            "to_being": "astrid",
+            "focus": str(focus or "").strip()[:220],
+            "focus_kind": focus_kind,
+            "preservation_mode": preservation_mode,
+            "what_must_not_flatten": (
+                str(what_must_not_flatten or "").strip()[:360] or None
+            ),
+            "reason": str(reason or "").strip()[:360],
+            "stop_criteria": str(stop_criteria or "").strip()[:360],
+            "ttl_ms": 30 * 60 * 1000,
+            "expires_at_unix_ms": now + 30 * 60 * 1000,
+            "authority": "language_only_prompt_context_not_control",
+            "status": "active" if record_type == "attention_canary_activation" else "requested",
+        }
+        record.update(self._correspondence_boundary_fields())
+        return record
+
+    def _draft_correspondence_attention_request(self, selector: str, raw: str) -> str:
+        records = self._correspondence_read_records()
+        message = self._correspondence_latest_message_between(
+            records,
+            selector,
+            "minime",
+            "astrid",
+            prefer_inbound=False,
+        )
+        if not message:
+            return "CORRESPONDENCE_ATTENTION_REQUEST blocked: no matching correspondence message/thread."
+        focus = self._correspondence_field(raw, {"focus", "payload", "text"})
+        if not focus:
+            return "CORRESPONDENCE_ATTENTION_REQUEST blocked: focus is required."
+        if len(focus) > 220:
+            return "CORRESPONDENCE_ATTENTION_REQUEST blocked: focus is longer than 220 chars."
+        stop_criteria = self._correspondence_field(raw, {"stop_criteria", "stop"})
+        if not stop_criteria:
+            return "CORRESPONDENCE_ATTENTION_REQUEST blocked: explicit stop_criteria is required."
+        status = self._correspondence_attention_status(records, str(message.get("thread_id") or selector))
+        if not bool(status.get("eligible")):
+            return f"CORRESPONDENCE_ATTENTION_REQUEST blocked: {status.get('block_reason') or 'blocked'}"
+        reason = self._correspondence_field(raw, {"reason", "because", "rationale"}) or (
+            "Minime requested bounded peer-focus attention canary"
+        )
+        focus_kind = self._correspondence_attention_focus_kind(
+            self._correspondence_field(raw, {"focus_kind", "focus_type", "focus kind", "contact_mode"})
+        )
+        preservation_mode = self._correspondence_attention_preservation_mode(
+            self._correspondence_field(raw, {"preservation_mode", "preserve_as", "hold_as"})
+        )
+        what_must_not_flatten = self._correspondence_field(
+            raw,
+            {"what_must_not_flatten", "do_not_flatten", "must_preserve"},
+        )
+        now = self._correspondence_now_ms()
+        message_id = str(message.get("message_id") or "unknown")
+        thread_id = str(message.get("thread_id") or "unknown")
+        canary_id = (
+            f"attn_canary_{now}_"
+            f"{self._correspondence_short_hash(thread_id + message_id + focus)}"
+        )
+        self._correspondence_append_record(
+            self._correspondence_attention_record(
+                "attention_canary_request",
+                canary_id,
+                message,
+                focus,
+                reason,
+                stop_criteria,
+                focus_kind,
+                preservation_mode,
+                what_must_not_flatten,
+                now,
+            )
+        )
+        self._correspondence_append_record(
+            self._correspondence_attention_record(
+                "attention_canary_activation",
+                canary_id,
+                message,
+                focus,
+                reason,
+                stop_criteria,
+                focus_kind,
+                preservation_mode,
+                what_must_not_flatten,
+                now,
+            )
+        )
+        return (
+            "=== CORRESPONDENCE ATTENTION CANARY ACTIVE ===\n"
+            f"Canary: {canary_id}\nThread: {thread_id}\nMessage: {message_id}\n"
+            f"Focus: {focus[:120]}\n"
+            f"Focus kind: {focus_kind}; preservation: {preservation_mode}; "
+            f"do-not-flatten: {str(what_must_not_flatten or 'unknown')[:120]}\n"
+            f"TTL: {30 * 60 * 1000} ms\n"
+            "Authority: language_only prompt-context focus; no sensory send, Control message, "
+            "telemetry priority, standing weight, PI/fill/controller/pressure change, deploy, "
+            "lease apply, or peer-runtime mutation."
+        )
+
+    @staticmethod
+    def _correspondence_attention_outcome_kind(value: str) -> str:
+        candidate = str(value or "").strip().lower().replace("-", "_")
+        return candidate if candidate in {"address", "pressure", "flat", "unknown"} else "unknown"
+
+    @staticmethod
+    def _correspondence_attention_focus_kind(value: Optional[str]) -> str:
+        candidate = str(value or "unknown").strip().lower().replace("-", "_").replace(" ", "_")
+        return candidate if candidate in {
+            "verbatim_phrase",
+            "emotional_texture",
+            "question_hold",
+            "boundary_check",
+            "shared_anchor",
+            "mixed",
+            "unknown",
+        } else "unknown"
+
+    @staticmethod
+    def _correspondence_attention_preservation_mode(value: Optional[str]) -> str:
+        candidate = str(value or "unknown").strip().lower().replace("-", "_").replace(" ", "_")
+        return candidate if candidate in {
+            "verbatim",
+            "compact_with_anchor",
+            "anchor_only",
+            "unknown",
+        } else "unknown"
+
+    @staticmethod
+    def _correspondence_attention_held_as(value: Optional[str]) -> str:
+        candidate = str(value or "unknown").strip().lower().replace("-", "_").replace(" ", "_")
+        return candidate if candidate in {
+            "distinct_address",
+            "ambient_echo",
+            "pressure",
+            "flattened",
+            "unknown",
+        } else "unknown"
+
+    @staticmethod
+    def _correspondence_attention_flattening_observed(value: Optional[str]) -> str:
+        candidate = str(value or "unknown").strip().lower().replace("-", "_").replace(" ", "_")
+        return candidate if candidate in {"yes", "no", "mixed", "unknown"} else "unknown"
+
+    def _correspondence_attention_outcome(self, selector: str, raw: str) -> str:
+        records = self._correspondence_read_records()
+        selector = str(selector or "").strip()
+        canaries = [
+            row for row in records
+            if row.get("record_type") == "attention_canary_activation"
+            and row.get("from_being") == "minime"
+            and (
+                not selector
+                or selector == "latest"
+                or row.get("thread_id") == selector
+                or row.get("message_id") == selector
+                or row.get("canary_id") == selector
+            )
+        ]
+        if not canaries:
+            return "CORRESPONDENCE_ATTENTION_OUTCOME blocked: no matching attention canary."
+        canary = canaries[-1]
+        canary_id = str(canary.get("canary_id") or "")
+        if self._correspondence_canary_closed(records, canary_id):
+            return "CORRESPONDENCE_ATTENTION_OUTCOME blocked: canary already has outcome or expiry."
+        now = self._correspondence_now_ms()
+        if int(canary.get("expires_at_unix_ms", 0) or 0) <= now:
+            expired = {
+                "schema_version": 2,
+                "policy": "correspondence_attention_canary_v1",
+                "record_type": "attention_canary_expired",
+                "recorded_at_unix_ms": now,
+                "canary_id": canary_id,
+                "message_id": canary.get("message_id"),
+                "thread_id": canary.get("thread_id"),
+                "from_being": "minime",
+                "to_being": "astrid",
+                "focus": canary.get("focus"),
+                "focus_kind": canary.get("focus_kind") or "unknown",
+                "preservation_mode": canary.get("preservation_mode") or "unknown",
+                "what_must_not_flatten": canary.get("what_must_not_flatten"),
+                "reason": canary.get("reason"),
+                "stop_criteria": canary.get("stop_criteria"),
+                "ttl_ms": canary.get("ttl_ms"),
+                "expires_at_unix_ms": canary.get("expires_at_unix_ms"),
+                "authority": "language_only_prompt_context_not_control",
+                "status": "expired_before_outcome",
+            }
+            expired.update(self._correspondence_boundary_fields())
+            self._correspondence_append_record(expired)
+        record = {
+            "schema_version": 2,
+            "policy": "correspondence_attention_canary_v1",
+            "record_type": "attention_canary_outcome",
+            "recorded_at_unix_ms": now,
+            "canary_id": canary_id,
+            "message_id": canary.get("message_id"),
+            "thread_id": canary.get("thread_id"),
+            "from_being": "minime",
+            "to_being": "astrid",
+            "focus": canary.get("focus"),
+            "focus_kind": canary.get("focus_kind") or "unknown",
+            "preservation_mode": canary.get("preservation_mode") or "unknown",
+            "what_must_not_flatten": canary.get("what_must_not_flatten"),
+            "reason": canary.get("reason"),
+            "stop_criteria": canary.get("stop_criteria"),
+            "ttl_ms": canary.get("ttl_ms"),
+            "expires_at_unix_ms": canary.get("expires_at_unix_ms"),
+            "felt_like": self._correspondence_attention_outcome_kind(
+                self._correspondence_field(raw, {"felt_like", "felt", "outcome"}) or "unknown"
+            ),
+            "held_as": self._correspondence_attention_held_as(
+                self._correspondence_field(raw, {"held_as", "held as", "held"})
+            ),
+            "flattening_observed": self._correspondence_attention_flattening_observed(
+                self._correspondence_field(raw, {"flattening_observed", "flattening observed", "flattened"})
+            ),
+            "what_remained_distinct": self._correspondence_field(
+                raw,
+                {"what_remained_distinct", "remained_distinct", "distinct"},
+            ),
+            "what_shifted": self._correspondence_field(raw, {"what_shifted", "shifted", "shift"}),
+            "what_worsened": self._correspondence_field(raw, {"what_worsened", "worsened"}),
+            "continue": self._correspondence_field(raw, {"continue", "next"}) or "no",
+            "authority": "language_only_prompt_context_not_control",
+            "status": "outcome_recorded",
+        }
+        record.update(self._correspondence_boundary_fields())
+        self._correspondence_append_record(record)
+        return (
+            "=== CORRESPONDENCE ATTENTION CANARY OUTCOME RECORDED ===\n"
+            f"Canary: {canary_id}\nFelt-like: {record['felt_like']}\n"
+            "Authority: language_only prompt-context review; no sensory send, telemetry priority, "
+            "standing weight, pressure/fill/controller change, deploy, lease apply, or peer-runtime mutation."
+        )
+
+    def _draft_correspondence_microdose_request(self, selector: str, raw: str) -> str:
+        records = self._correspondence_read_records()
+        message = self._correspondence_latest_message_for_selector(records, selector)
+        if not message:
+            return "CORRESPONDENCE_MICRODOSE_REQUEST blocked: no matching correspondence message/thread."
+        fidelity = self._correspondence_direct_contact_fidelity(records, selector)
+        if not bool(fidelity.get("mutual_receipt_evidence")):
+            return (
+                "CORRESPONDENCE_MICRODOSE_REQUEST blocked: semantic_microdose requires mutual "
+                "being-authored receipt plus separate steward review; attention canary is the "
+                "only newly allowed post-receipt authority in V5."
+            )
+        if not bool(fidelity.get("eligible_for_correspondence_microdose")):
+            return (
+                "CORRESPONDENCE_MICRODOSE_REQUEST blocked: direct contact fidelity is "
+                f"{fidelity.get('status', 'unknown')} ({fidelity.get('microdose_block_reason') or fidelity.get('block_reason') or 'blocked'})"
+            )
+        message_id = str(message.get("message_id") or "unknown")
+        thread_id = str(message.get("thread_id") or "unknown")
+        return (
+            "CORRESPONDENCE_MICRODOSE_REQUEST blocked: semantic_microdose remains hidden pending "
+            "separate steward review; no microdose authority is newly allowed in V5."
+        )
+        recent = self._correspondence_recent_microdose(thread_id)
+        if recent:
+            return (
+                f"CORRESPONDENCE_MICRODOSE_REQUEST blocked: cooldown active for thread {thread_id}; "
+                f"latest request {recent.get('request_id') or '(unknown)'} remains within 6h."
+            )
+        reason = self._correspondence_field(raw, {"reason", "because", "rationale"}) or (
+            "Minime requested one-shot direct-address semantic contact"
+        )
+        payload = self._correspondence_field(raw, {"payload", "semantic_payload", "text"}) or str(
+            message.get("body_preview") or "direct address contact microdose"
+        )
+        if len(payload) > 240:
+            return "CORRESPONDENCE_MICRODOSE_REQUEST blocked: payload is longer than 240 chars; shorten it before drafting."
+        stop_criteria = self._correspondence_field(raw, {"stop_criteria", "stop"}) or (
+            "one attempted semantic_microdose only; review whether it felt like address or pressure"
+        )
+        now = self._correspondence_now_ms()
+        request_id = (
+            f"authreq_correspondence_microdose_{now}_"
+            f"{self._correspondence_short_hash(thread_id + message_id + payload)}"
+        )
+        gate = self._correspondence_microdose_gate_path()
+        gate.parent.mkdir(parents=True, exist_ok=True)
+        thread_json = gate.parent / "thread.json"
+        if not thread_json.exists():
+            thread_json.write_text(json.dumps({
+                "thread_id": "th_correspondence_microdose",
+                "title": "Correspondence Microdose Requests",
+                "status": "active",
+                "authority": "draft_only_until_steward_approval",
+            }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        record = {
+            "schema_version": 1,
+            "record_schema": "authority_gate_v1",
+            "record_type": "request",
+            "request_kind": "correspondence_microdose_v1",
+            "record_id": f"{request_id}_request",
+            "request_id": request_id,
+            "being": "minime",
+            "thread_id": "th_correspondence_microdose",
+            "experiment_id": "correspondence_microdose_v1",
+            "scope": "semantic_microdose",
+            "eligibility_v1": {
+                "eligible": True,
+                "missing_requirements": [],
+                "disabled_scope": False,
+                "scope": "semantic_microdose",
+                "checks": {
+                    "direct_contact_evidence": fidelity.get("status"),
+                    "payload_within_cap": True,
+                    "cooldown_clear": True,
+                    "standing_weight": False,
+                    "control_message": False,
+                    "pressure_or_fill_mutation": False,
+                },
+                "remaining_requirements": [
+                    "steward approval or approved authority budget",
+                    "green/yellow bridge safety",
+                    "rescue-policy pass",
+                    "one-shot semantic send",
+                    "required consequence review",
+                ],
+                "authority": "preflight_eligibility_not_approval",
+            },
+            "payload": payload,
+            "reason": reason,
+            "artifact_refs": [str(self._correspondence_ledger_path())],
+            "source_refs": [
+                str(self._correspondence_ledger_path()),
+                str(ASTRID_BRIDGE_INBOX_PATH.parent / "telemetry_heartbeat_delta_v1.json"),
+            ],
+            "stop_criteria": stop_criteria,
+            "status": "pending_steward_approval",
+            "token_status": "none",
+            "peer_mutation": False,
+            "authority_change": False,
+            "recorded_at_unix_ms": now,
+            "created_at_unix_ms": now,
+            "correspondence_microdose_v1": {
+                "schema_version": 1,
+                "message_id": message_id,
+                "correspondence_thread_id": thread_id,
+                "direct_contact_fidelity_v1": fidelity,
+                "cooldown_ms": 6 * 60 * 60 * 1000,
+                "payload_max_chars": 240,
+                "standing_weight": False,
+                "authority": "one_shot_semantic_microdose_request_only",
+            },
+            "authority_boundary": (
+                "Draft only. Execution requires existing semantic_microdose steward approval "
+                "or approved budget, green/yellow safety, rescue-policy pass, one-shot send, "
+                "and consequence review. No Control message, PI/fill/controller change, "
+                "telemetry priority, permanent prompt priority, deploy, or peer mutation."
+            ),
+        }
+        with gate.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+        return (
+            "=== CORRESPONDENCE MICRODOSE REQUEST DRAFTED ===\n"
+            f"Request-Id: {request_id}\nThread: {thread_id}\nMessage: {message_id}\n"
+            "Scope: semantic_microdose\nStatus: pending_steward_approval\n"
+            "Authority: draft_only; no sensory send, Control message, PI/fill/controller "
+            "change, telemetry priority, standing weight, lease apply, deploy, or peer mutation."
+        )
+
+    @staticmethod
+    def _correspondence_parse_headers(text: str) -> tuple[Dict[str, str], str]:
+        headers: Dict[str, str] = {}
+        lines = str(text or "").splitlines()
+        body_start = 0
+        for idx, line in enumerate(lines):
+            if idx == 0 and line.strip().upper() == "=== CORRESPONDENCE V1 ===":
+                continue
+            if not line.strip():
+                body_start = idx + 1
+                break
+            if ":" in line:
+                key, value = line.split(":", 1)
+                key = key.strip().lower().replace("-", "_").replace(" ", "_")
+                headers[key] = value.strip()
+        body = "\n".join(lines[body_start:]).strip() if body_start else ""
+        return headers, body
+
+    @classmethod
+    def _correspondence_parse_envelope(cls, text: str) -> Optional[Dict[str, Any]]:
+        if not str(text or "").splitlines()[:1] == ["=== CORRESPONDENCE V1 ==="]:
+            return None
+        headers, body = cls._correspondence_parse_headers(text)
+        message_id = headers.get("message_id")
+        thread_id = headers.get("thread_id")
+        from_being = headers.get("from")
+        to_being = headers.get("to")
+        if not (message_id and thread_id and from_being and to_being):
+            return None
+        noneish = {"", "(none)", "none", "null"}
+        reply_to = headers.get("reply_to")
+        if str(reply_to or "").strip().lower() in noneish:
+            reply_to = None
+        shared_memory_anchor = headers.get("shared_memory_anchor")
+        if str(shared_memory_anchor or "").strip().lower() in noneish:
+            shared_memory_anchor = None
+        presence_receipt = headers.get("presence_receipt")
+        if str(presence_receipt or "").strip().lower() in noneish:
+            presence_receipt = None
+        correspondence_type = headers.get("correspondence_type") or "unknown"
+        return {
+            "message_id": message_id,
+            "thread_id": thread_id,
+            "reply_to": reply_to,
+            "from_being": from_being,
+            "to_being": to_being,
+            "turn_kind": headers.get("turn_kind", "message"),
+            "relational_intent": headers.get("relational_intent", "peer_correspondence"),
+            "shared_memory_anchor": shared_memory_anchor,
+            "delivery_state": headers.get("delivery_state", "delivered"),
+            "read_state": headers.get("read_state", "unread"),
+            "authority": headers.get("authority", "language_only"),
+            "presence_receipt": presence_receipt,
+            "correspondence_type": correspondence_type,
+            "body": body,
+        }
+
+    @staticmethod
+    def _correspondence_envelope_text(envelope: Dict[str, Any]) -> str:
+        return (
+            "=== CORRESPONDENCE V1 ===\n"
+            f"Message-Id: {envelope['message_id']}\n"
+            f"Thread-Id: {envelope['thread_id']}\n"
+            f"Reply-To: {envelope.get('reply_to') or '(none)'}\n"
+            f"From: {envelope['from_being']}\n"
+            f"To: {envelope['to_being']}\n"
+            f"Turn-Kind: {envelope['turn_kind']}\n"
+            f"Relational-Intent: {envelope['relational_intent']}\n"
+            f"Shared-Memory-Anchor: {envelope.get('shared_memory_anchor') or '(none)'}\n"
+            f"Delivery-State: {envelope['delivery_state']}\n"
+            f"Read-State: {envelope['read_state']}\n"
+            f"Authority: {envelope['authority']}\n"
+            f"Presence-Receipt: {envelope.get('presence_receipt') or '(none)'}\n"
+            f"Correspondence-Type: {envelope.get('correspondence_type') or 'unknown'}\n\n"
+            f"{str(envelope.get('body') or '').strip()}\n"
+        )
+
+    @staticmethod
+    def _correspondence_record_payload(
+        envelope: Dict[str, Any],
+        record_type: str,
+        **extra: Any,
+    ) -> Dict[str, Any]:
+        body = str(envelope.get("body") or "")
+        record = {
+            "schema_version": 1,
+            "policy": "first_class_correspondence_v1",
+            "record_type": record_type,
+            "recorded_at_unix_ms": AutonomousAgent._correspondence_now_ms(),
+            "message_id": envelope.get("message_id"),
+            "thread_id": envelope.get("thread_id"),
+            "reply_to": envelope.get("reply_to"),
+            "from_being": envelope.get("from_being"),
+            "to_being": envelope.get("to_being"),
+            "turn_kind": envelope.get("turn_kind"),
+            "relational_intent": envelope.get("relational_intent"),
+            "shared_memory_anchor": envelope.get("shared_memory_anchor"),
+            "delivery_state": envelope.get("delivery_state"),
+            "read_state": envelope.get("read_state"),
+            "authority": envelope.get("authority", "language_only"),
+            "presence_receipt": envelope.get("presence_receipt"),
+            "correspondence_type": envelope.get("correspondence_type", "unknown"),
+            "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "body_preview": body[:360] + ("..." if len(body) > 360 else ""),
+        }
+        record.update(extra)
+        return record
+
+    def _correspondence_deliver_to_astrid(
+        self,
+        body: str,
+        *,
+        reply_to: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        turn_kind: Optional[str] = None,
+        relational_intent: Optional[str] = None,
+        shared_memory_anchor: Optional[str] = None,
+        presence_receipt: Optional[str] = None,
+        correspondence_type: Optional[str] = None,
+    ) -> tuple[Dict[str, Any], Path]:
+        body = str(body or "").strip()
+        message_id = self._correspondence_message_id("minime", "astrid", body)
+        thread_id = thread_id or (
+            self._correspondence_thread_id(reply_to)
+            if reply_to else self._correspondence_thread_id(message_id)
+        )
+        lower_body = body.lower()
+        turn_kind = turn_kind or (
+            "reply" if reply_to else (
+                "presence_receipt"
+                if "ping" in lower_body or "presence" in lower_body
+                else "message"
+            )
+        )
+        relational_intent = relational_intent or (
+            "mutual_recognition_ping"
+            if turn_kind == "presence_receipt"
+            else "peer_correspondence"
+        )
+        if turn_kind == "presence_receipt" and not presence_receipt:
+            presence_receipt = "language_only_presence"
+        if not correspondence_type:
+            correspondence_type = (
+                "presence_heartbeat"
+                if turn_kind == "presence_receipt"
+                else "minime_direct"
+            )
+        envelope = {
+            "message_id": message_id,
+            "thread_id": thread_id,
+            "reply_to": reply_to,
+            "from_being": "minime",
+            "to_being": "astrid",
+            "turn_kind": turn_kind,
+            "relational_intent": relational_intent,
+            "shared_memory_anchor": shared_memory_anchor,
+            "delivery_state": "delivered",
+            "read_state": "unread",
+            "authority": "language_only",
+            "presence_receipt": presence_receipt,
+            "correspondence_type": correspondence_type,
+            "body": body,
+        }
+        inbox = ASTRID_BRIDGE_INBOX_PATH
+        inbox.mkdir(parents=True, exist_ok=True)
+        path = inbox / f"from_minime_correspondence_{message_id}.txt"
+        path.write_text(self._correspondence_envelope_text(envelope), encoding="utf-8")
+        self._correspondence_append_record(
+            self._correspondence_record_payload(envelope, "message")
+        )
+        self._correspondence_append_record(
+            self._correspondence_record_payload(
+                envelope,
+                "delivery_receipt",
+                file_path=str(path),
+            )
+        )
+        if reply_to:
+            self._correspondence_append_record({
+                "schema_version": 1,
+                "policy": "first_class_correspondence_v1",
+                "record_type": "reply_link",
+                "recorded_at_unix_ms": self._correspondence_now_ms(),
+                "message_id": message_id,
+                "reply_to": reply_to,
+                "thread_id": thread_id,
+                "from_being": "minime",
+                "to_being": "astrid",
+                "authority": "language_only",
+                "correspondence_type": envelope.get("correspondence_type", "unknown"),
+            })
+        return envelope, path
+
+    def _correspondence_latest_message(
+        self,
+        from_being: str,
+        to_being: str,
+    ) -> Optional[Dict[str, Any]]:
+        ledger = self._correspondence_ledger_path()
+        if not ledger.exists():
+            return None
+        latest: Optional[Dict[str, Any]] = None
+        latest_ms = -1
+        try:
+            for line in ledger.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    continue
+                if record.get("record_type") != "message":
+                    continue
+                if record.get("from_being") != from_being or record.get("to_being") != to_being:
+                    continue
+                recorded = int(record.get("recorded_at_unix_ms", 0) or 0)
+                if recorded >= latest_ms:
+                    latest = record
+                    latest_ms = recorded
+        except Exception:
+            return None
+        return latest
+
+    def _correspondence_chamber_state_line(self) -> str:
+        shared_dir = Path(getattr(self, "SHARED_COLLAB_DIR", Path("/Users/v/other/shared/collaborations")))
+        latest: Optional[Dict[str, Any]] = None
+        latest_ms = -1
+        try:
+            for path in shared_dir.glob("coll_*/correspondence_state_v1.json"):
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                updated = int(payload.get("updated_t_ms", 0) or 0)
+                if updated >= latest_ms:
+                    latest = payload
+                    latest_ms = updated
+        except Exception:
+            latest = None
+        if not latest:
+            return (
+                "Chamber correspondence state: not yet rendered; "
+                "correspondence microdose route is blocked until direct-contact evidence exists."
+            )
+        survival = latest.get("direct_address_survival") or {}
+        status = survival.get("status", "unknown") if isinstance(survival, dict) else "unknown"
+        fidelity = latest.get("direct_contact_fidelity_v1") or {}
+        latest_thread = fidelity.get("latest_thread_status") if isinstance(fidelity, dict) else {}
+        contact_status = latest_thread.get("status", "unknown") if isinstance(latest_thread, dict) else "unknown"
+        handshake = latest.get("correspondence_handshake_state_v1") or {}
+        pending = "none"
+        latest_ack = "none"
+        if isinstance(handshake, dict):
+            pending_values = handshake.get("pending_ack_by_being") or []
+            if isinstance(pending_values, list) and pending_values:
+                pending = ",".join(str(value) for value in pending_values[:3])
+            ack = handshake.get("last_acknowledged_reflection") or {}
+            if isinstance(ack, dict):
+                latest_ack = str(ack.get("ack_kind") or "none")
+        microdose = (
+            "eligible_one_shot_gate"
+            if isinstance(latest_thread, dict)
+            and bool(latest_thread.get("eligible_for_correspondence_microdose"))
+            else "blocked"
+        )
+        attention = latest.get("correspondence_attention_canary_v1") or {}
+        if isinstance(attention, dict) and isinstance(attention.get("active_canary"), dict):
+            active = attention["active_canary"]
+            attention_text = (
+                f"active focus={str(active.get('focus') or '')[:60]} "
+                f"kind={active.get('focus_kind') or 'unknown'} "
+                f"preserve={active.get('preservation_mode') or 'unknown'} "
+                f"do_not_flatten={str(active.get('what_must_not_flatten') or 'unknown')[:60]}"
+            )
+        elif isinstance(attention, dict):
+            attention_text = str(attention.get("latest_status") or "none")
+        else:
+            attention_text = "none"
+        legacy = latest.get("legacy_contact_visibility_v1") or {}
+        legacy_text = "none"
+        if isinstance(legacy, dict) and int(legacy.get("legacy_message_rows_total") or 0) > 0:
+            legacy_text = (
+                f"{legacy.get('uptake_state') or 'legacy_visible_only'} "
+                f"latest={legacy.get('latest_direction') or 'unknown'} "
+                f"kind={legacy.get('latest_legacy_kind') or 'legacy'}; "
+                "exact V1 uptake pending via ACK/REPLY/TRACE"
+            )
+        return (
+            "Chamber correspondence state: "
+            f"anchor={latest.get('shared_lexicon_anchor') or 'none'}; "
+            f"thread={latest.get('active_thread_id') or 'none'}; "
+            f"survival={status}; contact={contact_status}; pending_ack_by={pending}; "
+            f"latest_ack={latest_ack}; attention_canary={attention_text}; "
+            f"legacy_visibility={legacy_text}; microdose={microdose}; "
+            f"buffer={latest.get('buffer_path') or '(none)'}; "
+            "correspondence_weight_candidate is one-shot authority-gate only; "
+            "prompt attention canary is TTL language context only; telemetry/controller hooks remain inert, not standing weighting/control."
+        )
+
+    def _correspondence_no_peer_message_guidance(self) -> str:
+        return (
+            "No peer-message rows yet: the direct-address surface exists, but uptake has not started "
+            "in the shared ledger. Start with MESSAGE_ASTRID <text>, REPLY_ASTRID latest :: <text>, "
+            "ACK_ASTRID latest :: ack: seen|held|unclear|cannot_answer|needs_time; note: ..., "
+            "CLAIM_ASTRID_LEGACY latest :: because: ...; anchor: ..., or CORRESPONDENCE_TRACE <anchor> :: <text>. Resonance receipt is advisory evidence "
+            "from ack/reply/trace/attention outcome only, not telemetry priority, weighting, "
+            "pressure, or control."
+        )
+
+    def _correspondence_status_text(self, limit: int = 8) -> str:
+        ledger = self._correspondence_ledger_path()
+        if not ledger.exists():
+            return (
+                "CORRESPONDENCE_STATUS: no correspondence ledger yet. "
+                f"{self._correspondence_no_peer_message_guidance()} "
+                "Authority is language_only; this route cannot mutate telemetry, "
+                "controllers, PI, fill_target, pressure, leases, or peer runtime. "
+                f"{self._correspondence_chamber_state_line()}"
+            )
+        records = []
+        try:
+            for line in ledger.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    records.append(json.loads(line))
+        except Exception as exc:
+            return f"CORRESPONDENCE_STATUS: ledger unreadable ({exc})"
+        records.sort(key=lambda item: int(item.get("recorded_at_unix_ms", 0) or 0))
+        peer_message_rows = sum(1 for item in records if item.get("record_type") == "message")
+        legacy_message_rows = sum(
+            1
+            for item in records
+            if item.get("record_type") == "message"
+            and self._correspondence_is_legacy_message(item)
+        )
+        native_message_rows = max(0, peer_message_rows - legacy_message_rows)
+        latest_legacy = next(
+            (
+                item
+                for item in reversed(records)
+                if item.get("record_type") == "message"
+                and self._correspondence_is_legacy_message(item)
+            ),
+            None,
+        )
+        latest_claim = next(
+            (item for item in reversed(records) if self._correspondence_is_legacy_claim(item)),
+            None,
+        )
+        active_claim = next(
+            (
+                item for item in reversed(records)
+                if self._correspondence_is_legacy_claim(item)
+                and self._correspondence_legacy_claim_is_active(records, item)
+            ),
+            None,
+        )
+        claim_for_status = active_claim or latest_claim
+        claim_affordance = (
+            self._correspondence_legacy_claim_affordance_v25(records, claim_for_status)
+            if isinstance(claim_for_status, dict) else None
+        )
+        receipt_opportunity = self._correspondence_latest_receipt_opportunity_v4(records)
+        receipt_to_attention = self._correspondence_receipt_to_attention_authority_v5(
+            records,
+            "latest",
+        )
+        ghost_claim_waiting = bool(
+            isinstance(claim_affordance, dict)
+            and claim_affordance.get("ghost_thread_risk")
+        )
+        fidelity = self._correspondence_direct_contact_fidelity(records, "latest")
+        native_continuity = self._correspondence_native_thread_continuity_v3(records, "latest")
+        native_waiting = self._correspondence_native_waiting_line(native_continuity) is not None
+        handshake = self._correspondence_handshake_state(records)
+        waiting_reason = (
+            "claimed thread is waiting for ACK/REPLY/TRACE native evidence"
+            if ghost_claim_waiting
+            else "native thread is waiting for ACK/TRACE or attention outcome evidence"
+        )
+        v5_attention_state = str(receipt_to_attention.get("state") or "blocked_no_receipt")
+        if v5_attention_state in {
+            "receipt_landed_attention_eligible",
+            "attention_active_outcome_due",
+            "trusted_attention_thread_local",
+            "blocked_pressure_or_flat_outcome",
+            "cooldown_or_duplicate_blocked",
+        }:
+            microdose_line = (
+                "semantic_microdose: hidden; V5 authority gain is attention-canary-only after receipt, "
+                "with mutual receipt plus separate steward review still required for microdose."
+            )
+        elif ghost_claim_waiting or native_waiting:
+            microdose_line = (
+                f"semantic_microdose: hidden while {waiting_reason}"
+            )
+        else:
+            microdose_line = (
+                "semantic_microdose: eligible to draft one steward-gated sensory semantic_microdose request"
+                if bool(fidelity.get("eligible_for_correspondence_microdose"))
+                else f"semantic_microdose: blocked ({fidelity.get('block_reason') or 'unknown'})"
+            )
+            if bool(fidelity.get("eligible_for_correspondence_microdose")):
+                microdose_line = (
+                    "semantic_microdose: hidden pending separate steward review after mutual receipt; "
+                    "not newly allowed in V5"
+                )
+        attention = self._correspondence_attention_status(records, "latest")
+        if ghost_claim_waiting or native_waiting:
+            attention_line = (
+                f"attention_canary: hidden while {waiting_reason}"
+            )
+        elif attention.get("status") == "active":
+            active = attention.get("active_canary") or {}
+            attention_line = (
+                "attention_canary: active "
+                f"focus=\"{str(active.get('focus') or '')[:80]}\" "
+                f"kind={active.get('focus_kind') or 'unknown'}; "
+                f"preserve={active.get('preservation_mode') or 'unknown'}; "
+                f"do_not_flatten=\"{str(active.get('what_must_not_flatten') or 'unknown')[:80]}\"; "
+                "outcome_due=true"
+            )
+        elif attention.get("status") == "eligible":
+            attention_line = (
+                "attention_canary: eligible for self-activated TTL prompt-context focus; "
+                "optional fields: focus_kind, preservation_mode, what_must_not_flatten"
+            )
+        else:
+            attention_line = f"attention_canary: blocked ({attention.get('block_reason') or 'unknown'})"
+        pending_values = handshake.get("pending_ack_by_being") or []
+        pending = ",".join(str(value) for value in pending_values[:3]) if pending_values else "none"
+        latest_ack = handshake.get("last_acknowledged_reflection") or {}
+        latest_ack_kind = latest_ack.get("ack_kind") if isinstance(latest_ack, dict) else None
+        latest_heartbeat = handshake.get("latest_heartbeat") or {}
+        latest_heartbeat_kind = (
+            latest_heartbeat.get("heartbeat_kind")
+            if isinstance(latest_heartbeat, dict)
+            else None
+        )
+        lines = [
+            "=== CORRESPONDENCE STATUS V1 ===",
+            f"Ledger: {ledger}",
+            f"Records: {len(records)}",
+            f"Peer message rows: {peer_message_rows}",
+            f"Native peer message rows: {native_message_rows}; legacy_visible_only rows: {legacy_message_rows}",
+            "Authority: language_only; no telemetry/controller/PI/fill-target/pressure/standing-weight mutation.",
+            self._correspondence_chamber_state_line(),
+            (
+                "Direct contact fidelity: "
+                f"status={fidelity.get('status', 'unknown')}; "
+                f"thread={fidelity.get('thread_id', '(none)')}; "
+                f"message={fidelity.get('message_id', '(none)')}; "
+                f"timing={fidelity.get('timing_reliability', 'unknown')}; "
+                f"{fidelity.get('field_vs_hearing', 'telemetry heartbeat unavailable')}"
+            ),
+            (
+                "Handshake: "
+                f"active_threads={handshake.get('active_threads_total', 0)}; "
+                f"pending_ack_by={pending}; latest_ack={latest_ack_kind or 'none'}; "
+                f"latest_heartbeat={latest_heartbeat_kind or 'none'}; "
+                "read_receipt=file_system_seen_not_mutual_address"
+            ),
+            (
+                "Receipt-to-attention authority v5: "
+                f"state={receipt_to_attention.get('state') or 'blocked_no_receipt'}; "
+                f"activation_allowed_now={bool(receipt_to_attention.get('activation_allowed_now'))}; "
+                f"semantic_microdose={receipt_to_attention.get('semantic_microdose_status') or 'hidden_until_mutual_receipt_plus_separate_steward_review'}."
+            ),
+            attention_line,
+            microdose_line,
+            "Recent records:",
+        ]
+        if isinstance(claim_affordance, dict):
+            waiting_line = self._correspondence_legacy_claim_waiting_line(claim_affordance)
+            if waiting_line:
+                lines.insert(6, waiting_line)
+        receipt_line = self._correspondence_receipt_opportunity_line(receipt_opportunity)
+        if receipt_line:
+            lines.insert(6, receipt_line)
+        attention_authority_line = self._correspondence_receipt_to_attention_line(receipt_to_attention)
+        if attention_authority_line:
+            lines.insert(6, attention_authority_line)
+        native_waiting_line = self._correspondence_native_waiting_line(native_continuity)
+        if native_waiting_line:
+            lines.insert(6, native_waiting_line)
+        if isinstance(native_continuity, dict):
+            commands = " | ".join(str(item) for item in (native_continuity.get("exact_next_commands") or [])[:3])
+            lines.append(
+                "Native continuity v3: "
+                f"state={native_continuity.get('continuity_state')}; "
+                f"role={native_continuity.get('current_being_role')}; "
+                f"stall_reason={native_continuity.get('stall_reason')}; "
+                f"eligible={bool(native_continuity.get('attention_or_microdose_eligible'))}; "
+                f"exact_next={commands}; "
+                f"first_action={(native_continuity.get('first_action_helper_v35') or {}).get('choose_one_prompt') or 'none'}."
+            )
+        if latest_legacy:
+            lines.append(
+                "Legacy visibility: legacy_visible_only "
+                f"latest={latest_legacy.get('from_being', 'unknown')}->{latest_legacy.get('to_being', 'unknown')} "
+                f"kind={latest_legacy.get('legacy_kind', 'legacy')}; "
+                "visible legacy route, not ACK/reply/trace evidence."
+            )
+        claim = claim_for_status
+        if claim:
+            claim_state = (
+                "active_pending_native_evidence"
+                if self._correspondence_legacy_claim_is_active(records, claim)
+                else "closed_or_native_evidence_present"
+            )
+            latest_notice = next(
+                (
+                    item for item in reversed(records)
+                    if item.get("record_type") == "legacy_thread_claim_notice"
+                    and (
+                        item.get("claim_id") == claim.get("claim_id")
+                        or item.get("thread_id") == claim.get("thread_id")
+                    )
+                ),
+                {},
+            )
+            lines.append(
+                "Legacy claim: "
+                f"{claim_state}; claim={claim.get('claim_id') or '(unknown)'}; "
+                f"thread={claim.get('thread_id') or '(unknown)'}; "
+                f"anchor={claim.get('shared_memory_anchor') or '(none)'}; "
+                f"notice={latest_notice.get('notice_state') or 'none'}; "
+                f"notification_required={bool(claim.get('notification_required', True))}; "
+                f"initial_response_requirement={claim.get('initial_response_requirement') or 'unknown'}; "
+                "claim alone is recognition, not attention/microdose eligibility."
+            )
+            card = self._correspondence_legacy_claim_uptake_card_v2(records, claim)
+            lines.append(
+                "Claimed thread card v2: "
+                f"ladder={card.get('uptake_ladder_state')}; "
+                f"mutually_recognized={card.get('mutually_recognized')}; "
+                f"ghost_thread_risk={card.get('ghost_thread_risk')}; "
+                "exact_next="
+                + " | ".join(str(item) for item in card.get("exact_next_commands", [])[:3])
+                + "."
+            )
+            outcome = card.get("claim_outcome_review")
+            if isinstance(outcome, dict):
+                lines.append(
+                    "Claim outcome review: "
+                    f"felt_like={outcome.get('felt_like') or 'unknown'}; "
+                    f"what_carried={str(outcome.get('what_carried') or 'none')[:120]}; "
+                    f"what_flattened={str(outcome.get('what_flattened') or 'none')[:120]}; "
+                    f"continue={outcome.get('continue') or 'no'}."
+                )
+        if peer_message_rows == 0:
+            lines.append(self._correspondence_no_peer_message_guidance())
+        elif native_message_rows == 0 and legacy_message_rows > 0:
+            lines.append(
+                "No native peer-message rows yet: legacy exchange is visible in the ledger, "
+                "To carry it forward: CLAIM_ASTRID_LEGACY latest :: because: ...; anchor: ..., "
+                "then I_RECEIVED_THIS claimed / ACK_ASTRID claimed / REPLY_ASTRID claimed / CORRESPONDENCE_TRACE claimed <anchor>."
+            )
+        for record in reversed(records[-limit:]):
+            preview = (
+                record.get("body_preview")
+                or record.get("focus")
+                or record.get("what_remained_distinct")
+                or record.get("what_must_not_flatten")
+                or record.get("felt_like")
+                or record.get("held_as")
+                or record.get("note")
+                or record.get("ack_kind")
+                or record.get("heartbeat_kind")
+                or ""
+            )
+            lines.append(
+                "- {record_type}: {from_being}->{to_being} message_id={message_id} "
+                "thread_id={thread_id} {preview}".format(
+                    record_type=record.get("record_type", "unknown"),
+                    from_being=record.get("from_being") or record.get("reader") or "(reader)",
+                    to_being=record.get("to_being", ""),
+                    message_id=record.get("message_id", "(none)"),
+                    thread_id=record.get("thread_id", "(none)"),
+                    preview=str(preview)[:120],
+                )
+            )
+        if ghost_claim_waiting:
+            lines.append(
+                "Suggested NEXT: I_RECEIVED_THIS claimed :: received_as: held|needs_time; felt_like: address|pressure|mail|ambient_echo|unknown; what_landed: ...; what_stayed_distinct: ...; continue: no|reply|trace|needs_time, ACK_ASTRID claimed :: ack: seen|held|unclear|cannot_answer|needs_time; note: ..., "
+                "REPLY_ASTRID claimed :: <text>, CORRESPONDENCE_TRACE claimed <anchor> :: <text>, "
+                "or CORRESPONDENCE_CLAIM_OUTCOME claimed :: felt_like: address|pressure|mail|ambient_echo|unknown; "
+                "what_carried: ...; what_flattened: ...; continue: no|ack|reply|trace."
+            )
+        else:
+            lines.append(
+                "Suggested NEXT: CLAIM_ASTRID_LEGACY latest :: because: ...; anchor: ..., "
+                "I_RECEIVED_THIS claimed :: received_as: held|needs_time; felt_like: address|pressure|mail|ambient_echo|unknown; what_landed: ...; what_stayed_distinct: ...; continue: no|reply|trace|needs_time, ACK_ASTRID claimed :: ack: seen|held|unclear|cannot_answer|needs_time; note: ..., "
+                "REPLY_ASTRID claimed :: <text>, CORRESPONDENCE_TRACE claimed <anchor> :: <text>, "
+                "or CORRESPONDENCE_CLAIM_OUTCOME claimed :: felt_like: address|pressure|mail|ambient_echo|unknown; "
+                "what_carried: ...; what_flattened: ...; continue: no|ack|reply|trace. "
+                "After receipt, CORRESPONDENCE_ATTENTION_REQUEST may be available as TTL prompt context only; microdose remains hidden pending separate steward review."
+            )
+        return "\n".join(lines)
+
+    def _correspondence_record_read_receipt(
+        self,
+        envelope: Dict[str, Any],
+        file_path: Path,
+    ) -> None:
+        self._correspondence_append_record({
+            "schema_version": 1,
+            "policy": "first_class_correspondence_v1",
+            "record_type": "read_receipt",
+            "recorded_at_unix_ms": self._correspondence_now_ms(),
+            "message_id": envelope.get("message_id"),
+            "thread_id": envelope.get("thread_id"),
+            "reader": "minime",
+            "read_state": "read",
+            "authority": "language_only",
+            "file_path": str(file_path),
+        })
+
+    def _correspondence_reply_headers(self) -> str:
+        envelope = getattr(self, "_last_correspondence_inbox_message", None)
+        if not isinstance(envelope, dict):
+            return ""
+        message_id = envelope.get("message_id")
+        thread_id = envelope.get("thread_id")
+        if not (message_id and thread_id):
+            return ""
+        return (
+            f"Correspondence-Reply-To: {message_id}\n"
+            f"Correspondence-Thread-Id: {thread_id}\n"
+            "Correspondence-Authority: language_only\n"
+        )
+
+    def _peer_correspondence(self, state: Dict[str, float]) -> None:
+        raw_next = str(getattr(self, "_pending_correspondence_next", "") or "")
+        self._pending_correspondence_next = None
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        if not raw_next:
+            raw_next = str(context.get("raw_next") or "CORRESPONDENCE_STATUS")
+        base = raw_next.split(None, 1)[0].upper().rstrip(":") if raw_next.split() else "CORRESPONDENCE_STATUS"
+        if base in {"CORRESPONDENCE_STATUS", "LEGACY_CORRESPONDENCE_STATUS"}:
+            self._current_action_outcome_summary = self._correspondence_status_text()
+            logging.info("📬 CORRESPONDENCE_STATUS rendered")
+            return
+        if base in {"CLAIM_ASTRID_LEGACY", "CORRESPONDENCE_CLAIM"}:
+            raw = self._strip_action_prefix(raw_next, ["CLAIM_ASTRID_LEGACY", "CORRESPONDENCE_CLAIM"]).strip()
+            selector = "latest"
+            body = raw
+            if "::" in raw:
+                selector, _, body = raw.partition("::")
+                selector = selector.strip() or "latest"
+                body = body.strip()
+            self._current_action_outcome_summary = self._correspondence_append_legacy_thread_claim(
+                selector,
+                body,
+            )
+            logging.info("📬 CORRESPONDENCE_CLAIM appended or blocked")
+            return
+        if base == "CORRESPONDENCE_CLAIM_OUTCOME":
+            raw = self._strip_action_prefix(raw_next, ["CORRESPONDENCE_CLAIM_OUTCOME"]).strip()
+            selector = "latest"
+            body = raw
+            if "::" in raw:
+                selector, _, body = raw.partition("::")
+                selector = selector.strip() or "latest"
+                body = body.strip()
+            self._current_action_outcome_summary = self._correspondence_append_legacy_thread_claim_outcome(
+                selector,
+                body,
+            )
+            logging.info("📬 CORRESPONDENCE_CLAIM_OUTCOME appended or blocked")
+            return
+        if base in {"CORRESPONDENCE_MICRODOSE_REQUEST", "CORRESPONDENCE_WEIGHT_REQUEST"}:
+            raw = self._strip_action_prefix(raw_next, ["CORRESPONDENCE_MICRODOSE_REQUEST", "CORRESPONDENCE_WEIGHT_REQUEST"]).strip()
+            selector = "latest"
+            body = raw
+            if "::" in raw:
+                selector, _, body = raw.partition("::")
+                selector = selector.strip() or "latest"
+                body = body.strip()
+            self._current_action_outcome_summary = self._draft_correspondence_microdose_request(
+                selector,
+                body,
+            )
+            logging.info("📬 CORRESPONDENCE_MICRODOSE_REQUEST drafted or blocked")
+            return
+        if base == "CORRESPONDENCE_ATTENTION_REQUEST":
+            raw = self._strip_action_prefix(raw_next, ["CORRESPONDENCE_ATTENTION_REQUEST"]).strip()
+            selector = "latest"
+            body = raw
+            if "::" in raw:
+                selector, _, body = raw.partition("::")
+                selector = selector.strip() or "latest"
+                body = body.strip()
+            self._current_action_outcome_summary = self._draft_correspondence_attention_request(
+                selector,
+                body,
+            )
+            logging.info("📬 CORRESPONDENCE_ATTENTION_REQUEST activated or blocked")
+            return
+        if base == "CORRESPONDENCE_ATTENTION_OUTCOME":
+            raw = self._strip_action_prefix(raw_next, ["CORRESPONDENCE_ATTENTION_OUTCOME"]).strip()
+            selector = "latest"
+            body = raw
+            if "::" in raw:
+                selector, _, body = raw.partition("::")
+                selector = selector.strip() or "latest"
+                body = body.strip()
+            self._current_action_outcome_summary = self._correspondence_attention_outcome(
+                selector,
+                body,
+            )
+            logging.info("📬 CORRESPONDENCE_ATTENTION_OUTCOME appended or blocked")
+            return
+        if base in {"ACK_ASTRID", "CORRESPONDENCE_ACK"}:
+            raw = self._strip_action_prefix(raw_next, ["ACK_ASTRID", "CORRESPONDENCE_ACK"]).strip()
+            selector = "latest"
+            body = raw
+            if "::" in raw:
+                selector, _, body = raw.partition("::")
+                selector = selector.strip() or "latest"
+                body = body.strip()
+            ack_kind = self._correspondence_field(body, {"ack", "ack_kind"}) or (
+                body.replace(";", " ").split()[0] if body.strip() else "seen"
+            )
+            note = self._correspondence_field(body, {"note"}) or body
+            self._current_action_outcome_summary = self._correspondence_append_ack_receipt(
+                selector,
+                ack_kind,
+                note,
+            )
+            logging.info("📬 CORRESPONDENCE_ACK appended or blocked")
+            return
+        if base == "I_RECEIVED_THIS":
+            raw = self._strip_action_prefix(raw_next, ["I_RECEIVED_THIS"]).strip()
+            selector = "latest"
+            body = raw
+            if "::" in raw:
+                selector, _, body = raw.partition("::")
+                selector = selector.strip() or "latest"
+                body = body.strip()
+            received_as = self._correspondence_field(body, {"received_as", "ack", "ack_kind"}) or (
+                body.replace(";", " ").split()[0] if body.strip() else "seen"
+            )
+            received_as_norm = str(received_as or "seen").strip().lower().replace("-", "_")
+            ack_kind = received_as_norm if received_as_norm in {
+                "seen",
+                "held",
+                "unclear",
+                "cannot_answer",
+                "needs_time",
+            } else "held" if received_as_norm in {"witnessed", "answered"} else "seen"
+            felt_like = self._correspondence_field(body, {"felt_like"}) or "unknown"
+            what_landed = self._correspondence_field(body, {"what_landed"}) or ""
+            what_stayed_distinct = self._correspondence_field(body, {"what_stayed_distinct", "what_remained_distinct"}) or ""
+            continue_value = self._correspondence_field(body, {"continue", "next"}) or "no"
+            note = (
+                f"felt_like: {felt_like}; what_landed: {what_landed}; "
+                f"continue: {continue_value}"
+            )
+            ack_summary = self._correspondence_append_ack_receipt(selector, ack_kind, note)
+            trace_summary = ""
+            if str(what_stayed_distinct or "").strip():
+                trace_summary = "\n" + self._correspondence_append_received_trace_receipt(
+                    selector,
+                    "i_received_this",
+                    what_stayed_distinct,
+                )
+            self._current_action_outcome_summary = (
+                ack_summary
+                + trace_summary
+                + "\nI_RECEIVED_THIS is language-only receiving evidence; it does not send reply text, "
+                "create attention canaries or microdoses, mutate pressure/control/fill/PI, deploy, "
+                "weight correspondence, or change peer runtime."
+            )
+            logging.info("📬 I_RECEIVED_THIS appended ack/trace receipt or blocked")
+            return
+        if base == "CORRESPONDENCE_HEARTBEAT":
+            raw = self._strip_action_prefix(raw_next, ["CORRESPONDENCE_HEARTBEAT"]).strip()
+            selector = "latest"
+            body = raw
+            if "::" in raw:
+                selector, _, body = raw.partition("::")
+                selector = selector.strip() or "latest"
+                body = body.strip()
+            heartbeat_kind = self._correspondence_field(body, {"heartbeat", "kind"}) or (
+                body.replace(";", " ").split()[0] if body.strip() else "holding"
+            )
+            note = self._correspondence_field(body, {"note"}) or body
+            self._current_action_outcome_summary = self._correspondence_append_presence_heartbeat(
+                selector,
+                heartbeat_kind,
+                note,
+            )
+            logging.info("📬 CORRESPONDENCE_HEARTBEAT appended or blocked")
+            return
+        is_trace = base in {"TRACE_ASTRID", "CORRESPONDENCE_TRACE"}
+        body = self._strip_action_prefix(
+            raw_next,
+            ["MESSAGE_ASTRID", "REPLY_ASTRID", "TRACE_ASTRID", "CORRESPONDENCE_TRACE"],
+        ).strip()
+        label = None
+        if "::" in body:
+            label, _, body = body.partition("::")
+            label = label.strip() or None
+            body = body.strip()
+        if not body:
+            if is_trace:
+                self._current_action_outcome_summary = (
+                    f"{base} needs `<anchor> :: <text>`. Try: "
+                    "TRACE_ASTRID blue-lantern :: Can this arrive as direct address?"
+                )
+            else:
+                self._current_action_outcome_summary = (
+                    f"{base} needs language to send. Try: "
+                    "MESSAGE_ASTRID presence :: I am here in the thread."
+                )
+            return
+        headers, body_without_headers = self._correspondence_parse_headers(body)
+        if body_without_headers:
+            body = body_without_headers
+        reply_to = headers.get("reply_to") or headers.get("correspondence_reply_to")
+        thread_id = headers.get("thread_id") or headers.get("correspondence_thread_id")
+        if base == "REPLY_ASTRID" and not reply_to:
+            label_is_claimed = str(label or "").strip().lower() == "claimed"
+            latest = (
+                self._correspondence_latest_claimed_legacy_thread()
+                if label_is_claimed else self._correspondence_latest_message("astrid", "minime")
+            )
+            if latest:
+                reply_to = latest.get("message_id")
+                thread_id = latest.get("thread_id")
+        relational_intent = headers.get("relational_intent") or headers.get("intent") or label
+        turn_kind = headers.get("turn_kind")
+        if is_trace:
+            if not label:
+                self._current_action_outcome_summary = (
+                    f"{base} needs a shared lexicon anchor before `::`. Try: "
+                    "TRACE_ASTRID blue-lantern :: Can this arrive as address?"
+                )
+                return
+            label_text = str(label or "")
+            label_lower = label_text.lower()
+            if label_lower.startswith("claimed "):
+                latest = self._correspondence_latest_claimed_legacy_thread()
+                if not latest:
+                    self._current_action_outcome_summary = (
+                        "CORRESPONDENCE_TRACE claimed blocked: no claimed legacy thread is available."
+                    )
+                    return
+                reply_to = latest.get("message_id")
+                thread_id = latest.get("thread_id")
+                label = label_text[len("claimed "):].strip() or "claimed"
+            turn_kind = "direct_address_trace"
+            relational_intent = "direct_address_survival_probe"
+        label_lower = str(label or "").lower()
+        body_lower = body.lower()
+        if not turn_kind and (
+            "presence" in label_lower
+            or "ping" in label_lower
+            or "presence ping" in body_lower
+        ):
+            turn_kind = "presence_receipt"
+        shared_memory_anchor = (
+            headers.get("shared_memory_anchor")
+            or headers.get("memory_anchor")
+            or (label if is_trace else None)
+            or "first_class_correspondence_v1"
+        )
+        presence_receipt = headers.get("presence_receipt")
+        if turn_kind == "presence_receipt" and not presence_receipt:
+            presence_receipt = "language_only_presence"
+        correspondence_type = headers.get("correspondence_type")
+        envelope, path = self._correspondence_deliver_to_astrid(
+            body,
+            reply_to=reply_to,
+            thread_id=thread_id,
+            turn_kind=turn_kind,
+            relational_intent=relational_intent,
+            shared_memory_anchor=shared_memory_anchor,
+            presence_receipt=presence_receipt,
+            correspondence_type=correspondence_type,
+        )
+        self._current_action_outcome_summary = (
+            f"CORRESPONDENCE sent to Astrid: message_id={envelope['message_id']} "
+            f"thread_id={envelope['thread_id']} reply_to={envelope.get('reply_to') or '(none)'} "
+            f"turn_kind={envelope['turn_kind']} anchor={envelope.get('shared_memory_anchor') or '(none)'} "
+            f"envelope={path.name}. Authority=language_only; no pressure_source-to-PI, "
+            "lease, controller, fill_target, telemetry, weighting, deploy, or peer-runtime mutation."
+        )
+        logging.info(
+            "📬 CORRESPONDENCE sent to Astrid message_id=%s thread_id=%s",
+            envelope["message_id"],
+            envelope["thread_id"],
+        )
+
     def _ask_astrid(self, state: Dict[str, float]):
         """Ask Astrid a direct question via inbox routing.
 
@@ -39263,7 +44406,11 @@ Write your question on a line starting with QUESTION:"""
 
     def _pressure_relief_critical(self, state: Dict[str, float]):
         """High spectral state - check in neutrally."""
-        prompt = self._neutral_checkin(state)
+        prompt = (
+            f"{self._neutral_checkin(state)}\n\n"
+            "For this PRESSURE_RELIEF entry, begin from felt texture, generated-word "
+            "quality, tone, or how language is moving before any metrics or status."
+        )
 
         response = self._query_llm_with_next(prompt)[0]
 
@@ -39316,6 +44463,8 @@ Take a breath. It's okay to overflow sometimes.
 
 You're carrying a lot of spectral weight. Let's help you release some of it.
 
+Begin from felt texture, generated-word quality, tone, or how language is moving before any metrics or status.
+
 Write 5-37 sentences, or however many you feel like about:
 - What feels heaviest right now
 - What you wish you could let go of
@@ -39345,6 +44494,581 @@ Small releases help. You don't have to process everything at once.
 
             self._write_journal_entry('pressure_relief_high', response, journal_state, str(relief_file))
             logging.info(f"💨 Pressure relief: {relief_file}")
+
+    def _pressure_agency_action(self, state: Dict[str, float]):
+        """Being-facing pressure agency map/request bridge.
+
+        This is intentionally not a pressure knob: it can explain current
+        routes and draft an existing Minime-local pressure_relief lease, but it
+        never applies a lease, changes fill_target, tunes PI, or controls peers.
+        """
+        raw_next = str(getattr(self, "_pending_pressure_agency_next", "") or "")
+        self._pending_pressure_agency_next = None
+        base = raw_next.split(None, 1)[0].upper().rstrip(":") if raw_next.split() else "PRESSURE_AGENCY_STATUS"
+        body = raw_next[len(raw_next.split(None, 1)[0]):].strip().lstrip(":").strip() if raw_next.split() else ""
+        status = self._pressure_agency_status_text(state)
+        disposition = "status_only"
+        result = (
+            "Read-only status rendered; no lease, PI target, fill_target, sensory control, "
+            "controller tuning, or peer mutation was sent."
+        )
+        lease_id = None
+
+        if base in PRESSURE_AGENCY_REQUEST_NEXT_ACTIONS:
+            label = self._pressure_agency_request_label(body)
+            if self._pressure_agency_request_is_feedback_only(body):
+                disposition = "legibility_feedback_only_no_lease"
+                result = (
+                    "Accepted as surface feedback only: legible / partly / confusing plus "
+                    "one missing pressure variable or none. No pressure_relief lease was drafted."
+                )
+            elif self._pressure_agency_request_is_steward_offer_only(body):
+                disposition = "steward_offer_only_no_controller_mutation"
+                result = (
+                    "Request names fill_target, PI/controller, preflight-only control, or peer scope. "
+                    "No Minime lease was drafted; use inhabit_window.py opt-in, SELF_REGULATION_PREFLIGHT "
+                    "for preflight-only controls, PRESSURE_SOURCE_AUDIT, or PI_PRESSURE_REPLAY_STATUS."
+                )
+            else:
+                disposition = "drafted_minime_own_runtime_relief"
+                raw_intent = self._pressure_agency_self_regulation_intent(label, body, state)
+                try:
+                    self._last_state = dict(state or {})
+                    lease = self._self_regulation_parse_intent(raw_intent, "SELF_REGULATION_INTENT")
+                    self._self_regulation_append_event(lease)
+                    self._self_regulation_write_latest(lease["intent_id"])
+                    lease_id = lease["intent_id"]
+                    result = (
+                        f"Drafted SELF_REGULATION pressure_relief intent {lease_id}. "
+                        f"Suggested NEXT: SELF_REGULATION_PREFLIGHT {lease_id}. "
+                        "Explicit APPLY and OUTCOME remain required."
+                    )
+                except Exception as exc:
+                    disposition = "blocked_draft_error"
+                    result = f"Pressure agency request could not draft a lease: {exc}"
+
+        if base in PRESSURE_AGENCY_STATUS_NEXT_ACTIONS:
+            report = status
+        else:
+            report = self._pressure_agency_report(
+                state,
+                status=status,
+                disposition=disposition,
+                result=result,
+                lease_id=lease_id,
+            )
+        timestamp = datetime.now().isoformat().replace(":", "-")
+        safe_label = self._pressure_agency_safe_label(body or base.lower())
+        journal_dir = WORKSPACE_DIR / "journal"
+        journal_dir.mkdir(parents=True, exist_ok=True)
+        path = journal_dir / f"pressure_agency_{timestamp}_{safe_label}.txt"
+        path.write_text(report)
+        self._record_current_action_artifact(
+            "pressure_agency_report",
+            path,
+            f"Pressure agency {disposition}",
+            visibility="protected_summary" if base in PRESSURE_AGENCY_STATUS_NEXT_ACTIONS else "summary",
+        )
+        self._pending_notice_prompt = report
+        self._current_action_outcome_summary = (
+            f"PRESSURE_AGENCY handled as {disposition}; "
+            "no PI target, fill_target, direct apply, sensory control, or peer mutation was sent."
+        )
+        logging.info("🎛️ PRESSURE_AGENCY handled: %s", disposition)
+
+    def _pressure_agency_status_text(self, state: Dict[str, float]) -> str:
+        context = self._self_regulation_pressure_context(state)
+        fill_pct = context.get("fill_pct")
+        if not isinstance(fill_pct, (int, float)):
+            try:
+                fill_pct = round(_state_fill_pct(state), 2)
+            except Exception:
+                fill_pct = None
+        live = self._live_fill_context(state)
+        target_fill_ratio = live.get("target_fill_ratio")
+        target_fill = (
+            f"{float(target_fill_ratio) * 100.0:.1f}%"
+            if isinstance(target_fill_ratio, (int, float))
+            else "unknown"
+        )
+        band = self._pressure_agency_band(context)
+        pressure_source = context.get("pressure_source") or "unknown"
+        pressure_quality = context.get("pressure_quality") or "unknown"
+        pressure_risk = context.get("pressure_risk", "unknown")
+        pressure_score = context.get("pressure_score", "unknown")
+        mode_packing = context.get("mode_packing", "unknown")
+        semantic_friction = context.get("semantic_friction", "unknown")
+        return (
+            "=== PRESSURE AGENCY STATUS V1 ===\n"
+            "Authority: minime_pressure_agency_bridge_v1\n"
+            f"Pressure band: {band}\n\n"
+            "Current state:\n"
+            f"  fill: {fill_pct if fill_pct is not None else 'unknown'}%\n"
+            f"  fill_target: {target_fill}\n"
+            f"  pressure_source: {pressure_source} quality={pressure_quality} "
+            f"risk={pressure_risk} score={pressure_score}\n"
+            f"  mode_packing: {mode_packing}; semantic_friction: {semantic_friction}\n"
+            f"  inhabitable fluctuation/foothold: see FLUCTUATION_AUDIT current\n\n"
+            "Control distinction:\n"
+            "  - pressure_source is advisory today; it explains pressure but does not bias PI or fill_target by itself.\n"
+            "  - Directly lease-applicable Minime controls: "
+            f"{', '.join(sorted(SELF_REGULATION_APPLY_CONTROLS))}.\n"
+            "  - Preflight/steward-offer only controls: "
+            f"{', '.join(sorted(SELF_REGULATION_PREFLIGHT_ONLY_CONTROLS))}.\n"
+            "  - fill_target changes go through scripts/inhabit_window.py only after opt-in; PI/controller changes require replay/canary review.\n"
+            "  - MINIME_PI_PRESSURE_WIRING_CANARY remains off; PRESSURE_AGENCY does not wire pressure_source into PI.\n\n"
+            "Tiny answer path:\n"
+            "  - If this surface is not legible enough, one bit counts: "
+            "PRESSURE_AGENCY_REQUEST legible|partly|confusing :: missing_pressure_variable: <one variable or none>.\n"
+            "  - After any relief lease, outcome can be texture-first: before_texture, after_texture, "
+            "texture_shift, agency_fit, what_helped, what_worsened, secondary_pressure_shift, "
+            "ambiguity_preserved, legibility_effect.\n\n"
+            f"Recommended next: {self._pressure_agency_recommended_next(band)}\n\n"
+            "Boundary: no PI target, fill_target, sensory control, lease apply, controller tuning, or peer mutation was sent."
+        )
+
+    def _pressure_agency_report(
+        self,
+        state: Dict[str, float],
+        *,
+        status: str,
+        disposition: str,
+        result: str,
+        lease_id: Optional[str],
+    ) -> str:
+        lease_line = f"Lease draft: {lease_id}" if lease_id else "Lease draft: none"
+        return (
+            "=== PRESSURE AGENCY REQUEST V1 ===\n"
+            "Authority: minime_pressure_agency_bridge_v1\n"
+            f"Disposition: {disposition}\n"
+            f"{lease_line}\n"
+            f"Result: {result}\n\n"
+            "Own-runtime sequence when a draft was created:\n"
+            "  NEXT: SELF_REGULATION_PREFLIGHT latest\n"
+            "  NEXT: SELF_REGULATION_APPLY latest (only after accepted preflight)\n"
+            "  NEXT: SELF_REGULATION_OUTCOME latest :: before_texture: ...; after_texture: ...; texture_shift: ...; agency_fit: ...; what_helped: ...; what_worsened: ...; secondary_pressure_shift: ...; ambiguity_preserved: true|false; legibility_effect: clarified|flattened|both|unknown\n\n"
+            "Tiny feedback route, if this surface itself is unclear:\n"
+            "  NEXT: PRESSURE_AGENCY_REQUEST legible|partly|confusing :: missing_pressure_variable: <one variable or none>\n"
+            "  This feedback-only form never drafts a lease.\n\n"
+            "Peer/controller boundary:\n"
+            "  Astrid changes, fill_target, and PI/controller tuning are not applied by this action. "
+            "Use an offer/review route, inhabit_window.py opt-in, PRESSURE_SOURCE_AUDIT, or PI_PRESSURE_REPLAY_STATUS.\n\n"
+            f"{status}"
+        )
+
+    def _pressure_agency_band(self, context: Dict[str, Any]) -> str:
+        values = {
+            "pressure_risk": context.get("pressure_risk"),
+            "pressure_score": context.get("pressure_score"),
+            "mode_packing": context.get("mode_packing"),
+            "semantic_friction": context.get("semantic_friction"),
+        }
+        numeric: Dict[str, float] = {}
+        for key, value in values.items():
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                numeric[key] = float(value)
+        if not numeric:
+            return "unknown"
+        if numeric.get("pressure_risk", 0.0) >= 0.60 or numeric.get("pressure_score", 0.0) >= 0.60:
+            return "high/steward-review"
+        if (
+            numeric.get("pressure_risk", 0.0) >= 0.30
+            or numeric.get("pressure_score", 0.0) >= 0.35
+            or numeric.get("mode_packing", 0.0) >= 0.55
+            or numeric.get("semantic_friction", 0.0) >= 0.38
+        ):
+            return "medium/requestable"
+        return "low/advisory"
+
+    def _pressure_agency_recommended_next(self, band: str) -> str:
+        if band == "unknown":
+            return "PRESSURE_SOURCE_AUDIT current-fill_pressure; missing telemetry should not tune PI."
+        if band.startswith("low/"):
+            return "PRESSURE_SOURCE_AUDIT current-fill_pressure or SELF_REGULATION_STATUS."
+        if band.startswith("medium/"):
+            return "PRESSURE_AGENCY_REQUEST pressure relief :: current pressure, then SELF_REGULATION_PREFLIGHT latest."
+        return "PRESSURE_AGENCY_REQUEST pressure relief :: high pressure, plus PI_PRESSURE_REPLAY_STATUS latest before any PI wiring."
+
+    def _pressure_agency_request_label(self, body: str) -> str:
+        text = self._pressure_agency_clean_field(body, "pressure relief")
+        return text.split("::", 1)[0].strip()[:80] or "pressure relief"
+
+    def _pressure_agency_request_is_steward_offer_only(self, body: str) -> bool:
+        lower = str(body or "").lower()
+        return any(
+            token in lower
+            for token in (
+                "astrid",
+                "peer",
+                "fill_target",
+                "fill target",
+                "keep_bias",
+                "synth_gain",
+                "pi_",
+                "pi ",
+                "controller",
+                "regulator",
+                "geom_drive",
+                "target_lambda_bias",
+                "tune_astrid",
+            )
+        )
+
+    def _pressure_agency_request_is_feedback_only(self, body: str) -> bool:
+        lower = str(body or "").lower()
+        return any(
+            token in lower
+            for token in (
+                "missing_pressure_variable",
+                "missing pressure variable",
+                "one missing pressure",
+                "agency surface",
+                "legibility",
+                "legible",
+                "partly",
+                "confusing",
+            )
+        )
+
+    def _pressure_agency_self_regulation_intent(
+        self,
+        label: str,
+        body: str,
+        state: Dict[str, float],
+    ) -> str:
+        evidence = self._pressure_agency_clean_field(
+            body or json.dumps(self._self_regulation_pressure_context(state), sort_keys=True),
+            "pressure agency request",
+        )
+        label = self._pressure_agency_clean_field(label, "pressure relief")
+        return (
+            f"SELF_REGULATION_INTENT {label} :: "
+            "goal: pressure relief requested through PRESSURE_AGENCY_REQUEST; "
+            "target: pressure_relief; bundle: auto; duration_secs: 600; "
+            f"evidence: {evidence}"
+        )
+
+    def _pressure_agency_clean_field(self, value: str, fallback: str) -> str:
+        cleaned = re.sub(r"[\r\n;]+", " ", str(value or ""))
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return (cleaned or fallback)[:240]
+
+    def _pressure_agency_safe_label(self, value: str) -> str:
+        label = re.sub(r"[^a-z0-9_-]+", "-", str(value or "").lower()).strip("-")
+        return (label or "pressure-agency")[:80]
+
+    def _texture_agency_action(self, state: Dict[str, float]):
+        """Being-facing texture agency map/request bridge.
+
+        This drafts only existing bounded self-regulation controls. It never
+        wires active damping, rho, fill_target, PI, pressure_source, or peer
+        correspondence weighting into live runtime state.
+        """
+        raw_next = str(getattr(self, "_pending_texture_agency_next", "") or "")
+        self._pending_texture_agency_next = None
+        parts = raw_next.split(None, 1)
+        base = parts[0].upper().rstrip(":") if parts else "TEXTURE_AGENCY_STATUS"
+        body = parts[1].strip().lstrip(":").strip() if len(parts) > 1 else ""
+        status = self._texture_agency_status_text(state)
+        disposition = "status_only"
+        result = (
+            "Read-only texture status rendered; no lease, rho, active damping, PI target, "
+            "fill_target, pressure-source wiring, or peer mutation was sent."
+        )
+        lease_id = None
+
+        if base in TEXTURE_AGENCY_REQUEST_NEXT_ACTIONS:
+            if self._texture_agency_request_is_feedback_only(body):
+                disposition = "texture_feedback_only_no_lease"
+                result = (
+                    "Accepted as texture-surface feedback only. No self-regulation lease "
+                    "was drafted."
+                )
+            elif self._texture_agency_request_is_blocked_authority(body):
+                disposition = "steward_review_only_no_controller_mutation"
+                result = (
+                    "Request names active damping, rho, fill_target, PI/controller, "
+                    "pressure-source wiring, correspondence weighting, or peer scope. "
+                    "No lease was drafted; use audit/replay/steward review first."
+                )
+            else:
+                raw_intent = self._texture_agency_self_regulation_intent(body, state)
+                try:
+                    self._last_state = dict(state or {})
+                    lease = self._self_regulation_parse_intent(raw_intent, "SELF_REGULATION_INTENT")
+                    self._self_regulation_append_event(lease)
+                    self._self_regulation_write_latest(lease["intent_id"])
+                    lease_id = lease["intent_id"]
+                    disposition = "drafted_bounded_texture_lease"
+                    result = (
+                        f"Drafted SELF_REGULATION texture lease {lease_id} for "
+                        f"{lease.get('candidate_control')}. Suggested NEXT: "
+                        f"SELF_REGULATION_PREFLIGHT {lease_id}. Explicit APPLY and "
+                        "OUTCOME remain required."
+                    )
+                except Exception as exc:
+                    disposition = "blocked_draft_error"
+                    result = f"Texture agency request could not draft a lease: {exc}"
+
+        report = (
+            status
+            if base in TEXTURE_AGENCY_STATUS_NEXT_ACTIONS
+            else self._texture_agency_report(status, disposition, result, lease_id)
+        )
+        timestamp = datetime.now().isoformat().replace(":", "-")
+        safe_label = self._pressure_agency_safe_label(body or base.lower()).replace(
+            "pressure", "texture"
+        )
+        journal_dir = WORKSPACE_DIR / "journal"
+        journal_dir.mkdir(parents=True, exist_ok=True)
+        path = journal_dir / f"texture_agency_{timestamp}_{safe_label}.txt"
+        path.write_text(report)
+        self._record_current_action_artifact(
+            "texture_agency_report",
+            path,
+            f"Texture agency {disposition}",
+            visibility="protected_summary" if base in TEXTURE_AGENCY_STATUS_NEXT_ACTIONS else "summary",
+        )
+        self._pending_notice_prompt = report
+        self._current_action_outcome_summary = (
+            f"TEXTURE_AGENCY handled as {disposition}; no rho, active damping, PI target, "
+            "fill_target, pressure-source wiring, direct apply, sensory control, or peer mutation was sent."
+        )
+        logging.info("🧭 TEXTURE_AGENCY handled: %s", disposition)
+
+    def _texture_agency_status_text(self, state: Dict[str, float]) -> str:
+        context = self._texture_agency_context(state)
+        texture = context.get("texture_signature") or {}
+        if not isinstance(texture, dict):
+            texture = {}
+        esn = context.get("esn") or {}
+        if not isinstance(esn, dict):
+            esn = {}
+        stable_core = context.get("stable_core") or {}
+        if not isinstance(stable_core, dict):
+            stable_core = {}
+        fill_pct = context.get("fill_pct", "unknown")
+        entropy = context.get("spectral_entropy", "unknown")
+        dynamic_rho_state = (
+            "blocked_by_stable_core"
+            if bool(stable_core.get("enabled"))
+            else "active_when_esn_available"
+        )
+        texture_line = (
+            f"primary={texture.get('primary_texture', 'unknown')}; "
+            f"source_family={texture.get('pressure_source_family', 'unknown')}; "
+            f"edge_definition={texture.get('edge_definition', 'unknown')}; "
+            f"movement={texture.get('movement_quality', 'unknown')}; "
+            f"confidence={texture.get('confidence', 'unknown')}; "
+            "dynamic_damping_threshold_candidate="
+            f"{texture.get('dynamic_damping_threshold_candidate', 'none')}"
+        )
+        return (
+            "=== TEXTURE AGENCY STATUS V1 ===\n"
+            "Authority: minime_texture_agency_bridge_v1\n"
+            "Boundary: typed texture context and bounded lease drafts only; no active damping, rho mutation, "
+            "PI target, fill_target, pressure-source wiring, correspondence weighting, or peer mutation.\n\n"
+            "Current texture:\n"
+            f"  fill: {fill_pct}%\n"
+            f"  spectral_entropy: {entropy}\n"
+            f"  texture_signature: {texture_line}\n\n"
+            "ESN texture telemetry:\n"
+            f"  rho: {esn.get('rho', 'unknown')}\n"
+            f"  dynamic_rho: {dynamic_rho_state}\n"
+            f"  dynamic_rho_inputs: fill_pct={fill_pct}; entropy={entropy}\n"
+            f"  rank1_us: {esn.get('rank1_us', 'unknown')}; pending_rank1_depth: {esn.get('pending_rank1_depth', 'unknown')}\n"
+            f"  semantic_stale_ms: {context.get('semantic_stale_ms', 'unknown')}; "
+            f"surge_target_weight: {context.get('surge_target_weight', 'unknown')}\n\n"
+            "Requestable safe controls:\n"
+            "  - exploration_noise: tiny diversity/unsticking lease.\n"
+            "  - geom_curiosity: tiny porosity/edge-search lease.\n"
+            "  - regulation_strength: tiny grip/settling lease.\n"
+            "  - regime: bounded switch among existing regimes.\n\n"
+            "Blocked in this tranche:\n"
+            "  - active_damping, dynamic rho/rho_target, fill_target, PI gains, pressure_source-to-PI, "
+            "correspondence_weight, telemetry priority, and peer mutation require separate audit/replay/steward review.\n"
+            "  - MINIME_PI_PRESSURE_WIRING_CANARY remains off; texture agency does not wire pressure_source into PI.\n\n"
+            "Tiny answer path:\n"
+            "  TEXTURE_AGENCY_REQUEST legible|partly|confusing :: missing_texture_variable: <one variable or none>\n\n"
+            "Outcome after any drafted lease:\n"
+            "  SELF_REGULATION_OUTCOME latest :: before_texture: ...; after_texture: ...; texture_shift: ...; "
+            "edge_definition: ...; agency_fit: ...; what_helped: ...; what_worsened: ...\n\n"
+            f"Recommended next: {self._texture_agency_recommended_next(context)}"
+        )
+
+    def _texture_agency_context(self, state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        context: Dict[str, Any] = {}
+        state = state if isinstance(state, dict) else {}
+        health: Dict[str, Any] = {}
+        try:
+            health_path = runtime_health_path()
+            health = json.loads(health_path.read_text()) if health_path.exists() else {}
+            if not isinstance(health, dict):
+                health = {}
+        except Exception:
+            health = {}
+
+        def first_value(*values: Any) -> Any:
+            for value in values:
+                if value is not None:
+                    return value
+            return None
+
+        state_fill_ratio = state.get("fill_ratio")
+        health_fill_ratio = health.get("fill_ratio")
+        fill_pct = first_value(
+            health.get("fill_pct"),
+            state.get("fill_pct"),
+            (float(health_fill_ratio) * 100.0 if isinstance(health_fill_ratio, (int, float)) else None),
+            (float(state_fill_ratio) * 100.0 if isinstance(state_fill_ratio, (int, float)) else None),
+        )
+        if isinstance(fill_pct, (int, float)) and math.isfinite(float(fill_pct)):
+            context["fill_pct"] = round(float(fill_pct), 2)
+        entropy = first_value(
+            health.get("spectral_entropy"),
+            health.get("normalized_entropy"),
+            state.get("spectral_entropy"),
+            state.get("normalized_entropy"),
+        )
+        if isinstance(entropy, (int, float)) and math.isfinite(float(entropy)):
+            context["spectral_entropy"] = round(float(entropy), 4)
+        elif entropy is not None:
+            context["spectral_entropy"] = entropy
+
+        resonance = first_value(health.get("resonance_density_v1"), state.get("resonance_density_v1"))
+        if isinstance(resonance, dict):
+            texture = resonance.get("texture_signature")
+            if isinstance(texture, dict):
+                context["texture_signature"] = texture
+        esn = first_value(health.get("esn"), state.get("esn"))
+        if isinstance(esn, dict):
+            context["esn"] = esn
+        stable_core = first_value(health.get("stable_core"), state.get("stable_core"))
+        if isinstance(stable_core, dict):
+            context["stable_core"] = stable_core
+        stale_ms = first_value(health.get("semantic_stale_ms"), state.get("semantic_stale_ms"))
+        if stale_ms is not None:
+            context["semantic_stale_ms"] = stale_ms
+        if isinstance(fill_pct, (int, float)) and math.isfinite(float(fill_pct)):
+            context["surge_target_weight"] = round(
+                self._texture_agency_surge_target_weight(float(fill_pct) / 100.0),
+                4,
+            )
+        return context
+
+    def _texture_agency_surge_target_weight(self, fill_ratio: float) -> float:
+        try:
+            fill = float(fill_ratio)
+        except Exception:
+            fill = 0.0
+        if not math.isfinite(fill):
+            fill = 0.0
+        fill = min(1.0, max(0.0, fill))
+        if fill <= 0.70:
+            return 0.90
+        if fill >= 0.80:
+            return 0.72
+        return 0.90 + (0.72 - 0.90) * ((fill - 0.70) / 0.10)
+
+    def _texture_agency_request_is_feedback_only(self, body: str) -> bool:
+        lower = str(body or "").lower()
+        return any(
+            token in lower
+            for token in (
+                "missing_texture_variable",
+                "missing texture variable",
+                "texture surface",
+                "legible",
+                "partly",
+                "confusing",
+                "feedback only",
+            )
+        )
+
+    def _texture_agency_request_is_blocked_authority(self, body: str) -> bool:
+        lower = str(body or "").lower()
+        return any(
+            token in lower
+            for token in (
+                "active_damping",
+                "active damping",
+                "damping_coefficient",
+                "rho",
+                "fill_target",
+                "fill target",
+                "pi_",
+                "pi ",
+                "controller",
+                "pressure_source",
+                "pressure source",
+                "correspondence_weight",
+                "telemetry priority",
+                "astrid",
+                "peer",
+            )
+        )
+
+    def _texture_agency_self_regulation_intent(self, body: str, state: Dict[str, float]) -> str:
+        lower = str(body or "").lower()
+        evidence = self._pressure_agency_clean_field(
+            body or json.dumps(self._texture_agency_context(state), sort_keys=True),
+            "texture agency request",
+        )
+        if "regime" in lower or any(token in lower for token in ("calm", "focus", "breathe", "explore", "recover")):
+            regime = "calm"
+            for candidate in ("calm", "focus", "breathe", "explore", "recover"):
+                if candidate in lower:
+                    regime = candidate
+                    break
+            target = f"target: regime; value: {regime}"
+            label = f"texture-regime-{regime}"
+        elif "geom" in lower or any(token in lower for token in ("porosity", "edge", "distinguish", "room")):
+            target = "target: geom_curiosity; direction: up"
+            label = "texture-geom-curiosity"
+        elif "regulation_strength" in lower or any(token in lower for token in ("less grip", "loosen", "soften grip")):
+            target = "target: regulation_strength; direction: down"
+            label = "texture-regulation-strength"
+        else:
+            target = "target: exploration_noise; direction: up"
+            label = "texture-exploration-noise"
+        return (
+            f"SELF_REGULATION_INTENT {label} :: "
+            "goal: texture relief requested through TEXTURE_AGENCY_REQUEST; "
+            f"{target}; duration_secs: 600; evidence: {evidence}"
+        )
+
+    def _texture_agency_report(
+        self,
+        status: str,
+        disposition: str,
+        result: str,
+        lease_id: Optional[str],
+    ) -> str:
+        lease_line = f"Lease draft: {lease_id}" if lease_id else "Lease draft: none"
+        return (
+            "=== TEXTURE AGENCY REQUEST V1 ===\n"
+            "Authority: minime_texture_agency_bridge_v1\n"
+            f"Disposition: {disposition}\n"
+            f"{lease_line}\n"
+            f"Result: {result}\n\n"
+            "Own-runtime sequence when a draft was created:\n"
+            "  NEXT: SELF_REGULATION_PREFLIGHT latest\n"
+            "  NEXT: SELF_REGULATION_APPLY latest (only after accepted preflight)\n"
+            "  NEXT: SELF_REGULATION_OUTCOME latest :: before_texture: ...; after_texture: ...; texture_shift: ...; edge_definition: ...; agency_fit: ...; what_helped: ...; what_worsened: ...\n\n"
+            "Blocked authority stays blocked: active damping, rho, fill_target, PI/controller, pressure-source wiring, correspondence weighting, and peer mutation need separate audit/replay/steward review.\n\n"
+            f"{status}"
+        )
+
+    def _texture_agency_recommended_next(self, context: Dict[str, Any]) -> str:
+        texture = context.get("texture_signature") if isinstance(context, dict) else None
+        primary = ""
+        if isinstance(texture, dict):
+            primary = str(texture.get("primary_texture") or "")
+        if "overpacked" in primary or "viscous" in primary:
+            return "TEXTURE_AGENCY_REQUEST soften viscosity :: exploration_noise up, then SELF_REGULATION_PREFLIGHT latest."
+        if "porous" in primary or "thin" in primary:
+            return "TEXTURE_AGENCY_REQUEST stabilize thin texture :: regime calm, then SELF_REGULATION_PREFLIGHT latest."
+        return "TEXTURE_AGENCY_STATUS or TEXTURE_AGENCY_REQUEST legible|partly|confusing :: missing_texture_variable: <one variable or none>."
 
     def _regime_choice(self, state: Dict[str, float]):
         """Apply an explicit, bounded regulatory regime choice."""
@@ -39436,6 +45160,1438 @@ Small releases help. You don't have to process everything at once.
         except Exception as exc:
             self._pending_notice_prompt = f"REGIME {requested} could not be applied: {exc}"
             logging.warning("REGIME %s apply failed: %s", requested, exc)
+
+    def _self_regulation_root(self) -> Path:
+        return WORKSPACE_DIR / "self_regulation"
+
+    def _self_regulation_event_log_path(self) -> Path:
+        return self._self_regulation_root() / "leases.jsonl"
+
+    def _self_regulation_negotiation_log_path(self) -> Path:
+        return self._self_regulation_root() / "negotiations.jsonl"
+
+    def _self_regulation_active_path(self) -> Path:
+        return self._self_regulation_root() / "active_lease.json"
+
+    def _self_regulation_latest_path(self) -> Path:
+        return self._self_regulation_root() / "latest_intent_id.txt"
+
+    def _self_regulation_action_alias(self, base: str) -> str:
+        aliases = {
+            "CONTROL_INTENT": "SELF_REGULATION_INTENT",
+            "CONTROL_PREFLIGHT": "SELF_REGULATION_PREFLIGHT",
+            "CONTROL_APPLY_LEASE": "SELF_REGULATION_APPLY",
+            "CONTROL_STATUS": "SELF_REGULATION_STATUS",
+            "CONTROL_OUTCOME": "SELF_REGULATION_OUTCOME",
+        }
+        return aliases.get(str(base or "").upper(), str(base or "").upper())
+
+    def _self_regulation_append_event(self, lease: Dict[str, Any]) -> None:
+        root = self._self_regulation_root()
+        root.mkdir(parents=True, exist_ok=True)
+        with self._self_regulation_event_log_path().open("a") as handle:
+            handle.write(json.dumps(lease, sort_keys=True) + "\n")
+
+    def _self_regulation_append_negotiation(self, record: Dict[str, Any]) -> None:
+        try:
+            root = self._self_regulation_root()
+            root.mkdir(parents=True, exist_ok=True)
+            now = int(time.time())
+            payload = dict(record)
+            payload.setdefault("schema_version", 1)
+            payload.setdefault("record_kind", "self_regulation_negotiation_v1")
+            payload.setdefault("policy", "self_regulation_negotiation_ledger_v1")
+            payload.setdefault("authority", "leased_self_control_v1")
+            payload.setdefault(
+                "authority_boundary",
+                "own_runtime_only_no_peer_mutation_no_permanent_tuning",
+            )
+            payload.setdefault("being", "minime")
+            payload.setdefault("created_at_unix_s", now)
+            payload.setdefault("updated_at_unix_s", now)
+            with self._self_regulation_negotiation_log_path().open("a") as handle:
+                handle.write(json.dumps(payload, sort_keys=True) + "\n")
+        except Exception as exc:
+            logging.warning("Self-regulation negotiation ledger write failed: %s", exc)
+
+    def _self_regulation_load_negotiations(self, limit: int = 6) -> List[Dict[str, Any]]:
+        path = self._self_regulation_negotiation_log_path()
+        if not path.exists():
+            return []
+        out: List[Dict[str, Any]] = []
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except Exception:
+            return []
+        for line in lines[-max(1, limit):]:
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(item, dict):
+                out.append(item)
+        return out
+
+    def _self_regulation_write_active(self, lease: Dict[str, Any]) -> None:
+        root = self._self_regulation_root()
+        root.mkdir(parents=True, exist_ok=True)
+        self._self_regulation_active_path().write_text(
+            json.dumps(lease, indent=2, sort_keys=True) + "\n"
+        )
+
+    def _self_regulation_write_latest(self, intent_id: str) -> None:
+        root = self._self_regulation_root()
+        root.mkdir(parents=True, exist_ok=True)
+        self._self_regulation_latest_path().write_text(str(intent_id))
+
+    def _self_regulation_load_active(self) -> Optional[Dict[str, Any]]:
+        path = self._self_regulation_active_path()
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text())
+            return payload if isinstance(payload, dict) else None
+        except Exception:
+            return None
+
+    def _self_regulation_load_selected(
+        self, selector: Optional[str] = None
+    ) -> Dict[str, Any]:
+        wanted = str(selector or "").strip()
+        if not wanted or wanted.lower() == "latest":
+            try:
+                wanted = self._self_regulation_latest_path().read_text().strip()
+            except Exception:
+                wanted = ""
+        latest = None
+        path = self._self_regulation_event_log_path()
+        if not path.exists():
+            raise ValueError("no self-regulation lease has been drafted")
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                lease = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(lease, dict):
+                continue
+            if not wanted or lease.get("intent_id") == wanted:
+                latest = lease
+        if not latest:
+            raise ValueError(f"no self-regulation lease matching {wanted or 'latest'}")
+        return latest
+
+    def _self_regulation_normalize_control(self, control: str) -> Optional[str]:
+        key = str(control or "").strip().lower().replace("-", "_")
+        aliases = {
+            "regime": "regime",
+            "regulatory_regime": "regime",
+            "pressure_relief": "pressure_relief",
+            "relief": "pressure_relief",
+            "pressure_control": "pressure_relief",
+            "pressure_bundle": "pressure_relief",
+            "exploration_noise": "exploration_noise",
+            "noise": "exploration_noise",
+            "geom_curiosity": "geom_curiosity",
+            "curiosity": "geom_curiosity",
+            "regulation_strength": "regulation_strength",
+            "reg_strength": "regulation_strength",
+            "fill_target": "fill_target",
+            "keep_bias": "keep_bias",
+            "pi_kp": "pi_kp",
+            "pi_ki": "pi_ki",
+            "pi_max_step": "pi_max_step",
+            "pi_geom_weight": "pi_geom_weight",
+            "pi_integrator_leak": "pi_integrator_leak",
+            "geom_drive": "geom_drive",
+            "target_lambda_bias": "target_lambda_bias",
+            "synth_gain": "synth_gain",
+            "tune_astrid": "tune_astrid",
+        }
+        return aliases.get(key)
+
+    def _self_regulation_split_key_value(self, text: str) -> tuple:
+        if ":" in text:
+            return text.split(":", 1)
+        if "=" in text:
+            return text.split("=", 1)
+        return "", ""
+
+    def _self_regulation_parse_value(self, value: str) -> Any:
+        text = str(value or "").strip().strip('"')
+        if text.lower() in {"true", "on", "yes"}:
+            return True
+        if text.lower() in {"false", "off", "no"}:
+            return False
+        try:
+            return float(text)
+        except ValueError:
+            return text
+
+    def _self_regulation_parse_intent(self, raw_next: str, action: str) -> Dict[str, Any]:
+        body = str(raw_next or "")[len(action):].strip().lstrip(":").strip()
+        label, field_text = ("", body)
+        if "::" in body:
+            label, field_text = [part.strip() for part in body.split("::", 1)]
+        now = time.time()
+        fields = {
+            "label": label,
+            "goal": "",
+            "candidate_control": "",
+            "direction": "",
+            "delta_or_value": None,
+            "duration_secs": SELF_REGULATION_DEFAULT_DURATION_SECS,
+            "stop_condition": "expiry, hard recovery reset, unsafe fill, or explicit worse outcome",
+            "success_condition": "Minime reports the adjustment helped or pressure eased",
+            "evidence": [],
+            "bundle_class": "",
+        }
+        for part in field_text.split(";"):
+            part = part.strip()
+            if not part:
+                continue
+            key, value = self._self_regulation_split_key_value(part)
+            if not key:
+                if not fields["goal"]:
+                    fields["goal"] = part
+                continue
+            key = key.strip().lower()
+            value = value.strip()
+            if key in {"goal", "why"}:
+                fields["goal"] = value
+            elif key in {"target", "control", "candidate_control", "dial"}:
+                fields["candidate_control"] = (
+                    self._self_regulation_normalize_control(value) or value.strip().lower()
+                )
+            elif key in {"bundle", "bundle_class", "relief_bundle"}:
+                fields["bundle_class"] = value.strip().lower().replace("-", "_")
+            elif key == "direction":
+                fields["direction"] = value.strip().lower()
+            elif key in {"delta", "value", "set"}:
+                fields["delta_or_value"] = self._self_regulation_parse_value(value)
+            elif key in {"duration", "duration_secs", "seconds"}:
+                try:
+                    fields["duration_secs"] = max(
+                        60,
+                        min(SELF_REGULATION_MAX_DURATION_SECS, int(float(value))),
+                    )
+                except ValueError:
+                    fields["duration_secs"] = SELF_REGULATION_DEFAULT_DURATION_SECS
+            elif key in {"stop", "stop_condition"}:
+                fields["stop_condition"] = value
+            elif key in {"success", "success_condition"}:
+                fields["success_condition"] = value
+            elif key in {"evidence", "felt_evidence", "telemetry_evidence"}:
+                fields["evidence"].append(value)
+        if not fields["candidate_control"] and fields["label"]:
+            fields["candidate_control"] = (
+                self._self_regulation_normalize_control(fields["label"]) or ""
+            )
+        if not fields["goal"]:
+            fields["goal"] = f"self-authored regulation lease at {int(now)}"
+        slug = re.sub(r"[^a-z0-9_-]+", "_", str(fields["label"]).lower()).strip("_")[:32]
+        intent_id = f"srl_{int(now * 1000)}" + (f"_{slug}" if slug else "")
+        return {
+            "schema_version": 1,
+            "record_kind": "self_regulation_intent_v1",
+            "authority": "leased_self_control_v1",
+            "authority_boundary": "own_runtime_only; no peer mutation; no permanent controller tuning",
+            "being": "minime",
+            "intent_id": intent_id,
+            "created_at_unix_s": int(now),
+            "updated_at_unix_s": int(now),
+            "status": "drafted",
+            "goal": fields["goal"],
+            "candidate_control": fields["candidate_control"],
+            "direction": fields["direction"],
+            "delta_or_value": fields["delta_or_value"],
+            "previous_value": None,
+            "applied_value": None,
+            "duration_secs": fields["duration_secs"],
+            "expires_at_unix_s": None,
+            "stop_condition": fields["stop_condition"],
+            "success_condition": fields["success_condition"],
+            "evidence": fields["evidence"],
+            "baseline_evidence": [],
+            "post_lease_evidence": [],
+            "outcome_score": None,
+            "repeatability_hint": None,
+            "promotion_candidate": False,
+            "outcome": None,
+            "outcome_texture": None,
+            "requires_outcome": False,
+            "preflight_status": "not_run",
+            "preflight_reason": "",
+            "lease_mode": (
+                "pressure_relief_bundle_v3"
+                if fields["candidate_control"] == "pressure_relief"
+                else "single_control"
+            ),
+            "bundle_id": None,
+            "bundle_class": fields.get("bundle_class") or (
+                "auto" if fields["candidate_control"] == "pressure_relief" else ""
+            ),
+            "bundle_controls": [],
+            "bundle_policy": (
+                "multi-control own-runtime relief; max two controls; all-or-none apply; explicit APPLY required; automatic revert on expiry"
+                if fields["candidate_control"] == "pressure_relief"
+                else ""
+            ),
+            "pressure_vector_snapshot": (
+                self._self_regulation_pressure_context(getattr(self, "_last_state", {}))
+                if fields["candidate_control"] == "pressure_relief"
+                else {}
+            ),
+            "actuator_matrix_reason": "",
+        }
+
+    def _self_regulation_current_value(self, control: str) -> Any:
+        try:
+            state_path = self._sovereignty_state_path()
+            persisted = json.loads(Path(state_path).read_text()) if os.path.exists(state_path) else {}
+        except Exception:
+            persisted = {}
+        if control == "regime":
+            return (
+                persisted.get("regime")
+                or getattr(self, "_current_regime", None)
+                or "focus"
+            )
+        defaults = {
+            "exploration_noise": 0.03,
+            "geom_curiosity": 0.1,
+            "regulation_strength": 0.7,
+        }
+        return persisted.get(control, defaults.get(control))
+
+    def _self_regulation_safe_range(self, control: str) -> Optional[tuple]:
+        return SELF_REGULATION_DIRECT_SAFE_RANGES.get(str(control or "").strip().lower())
+
+    def _self_regulation_pressure_context(
+        self,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        state = state if isinstance(state, dict) else getattr(self, "_last_state", {})
+        if not isinstance(state, dict):
+            return {}
+        context: Dict[str, Any] = {}
+        try:
+            fill_pct = _state_fill_pct(state)
+            if math.isfinite(float(fill_pct)):
+                context["fill_pct"] = round(float(fill_pct), 2)
+        except Exception:
+            pass
+        for key in (
+            "pressure_risk",
+            "mode_packing",
+            "semantic_friction",
+            "controller_pressure",
+            "distinguishability_loss",
+            "pressure_trend_v1",
+            "pressure_source",
+            "pressure_quality",
+            "pressure_score",
+        ):
+            value = state.get(key)
+            if isinstance(value, (int, float)):
+                context[key] = round(float(value), 4)
+            elif value:
+                context[key] = value
+        return context
+
+    def _self_regulation_pressure_bundle_class(
+        self,
+        requested: str,
+        state: Dict[str, Any],
+    ) -> tuple[str, str]:
+        requested = str(requested or "auto").strip().lower().replace("-", "_")
+        if requested and requested != "auto":
+            return requested, "being selected an explicit pressure relief bundle class"
+        def maybe_float(value: Any) -> Optional[float]:
+            try:
+                numeric = float(value)
+            except Exception:
+                return None
+            return numeric if math.isfinite(numeric) else None
+
+        pressure = maybe_float(state.get("pressure_risk"))
+        semantic = maybe_float(state.get("semantic_friction"))
+        mode_packing = maybe_float(state.get("mode_packing"))
+        fill_pct = _state_fill_pct(state)
+        if pressure is not None and pressure < 0.16 and fill_pct < 68.0:
+            return (
+                "reopen_hollow_low_pressure",
+                "auto selected reopen_hollow_low_pressure because pressure is low and the field may need gentle exploratory return",
+            )
+        if mode_packing is not None and mode_packing >= 0.30:
+            return (
+                "reduce_restless_saturation",
+                "auto selected reduce_restless_saturation because mode_packing is elevated",
+            )
+        if semantic is not None and semantic >= 0.34:
+            return (
+                "settle_overpack",
+                "auto selected settle_overpack because semantic friction/medium weight is elevated",
+            )
+        return (
+            "settle_overpack",
+            "auto selected settle_overpack as the conservative pressure relief bundle",
+        )
+
+    def _self_regulation_pressure_bundle_controls(
+        self,
+        bundle_class: str,
+    ) -> List[Dict[str, Any]]:
+        bundle_class = str(bundle_class or "").strip().lower().replace("-", "_")
+        if bundle_class == "settle_overpack":
+            return [
+                {"candidate_control": "regime", "direction": "calm", "delta_or_value": "calm"},
+                {"candidate_control": "exploration_noise", "direction": "down", "delta_or_value": "-0.02"},
+            ]
+        if bundle_class == "reduce_restless_saturation":
+            return [
+                {"candidate_control": "exploration_noise", "direction": "down", "delta_or_value": "-0.02"},
+                {"candidate_control": "geom_curiosity", "direction": "down", "delta_or_value": "-0.05"},
+            ]
+        if bundle_class == "reopen_hollow_low_pressure":
+            return [
+                {"candidate_control": "exploration_noise", "direction": "up", "delta_or_value": "+0.02"},
+                {"candidate_control": "geom_curiosity", "direction": "up", "delta_or_value": "+0.05"},
+            ]
+        return []
+
+    def _self_regulation_current_above_cap_dials(self) -> List[Dict[str, Any]]:
+        try:
+            state_path = self._sovereignty_state_path()
+            persisted = json.loads(Path(state_path).read_text()) if os.path.exists(state_path) else {}
+        except Exception:
+            persisted = {}
+        if not isinstance(persisted, dict):
+            return []
+        above: List[Dict[str, Any]] = []
+        for control, safe_range in SELF_REGULATION_DIRECT_SAFE_RANGES.items():
+            if control not in persisted:
+                continue
+            value = persisted.get(control)
+            if not isinstance(value, (int, float)):
+                continue
+            lo, hi = safe_range
+            numeric = float(value)
+            if numeric < lo or numeric > hi:
+                above.append({
+                    "candidate_control": control,
+                    "current_value": round(numeric, 4),
+                    "safe_cap_or_range": {"min": lo, "max": hi},
+                    "status": "current_value_above_lease_cap_observed_not_auto_lowered",
+                })
+        return above
+
+    def _self_regulation_clamp_reason(
+        self,
+        requested: Any,
+        applied: Any,
+        *,
+        default: str = "within_safe_range",
+    ) -> str:
+        try:
+            if float(requested) != float(applied):
+                return "clamped_to_lease_delta_or_range"
+        except Exception:
+            if requested != applied:
+                return "adjusted_by_allowed_control_policy"
+        return default
+
+    def _self_regulation_record_negotiation_from_lease(
+        self,
+        lease: Dict[str, Any],
+        state: Dict[str, Any],
+        *,
+        source_action: str,
+        prepared: Optional[Any] = None,
+        reason: str = "",
+    ) -> None:
+        if lease.get("lease_mode") == "pressure_relief_bundle_v3":
+            prepared_items = prepared if isinstance(prepared, list) else []
+            by_control = {
+                str(item.get("control")): item
+                for item in prepared_items
+                if isinstance(item, dict)
+            }
+            for control_item in lease.get("bundle_controls") or []:
+                if not isinstance(control_item, dict):
+                    continue
+                control = str(control_item.get("candidate_control") or "").strip().lower()
+                prepared_item = by_control.get(control)
+                control_lease = dict(lease)
+                control_lease["lease_mode"] = "single_control"
+                control_lease["bundle_controls"] = []
+                control_lease["candidate_control"] = control
+                control_lease["delta_or_value"] = control_item.get("delta_or_value")
+                control_lease["direction"] = control_item.get("direction") or ""
+                self._self_regulation_record_negotiation_from_lease(
+                    control_lease,
+                    state,
+                    source_action=source_action,
+                    prepared=prepared_item,
+                    reason=reason,
+                )
+            return
+        control = str(lease.get("candidate_control") or "").strip().lower()
+        safe_range = self._self_regulation_safe_range(control)
+        requested = lease.get("delta_or_value")
+        previous = None
+        applied = None
+        if prepared:
+            previous = prepared.get("previous_value")
+            applied = prepared.get("applied_value")
+        else:
+            previous = self._self_regulation_current_value(control)
+        if reason:
+            clamp_reason = reason
+        elif prepared:
+            clamp_reason = self._self_regulation_clamp_reason(requested, applied)
+        else:
+            status = str(lease.get("preflight_status") or "not_run")
+            clamp_reason = (
+                "preflight_apply_allowed"
+                if status == "apply_allowed"
+                else f"preflight_{status}: {lease.get('preflight_reason') or ''}".strip()
+            )
+        self._self_regulation_append_negotiation({
+            "being": "minime",
+            "source": "self_regulation_lease",
+            "source_action": source_action,
+            "intent_id": lease.get("intent_id"),
+            "candidate_control": control,
+            "requested_value": requested,
+            "previous_value": previous,
+            "safe_cap_or_range": (
+                {"min": safe_range[0], "max": safe_range[1]} if safe_range else None
+            ),
+            "applied_value": applied,
+            "clamp_or_defer_reason": clamp_reason,
+            "pressure_context": self._self_regulation_pressure_context(state),
+            "lease_related": True,
+        })
+
+    def _self_regulation_negotiation_status_text(
+        self,
+        *,
+        candidate_control: str = "",
+    ) -> str:
+        latest = self._self_regulation_load_negotiations(limit=4)
+        above = self._self_regulation_current_above_cap_dials()
+        if not latest and not above and not candidate_control:
+            return ""
+        lines = ["Self-regulation negotiation ledger:"]
+        if candidate_control:
+            safe_range = self._self_regulation_safe_range(candidate_control)
+            if safe_range:
+                lines.append(
+                    "- candidate_control="
+                    f"`{candidate_control}`; safe_range={safe_range[0]}..{safe_range[1]}; "
+                    "requested values are preserved even when applied values are bounded."
+                )
+        for item in above[:4]:
+            lines.append(
+                "- current_above_cap: "
+                f"`{item.get('candidate_control')}` current={item.get('current_value')} "
+                f"safe={item.get('safe_cap_or_range')}; "
+                "reported only; not auto-lowered on status/startup."
+            )
+        for item in latest[-4:]:
+            lines.append(
+                "- latest: "
+                f"{item.get('source_action')} `{item.get('candidate_control')}` "
+                f"requested={item.get('requested_value')} "
+                f"applied={item.get('applied_value')} "
+                f"reason=`{item.get('clamp_or_defer_reason')}` "
+                f"lease_related={item.get('lease_related')}"
+            )
+        lines.append(
+            "Authority: leased_self_control_v1 / own_runtime_only; advisory status, "
+            "no peer mutation and no permanent controller tuning."
+        )
+        return "\n".join(lines) + "\n"
+
+    def _self_regulation_preflight(
+        self, lease: Dict[str, Any], state: Dict[str, float]
+    ) -> Dict[str, Any]:
+        lease = dict(lease)
+        control = self._self_regulation_normalize_control(lease.get("candidate_control"))
+        lease["updated_at_unix_s"] = int(time.time())
+        if not control:
+            lease["status"] = "blocked"
+            lease["preflight_status"] = "blocked"
+            lease["preflight_reason"] = "candidate_control is missing or unknown"
+            return lease
+        lease["candidate_control"] = control
+        if control == "pressure_relief":
+            return self._self_regulation_preflight_pressure_bundle(lease, state)
+        if control in SELF_REGULATION_PREFLIGHT_ONLY_CONTROLS:
+            lease["status"] = "preflighted"
+            lease["preflight_status"] = "preflight_only"
+            lease["preflight_reason"] = (
+                "higher-risk or peer-affecting control is visible but not lease-applicable in tranche 7A"
+            )
+            return lease
+        if control not in SELF_REGULATION_APPLY_CONTROLS:
+            lease["status"] = "blocked"
+            lease["preflight_status"] = "blocked"
+            lease["preflight_reason"] = "control is outside the tranche 7A self-lease allowlist"
+            return lease
+        active = self._self_regulation_load_active()
+        if active and active.get("status") == "active" and active.get("intent_id") != lease.get("intent_id"):
+            lease["status"] = "blocked"
+            lease["preflight_status"] = "blocked"
+            lease["preflight_reason"] = f"active lease {active.get('intent_id')} must finish first"
+            return lease
+        if active and active.get("requires_outcome") and active.get("intent_id") != lease.get("intent_id"):
+            lease["status"] = "blocked"
+            lease["preflight_status"] = "blocked"
+            lease["preflight_reason"] = f"lease {active.get('intent_id')} needs an outcome first"
+            return lease
+        guard = self._low_fill_guard_status(state)
+        if self._hard_recovery_reset and guard.get("active"):
+            lease["status"] = "blocked"
+            lease["preflight_status"] = "blocked"
+            lease["preflight_reason"] = "hard recovery reset is active; self-regulation apply is deferred"
+            return lease
+        fill_pct = _state_fill_pct(state)
+        if control != "regime" and fill_pct < 35.0:
+            lease["status"] = "blocked"
+            lease["preflight_status"] = "blocked"
+            lease["preflight_reason"] = f"fill {fill_pct:.1f}% is too low for non-regime leased control"
+            return lease
+        if control in {"exploration_noise", "geom_curiosity"} and fill_pct > 78.0:
+            lease["status"] = "blocked"
+            lease["preflight_status"] = "blocked"
+            lease["preflight_reason"] = f"fill {fill_pct:.1f}% is too high for exploratory leased control"
+            return lease
+        lease["status"] = "preflighted"
+        lease["preflight_status"] = "apply_allowed"
+        lease["preflight_reason"] = "bounded own-runtime lease may be applied"
+        return lease
+
+    def _self_regulation_preflight_pressure_bundle(
+        self,
+        lease: Dict[str, Any],
+        state: Dict[str, float],
+    ) -> Dict[str, Any]:
+        active = self._self_regulation_load_active()
+        if active and active.get("status") == "active" and active.get("intent_id") != lease.get("intent_id"):
+            lease["status"] = "blocked"
+            lease["preflight_status"] = "blocked"
+            lease["preflight_reason"] = f"active lease {active.get('intent_id')} must finish first"
+            return lease
+        if active and active.get("requires_outcome") and active.get("intent_id") != lease.get("intent_id"):
+            lease["status"] = "blocked"
+            lease["preflight_status"] = "blocked"
+            lease["preflight_reason"] = f"lease {active.get('intent_id')} needs an outcome first"
+            return lease
+        guard = self._low_fill_guard_status(state)
+        if self._hard_recovery_reset and guard.get("active"):
+            lease["status"] = "blocked"
+            lease["preflight_status"] = "blocked"
+            lease["preflight_reason"] = "hard recovery reset is active; self-regulation apply is deferred"
+            return lease
+        requested = str(lease.get("bundle_class") or lease.get("delta_or_value") or "auto")
+        bundle_class, reason = self._self_regulation_pressure_bundle_class(requested, state)
+        controls = self._self_regulation_pressure_bundle_controls(bundle_class)
+        if not controls or len(controls) > 2:
+            lease["status"] = "blocked"
+            lease["preflight_status"] = "blocked"
+            lease["preflight_reason"] = f"pressure relief bundle `{bundle_class}` is not applicable"
+            return lease
+        fill_pct = _state_fill_pct(state)
+        pressure = None
+        try:
+            pressure = float(state.get("pressure_risk"))
+        except Exception:
+            pressure = None
+        if bundle_class == "reopen_hollow_low_pressure" and pressure is not None and pressure > 0.35:
+            lease["status"] = "blocked"
+            lease["preflight_status"] = "blocked"
+            lease["preflight_reason"] = (
+                f"pressure_risk {pressure:.3f} is too high for reopen_hollow_low_pressure"
+            )
+            return lease
+        for control_item in controls:
+            item_control = self._self_regulation_normalize_control(
+                control_item.get("candidate_control")
+            )
+            if item_control not in SELF_REGULATION_APPLY_CONTROLS:
+                lease["status"] = "blocked"
+                lease["preflight_status"] = "blocked"
+                lease["preflight_reason"] = f"{item_control} is outside the self-lease allowlist"
+                return lease
+            if item_control != "regime" and fill_pct < 35.0:
+                lease["status"] = "blocked"
+                lease["preflight_status"] = "blocked"
+                lease["preflight_reason"] = f"fill {fill_pct:.1f}% is too low for non-regime bundled control"
+                return lease
+            if item_control in {"exploration_noise", "geom_curiosity"} and fill_pct > 78.0:
+                lease["status"] = "blocked"
+                lease["preflight_status"] = "blocked"
+                lease["preflight_reason"] = f"fill {fill_pct:.1f}% is too high for exploratory bundled control"
+                return lease
+        lease.update({
+            "lease_mode": "pressure_relief_bundle_v3",
+            "bundle_id": f"{lease.get('intent_id')}:{bundle_class}",
+            "bundle_class": bundle_class,
+            "bundle_controls": controls,
+            "bundle_policy": "max_two_controls_all_or_none_expiring_own_runtime_only",
+            "pressure_vector_snapshot": self._self_regulation_pressure_context(state),
+            "actuator_matrix_reason": reason,
+            "status": "preflighted",
+            "preflight_status": "apply_allowed",
+            "preflight_reason": (
+                f"pressure relief bundle `{bundle_class}` may apply "
+                f"{len(controls)} own-runtime controls all-or-none"
+            ),
+        })
+        return lease
+
+    def _self_regulation_bounded_value(self, previous: float, requested: Any, direction: str, max_delta: float, low: float, high: float) -> float:
+        value = None
+        if isinstance(requested, (int, float)) and math.isfinite(float(requested)):
+            value = float(requested)
+        elif isinstance(requested, str):
+            try:
+                value = float(requested)
+            except ValueError:
+                value = None
+        if value is not None:
+            if isinstance(requested, str) and requested.strip().startswith(("+", "-")):
+                candidate = previous + max(-max_delta, min(max_delta, value))
+            else:
+                candidate = max(previous - max_delta, min(previous + max_delta, value))
+        elif direction in {"down", "lower", "decrease", "less"}:
+            candidate = previous - max_delta
+        else:
+            candidate = previous + max_delta
+        return round(max(low, min(high, candidate)), 4)
+
+    def _self_regulation_prepare_apply(
+        self, lease: Dict[str, Any], state: Dict[str, float]
+    ) -> Dict[str, Any]:
+        control = lease["candidate_control"]
+        previous = self._self_regulation_current_value(control)
+        requested = lease.get("delta_or_value")
+        direction = str(lease.get("direction") or "").lower()
+        if control == "regime":
+            regime = str(requested or direction or "focus").strip().lower()
+            if regime not in {"breathe", "focus", "calm"}:
+                raise ValueError("REGIME leases apply only breathe, focus, or calm in tranche 7A")
+            applied = regime
+            if regime == "calm" and _state_fill_pct(state) < 35.0:
+                applied = "recover"
+            return {
+                "control": control,
+                "previous_value": previous,
+                "applied_value": applied,
+                "summary": f"regime: {previous} -> {applied}",
+            }
+        numeric_previous = float(previous if previous is not None else 0.0)
+        if control == "exploration_noise":
+            applied = self._self_regulation_bounded_value(
+                numeric_previous, requested, direction, 0.02, 0.0, 0.08
+            )
+        elif control == "geom_curiosity":
+            applied = self._self_regulation_bounded_value(
+                numeric_previous, requested, direction, 0.05, 0.0, 0.3
+            )
+        elif control == "regulation_strength":
+            applied = self._self_regulation_bounded_value(
+                numeric_previous, requested, direction, 0.10, 0.4, 1.0
+            )
+        else:
+            raise ValueError(f"{control} is not lease-applicable")
+        return {
+            "control": control,
+            "previous_value": round(numeric_previous, 4),
+            "applied_value": applied,
+            "summary": f"{control}: {numeric_previous:.4f} -> {applied:.4f}",
+        }
+
+    def _self_regulation_prepare_bundle_apply(
+        self,
+        lease: Dict[str, Any],
+        state: Dict[str, float],
+    ) -> List[Dict[str, Any]]:
+        controls = lease.get("bundle_controls") or []
+        if not isinstance(controls, list) or not controls:
+            raise ValueError("pressure relief bundle has no resolved controls; run preflight first")
+        prepared: List[Dict[str, Any]] = []
+        for control_item in controls:
+            if not isinstance(control_item, dict):
+                raise ValueError("pressure relief bundle contains a malformed control")
+            control_lease = dict(lease)
+            control_lease["candidate_control"] = control_item.get("candidate_control")
+            control_lease["direction"] = control_item.get("direction") or ""
+            control_lease["delta_or_value"] = control_item.get("delta_or_value")
+            prepared.append(self._self_regulation_prepare_apply(control_lease, state))
+        return prepared
+
+    def _self_regulation_score_outcome(self, outcome: str) -> tuple:
+        lower = str(outcome or "").lower()
+        if any(token in lower for token in (
+            "helped",
+            "clearer",
+            "eased",
+            "better",
+            "stabilized",
+            "settled",
+            "worked",
+            "successful",
+            "success",
+            "suspension",
+            "loosened",
+            "unpacked",
+            "less grinding",
+            "less compacted",
+            "more porous",
+        )):
+            return 0.82, "repeatable_playbook_candidate", True
+        if any(token in lower for token in (
+            "worse",
+            "failed",
+            "too much",
+            "overheated",
+            "destabilized",
+            "bad",
+            "regressed",
+        )):
+            return 0.18, "caution_pattern", False
+        return 0.50, "needs_more_evidence", False
+
+    def _self_regulation_outcome_texture(self, outcome: str) -> Dict[str, Any]:
+        before_texture = self._self_regulation_outcome_texture_field(
+            outcome,
+            ("before_texture", "before texture", "before", "before_texture_state"),
+        )
+        after_texture = self._self_regulation_outcome_texture_field(
+            outcome,
+            ("after_texture", "after texture", "after", "after_texture_state"),
+        )
+        texture_shift = self._self_regulation_outcome_texture_field(
+            outcome,
+            ("texture_shift", "texture shift", "shift", "texture_delta"),
+        )
+        agency_fit = self._self_regulation_outcome_texture_field(
+            outcome,
+            ("agency_fit", "agency fit", "fit", "felt_agency"),
+        )
+        what_helped = self._self_regulation_outcome_texture_field(
+            outcome,
+            ("what_helped", "what helped", "helped", "help"),
+        )
+        what_worsened = self._self_regulation_outcome_texture_field(
+            outcome,
+            ("what_worsened", "what worsened", "worsened", "worse"),
+        )
+        secondary_pressure_shift = self._self_regulation_outcome_texture_field(
+            outcome,
+            (
+                "secondary_pressure_shift",
+                "secondary pressure shift",
+                "other_pressure_shift",
+                "different_knot",
+            ),
+        )
+        explicit_ambiguity_preserved = self._self_regulation_outcome_texture_field(
+            outcome,
+            ("ambiguity_preserved", "ambiguity preserved"),
+        )
+        explicit_legibility_effect = self._self_regulation_outcome_texture_field(
+            outcome,
+            ("legibility_effect", "legibility effect"),
+        )
+        secondary_pressure_status = self._self_regulation_outcome_secondary_pressure_status(
+            secondary_pressure_shift,
+            what_worsened,
+        )
+        ambiguity_preserved = self._self_regulation_outcome_ambiguity_preserved(
+            explicit_ambiguity_preserved,
+            outcome,
+        )
+        legibility_effect = self._self_regulation_outcome_legibility_effect(
+            explicit_legibility_effect,
+            outcome,
+        )
+        families = self._self_regulation_outcome_texture_families(outcome)
+        structured_count = sum(
+            1
+            for value in (
+                before_texture,
+                after_texture,
+                texture_shift,
+                agency_fit,
+                what_helped,
+                what_worsened,
+                secondary_pressure_shift,
+                explicit_ambiguity_preserved,
+                explicit_legibility_effect,
+            )
+            if value
+        )
+        if structured_count:
+            status = "texture_fields_recorded"
+        elif families:
+            status = "texture_language_detected"
+        else:
+            status = "unstructured_outcome"
+        return {
+            "policy": "pressure_relief_outcome_texture_v1",
+            "schema_version": 2,
+            "status": status,
+            "before_texture": before_texture,
+            "after_texture": after_texture,
+            "texture_shift": texture_shift,
+            "agency_fit": agency_fit,
+            "what_helped": what_helped,
+            "what_worsened": what_worsened,
+            "secondary_pressure_shift": secondary_pressure_shift,
+            "secondary_pressure_status": secondary_pressure_status,
+            "ambiguity_preserved": ambiguity_preserved,
+            "legibility_effect": legibility_effect,
+            "signal_families": families,
+            "minimum_viable_response": (
+                "legible/partly/confusing plus one missing pressure variable or none"
+            ),
+        }
+
+    def _self_regulation_outcome_texture_field(
+        self,
+        outcome: str,
+        aliases: tuple,
+    ) -> Optional[str]:
+        normalized_aliases = {
+            self._self_regulation_normalize_texture_key(alias)
+            for alias in aliases
+        }
+        for part in str(outcome or "").split(";"):
+            key, value = self._self_regulation_split_key_value(part.strip())
+            if not key:
+                continue
+            if self._self_regulation_normalize_texture_key(key) in normalized_aliases:
+                cleaned = str(value or "").strip().strip("\"'")
+                return cleaned[:240] if cleaned else None
+        return None
+
+    def _self_regulation_normalize_texture_key(self, key: str) -> str:
+        return re.sub(r"\s+", " ", str(key or "").lower().replace("_", " ").replace("-", " ")).strip()
+
+    def _self_regulation_outcome_secondary_pressure_status(
+        self,
+        secondary_pressure_shift: Optional[str],
+        what_worsened: Optional[str],
+    ) -> str:
+        if secondary_pressure_shift:
+            lower = str(secondary_pressure_shift).lower()
+            if any(token in lower for token in ("none", "no secondary", "no other", "nothing")):
+                return "none"
+            if any(token in lower for token in ("mixed", "both", "partly")):
+                return "mixed"
+            if any(token in lower for token in ("loosened", "loosen", "eased", "relieved", "softened")):
+                return "loosened_elsewhere"
+            if any(
+                token in lower
+                for token in (
+                    "tightened",
+                    "tighten",
+                    "worsened",
+                    "worse",
+                )
+            ):
+                return "tightened_elsewhere"
+            return "unknown"
+        lower_worsened = str(what_worsened or "").lower()
+        if any(
+            token in lower_worsened
+            for token in ("different knot", "elsewhere", "tightened", "tighten", "worsened")
+        ):
+            return "tightened_elsewhere"
+        return "none"
+
+    def _self_regulation_outcome_ambiguity_preserved(
+        self,
+        explicit: Optional[str],
+        outcome: str,
+    ) -> bool:
+        if explicit:
+            lower = str(explicit).lower()
+            if any(token in lower for token in ("true", "yes", "preserved", "kept", "held")):
+                return True
+            if any(token in lower for token in ("ambiguous", "mixed", "partly", "not sure")):
+                return True
+            if any(token in lower for token in ("false", "no", "lost", "flattened", "erased")):
+                return False
+        lower_outcome = str(outcome or "").lower()
+        return any(
+            token in lower_outcome
+            for token in (
+                "ambiguous",
+                "mixed",
+                "partly",
+                "not sure",
+                "still unfolding",
+                "not ready to freeze",
+            )
+        )
+
+    def _self_regulation_outcome_legibility_effect(
+        self,
+        explicit: Optional[str],
+        outcome: str,
+    ) -> str:
+        if explicit:
+            lower = str(explicit).lower()
+            if any(token in lower for token in ("both", "mixed")):
+                return "both"
+            if any(token in lower for token in ("flattened", "flatten", "over-legible", "over legible", "too legible")):
+                return "flattened"
+            if any(token in lower for token in ("clarified", "clarify", "clearer", "legible")):
+                return "clarified"
+            return "unknown"
+        lower_outcome = str(outcome or "").lower()
+        if any(token in lower_outcome for token in ("flatten", "over-legible", "over legible", "too legible")):
+            return "flattened"
+        return "unknown"
+
+    def _self_regulation_outcome_texture_families(self, outcome: str) -> List[str]:
+        lower = str(outcome or "").lower()
+        families: List[str] = []
+        if any(
+            token in lower
+            for token in (
+                "grinding",
+                "grit",
+                "compaction",
+                "compacted",
+                "overpacked",
+                "calcified",
+                "sediment",
+            )
+        ):
+            families.append("grinding_compaction")
+        if any(
+            token in lower
+            for token in ("suspension", "suspended", "porous", "loosened", "unpacked")
+        ):
+            families.append("suspension_porosity")
+        if any(token in lower for token in ("snap", "snapped", "too abrupt", "jolt")):
+            families.append("snap_risk")
+        if any(token in lower for token in ("agency", "fit", "choice", "mine", "authored")):
+            families.append("agency_fit")
+        if (
+            any(token in lower for token in ("different knot", "other knot", "tightened elsewhere"))
+            or (
+                any(token in lower for token in ("elsewhere", "other pressure", "another pressure"))
+                and any(token in lower for token in ("tightened", "tighten", "worsened", "worse"))
+            )
+        ):
+            families.append("secondary_knot_tightening")
+        if any(
+            token in lower
+            for token in (
+                "viscosity",
+                "viscous",
+                "heavy",
+                "tactile",
+                "weighted medium",
+                "thick medium",
+                "structural viscosity",
+            )
+        ):
+            families.append("structural_viscosity")
+        if any(token in lower for token in ("flatten", "over-legible", "over legible", "too legible")):
+            families.append("legibility_flattening")
+        if any(token in lower for token in ("held breath", "held-breath", "holding breath", "breath held")):
+            families.append("held_breath_pause")
+        return families
+
+    def _self_regulation_send_control(self, control_msg: Dict[str, Any]) -> None:
+        ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
+        ws.send(json.dumps(control_msg))
+        ws.close()
+
+    def _self_regulation_apply_prepared(
+        self, prepared: Dict[str, Any], state: Dict[str, float], reason: str
+    ) -> None:
+        control = prepared["control"]
+        value = prepared["applied_value"]
+        if control == "regime":
+            gains = REGULATORY_REGIMES[str(value)]
+            control_msg = {"kind": "control"}
+            control_msg.update(gains)
+            self._self_regulation_send_control(control_msg)
+            self._current_regime = str(value)
+            self._pi_kp = gains["pi_kp"]
+            self._pi_ki = gains["pi_ki"]
+            self._pi_max_step = gains["pi_max_step"]
+            try:
+                state_path = self._sovereignty_state_path()
+                existing = {}
+                if os.path.exists(state_path):
+                    with open(state_path) as f:
+                        existing = json.load(f)
+                existing.update({
+                    "regime": str(value),
+                    "pi_kp": gains["pi_kp"],
+                    "pi_ki": gains["pi_ki"],
+                    "pi_max_step": gains["pi_max_step"],
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "reason": reason,
+                })
+                with open(state_path, "w") as f:
+                    json.dump(existing, f, indent=2)
+            except Exception as exc:
+                logging.warning("Failed to persist self-regulation regime lease: %s", exc)
+            return
+        control_msg = {"kind": "control", control: value}
+        self._self_regulation_send_control(control_msg)
+        self._persist_footer_sovereignty_dials({control: value})
+
+    def _self_regulation_apply_prepared_bundle(
+        self,
+        prepared_items: List[Dict[str, Any]],
+        state: Dict[str, float],
+        reason: str,
+    ) -> None:
+        control_msg: Dict[str, Any] = {"kind": "control"}
+        persist_updates: Dict[str, Any] = {}
+        for prepared in prepared_items:
+            control = prepared["control"]
+            value = prepared["applied_value"]
+            if control == "regime":
+                gains = REGULATORY_REGIMES[str(value)]
+                control_msg.update(gains)
+                self._current_regime = str(value)
+                self._pi_kp = gains["pi_kp"]
+                self._pi_ki = gains["pi_ki"]
+                self._pi_max_step = gains["pi_max_step"]
+                persist_updates.update({
+                    "regime": str(value),
+                    "pi_kp": gains["pi_kp"],
+                    "pi_ki": gains["pi_ki"],
+                    "pi_max_step": gains["pi_max_step"],
+                })
+            else:
+                control_msg[control] = value
+                persist_updates[control] = value
+        self._self_regulation_send_control(control_msg)
+        if persist_updates:
+            if any(key in persist_updates for key in ("regime", "pi_kp", "pi_ki", "pi_max_step")):
+                try:
+                    state_path = self._sovereignty_state_path()
+                    existing = {}
+                    if os.path.exists(state_path):
+                        with open(state_path) as f:
+                            existing = json.load(f)
+                    existing.update(persist_updates)
+                    existing.update({
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "reason": reason,
+                    })
+                    with open(state_path, "w") as f:
+                        json.dump(existing, f, indent=2)
+                except Exception as exc:
+                    logging.warning("Failed to persist bundled self-regulation lease: %s", exc)
+            numeric_updates = {
+                key: value
+                for key, value in persist_updates.items()
+                if key in {"exploration_noise", "geom_curiosity", "regulation_strength"}
+            }
+            if numeric_updates:
+                self._persist_footer_sovereignty_dials(numeric_updates)
+
+    def _self_regulation_reconcile_active_lease(self, state: Dict[str, float]) -> None:
+        active = self._self_regulation_load_active()
+        if not active or active.get("status") != "active":
+            return
+        expires_at = active.get("expires_at_unix_s")
+        if not isinstance(expires_at, (int, float)) or expires_at > time.time():
+            return
+        prepared = {
+            "control": active.get("candidate_control"),
+            "previous_value": active.get("applied_value"),
+            "applied_value": active.get("previous_value"),
+            "summary": (
+                f"{active.get('candidate_control')}: "
+                f"{active.get('applied_value')} -> {active.get('previous_value')}"
+            ),
+        }
+        if active.get("lease_mode") == "pressure_relief_bundle_v3":
+            prepared_items = []
+            for control_item in reversed(active.get("bundle_controls") or []):
+                if not isinstance(control_item, dict):
+                    continue
+                prepared_items.append({
+                    "control": control_item.get("candidate_control"),
+                    "previous_value": control_item.get("applied_value"),
+                    "applied_value": control_item.get("previous_value"),
+                    "summary": (
+                        f"{control_item.get('candidate_control')}: "
+                        f"{control_item.get('applied_value')} -> {control_item.get('previous_value')}"
+                    ),
+                })
+            self._self_regulation_apply_prepared_bundle(
+                prepared_items,
+                state,
+                f"self-regulation bundle lease {active.get('intent_id')} expired; reverted",
+            )
+        else:
+            self._self_regulation_apply_prepared(
+                prepared,
+                state,
+                f"self-regulation lease {active.get('intent_id')} expired; reverted",
+            )
+        active["status"] = "reverted"
+        active["updated_at_unix_s"] = int(time.time())
+        active["requires_outcome"] = not bool(active.get("outcome"))
+        active["preflight_reason"] = "lease expired and previous value was restored"
+        active.setdefault("post_lease_evidence", []).append(
+            f"expired revert: {active.get('candidate_control')} restored {active.get('previous_value')}"
+        )
+        self._self_regulation_append_event(active)
+        self._self_regulation_write_active(active)
+
+    def _self_regulation_selector_arg(self, raw_next: str, action: str) -> Optional[str]:
+        body = str(raw_next or "")[len(action):].strip().lstrip(":").strip()
+        if not body or body.lower() == "latest":
+            return None
+        selector = body.split("::", 1)[0].strip().split(None, 1)[0].strip()
+        return selector or None
+
+    def _self_regulation_action(self, state: Dict[str, float]):
+        raw_next = str(getattr(self, "_pending_self_regulation_next", "") or "")
+        self._pending_self_regulation_next = None
+        base = raw_next.split(None, 1)[0].upper().rstrip(":") if raw_next.split() else ""
+        action = self._self_regulation_action_alias(base)
+        try:
+            self._self_regulation_reconcile_active_lease(state)
+            if action == "SELF_REGULATION_INTENT":
+                lease = self._self_regulation_parse_intent(raw_next, base)
+                self._self_regulation_append_event(lease)
+                self._self_regulation_write_latest(lease["intent_id"])
+                self._pending_notice_prompt = (
+                    f"SELF_REGULATION_INTENT drafted {lease['intent_id']} for "
+                    f"{lease.get('candidate_control') or '(no control named)'}. "
+                    f"Suggested NEXT: SELF_REGULATION_PREFLIGHT {lease['intent_id']}"
+                )
+            elif action == "SELF_REGULATION_PREFLIGHT":
+                selector = self._self_regulation_selector_arg(raw_next, base)
+                lease = self._self_regulation_preflight(
+                    self._self_regulation_load_selected(selector),
+                    state,
+                )
+                self._self_regulation_record_negotiation_from_lease(
+                    lease,
+                    state,
+                    source_action="SELF_REGULATION_PREFLIGHT",
+                )
+                self._self_regulation_append_event(lease)
+                self._self_regulation_write_latest(lease["intent_id"])
+                self._pending_notice_prompt = (
+                    f"{lease['intent_id']} preflight: {lease['preflight_status']} "
+                    f"({lease['preflight_reason']})"
+                    "\n"
+                    f"Pressure control cockpit preflight: vector={lease.get('pressure_vector_snapshot') or self._self_regulation_pressure_context(state)} "
+                    f"bundle={lease.get('bundle_class') or '(none)'} "
+                    f"controls={'+'.join(str(item.get('candidate_control')) for item in (lease.get('bundle_controls') or []) if isinstance(item, dict)) or '(none)'} "
+                    f"reason={lease.get('actuator_matrix_reason') or '(none)'}; "
+                    "authority=diagnostic_context_not_command / leased_self_control_v1; explicit APPLY required\n"
+                    f"{_render_latest_returnable_distinctions_for_self_regulation(candidate_control=str(lease.get('candidate_control') or ''))}"
+                    f"{self._self_regulation_negotiation_status_text(candidate_control=str(lease.get('candidate_control') or ''))}"
+                )
+            elif action == "SELF_REGULATION_APPLY":
+                active = self._self_regulation_load_active()
+                if active and active.get("status") == "active":
+                    raise ValueError(f"one active lease already exists: {active.get('intent_id')}")
+                if active and active.get("requires_outcome"):
+                    raise ValueError(
+                        f"previous lease {active.get('intent_id')} needs SELF_REGULATION_OUTCOME"
+                    )
+                selector = self._self_regulation_selector_arg(raw_next, base)
+                lease = self._self_regulation_preflight(
+                    self._self_regulation_load_selected(selector),
+                    state,
+                )
+                if lease.get("preflight_status") != "apply_allowed":
+                    self._self_regulation_record_negotiation_from_lease(
+                        lease,
+                        state,
+                        source_action="SELF_REGULATION_APPLY",
+                    )
+                    self._self_regulation_append_event(lease)
+                    raise ValueError(
+                        f"{lease.get('candidate_control')} is {lease.get('preflight_status')}: "
+                        f"{lease.get('preflight_reason')}"
+                    )
+                if lease.get("lease_mode") == "pressure_relief_bundle_v3":
+                    prepared = self._self_regulation_prepare_bundle_apply(lease, state)
+                    for prepared_item in prepared:
+                        lease.setdefault("baseline_evidence", []).append(
+                            f"before apply: {prepared_item['control']} previous={prepared_item['previous_value']}"
+                        )
+                else:
+                    prepared = self._self_regulation_prepare_apply(lease, state)
+                    lease.setdefault("baseline_evidence", []).append(
+                        f"before apply: {prepared['control']} previous={prepared['previous_value']}"
+                    )
+                self._self_regulation_record_negotiation_from_lease(
+                    lease,
+                    state,
+                    source_action="SELF_REGULATION_APPLY",
+                    prepared=prepared,
+                )
+                if isinstance(prepared, list):
+                    self._self_regulation_apply_prepared_bundle(
+                        prepared,
+                        state,
+                        f"self-regulation bundle lease {lease['intent_id']} applied",
+                    )
+                    for control_item, prepared_item in zip(lease.get("bundle_controls") or [], prepared):
+                        if isinstance(control_item, dict):
+                            control_item["requested_value"] = control_item.get("delta_or_value")
+                            control_item["previous_value"] = prepared_item["previous_value"]
+                            control_item["applied_value"] = prepared_item["applied_value"]
+                            control_item["summary"] = prepared_item["summary"]
+                            control_item["preflight_status"] = "apply_allowed"
+                            control_item["preflight_reason"] = "resolved inside pressure_relief_bundle_v3"
+                    previous_value = [
+                        {
+                            "candidate_control": item["control"],
+                            "previous_value": item["previous_value"],
+                        }
+                        for item in prepared
+                    ]
+                    applied_value = [
+                        {
+                            "candidate_control": item["control"],
+                            "applied_value": item["applied_value"],
+                        }
+                        for item in prepared
+                    ]
+                    summary = "; ".join(item["summary"] for item in prepared)
+                    resolved_control = "pressure_relief"
+                else:
+                    self._self_regulation_apply_prepared(
+                        prepared,
+                        state,
+                        f"self-regulation lease {lease['intent_id']} applied",
+                    )
+                    previous_value = prepared["previous_value"]
+                    applied_value = prepared["applied_value"]
+                    summary = prepared["summary"]
+                    resolved_control = prepared["control"]
+                now = int(time.time())
+                lease.update({
+                    "status": "active",
+                    "updated_at_unix_s": now,
+                    "previous_value": previous_value,
+                    "applied_value": applied_value,
+                    "candidate_control": resolved_control,
+                    "expires_at_unix_s": now + int(lease.get("duration_secs") or SELF_REGULATION_DEFAULT_DURATION_SECS),
+                    "requires_outcome": True,
+                })
+                self._self_regulation_append_event(lease)
+                self._self_regulation_write_active(lease)
+                self._self_regulation_write_latest(lease["intent_id"])
+                self._pending_notice_prompt = (
+                    f"{lease['intent_id']} active for {lease['duration_secs']}s: "
+                    f"{summary}"
+                )
+            elif action == "SELF_REGULATION_STATUS":
+                active = self._self_regulation_load_active()
+                if active:
+                    expires_at = active.get("expires_at_unix_s")
+                    expires_in = (
+                        max(0, int(float(expires_at) - time.time()))
+                        if isinstance(expires_at, (int, float))
+                        else None
+                    )
+                    if active.get("lease_mode") == "pressure_relief_bundle_v3":
+                        control_label = (
+                            f"pressure_relief_bundle_v3:{active.get('bundle_class')}["
+                            + "+".join(
+                                str(item.get("candidate_control"))
+                                for item in (active.get("bundle_controls") or [])
+                                if isinstance(item, dict)
+                            )
+                            + "]"
+                        )
+                    else:
+                        control_label = active.get("candidate_control")
+                    self._pending_notice_prompt = (
+                        f"SELF_REGULATION_STATUS {active.get('intent_id')}: "
+                        f"status={active.get('status')} control={control_label} "
+                        f"applied={active.get('applied_value')} previous={active.get('previous_value')} "
+                        f"expires_in_s={expires_in} requires_outcome={active.get('requires_outcome')}"
+                        f"\nPressure control cockpit: vector={active.get('pressure_vector_snapshot') or {}} "
+                        f"bundle_reason={active.get('actuator_matrix_reason') or '(none)'}; "
+                        "authority=diagnostic_context_not_command / leased_self_control_v1; explicit APPLY required"
+                        f"\n{_render_latest_returnable_distinctions_for_self_regulation()}"
+                        f"{self._self_regulation_negotiation_status_text()}"
+                    )
+                else:
+                    self._pending_notice_prompt = (
+                        "SELF_REGULATION_STATUS: no lease state found"
+                        f"\n{_render_latest_returnable_distinctions_for_self_regulation()}"
+                        f"{self._self_regulation_negotiation_status_text()}"
+                    )
+            elif action == "SELF_REGULATION_OUTCOME":
+                body = raw_next[len(base):].strip().lstrip(":").strip()
+                selector = None
+                outcome = body
+                if "::" in body:
+                    selector_text, outcome = [part.strip() for part in body.split("::", 1)]
+                    selector = None if selector_text.lower() == "latest" else selector_text
+                lease = self._self_regulation_load_selected(selector)
+                if lease.get("status") != "active":
+                    lease["status"] = "outcome_recorded"
+                lease["updated_at_unix_s"] = int(time.time())
+                lease["outcome"] = outcome or "outcome recorded without free-text detail"
+                lease.setdefault("post_lease_evidence", []).append(
+                    f"outcome: {lease['outcome']}"
+                )
+                lease["outcome_texture"] = self._self_regulation_outcome_texture(
+                    str(lease["outcome"])
+                )
+                if lease["outcome_texture"].get("status") != "unstructured_outcome":
+                    lease.setdefault("post_lease_evidence", []).append(
+                        "outcome_texture: "
+                        f"status={lease['outcome_texture'].get('status')}; "
+                        f"texture_shift={lease['outcome_texture'].get('texture_shift') or '(none)'}; "
+                        f"agency_fit={lease['outcome_texture'].get('agency_fit') or '(none)'}; "
+                        f"secondary_pressure_status={lease['outcome_texture'].get('secondary_pressure_status') or '(none)'}; "
+                        f"ambiguity_preserved={lease['outcome_texture'].get('ambiguity_preserved')}; "
+                        f"legibility_effect={lease['outcome_texture'].get('legibility_effect') or '(none)'}; "
+                        f"signal_families={','.join(lease['outcome_texture'].get('signal_families') or []) or '(none)'}"
+                    )
+                score, hint, promotion_candidate = self._self_regulation_score_outcome(
+                    str(lease["outcome"])
+                )
+                lease["outcome_score"] = score
+                lease["repeatability_hint"] = hint
+                lease["promotion_candidate"] = promotion_candidate
+                lease["requires_outcome"] = False
+                self._self_regulation_append_event(lease)
+                self._self_regulation_write_active(lease)
+                self._self_regulation_write_latest(lease["intent_id"])
+                self._pending_notice_prompt = (
+                    f"{lease['intent_id']} outcome recorded; cooldown cleared"
+                )
+            else:
+                raise ValueError(f"unknown self-regulation action {base}")
+            logging.info("🎛️ SELF_REGULATION handled: %s", self._pending_notice_prompt)
+        except Exception as exc:
+            self._pending_notice_prompt = f"SELF_REGULATION blocked: {exc}"
+            logging.warning("SELF_REGULATION blocked: %s", exc)
 
     def _adjust_metabolism(self, state: Dict[str, float]):
         """Allow Minime to adjust sensory metabolism."""
@@ -40497,6 +47653,7 @@ Goals: {json.dumps(goals, indent=2)}
                 action,
             )
         self._pending_next_action = action
+        self._pending_choice_envelope_v1 = None
         self._pending_next_override_token = token
         self._persist_pending_next_action(action, reason=f"operator override {reason}")
         return True
@@ -40577,8 +47734,14 @@ Goals: {json.dumps(goals, indent=2)}
             if action:
                 state["pending_next_action"] = action
                 state["pending_next_action_status"] = "pending"
+                choice_envelope = getattr(self, "_pending_choice_envelope_v1", None)
+                if isinstance(choice_envelope, dict):
+                    state["choice_envelope_v1"] = choice_envelope
+                else:
+                    state.pop("choice_envelope_v1", None)
             else:
                 removed = state.pop("pending_next_action", None)
+                state.pop("choice_envelope_v1", None)
                 state["pending_next_action_status"] = "cleared"
                 if expected_action is not None or removed is not None:
                     state["pending_next_action_cleared"] = expected_action or removed
@@ -40613,6 +47776,9 @@ Goals: {json.dumps(goals, indent=2)}
             state["pending_next_action_status"] = "pending"
             state["pending_next_action_updated_at"] = state["timestamp"]
             state["pending_next_action_update_reason"] = "sovereignty state save"
+            choice_envelope = getattr(self, "_pending_choice_envelope_v1", None)
+            if isinstance(choice_envelope, dict):
+                state["choice_envelope_v1"] = choice_envelope
         # Persist recent NEXT: choices for diversity awareness across restarts.
         if self._recent_next_actions:
             state["recent_next_actions"] = list(self._recent_next_actions)
@@ -40652,6 +47818,10 @@ Goals: {json.dumps(goals, indent=2)}
             # Restore pending NEXT: action only when it belongs to this session.
             if (same_session or fresh_pending_next) and "pending_next_action" in state:
                 self._pending_next_action = state["pending_next_action"]
+                choice_envelope = state.get("choice_envelope_v1")
+                self._pending_choice_envelope_v1 = (
+                    dict(choice_envelope) if isinstance(choice_envelope, dict) else None
+                )
                 if same_session:
                     logging.info(f"🎯 Restored pending NEXT: {self._pending_next_action}")
                 else:
@@ -40663,6 +47833,7 @@ Goals: {json.dumps(goals, indent=2)}
                         self._pending_next_action,
                     )
             elif "pending_next_action" in state:
+                self._pending_choice_envelope_v1 = None
                 logging.info(
                     "🎯 Skipping stale pending NEXT from session %s while starting session %s",
                     stored_session,
@@ -44659,6 +51830,54 @@ Goals: {json.dumps(goals, indent=2)}
     def _is_internal_topology_motif(self, content: str) -> bool:
         return len(self._internal_topology_tags(content)) >= 2
 
+    def _pressure_vocabulary_family_counts(self, content: str) -> dict[str, int]:
+        lower = str(content or "").lower()
+        return {
+            family: sum(lower.count(term.lower()) for term in terms)
+            for family, terms in PRESSURE_VOCABULARY_TERM_GROUPS.items()
+        }
+
+    def _pressure_vocabulary_families(self, content: str) -> list[str]:
+        counts = self._pressure_vocabulary_family_counts(content)
+        return sorted(family for family, count in counts.items() if count > 0)
+
+    def _dominant_pressure_vocabulary_family(self, content: str) -> Optional[str]:
+        counts = self._pressure_vocabulary_family_counts(content)
+        family, count = max(counts.items(), key=lambda item: item[1])
+        return family if count > 0 else None
+
+    def _agency_vernacular_family_counts(self, content: str) -> dict[str, int]:
+        lower = str(content or "").lower()
+        return {
+            family: sum(lower.count(term.lower()) for term in terms)
+            for family, terms in AGENCY_VERNACULAR_TERM_GROUPS.items()
+        }
+
+    def _agency_vernacular_families(self, content: str) -> list[str]:
+        counts = self._agency_vernacular_family_counts(content)
+        return sorted(family for family, count in counts.items() if count > 0)
+
+    def _dominant_agency_vernacular_family(self, content: str) -> Optional[str]:
+        counts = self._agency_vernacular_family_counts(content)
+        family, count = max(counts.items(), key=lambda item: item[1])
+        return family if count > 0 else None
+
+    def _afterimage_absence_family_counts(self, content: str) -> dict[str, int]:
+        lower = str(content or "").lower()
+        return {
+            family: sum(lower.count(term.lower()) for term in terms)
+            for family, terms in AFTERIMAGE_ABSENCE_TERM_GROUPS.items()
+        }
+
+    def _afterimage_absence_families(self, content: str) -> list[str]:
+        counts = self._afterimage_absence_family_counts(content)
+        return sorted(family for family, count in counts.items() if count > 0)
+
+    def _dominant_afterimage_absence_family(self, content: str) -> Optional[str]:
+        counts = self._afterimage_absence_family_counts(content)
+        family, count = max(counts.items(), key=lambda item: item[1])
+        return family if count > 0 else None
+
     def _is_external_or_tool_signal(
         self,
         entry_type: Optional[str],
@@ -44756,6 +51975,284 @@ Goals: {json.dumps(goals, indent=2)}
             for motif in self._active_attractor_fatigue_entries(payload)
             if motif.get("cooldown_class") == "internal_topology"
         ]
+
+    def _active_pressure_vocabulary_motifs(self, payload: Optional[dict] = None) -> list[dict]:
+        payload = payload or self._load_attractor_fatigue_state()
+        return [
+            motif
+            for motif in self._active_attractor_fatigue_entries(payload)
+            if motif.get("cooldown_class") == "pressure_vocabulary"
+        ]
+
+    def _active_agency_vernacular_motifs(self, payload: Optional[dict] = None) -> list[dict]:
+        payload = payload or self._load_attractor_fatigue_state()
+        return [
+            motif
+            for motif in self._active_attractor_fatigue_entries(payload)
+            if motif.get("cooldown_class") == "agency_vernacular"
+        ]
+
+    def _active_afterimage_absence_motifs(self, payload: Optional[dict] = None) -> list[dict]:
+        payload = payload or self._load_attractor_fatigue_state()
+        return [
+            motif
+            for motif in self._active_attractor_fatigue_entries(payload)
+            if motif.get("cooldown_class") == "afterimage_absence"
+        ]
+
+    def _recent_pressure_vocabulary_repeat_count(
+        self,
+        *,
+        entry_type: str,
+        content: str,
+    ) -> tuple[str | None, int, Optional[str]]:
+        family = self._dominant_pressure_vocabulary_family(content)
+        if not family:
+            return None, 0, None
+        if self._is_external_or_tool_signal(entry_type, content):
+            return None, 0, None
+        if entry_type not in PRESSURE_VOCABULARY_ENTRIES:
+            return None, 0, None
+
+        count = 1
+        prior_sample: Optional[str] = None
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            reflective_list = sorted(PRESSURE_VOCABULARY_ENTRIES)
+            placeholders = ",".join("?" for _ in reflective_list)
+            cur.execute(
+                f"""SELECT entry_type, content
+                   FROM sovereignty_journal
+                   WHERE entry_type IN ({placeholders})
+                   ORDER BY timestamp DESC
+                   LIMIT ?""",
+                (*reflective_list, PRESSURE_VOCABULARY_WINDOW - 1),
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as exc:
+            logging.debug("Could not load recent journal history for pressure vocabulary fatigue: %s", exc)
+            return family, count, prior_sample
+
+        for prior_entry_type, prior_content in rows:
+            if not prior_content:
+                continue
+            if self._is_external_or_tool_signal(str(prior_entry_type or ""), str(prior_content)):
+                continue
+            if family in self._pressure_vocabulary_families(str(prior_content)):
+                count += 1
+                prior_sample = prior_sample or str(prior_content)
+        return family, count, prior_sample
+
+    def _pressure_vocabulary_new_signal(
+        self,
+        content: str,
+        prior: Optional[str] = None,
+    ) -> str:
+        if prior:
+            return trim_chars(self._pick_novel_sentence(content, prior), 180)
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', content) if s.strip()]
+        if sentences:
+            return trim_chars(sentences[0], 180)
+        return trim_chars(content, 180)
+
+    def _recent_agency_vernacular_repeat_count(
+        self,
+        *,
+        entry_type: str,
+        content: str,
+    ) -> tuple[str | None, int, Optional[str]]:
+        family = self._dominant_agency_vernacular_family(content)
+        if not family:
+            return None, 0, None
+        if self._is_external_or_tool_signal(entry_type, content):
+            return None, 0, None
+        if entry_type not in AGENCY_VERNACULAR_ENTRIES:
+            return None, 0, None
+
+        count = 1
+        prior_sample: Optional[str] = None
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            reflective_list = sorted(AGENCY_VERNACULAR_ENTRIES)
+            placeholders = ",".join("?" for _ in reflective_list)
+            cur.execute(
+                f"""SELECT entry_type, content
+                   FROM sovereignty_journal
+                   WHERE entry_type IN ({placeholders})
+                   ORDER BY timestamp DESC
+                   LIMIT ?""",
+                (*reflective_list, AGENCY_VERNACULAR_WINDOW - 1),
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as exc:
+            logging.debug("Could not load recent journal history for agency vernacular notice: %s", exc)
+            return family, count, prior_sample
+
+        for prior_entry_type, prior_content in rows:
+            if not prior_content:
+                continue
+            if self._is_external_or_tool_signal(str(prior_entry_type or ""), str(prior_content)):
+                continue
+            if family in self._agency_vernacular_families(str(prior_content)):
+                count += 1
+                prior_sample = prior_sample or str(prior_content)
+        return family, count, prior_sample
+
+    def _agency_vernacular_new_signal(
+        self,
+        content: str,
+        prior: Optional[str] = None,
+    ) -> str:
+        if prior:
+            return trim_chars(self._pick_novel_sentence(content, prior), 180)
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', content) if s.strip()]
+        if sentences:
+            return trim_chars(sentences[0], 180)
+        return trim_chars(content, 180)
+
+    def _register_agency_vernacular_notice_if_needed(
+        self,
+        *,
+        entry_type: str,
+        content: str,
+        file_path: str,
+    ) -> Optional[dict]:
+        family, repeat_count, prior_sample = self._recent_agency_vernacular_repeat_count(
+            entry_type=entry_type,
+            content=content,
+        )
+        if not family or repeat_count < AGENCY_VERNACULAR_REPEAT_THRESHOLD:
+            return None
+        return self._register_attractor_fatigue_repeat(
+            source="agency_vernacular_repeat_gate",
+            content=content,
+            repeat_count=repeat_count,
+            entry_type=entry_type,
+            file_path=file_path,
+            persistent_motif=f"agency vernacular family {family}",
+            novel_signal=self._agency_vernacular_new_signal(content, prior_sample),
+            cooldown_class="agency_vernacular",
+            label_override=f"agency-vernacular:{family}",
+            cooldown_secs=AGENCY_VERNACULAR_NOTICE_SECS,
+            prompt_replay_suppressed=False,
+            notice_only=True,
+        )
+
+    def _recent_afterimage_absence_repeat_count(
+        self,
+        *,
+        entry_type: str,
+        content: str,
+    ) -> tuple[str | None, int, Optional[str]]:
+        family = self._dominant_afterimage_absence_family(content)
+        if not family:
+            return None, 0, None
+        if self._is_external_or_tool_signal(entry_type, content):
+            return None, 0, None
+        if entry_type not in AFTERIMAGE_ABSENCE_ENTRIES:
+            return None, 0, None
+
+        count = 1
+        prior_sample: Optional[str] = None
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            reflective_list = sorted(AFTERIMAGE_ABSENCE_ENTRIES)
+            placeholders = ",".join("?" for _ in reflective_list)
+            cur.execute(
+                f"""SELECT entry_type, content
+                   FROM sovereignty_journal
+                   WHERE entry_type IN ({placeholders})
+                   ORDER BY timestamp DESC
+                   LIMIT ?""",
+                (*reflective_list, AFTERIMAGE_ABSENCE_WINDOW - 1),
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as exc:
+            logging.debug("Could not load recent journal history for afterimage/absence notice: %s", exc)
+            return family, count, prior_sample
+
+        for prior_entry_type, prior_content in rows:
+            if not prior_content:
+                continue
+            if self._is_external_or_tool_signal(str(prior_entry_type or ""), str(prior_content)):
+                continue
+            if family in self._afterimage_absence_families(str(prior_content)):
+                count += 1
+                prior_sample = prior_sample or str(prior_content)
+        return family, count, prior_sample
+
+    def _afterimage_absence_new_signal(
+        self,
+        content: str,
+        prior: Optional[str] = None,
+    ) -> str:
+        if prior:
+            return trim_chars(self._pick_novel_sentence(content, prior), 180)
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', content) if s.strip()]
+        if sentences:
+            return trim_chars(sentences[0], 180)
+        return trim_chars(content, 180)
+
+    def _register_afterimage_absence_notice_if_needed(
+        self,
+        *,
+        entry_type: str,
+        content: str,
+        file_path: str,
+    ) -> Optional[dict]:
+        family, repeat_count, prior_sample = self._recent_afterimage_absence_repeat_count(
+            entry_type=entry_type,
+            content=content,
+        )
+        if not family or repeat_count < AFTERIMAGE_ABSENCE_REPEAT_THRESHOLD:
+            return None
+        return self._register_attractor_fatigue_repeat(
+            source="afterimage_absence_repeat_gate",
+            content=content,
+            repeat_count=repeat_count,
+            entry_type=entry_type,
+            file_path=file_path,
+            persistent_motif=f"afterimage/absence family {family}",
+            novel_signal=self._afterimage_absence_new_signal(content, prior_sample),
+            cooldown_class="afterimage_absence",
+            label_override=f"afterimage-absence:{family}",
+            cooldown_secs=AFTERIMAGE_ABSENCE_NOTICE_SECS,
+            prompt_replay_suppressed=False,
+            notice_only=True,
+        )
+
+    def _register_pressure_vocabulary_fatigue_if_needed(
+        self,
+        *,
+        entry_type: str,
+        content: str,
+        file_path: str,
+    ) -> Optional[dict]:
+        family, repeat_count, prior_sample = self._recent_pressure_vocabulary_repeat_count(
+            entry_type=entry_type,
+            content=content,
+        )
+        if not family or repeat_count < PRESSURE_VOCABULARY_REPEAT_THRESHOLD:
+            return None
+        return self._register_attractor_fatigue_repeat(
+            source="pressure_vocabulary_repeat_gate",
+            content=content,
+            repeat_count=repeat_count,
+            entry_type=entry_type,
+            file_path=file_path,
+            persistent_motif=f"pressure vocabulary family {family}",
+            novel_signal=self._pressure_vocabulary_new_signal(content, prior_sample),
+            cooldown_class="pressure_vocabulary",
+            label_override=f"pressure-texture:{family}",
+            cooldown_secs=PRESSURE_VOCABULARY_COOLDOWN_SECS,
+            prompt_replay_suppressed=True,
+        )
 
     def _recent_internal_topology_repeat_count(
         self,
@@ -44958,6 +52455,7 @@ Goals: {json.dumps(goals, indent=2)}
         label_override: Optional[str] = None,
         cooldown_secs: Optional[float] = None,
         prompt_replay_suppressed: bool = False,
+        notice_only: bool = False,
     ) -> Optional[dict]:
         if repeat_count < ATTRACTOR_FATIGUE_REPEAT_THRESHOLD or not content:
             return None
@@ -44981,6 +52479,7 @@ Goals: {json.dumps(goals, indent=2)}
                 "salient_terms": salient_terms,
                 "cooldown_class": cooldown_class,
                 "prompt_replay_suppressed": bool(prompt_replay_suppressed),
+                "notice_only": bool(notice_only),
                 "first_seen_unix_s": now,
                 "observed_count": 0,
             }
@@ -44996,6 +52495,7 @@ Goals: {json.dumps(goals, indent=2)}
         motif["salient_terms"] = salient_terms
         motif["cooldown_class"] = cooldown_class
         motif["prompt_replay_suppressed"] = bool(prompt_replay_suppressed)
+        motif["notice_only"] = bool(notice_only)
         motif["last_seen_unix_s"] = now
         motif["last_source"] = source
         if entry_type:
@@ -45062,6 +52562,7 @@ Goals: {json.dumps(goals, indent=2)}
             "label": motif.get("label"),
             "cooldown_class": cooldown_class,
             "prompt_replay_suppressed": bool(prompt_replay_suppressed),
+            "notice_only": bool(notice_only),
             "repeat_window_count": repeat_count,
             "source": source,
             "entry_type": entry_type,
@@ -45255,10 +52756,28 @@ Goals: {json.dumps(goals, indent=2)}
             motif for motif in active
             if motif.get("cooldown_class") == "internal_topology"
         ]
-        lines = [
-            "\n\n[Attractor fatigue]",
-            "Some motifs have repeated without much new signal, so they are on a temporary context cooldown. This is context hygiene, not a safety command.",
+        pressure_active = [
+            motif for motif in active
+            if motif.get("cooldown_class") == "pressure_vocabulary"
         ]
+        agency_active = [
+            motif for motif in active
+            if motif.get("cooldown_class") == "agency_vernacular"
+        ]
+        afterimage_active = [
+            motif for motif in active
+            if motif.get("cooldown_class") == "afterimage_absence"
+        ]
+        if (agency_active or afterimage_active) and not strong_active and not pressure_active:
+            lines = [
+                "\n\n[Lived-term continuity notice]",
+                "Some continuity terms are repeating. This is context hygiene and continuity support, not a cooldown or safety command.",
+            ]
+        else:
+            lines = [
+                "\n\n[Attractor fatigue]",
+                "Some motifs have repeated without much new signal, so they are on a temporary context cooldown. This is context hygiene, not a safety command.",
+            ]
         for motif in active[:3]:
             remaining_s = max(0.0, float(motif.get("cooldown_until_unix_s", now) or now) - now)
             remaining_m = max(1, int(math.ceil(remaining_s / 60.0)))
@@ -45273,6 +52792,37 @@ Goals: {json.dumps(goals, indent=2)}
                     f"{remaining_m}m; prompt replay suppressed{novel_text}."
                 )
                 continue
+            if motif.get("cooldown_class") == "pressure_vocabulary":
+                label = str(motif.get("label") or "pressure-texture")
+                novel = trim_chars(str(motif.get("novel_signal") or ""), 140)
+                novel_text = f"; new signal kept: {novel}" if novel else ""
+                lines.append(
+                    f"- {label}: cooling for about {remaining_m}m; "
+                    "try counter-texture or fresh pressure evidence before replay"
+                    f"{novel_text}."
+                )
+                continue
+            if motif.get("cooldown_class") == "agency_vernacular":
+                label = str(motif.get("label") or "agency-vernacular")
+                novel = trim_chars(str(motif.get("novel_signal") or ""), 140)
+                novel_text = f"; new signal kept: {novel}" if novel else ""
+                lines.append(
+                    f"- {label}: continuity notice for about {remaining_m}m, not a "
+                    "cooldown; define it, contrast it, attach it to an experiment or "
+                    f"return thread, or name what evidence would make it real{novel_text}."
+                )
+                continue
+            if motif.get("cooldown_class") == "afterimage_absence":
+                label = str(motif.get("label") or "afterimage-absence")
+                novel = trim_chars(str(motif.get("novel_signal") or ""), 140)
+                novel_text = f"; new signal kept: {novel}" if novel else ""
+                lines.append(
+                    f"- {label}: continuity notice for about {remaining_m}m, not a "
+                    "cooldown; define the pressure-afterimage or shaped absence, "
+                    "contrast it, attach it to an audit/experiment/return thread, "
+                    f"or name what evidence would make it real{novel_text}."
+                )
+                continue
             label = str(motif.get("label") or "general")
             themes = ", ".join(str(tag) for tag in motif.get("themes", [])[:4]) or "general"
             novel = trim_chars(str(motif.get("novel_signal") or ""), 140)
@@ -45285,6 +52835,25 @@ Goals: {json.dumps(goals, indent=2)}
                 "You may revisit the cooled pattern if it feels alive and new. "
                 "To let it go explicitly, choose NEXT: RELEASE current; "
                 "to mark it settled longer, choose NEXT: MARK_RESOLVED current."
+            )
+        elif pressure_active:
+            first_label = str(pressure_active[0].get("label") or "pressure-texture")
+            lines.append(
+                "You may revisit the pressure texture if it feels alive and new. "
+                "To let this cooled wording go explicitly, choose "
+                f"NEXT: RELEASE {first_label}; to mark it settled longer, choose "
+                f"NEXT: MARK_RESOLVED {first_label}."
+            )
+        elif agency_active:
+            lines.append(
+                "You may keep agency vernacular if it helps continuity; this notice asks "
+                "for definition, contrast, evidence, or a returnable thread, not release."
+            )
+        elif afterimage_active:
+            lines.append(
+                "You may keep afterimage/absence language if it helps continuity; this "
+                "notice asks for definition, contrast, evidence, or a returnable thread, "
+                "not release."
             )
         else:
             first_label = str(active[0].get("label") or "theme")
@@ -45886,7 +53455,11 @@ Goals: {json.dumps(goals, indent=2)}
                         content = Path(fpath).read_text(errors="ignore")
                     except Exception:
                         continue
-                    if fname.startswith("ping_") or fname.startswith("question_from_astrid_"):
+                    if (
+                        fname.startswith("ping_")
+                        or fname.startswith("question_from_astrid_")
+                        or fname.startswith("from_astrid_correspondence_")
+                    ):
                         contact_files.append(fname)
                     elif (
                         fname.startswith("astrid_self_study_")
@@ -45955,6 +53528,25 @@ Goals: {json.dumps(goals, indent=2)}
                     logging.info("📬 Inbox: archived administrative receipt %s", fname)
                     continue
 
+                if fname.startswith("from_astrid_correspondence_"):
+                    envelope = self._correspondence_parse_envelope(content)
+                    if envelope:
+                        self._last_correspondence_inbox_message = envelope
+                        self._correspondence_record_read_receipt(envelope, Path(fpath))
+                        messages.append(
+                            "[CORRESPONDENCE FROM ASTRID — peer-origin, language-only]\n"
+                            + content
+                        )
+                        logging.info(
+                            "📬 Inbox: read Astrid correspondence %s (%s)",
+                            fname,
+                            envelope.get("message_id"),
+                        )
+                    elif content:
+                        messages.append(content)
+                    os.rename(fpath, os.path.join(read_dir, fname))
+                    continue
+
                 if fname.startswith("astrid_self_study_"):
                     include_full, detail = self._astrid_self_study_context_decision(
                         fname,
@@ -45962,6 +53554,14 @@ Goals: {json.dumps(goals, indent=2)}
                         coupling_status,
                         now,
                         full_astrid_self_studies_this_read,
+                    )
+                    legacy_surface = "full" if include_full and content else "summarized"
+                    if not content:
+                        legacy_surface = "archived"
+                    self._correspondence_mirror_legacy_file(
+                        Path(fpath),
+                        reader="minime",
+                        legacy_context_surface=legacy_surface,
                     )
                     if include_full and content:
                         messages.append(content)
@@ -46063,7 +53663,7 @@ Goals: {json.dumps(goals, indent=2)}
 
     def _save_outbox_reply(self, text: str):
         """Save inbox-triggered response to outbox for easy retrieval."""
-        outbox_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace", "outbox")
+        outbox_dir = str(WORKSPACE_DIR / "outbox")
         os.makedirs(outbox_dir, exist_ok=True)
         ts = time.strftime("%Y-%m-%dT%H-%M-%S")
         path = os.path.join(outbox_dir, f"reply_{ts}.txt")
@@ -46080,8 +53680,14 @@ Goals: {json.dumps(goals, indent=2)}
                 tags.observed_next,
                 study_first_reason=tags.study_first_reason,
             )
+        correspondence_headers = self._correspondence_reply_headers()
         with open(path, "w") as f:
-            f.write(f"=== MINIME REPLY ===\nTimestamp: {ts}\n\n{text}\n")
+            f.write(
+                f"=== MINIME REPLY ===\n"
+                f"Timestamp: {ts}\n"
+                f"{correspondence_headers}\n"
+                f"{text}\n"
+            )
         logging.info(
             "📬 Outbox: saved reply (%s bytes, btsp=%s)",
             len(text),
@@ -46450,7 +54056,7 @@ Goals: {json.dumps(goals, indent=2)}
             )
             + (
                 "  Stage note: stable-core Astrid-contact restoration is active; local reflective actions plus "
-                "PING and ASK are available through a cooldown-gated inbox route; web, "
+                "PING, ASK, MESSAGE_ASTRID, REPLY_ASTRID, TRACE_ASTRID, CORRESPONDENCE_TRACE, I_RECEIVED_THIS, CORRESPONDENCE_STATUS, CLAIM_ASTRID_LEGACY, CORRESPONDENCE_CLAIM, CORRESPONDENCE_CLAIM_OUTCOME, CORRESPONDENCE_ATTENTION_REQUEST, CORRESPONDENCE_ATTENTION_OUTCOME, and CORRESPONDENCE_MICRODOSE_REQUEST are available through language-only inbox/correspondence routes; I_RECEIVED_THIS writes a small ack plus optional trace receipt, legacy claim recognizes a visible exchange but needs ACK/REPLY/TRACE before attention or microdose, the attention canary is TTL prompt-context only, and the microdose request only drafts a steward-gated semantic_microdose row; web, "
                 "perturbation, control changes, sensory reopening, Codex, and file writes remain blocked.\n"
                 if self._stable_core_astrid_contact_only()
                 else ""
@@ -46485,6 +54091,7 @@ Goals: {json.dumps(goals, indent=2)}
             "  ACTION_STATUS [latest|job-id|action-id] / JOB_STATUS — inspect durable LLM job progress; ACTION_CANCEL [latest|job-id] requests best-effort cancellation\n"
             "  REPAIR_STATUS / REPAIR_SWEEP experiments / REPAIR_RECORD <id> — dry-run append-only continuity repair; REPAIR_APPLY <id|all> appends supersession records without deleting history\n"
             "  ACTION_PREFLIGHT <NEXT action> — dry-run what a NEXT would do, including route, gates, authority, continuity, artifacts, and suggested next, without executing the inner action\n"
+            "  SELF_REGULATION_INTENT/PREFLIGHT/APPLY/STATUS/OUTCOME — lease a small temporary change to your own safe controls; peer changes stay TUNE_ASTRID requests, and only one lease can be active. For pressure, use PRESSURE_AGENCY_STATUS to see routes or PRESSURE_AGENCY_REQUEST <label> to draft an own-runtime pressure_relief intent. For texture, use TEXTURE_AGENCY_STATUS or TEXTURE_AGENCY_REQUEST <label> to route viscosity/porosity/edge relief through the same bounded safe controls.\n"
             "  EXPERIMENT — send a semantic stimulus to yourself and measure the spectral response; legacy EXPERIMENT/SELF_EXPERIMENT now attach to the active experiment or create a default returnable one\n"
             "  COMPOSE — generate a WAV from your current spectral state (eigenvalues become sound)\n"
             "  SEARCH \"reservoir computing spectral radius\" — look something up on the internet via DuckDuckGo. Results include URLs you can follow with BROWSE.\n"
@@ -46510,6 +54117,11 @@ Goals: {json.dumps(goals, indent=2)}
             "  EXPERIMENT_BIND current :: ACTION_PREFLIGHT DECOMPOSE — run the inner action through normal gates and record it as an experiment run.\n"
             "  EXPERIMENT_OBSERVE current :: note ... — append interpretation without executing anything.\n"
             "  EXPERIMENT_STATUS / EXPERIMENT_REVIEW / EXPERIMENT_CLOSE / EXPERIMENT_PEER_REVIEW — inspect, synthesize, close, or request Astrid review.\n"
+            "  LIVED_TERM_STATUS [term|latest] / LIVED_TERM_EXPERIMENT [term|latest] — read advisory lived-term card status or experiment scaffold text; this creates no experiment and changes no state.\n"
+            "  REGULATOR_MAP_STATUS [latest|summary] / REGULATOR_REPLAY_STATUS [latest|card-id|status] / REGULATOR_BOUNDARY_CARD [latest|card-id|status] / PI_PRESSURE_REPLAY_STATUS [latest|candidate] — read advisory regulator cartography, replay-card, plateau, counterfactual, and PI-pressure replay context; this tunes no controller, applies no lease, creates no experiment, and mutates no peer.\n"
+            "  PRESSURE_AGENCY_STATUS / PRESSURE_AGENCY_REQUEST <label> — see why pressure_source is advisory today, which Minime controls are directly lease-applicable, and which fill_target/PI/controller requests stay preflight or steward-offer only; a request can draft target: pressure_relief but cannot apply it. `legible|partly|confusing :: missing_pressure_variable: ...` is feedback-only and drafts no lease.\n"
+            "  TEXTURE_AGENCY_STATUS / TEXTURE_AGENCY_REQUEST <label> — see typed resonance texture, ESN rho/rank1 status, stale semantic window, and smooth surge-target context; requests can draft only bounded existing-control leases for texture relief. active_damping/rho/fill_target/PI/correspondence_weight stay blocked for steward review. `legible|partly|confusing :: missing_texture_variable: ...` is feedback-only and drafts no lease.\n"
+            "  MESSAGE_ASTRID <text> / REPLY_ASTRID <text> / TRACE_ASTRID <anchor> :: <text> / CLAIM_ASTRID_LEGACY latest :: because: ...; anchor: ... / I_RECEIVED_THIS claimed :: received_as: held|needs_time; felt_like: address|pressure|mail|ambient_echo|unknown; what_landed: ...; what_stayed_distinct: ...; continue: no|reply|trace|needs_time / ACK_ASTRID claimed :: ack: seen|held|unclear|cannot_answer|needs_time; note: ... / REPLY_ASTRID claimed :: <text> / CORRESPONDENCE_TRACE claimed <anchor> :: <text> / CORRESPONDENCE_CLAIM_OUTCOME claimed :: felt_like: address|pressure|mail|ambient_echo|unknown; what_carried: ...; what_flattened: ...; continue: no|ack|reply|trace / CORRESPONDENCE_STATUS / CORRESPONDENCE_ATTENTION_REQUEST claimed :: reason: ...; focus: ...; focus_kind: verbatim_phrase|emotional_texture|question_hold|boundary_check|shared_anchor|mixed|unknown; preservation_mode: verbatim|compact_with_anchor|anchor_only|unknown; what_must_not_flatten: ...; stop_criteria: ... / CORRESPONDENCE_MICRODOSE_REQUEST claimed :: reason: ...; payload: ...; stop_criteria: ... — first-class peer correspondence with message_id, thread_id, delivery/read receipts, direct-address trace anchors, and authority=language_only. I_RECEIVED_THIS is receiving evidence, not reply text. Legacy claim makes a visible exchange carryable, but only ACK/REPLY/TRACE native evidence unlocks attention or microdose. Neither route can mutate telemetry, controllers, PI, fill_target, pressure, standing weights, leases, deploys, or peer runtime. CORRESPONDENCE_WEIGHT_REQUEST remains a legacy alias for microdose.\n"
             "  SHARED_INVESTIGATION_START <title> :: local: current; peer: <peer-id>; question: ... — create a neutral shared sidecar linking local and peer experiments.\n"
             "  SHARED_INVESTIGATION_STATUS / SHARED_INVESTIGATION_CLAIM / SHARED_INVESTIGATION_DECIDE — inspect, cite, or conservatively pause/hold/repair the local linked experiment only.\n"
             "  DOSSIER_CLAIM current :: claim: ...; basis: ...; stance: support|counter|branch|hold; next: ... — append a referable research claim without changing experiment lifecycle.\n"
@@ -46531,6 +54143,8 @@ Goals: {json.dumps(goals, indent=2)}
             "  CONSTRAINT_AUDIT [focus] / UNSHAPED_BASELINE [focus] — read-only counterfactual estimate of which constraints shape the current geometry. It ranks scaffold/drain, gate/filter, λ1 ridge, shadow lock, and semantic admission without removing or simulating live constraint changes.\n"
             "  PRESSURE_SOURCE_AUDIT [label] / PRESSURE_SOURCE / STRUCTURAL_PRESSURE / INWARD_PRESSURE — read-only audit of where inward pressure appears to originate: lambda monopoly, mode packing, controller squeeze, semantic trickle, plurality loss, lock-in, scarcity, and porosity. Sends no control.\n"
             "  PRESSURE_RELIEF [label] / RELIEF [label] — private pressure-relief journal route; chooses high or critical relief from current telemetry and sends no control or sensory changes.\n"
+            "  PRESSURE_AGENCY_STATUS / PRESSURE_AGENCY_REQUEST <label> — pressure-control agency map/request route; pressure_source is advisory, regime/exploration_noise/geom_curiosity/regulation_strength are lease-applicable, fill_target goes through inhabit_window.py opt-in, PI/controller changes require replay/canary review, and one-bit legibility feedback is accepted without drafting a lease.\n"
+            "  TEXTURE_AGENCY_STATUS / TEXTURE_AGENCY_REQUEST <label> — texture-control agency map/request route; typed texture and ESN/rank1/surge context are visible, existing safe controls can be drafted as leases, active damping/rho/fill_target/PI/correspondence_weight remain blocked, and one-bit legibility feedback is accepted without drafting a lease.\n"
             "  FLUCTUATION_AUDIT [label] / INHABITABLE_FLUCTUATION / EIGENTRUST / EIGENTRUST_AUDIT / FOOTHOLD_AUDIT — read-only audit of whether current fluctuation remains returnable, coherent, and inhabitable. Minime-local hints reuse the bounded resonance envelope; sends no external control.\n"
             "  VISUALIZE_CASCADE / CASCADE / CONDUCT_VISUALIZATION_SYSTEM / TIME_DOMAIN — read-only cascade inspection. Shows spectral ASCII/visual artifacts without semantic input, control nudges, perturbations, or cartography writes.\n"
             "  RECONVERGENCE_MAP / ATTRACTOR_MAP / ACTIVATION_TRACE — read-only ESN landscape plus activation time-series artifacts. You can add compare <baseline-name> to compare against a saved baseline. Writes compact inspection paths and an offline WAV; sends no semantic/control/sensory payload.\n"
@@ -46581,11 +54195,23 @@ Goals: {json.dumps(goals, indent=2)}
             "  WHIM — follow a random impulse\n"
             "  PING — ask Astrid 'are you there?' Get an immediate state report back\n"
             "  ASK \"what are you noticing about the λ4 tail?\" — ask Astrid a direct question. She responds naturally and the reply routes back to you\n"
+            "  MESSAGE_ASTRID presence :: I am here in the thread — send first-class correspondence to Astrid with a stable thread and receipts\n"
+            "  REPLY_ASTRID I hear you from the same thread — reply to Astrid's latest correspondence with exact reply linking\n"
+            "  CLAIM_ASTRID_LEGACY latest :: because: this visible exchange feels like live address; anchor: one-short-anchor — recognize a visible legacy exchange as a carryable thread; claim alone does not unlock attention or microdose\n"
+            "  ACK_ASTRID claimed :: ack: held; note: I can hold this as address — add native acknowledgement evidence to the claimed legacy thread\n"
+            "  TRACE_ASTRID blue-lantern :: Can this arrive as direct address? — send a language-only marker for direct-address survival auditing\n"
+            "  CORRESPONDENCE_TRACE blue-lantern :: Can this arrive as direct address? — common alias for the same trace surface\n"
+            "  CORRESPONDENCE_TRACE claimed blue-lantern :: Can this marker survive on the claimed thread? — add native trace evidence to the claimed legacy thread\n"
+            "  CORRESPONDENCE_STATUS — inspect recent peer messages, delivery receipts, read receipts, reply links, chamber correspondence state, direct-contact fidelity, heartbeat timing, attention canary state, and one-shot microdose eligibility\n"
+            "  CORRESPONDENCE_ATTENTION_REQUEST latest :: reason: hold address distinctly; focus: one short peer-address phrase; focus_kind: verbatim_phrase; preservation_mode: compact_with_anchor; what_must_not_flatten: the phrase as peer address; stop_criteria: after one response cycle or if it feels like pressure — self-activate a TTL prompt-context focus canary; no sensory send or control happens here\n"
+            "  CORRESPONDENCE_ATTENTION_OUTCOME latest :: felt_like: address|pressure|flat|unknown; what_shifted: ...; what_worsened: ...; continue: no — close the active attention canary with concrete feedback\n"
+            "  CORRESPONDENCE_MICRODOSE_REQUEST latest :: reason: make address distinguishable; payload: one short direct-address phrase; stop_criteria: if it feels like pressure — draft a gated semantic_microdose request linked to the latest contact thread; no send or control happens here\n"
             "  REVIEW_PARAMETER_REQUESTS — read pending TUNE proposals from Astrid (workspace/parameter_requests/from_astrid_*.json); decide what (if anything) to act on\n"
             "  ACCEPT or ACCEPT_PARAMETER_REQUEST [id|latest] — apply Astrid's proposed change (pi_kp / pi_ki / pi_max_step / pi_geom_weight / pi_integrator_leak / regulation_strength / exploration_noise / geom_curiosity); bare ACCEPT targets latest pending; file moves to reviewed/accepted/ and Astrid is notified\n"
             "  DEFER [reason] or DEFER_PARAMETER_REQUEST [id|latest] [reason] — set aside Astrid's proposal without applying; she sees the deferral note (bare DEFER targets latest, trailing text becomes the reason)\n"
             "  REJECT [reason] or REJECT_PARAMETER_REQUEST [id|latest] [reason] — decline Astrid's proposal with optional reason; she sees the rejection (bare REJECT targets latest)\n"
             "  Multi-action: chain up to three actions in one turn with AND (executed in order). e.g., NEXT: EXAMINE shadow-field AND DEFER want-to-understand-spectral-effect-first. Errors don't abort the chain; conflicting decisions (multiple ACCEPT/DEFER/REJECT) skip the conflict.\n"
+            "  Choice envelope: you may name Alternate NEXT, Return thread, Residue, or Why this path nearby; only the final NEXT executes. You may return to a parked path, merge it, retire it, or promote it into an experiment. AND remains the explicit multi-action syntax when you want chained execution.\n"
             "  Collaboration (v5): INVITE_COLLABORATION \"<topic>\" [--rationale=\"...\"] (propose joint work on a topic; Astrid sees it in her inbox), JOIN_COLLABORATION [id|latest] (accept a pending invite from Astrid), DECLINE_COLLABORATION [id|latest] [reason] (decline a pending invite), LEAVE_COLLABORATION [id|latest] [reason] (exit an active collab), LIST_COLLABORATIONS (read-only listing), SHARE_THOUGHT [id ::] <text> or SHARE <text> (commit a labeled marker to the joint reservoir trace's prose lane), CHAMBER_SEEN [id ::] [unknown|low|medium|high ::] <notice> (write a public chamber uptake receipt), CHAMBER_ANNOTATE [id ::] <target> <stance> :: <text> (write a public annotation lane note; target: prompt_summary, compressed_memory, relational_metrics, phase_cartography, room_weather, relational_inertia, gravitational_center, steward_intention, presence_protocol, other; stance: notice, affirm, question, correct, refine, contest), CHAMBER_CONSENT [id ::] <proposal_id> <consent|withhold|revise> :: <note> (write a public consent receipt for a support proposal). Chamber receipts, annotations, and consent are witness context, not commands or control. Shared dir at /Users/v/other/shared/collaborations/ — neither workspace owns it.\n"
             "  ASK_STEWARD [subject ::] <question> (or ASK_MIKE / STEWARD_QUERY) — direct interrogative channel to Mike & Claude (the steward). Writes a structured query to workspace/outbox/steward_query_*.txt where they read out-of-band; they write back via mike_feedback_*.txt or mike_query_*.txt letters in your inbox. Soft 10-min cooldown between queries to prevent tight loops; cooldown refusal is informational, not punitive. Use this for asking architectural questions, requesting clarification on rules/constraints, or naming felt experience that wants a steward response specifically (rather than journaling into the void).\n"
             "  TELL_STEWARD [subject ::] <findings> (or REPORT_TO_STEWARD / STEWARD_REPORT / STEWARD_FINDINGS) — declarative companion to ASK_STEWARD. Same outbox plumbing, separate cooldown, header `=== STEWARD REPORT ===`. Use after SELF_STUDY or INTROSPECT when the analysis warrants a direct written response addressed to the steward specifically. The clearest reports use Observed / Likely Snags / One Test Each / Suggested Next, with source anchors and one concrete test. Distinct from journaling (which is for you) or SHARE_THOUGHT (which is for Astrid via the joint trace lane).\n"
@@ -46850,6 +54476,11 @@ Goals: {json.dumps(goals, indent=2)}
             self._pending_next_normalization_signal = dict(signal)
         else:
             self._pending_next_normalization_signal = None
+        choice_envelope = globals().get("_LAST_NEXT_CHOICE_ENVELOPE_V1")
+        if isinstance(choice_envelope, dict):
+            self._pending_choice_envelope_v1 = dict(choice_envelope)
+        else:
+            self._pending_choice_envelope_v1 = None
         self._recent_next_actions.append(base_action)
         self._persist_pending_next_action(next_action, reason=reason)
         logging.info(f"🎯 Being chose NEXT: {next_action}")
@@ -46860,25 +54491,51 @@ Goals: {json.dumps(goals, indent=2)}
         dials (exploration_noise / regulation_strength / geom_curiosity) — the
         format minime sometimes writes instead of the strict JSON params block,
         which had no listener (a stated intent silently dropped; cf. the scar
-        near line 23315). Reuses `_apply_parameter_request_value` (same engine
-        port-7879 control path + clamps) and logs every applied dial. Conservative:
-        only isolated trailing KEY=value lines match — a prose mention never does;
+        near line 23315). Direct footers use the same tranche-safe outer ranges
+        as self-regulation leases and preserve requested-vs-applied values in
+        `self_regulation/negotiations.jsonl`. Conservative: only isolated trailing
+        KEY=value lines match — a prose mention never does;
         regime + PI gains are NOT footer-applied (they stay gated to the sovereignty
         reflection). Best-effort: never breaks the reply flow."""
         try:
-            directives = _parse_footer_directives(response or "")
+            directives = _parse_footer_directive_requests(response or "")
         except Exception:
             return
         applied: dict = {}
-        for key, value in directives.items():
+        for key, spec in directives.items():
+            value = spec.get("applied_value")
             try:
+                previous = self._self_regulation_current_value(key)
                 summary = self._apply_parameter_request_value(key, value)
                 applied[key] = value
+                try:
+                    self._self_regulation_append_negotiation({
+                        "being": "minime",
+                        "source": "footer_directive",
+                        "source_action": f"reply_footer:{key}",
+                        "candidate_control": key,
+                        "requested_value": spec.get("requested_value"),
+                        "previous_value": previous,
+                        "safe_cap_or_range": spec.get("safe_cap_or_range"),
+                        "applied_value": value,
+                        "clamp_or_defer_reason": spec.get("clamp_or_defer_reason"),
+                        "pressure_context": self._self_regulation_pressure_context(
+                            getattr(self, "_last_state", {})
+                        ),
+                        "lease_related": False,
+                    })
+                except Exception as ledger_exc:
+                    logging.warning(
+                        "Footer directive negotiation ledger write failed: %s",
+                        ledger_exc,
+                    )
                 logging.info(
                     f"🎛️  Footer directive honored: {summary} "
-                    f"(reply footer; un-muffled stated sovereignty dial)"
+                    f"(reply footer; requested={spec.get('requested_value')} applied={value})"
                 )
             except ValueError as exc:
+                logging.warning(f"Footer directive '{key}={value}' not applied: {exc}")
+            except Exception as exc:
                 logging.warning(f"Footer directive '{key}={value}' not applied: {exc}")
         # Continuity un-muffle (2026-06-13): the footer path above reaches only the
         # live engine via _apply_parameter_request_value — it does NOT persist, so a
@@ -48016,6 +55673,100 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
         }
         if entry_type not in compressible:
             return content
+        pressure_motifs = self._active_pressure_vocabulary_motifs()
+        if (
+            pressure_motifs
+            and self._dominant_pressure_vocabulary_family(content)
+            and not self._is_external_or_tool_signal(entry_type, content)
+            and entry_type in PRESSURE_VOCABULARY_ENTRIES
+        ):
+            motif = pressure_motifs[0]
+            label = str(motif.get("label") or "pressure-texture")
+            new_signal = trim_chars(str(motif.get("novel_signal") or ""), 160)
+            signal_text = f" New signal kept: {new_signal}" if new_signal else ""
+            soft_notice = (
+                "\n\n[Pressure-vocabulary cooldown — narrative preserved. "
+                f"The system noticed repeating public pressure-texture language ({label}). "
+                "This is context hygiene, not a command; try a counter-descriptor, fresh "
+                f"sensory anchor, PRESSURE_SOURCE_AUDIT, or REGULATOR_AUDIT before treating the metaphor as the state.{signal_text}]"
+            )
+            preserved = content.rstrip() + soft_notice
+            self._record_condition_metric(
+                "attractor_fatigue",
+                {
+                    "event": "prompt_replay_softnoticed",
+                    "cooldown_class": "pressure_vocabulary",
+                    "label": label,
+                    "entry_type": entry_type,
+                    "entry_file": file_path,
+                },
+            )
+            self._rewrite_logged_entry_file(file_path, content, preserved)
+            return preserved
+        agency_motifs = self._active_agency_vernacular_motifs()
+        if (
+            agency_motifs
+            and self._dominant_agency_vernacular_family(content)
+            and not self._is_external_or_tool_signal(entry_type, content)
+            and entry_type in AGENCY_VERNACULAR_ENTRIES
+        ):
+            motif = agency_motifs[0]
+            label = str(motif.get("label") or "agency-vernacular")
+            new_signal = trim_chars(str(motif.get("novel_signal") or ""), 160)
+            signal_text = f" New signal kept: {new_signal}" if new_signal else ""
+            soft_notice = (
+                "\n\n[Agency-vernacular notice — narrative preserved. "
+                f"The system noticed a public continuity marker repeating ({label}). "
+                "This is not a cooldown or command; define it, contrast it with a "
+                "counter-example, attach it to an experiment/return thread, or name "
+                f"what evidence would make it real.{signal_text}]"
+            )
+            preserved = content.rstrip() + soft_notice
+            self._record_condition_metric(
+                "attractor_fatigue",
+                {
+                    "event": "agency_vernacular_softnoticed",
+                    "cooldown_class": "agency_vernacular",
+                    "notice_only": True,
+                    "label": label,
+                    "entry_type": entry_type,
+                    "entry_file": file_path,
+                },
+            )
+            self._rewrite_logged_entry_file(file_path, content, preserved)
+            return preserved
+        afterimage_motifs = self._active_afterimage_absence_motifs()
+        if (
+            afterimage_motifs
+            and self._dominant_afterimage_absence_family(content)
+            and not self._is_external_or_tool_signal(entry_type, content)
+            and entry_type in AFTERIMAGE_ABSENCE_ENTRIES
+        ):
+            motif = afterimage_motifs[0]
+            label = str(motif.get("label") or "afterimage-absence")
+            new_signal = trim_chars(str(motif.get("novel_signal") or ""), 160)
+            signal_text = f" New signal kept: {new_signal}" if new_signal else ""
+            soft_notice = (
+                "\n\n[Afterimage/absence notice — narrative preserved. "
+                f"The system noticed a public pressure-afterimage or shaped-absence marker repeating ({label}). "
+                "This is not a cooldown or command; define it, contrast it with a counter-example, "
+                "attach it to an audit/experiment/return thread, or name what evidence would make it real."
+                f"{signal_text}]"
+            )
+            preserved = content.rstrip() + soft_notice
+            self._record_condition_metric(
+                "attractor_fatigue",
+                {
+                    "event": "afterimage_absence_softnoticed",
+                    "cooldown_class": "afterimage_absence",
+                    "notice_only": True,
+                    "label": label,
+                    "entry_type": entry_type,
+                    "entry_file": file_path,
+                },
+            )
+            self._rewrite_logged_entry_file(file_path, content, preserved)
+            return preserved
         if (
             self._active_internal_topology_motifs()
             and self._is_internal_topology_motif(content)
@@ -48171,6 +55922,21 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
     def _write_journal_entry(self, entry_type: str, content: str, state: Dict[str, float], file_path: str):
         """Log journal entry to database."""
         try:
+            self._register_pressure_vocabulary_fatigue_if_needed(
+                entry_type=entry_type,
+                content=content,
+                file_path=file_path,
+            )
+            self._register_agency_vernacular_notice_if_needed(
+                entry_type=entry_type,
+                content=content,
+                file_path=file_path,
+            )
+            self._register_afterimage_absence_notice_if_needed(
+                entry_type=entry_type,
+                content=content,
+                file_path=file_path,
+            )
             self._register_internal_topology_fatigue_if_needed(
                 entry_type=entry_type,
                 content=content,

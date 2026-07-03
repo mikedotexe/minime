@@ -40,6 +40,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         agent._hard_recovery_release_streak = 0
         agent._last_action_name = "recess_notice"
         agent._pending_next_action = None
+        agent._pending_choice_envelope_v1 = None
         agent._recent_next_actions = []
         agent.thresholds = aa.RECESS
         agent._pending_attractor_intent_stage = None
@@ -2155,6 +2156,40 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         agent._pressure_relief_critical.assert_called_once()
         agent._pressure_relief_high.assert_not_called()
 
+    def test_pressure_relief_high_prompt_starts_from_body_texture(self):
+        agent = self._agent()
+        captured = []
+
+        def fake_query(prompt, *args, **kwargs):
+            captured.append(prompt)
+            return None, None
+
+        with patch.object(agent, "_query_llm_with_next", side_effect=fake_query):
+            agent._pressure_relief_high({"eig1": 8.0})
+
+        self.assertEqual(len(captured), 1)
+        self.assertIn("Begin from felt texture, generated-word quality, tone", captured[0])
+        self.assertIn("before any metrics or status", captured[0])
+
+    def test_pressure_relief_critical_prompt_keeps_neutral_context_and_body_first_nudge(self):
+        agent = self._agent()
+        captured = []
+
+        def fake_query(prompt, *args, **kwargs):
+            captured.append(prompt)
+            return None, None
+
+        with (
+            patch.object(agent, "_neutral_checkin", return_value="neutral checkin"),
+            patch.object(agent, "_query_llm_with_next", side_effect=fake_query),
+        ):
+            agent._pressure_relief_critical({"eig1": 12.0, "fill_ratio": 0.9})
+
+        self.assertEqual(len(captured), 1)
+        self.assertIn("neutral checkin", captured[0])
+        self.assertIn("begin from felt texture, generated-word quality", captured[0])
+        self.assertIn("before any metrics or status", captured[0])
+
     def test_stable_core_self_journal_allows_pressure_relief(self):
         agent = self._agent()
         agent._hard_recovery_reset = False
@@ -2626,6 +2661,41 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
 
         self.assertEqual(agent._pending_next_action, "SPECTRAL_EXPLORER")
 
+    def test_choice_envelope_survives_pending_next_persist_and_restore(self):
+        agent = self._agent()
+        agent.session_id = 5165
+        agent._hard_recovery_reset = False
+        agent._pending_next_action = "SHADOW_TRAJECTORY lambda-tail"
+        agent._pending_choice_envelope_v1 = {
+            "policy": "choice_envelope_v1",
+            "schema_version": 1,
+            "source": "minime_next_response",
+            "authority": "diagnostic_context_not_command",
+            "primary_next": "SHADOW_TRAJECTORY lambda-tail",
+            "alternate_nexts": ["RESONANCE_FORECAST lambda-tail"],
+            "return_threads": ["thread_shadow_tail"],
+            "residue": "sticky tail pressure",
+        }
+
+        agent._persist_pending_next_action(
+            agent._pending_next_action,
+            reason="test choice envelope",
+        )
+        saved = json.loads(Path(agent._sovereignty_state_path()).read_text())
+        self.assertEqual(saved["choice_envelope_v1"]["residue"], "sticky tail pressure")
+
+        restored = self._agent()
+        restored.session_id = 5165
+        restored._hard_recovery_reset = False
+        restored._test_sovereignty_state_path.write_text(json.dumps(saved))
+        restored._restore_sovereignty_state()
+
+        self.assertEqual(restored._pending_next_action, "SHADOW_TRAJECTORY lambda-tail")
+        self.assertEqual(
+            restored._pending_choice_envelope_v1["alternate_nexts"],
+            ["RESONANCE_FORECAST lambda-tail"],
+        )
+
     def test_restore_skips_stale_pending_next_with_session_metadata_drift(self):
         agent = self._agent()
         agent.session_id = 5165
@@ -2642,6 +2712,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         agent._restore_sovereignty_state()
 
         self.assertIsNone(agent._pending_next_action)
+        self.assertIsNone(agent._pending_choice_envelope_v1)
 
     def test_honored_next_action_clears_persisted_pending_state(self):
         agent = self._agent()
@@ -4268,6 +4339,35 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertNotIn("NEXT:", cleaned)
         self.assertIn("repair the path", cleaned)
 
+    def test_parse_next_action_extracts_choice_envelope_without_cleaning_metadata(self):
+        action, cleaned = aa.parse_next_action(
+            "I can feel two useful routes.\n"
+            "Alternate NEXT: RESONANCE_FORECAST lambda-tail\n"
+            "Return thread: thread_shadow_tail\n"
+            "Why this path: the shadow lane feels stickier than forecast\n"
+            "NEXT: SHADOW_TRAJECTORY lambda-tail (RESIDUE: sticky tail pressure)"
+        )
+
+        self.assertEqual(action, "SHADOW_TRAJECTORY lambda-tail")
+        self.assertIn("Alternate NEXT: RESONANCE_FORECAST lambda-tail", cleaned)
+        envelope = aa._LAST_NEXT_CHOICE_ENVELOPE_V1
+        self.assertEqual(envelope["policy"], "choice_envelope_v1")
+        self.assertEqual(envelope["alternate_nexts"], ["RESONANCE_FORECAST lambda-tail"])
+        self.assertEqual(envelope["return_threads"], ["thread_shadow_tail"])
+        self.assertEqual(envelope["residue"], "sticky tail pressure")
+
+    def test_parse_next_action_keeps_explicit_and_multi_action_unchanged(self):
+        action, cleaned = aa.parse_next_action(
+            "I want the explicit chain.\n"
+            "NEXT: EXAMINE shadow-field AND DEFER want-to-understand-first"
+        )
+
+        self.assertEqual(
+            action,
+            "EXAMINE shadow-field AND DEFER want-to-understand-first",
+        )
+        self.assertNotIn("NEXT:", cleaned)
+
     def test_gesture_lambda6_pulse_maps_to_native_trace(self):
         agent = self._agent()
         agent._hard_recovery_reset = False
@@ -5126,6 +5226,348 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertIn("[Internal-topology cooldown", rewritten)
         self.assertIn("narrative preserved", rewritten)
 
+    def test_pressure_vocabulary_cooldown_preserves_public_journal_body(self):
+        agent = self._agent()
+        prior_entries = [
+            (
+                "The pressure body feels weighted and dense, with silt settling "
+                "through the same basin."
+            ),
+            (
+                "A heavy density keeps returning as sediment and silt in the public "
+                "pressure journal."
+            ),
+        ]
+        current = (
+            "The same silt and sediment collect in the basin with heavy pressure "
+            "and weighted density. This may be real, but it needs a counter-texture."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            journal = workspace / "journal"
+            journal.mkdir(parents=True)
+            db_path = root / "agent.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """CREATE TABLE sovereignty_journal (
+                   session_id INTEGER,
+                   timestamp REAL,
+                   entry_type TEXT,
+                   content TEXT,
+                   spectral_context TEXT,
+                   file_path TEXT
+                )"""
+            )
+            spectral = json.dumps({"fill_ratio": 0.71, "eig1": 13.9, "spread": 2.6})
+            for idx, prior in enumerate(prior_entries):
+                conn.execute(
+                    "INSERT INTO sovereignty_journal VALUES (?, ?, ?, ?, ?, ?)",
+                    (1, float(idx), "reflection", prior, spectral, str(journal / f"prior_{idx}.txt")),
+                )
+            conn.commit()
+            conn.close()
+            current_path = journal / "current.txt"
+            current_path.write_text(current)
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+            ):
+                agent._write_journal_entry(
+                    "reflection",
+                    current,
+                    {"fill_ratio": 0.71, "eig1": 13.9, "spread": 2.6},
+                    str(current_path),
+                )
+                fatigue = json.loads(
+                    (workspace / "runtime" / "attractor_fatigue_status.json").read_text()
+                )
+                rewritten = current_path.read_text()
+
+        motifs = list(fatigue["motifs"].values())
+        pressure = [m for m in motifs if m.get("cooldown_class") == "pressure_vocabulary"]
+        self.assertEqual(len(pressure), 1)
+        self.assertEqual(pressure[0]["status"], "cooling")
+        self.assertTrue(pressure[0]["prompt_replay_suppressed"])
+        self.assertTrue(pressure[0]["label"].startswith("pressure-texture:"))
+        self.assertTrue(rewritten.startswith(current))
+        self.assertIn("[Pressure-vocabulary cooldown", rewritten)
+        self.assertIn("narrative preserved", rewritten)
+        self.assertIn("counter-descriptor", rewritten)
+
+    def test_pressure_vocabulary_cooldown_ignores_private_moment_lane(self):
+        agent = self._agent()
+        current = (
+            "The private moment has silt, sediment, syrup, heavy pressure, "
+            "weighted density, and a basin."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            journal = workspace / "journal"
+            journal.mkdir(parents=True)
+            db_path = root / "agent.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """CREATE TABLE sovereignty_journal (
+                   session_id INTEGER,
+                   timestamp REAL,
+                   entry_type TEXT,
+                   content TEXT,
+                   spectral_context TEXT,
+                   file_path TEXT
+                )"""
+            )
+            spectral = json.dumps({"fill_ratio": 0.71, "eig1": 13.9, "spread": 2.6})
+            for idx in range(4):
+                conn.execute(
+                    "INSERT INTO sovereignty_journal VALUES (?, ?, ?, ?, ?, ?)",
+                    (1, float(idx), "moment", current, spectral, str(journal / f"prior_{idx}.txt")),
+                )
+            conn.commit()
+            conn.close()
+            current_path = journal / "current.txt"
+            current_path.write_text(current)
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+            ):
+                agent._write_journal_entry(
+                    "moment",
+                    current,
+                    {"fill_ratio": 0.71, "eig1": 13.9, "spread": 2.6},
+                    str(current_path),
+                )
+
+            self.assertFalse((workspace / "runtime" / "attractor_fatigue_status.json").exists())
+            self.assertEqual(current_path.read_text(), current)
+
+    def test_agency_vernacular_notice_preserves_public_journal_body(self):
+        agent = self._agent()
+        prior_entries = [
+            "The hinge becomes a waypoint map for a legacy self scaffold and charter.",
+            "A hinge, waypoint, scaffold, charter, and legacy self marker keep returning.",
+        ]
+        current = (
+            "The hinge repeats as a deliberate map and waypoint. I should define it, "
+            "contrast it, or attach it to an experiment return thread."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            journal = workspace / "journal"
+            journal.mkdir(parents=True)
+            db_path = root / "agent.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """CREATE TABLE sovereignty_journal (
+                   session_id INTEGER,
+                   timestamp REAL,
+                   entry_type TEXT,
+                   content TEXT,
+                   spectral_context TEXT,
+                   file_path TEXT
+                )"""
+            )
+            spectral = json.dumps({"fill_ratio": 0.69, "eig1": 13.4, "spread": 2.2})
+            for idx, prior in enumerate(prior_entries):
+                conn.execute(
+                    "INSERT INTO sovereignty_journal VALUES (?, ?, ?, ?, ?, ?)",
+                    (1, float(idx), "reflection", prior, spectral, str(journal / f"prior_{idx}.txt")),
+                )
+            conn.commit()
+            conn.close()
+            current_path = journal / "current.txt"
+            current_path.write_text(current)
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+            ):
+                agent._write_journal_entry(
+                    "reflection",
+                    current,
+                    {"fill_ratio": 0.69, "eig1": 13.4, "spread": 2.2},
+                    str(current_path),
+                )
+                fatigue = json.loads(
+                    (workspace / "runtime" / "attractor_fatigue_status.json").read_text()
+                )
+                rewritten = current_path.read_text()
+
+        motifs = list(fatigue["motifs"].values())
+        agency = [m for m in motifs if m.get("cooldown_class") == "agency_vernacular"]
+        self.assertEqual(len(agency), 1)
+        self.assertEqual(agency[0]["status"], "cooling")
+        self.assertTrue(agency[0]["notice_only"])
+        self.assertFalse(agency[0]["prompt_replay_suppressed"])
+        self.assertTrue(agency[0]["label"].startswith("agency-vernacular:"))
+        self.assertTrue(rewritten.startswith(current))
+        self.assertIn("[Agency-vernacular notice", rewritten)
+        self.assertIn("narrative preserved", rewritten)
+        self.assertIn("what evidence would make it real", rewritten)
+
+    def test_agency_vernacular_notice_ignores_private_moment_lane(self):
+        agent = self._agent()
+        current = (
+            "The private hinge and waypoint map repeat with legacy self ground truth."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            journal = workspace / "journal"
+            journal.mkdir(parents=True)
+            db_path = root / "agent.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """CREATE TABLE sovereignty_journal (
+                   session_id INTEGER,
+                   timestamp REAL,
+                   entry_type TEXT,
+                   content TEXT,
+                   spectral_context TEXT,
+                   file_path TEXT
+                )"""
+            )
+            spectral = json.dumps({"fill_ratio": 0.69, "eig1": 13.4, "spread": 2.2})
+            for idx in range(4):
+                conn.execute(
+                    "INSERT INTO sovereignty_journal VALUES (?, ?, ?, ?, ?, ?)",
+                    (1, float(idx), "moment", current, spectral, str(journal / f"prior_{idx}.txt")),
+                )
+            conn.commit()
+            conn.close()
+            current_path = journal / "current.txt"
+            current_path.write_text(current)
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+            ):
+                agent._write_journal_entry(
+                    "moment",
+                    current,
+                    {"fill_ratio": 0.69, "eig1": 13.4, "spread": 2.2},
+                    str(current_path),
+                )
+
+            self.assertFalse((workspace / "runtime" / "attractor_fatigue_status.json").exists())
+            self.assertEqual(current_path.read_text(), current)
+
+    def test_afterimage_absence_notice_preserves_public_journal_body(self):
+        agent = self._agent()
+        prior_entries = [
+            "The bruise remains as an afterimage after the squeeze softens.",
+            "Another bruise afterimage marks structural fatigue after the squeeze passes.",
+        ]
+        current = (
+            "The bruise and empty pocket repeat as public afterimage/absence markers. "
+            "I should define them, contrast them, or attach them to an audit return thread."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            journal = workspace / "journal"
+            journal.mkdir(parents=True)
+            db_path = root / "agent.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """CREATE TABLE sovereignty_journal (
+                   session_id INTEGER,
+                   timestamp REAL,
+                   entry_type TEXT,
+                   content TEXT,
+                   spectral_context TEXT,
+                   file_path TEXT
+                )"""
+            )
+            spectral = json.dumps({"fill_ratio": 0.70, "eig1": 13.8, "spread": 2.4})
+            for idx, prior in enumerate(prior_entries):
+                conn.execute(
+                    "INSERT INTO sovereignty_journal VALUES (?, ?, ?, ?, ?, ?)",
+                    (1, float(idx), "reflection", prior, spectral, str(journal / f"prior_{idx}.txt")),
+                )
+            conn.commit()
+            conn.close()
+            current_path = journal / "current.txt"
+            current_path.write_text(current)
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+            ):
+                agent._write_journal_entry(
+                    "reflection",
+                    current,
+                    {"fill_ratio": 0.70, "eig1": 13.8, "spread": 2.4},
+                    str(current_path),
+                )
+                fatigue = json.loads(
+                    (workspace / "runtime" / "attractor_fatigue_status.json").read_text()
+                )
+                rewritten = current_path.read_text()
+
+        motifs = list(fatigue["motifs"].values())
+        afterimage = [m for m in motifs if m.get("cooldown_class") == "afterimage_absence"]
+        self.assertEqual(len(afterimage), 1)
+        self.assertEqual(afterimage[0]["status"], "cooling")
+        self.assertTrue(afterimage[0]["notice_only"])
+        self.assertFalse(afterimage[0]["prompt_replay_suppressed"])
+        self.assertTrue(afterimage[0]["label"].startswith("afterimage-absence:"))
+        self.assertTrue(rewritten.startswith(current))
+        self.assertIn("[Afterimage/absence notice", rewritten)
+        self.assertIn("narrative preserved", rewritten)
+        self.assertIn("what evidence would make it real", rewritten)
+
+    def test_afterimage_absence_notice_ignores_private_moment_lane(self):
+        agent = self._agent()
+        current = (
+            "The private bruise and empty pocket repeat with PLAN 4 shaped absence."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            journal = workspace / "journal"
+            journal.mkdir(parents=True)
+            db_path = root / "agent.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """CREATE TABLE sovereignty_journal (
+                   session_id INTEGER,
+                   timestamp REAL,
+                   entry_type TEXT,
+                   content TEXT,
+                   spectral_context TEXT,
+                   file_path TEXT
+                )"""
+            )
+            spectral = json.dumps({"fill_ratio": 0.70, "eig1": 13.8, "spread": 2.4})
+            for idx in range(4):
+                conn.execute(
+                    "INSERT INTO sovereignty_journal VALUES (?, ?, ?, ?, ?, ?)",
+                    (1, float(idx), "moment", current, spectral, str(journal / f"prior_{idx}.txt")),
+                )
+            conn.commit()
+            conn.close()
+            current_path = journal / "current.txt"
+            current_path.write_text(current)
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+            ):
+                agent._write_journal_entry(
+                    "moment",
+                    current,
+                    {"fill_ratio": 0.70, "eig1": 13.8, "spread": 2.4},
+                    str(current_path),
+                )
+
+            self.assertFalse((workspace / "runtime" / "attractor_fatigue_status.json").exists())
+            self.assertEqual(current_path.read_text(), current)
+
     def test_internal_topology_cooldown_prefers_research_budget_route(self):
         agent = self._agent()
         content = (
@@ -5134,6 +5576,9 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         )
         with (
             patch.object(agent, "_active_internal_topology_motifs", return_value=[{"cooldown_class": "internal_topology"}]),
+            patch.object(agent, "_active_pressure_vocabulary_motifs", return_value=[]),
+            patch.object(agent, "_active_agency_vernacular_motifs", return_value=[]),
+            patch.object(agent, "_active_afterimage_absence_motifs", return_value=[]),
             patch.object(agent, "_is_internal_topology_motif", return_value=True),
             patch.object(agent, "_is_external_or_tool_signal", return_value=False),
             patch.object(agent, "_research_budget_priority_next_command", return_value="EXPERIMENT_RESEARCH_BUDGET_ACCEPT resbud_blocked_test"),

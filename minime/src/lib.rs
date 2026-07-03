@@ -16,8 +16,10 @@ pub mod ising_shadow;
 pub mod memory_bank;
 // pub mod net;  // no net.rs file
 pub mod nn;
+pub mod pressure_texture;
 pub mod prime;
 pub mod regulator;
+pub mod regulator_cartography;
 pub mod rescue_overfill;
 pub mod rescue_scaffold;
 pub mod sensory_bus;

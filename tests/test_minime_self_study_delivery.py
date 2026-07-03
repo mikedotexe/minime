@@ -72,6 +72,10 @@ class MinimeSelfStudyDeliveryTests(unittest.TestCase):
                 agent._query_llm_with_next.call_args.kwargs["context_mode"],
                 "strict_review",
             )
+            prompt = agent._query_llm_with_next.call_args.args[0]
+            self.assertIn("generated body of the reflection", prompt)
+            self.assertIn("generated-word quality", prompt)
+            self.assertIn("wrapper/status details as evidence", prompt)
             files = list((workspace / "journal").glob("self_study_*.txt"))
             self.assertEqual(len(files), 1)
             written = files[0].read_text(encoding="utf-8")

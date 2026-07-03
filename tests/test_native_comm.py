@@ -938,6 +938,35 @@ def test_quiet_fissure_trace_does_not_suggest_immediate_repeat(monkeypatch, tmp_
     assert "Use FISSURE_TRACE/NOTICE_AMBIGUITY now" not in payload["safe_suggested_next"]
 
 
+def test_shared_sight_notice_ambiguity_gets_boundary_target(monkeypatch, tmp_path):
+    workspace = _redirect_paths(monkeypatch, tmp_path)
+    _healthy_workspace(workspace)
+    payload = native_comm.build_fissure_trace(
+        snapshot={
+            "eigenvalues": [4.0, 2.0, 1.4, 1.1],
+            "lambda_profile": {
+                "ratios": {
+                    "lambda1_share": 0.44,
+                    "shoulder_share": 0.22,
+                    "tail_share": 0.18,
+                },
+                "pom": {"topology_index": 0.38},
+            },
+            "lambda_edge": {"entropy": 0.62, "selected_noise_score": 0.18},
+            "spectral_drift": {"spectral_drift_index": 0.22},
+            "semantic": {"energy": 0.0},
+        },
+        label="shared-sight",
+        write_latest=False,
+    )
+
+    regions = [target["region"] for target in payload["fissure_targets"]]
+    assert "shared_sight_boundary" in regions
+    block = native_comm.format_fissure_trace_block(payload)
+    assert "shared_sight_boundary" in block
+    assert "NOTICE_AMBIGUITY shared-sight" in block
+
+
 def test_space_hold_records_protected_non_control_exploration(monkeypatch, tmp_path):
     workspace = _redirect_paths(monkeypatch, tmp_path)
     _healthy_workspace(workspace)

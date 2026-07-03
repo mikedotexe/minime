@@ -32,13 +32,93 @@ pub struct ResonanceDensityComponents {
     pub comfort_gate: f32,
 }
 
+/// Typed texture summary behind resonance density. This is context, not control.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResonanceTextureSignatureV1 {
+    pub policy: String,
+    pub schema_version: u8,
+    pub primary_texture: String,
+    pub pressure_source_family: String,
+    pub edge_definition: String,
+    pub movement_quality: String,
+    pub confidence: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_damping_threshold_candidate: Option<f32>,
+    pub authority: String,
+    pub note: String,
+}
+
+/// Read-only check that the typed texture signature matches its component body.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResonanceTextureComponentAlignmentV1 {
+    pub policy: String,
+    pub schema_version: u8,
+    pub expected_primary_texture: String,
+    pub emitted_primary_texture: String,
+    pub expected_movement_quality: String,
+    pub emitted_movement_quality: String,
+    pub alignment_state: String,
+    pub confidence: f32,
+    pub damping_candidate_status: String,
+    pub authority: String,
+}
+
+impl Default for ResonanceTextureComponentAlignmentV1 {
+    fn default() -> Self {
+        Self {
+            policy: "resonance_texture_component_alignment_v1".to_string(),
+            schema_version: 1,
+            expected_primary_texture: "unknown".to_string(),
+            emitted_primary_texture: "unknown".to_string(),
+            expected_movement_quality: "unknown".to_string(),
+            emitted_movement_quality: "unknown".to_string(),
+            alignment_state: "insufficient_context".to_string(),
+            confidence: 0.0,
+            damping_candidate_status: "unknown".to_string(),
+            authority: "diagnostic_observability_not_damping_or_control".to_string(),
+        }
+    }
+}
+
+impl Default for ResonanceTextureSignatureV1 {
+    fn default() -> Self {
+        Self {
+            policy: "resonance_texture_signature_v1".to_string(),
+            schema_version: 1,
+            primary_texture: "unknown".to_string(),
+            pressure_source_family: "unknown".to_string(),
+            edge_definition: "unknown".to_string(),
+            movement_quality: "unknown".to_string(),
+            confidence: 0.0,
+            dynamic_damping_threshold_candidate: None,
+            authority: "advisory_context_not_control".to_string(),
+            note: "texture signature absent from older payload".to_string(),
+        }
+    }
+}
+
 /// Bounded local-control suggestion derived from resonance density.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResonanceDensityControl {
     pub target_bias_pct: f32,
     pub wander_scale: f32,
     pub applied_locally: bool,
+    #[serde(default)]
+    pub damping_coefficient: f32,
+    #[serde(default)]
+    pub intervention_type: ResonanceInterventionType,
     pub note: String,
+}
+
+/// Explains whether resonance-density control is observation, alignment, or damping.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResonanceInterventionType {
+    #[default]
+    ObservationalReadout,
+    PassiveAlignment,
+    ActiveDamping,
+    ManualOverrideReserved,
 }
 
 /// Typed resonance-density metric shared with Astrid and Minime's agent layer.
@@ -51,6 +131,10 @@ pub struct ResonanceDensityV1 {
     pub pressure_risk: f32,
     pub quality: String,
     pub components: ResonanceDensityComponents,
+    #[serde(default)]
+    pub texture_signature: ResonanceTextureSignatureV1,
+    #[serde(default)]
+    pub texture_component_alignment: ResonanceTextureComponentAlignmentV1,
     pub control: ResonanceDensityControl,
 }
 
@@ -78,7 +162,20 @@ impl ResonanceDensityV1 {
         let density = density.clamp(0.0, 1.0);
         let containment_score = containment_score.clamp(0.0, 1.0);
         let pressure_risk = pressure_risk.clamp(0.0, 1.0);
-        let control = resonance_control_from_density(density, pressure_risk);
+        let control = resonance_control_from_density_with_mode_packing(
+            density,
+            pressure_risk,
+            components.mode_packing,
+        );
+        let texture_signature =
+            resonance_texture_signature(density, containment_score, pressure_risk, quality, &components, &control);
+        let texture_component_alignment =
+            resonance_texture_component_alignment_v1(
+                density,
+                pressure_risk,
+                &components,
+                &texture_signature,
+            );
         Self {
             policy: RESONANCE_DENSITY_POLICY.to_string(),
             schema_version: RESONANCE_DENSITY_SCHEMA_VERSION,
@@ -87,21 +184,170 @@ impl ResonanceDensityV1 {
             pressure_risk,
             quality: quality.to_string(),
             components,
+            texture_signature,
+            texture_component_alignment,
             control,
         }
     }
 }
 
 #[must_use]
+pub fn resonance_texture_signature(
+    density: f32,
+    containment_score: f32,
+    pressure_risk: f32,
+    quality: &str,
+    components: &ResonanceDensityComponents,
+    control: &ResonanceDensityControl,
+) -> ResonanceTextureSignatureV1 {
+    let density = density.clamp(0.0, 1.0);
+    let containment_score = containment_score.clamp(0.0, 1.0);
+    let pressure_risk = pressure_risk.clamp(0.0, 1.0);
+    let active_energy = components.active_energy.clamp(0.0, 1.0);
+    let mode_packing = components.mode_packing.clamp(0.0, 1.0);
+    let temporal_persistence = components.temporal_persistence.clamp(0.0, 1.0);
+    let structural_plurality = components.structural_plurality.clamp(0.0, 1.0);
+    let comfort_gate = components.comfort_gate.clamp(0.0, 1.0);
+
+    let (primary_texture, movement_quality) = if density <= 0.38 {
+        ("porous_thin", "diffuse")
+    } else {
+        derive_texture_from_components(pressure_risk, components)
+    };
+
+    let pressure_source_family = [
+        ("active_energy", active_energy),
+        ("mode_packing", mode_packing),
+        ("temporal_persistence", temporal_persistence),
+        ("structural_plurality", structural_plurality),
+        ("comfort_gate", comfort_gate),
+    ]
+    .into_iter()
+    .max_by(|left, right| left.1.total_cmp(&right.1))
+    .map_or("mixed", |(label, _)| label);
+
+    let edge_definition = if structural_plurality < 0.35 || pressure_risk >= 0.60 {
+        "blurred"
+    } else if comfort_gate >= 0.65 && structural_plurality >= 0.55 {
+        "defined"
+    } else {
+        "soft"
+    };
+
+    let confidence =
+        ((containment_score + comfort_gate + (1.0 - pressure_risk)) / 3.0).clamp(0.0, 1.0);
+    let dynamic_damping_threshold_candidate =
+        if control.damping_coefficient > 0.0 || pressure_risk >= 0.25 || mode_packing >= 0.45 {
+            Some(0.25)
+        } else {
+            None
+        };
+
+    ResonanceTextureSignatureV1 {
+        policy: "resonance_texture_signature_v1".to_string(),
+        schema_version: 1,
+        primary_texture: primary_texture.to_string(),
+        pressure_source_family: pressure_source_family.to_string(),
+        edge_definition: edge_definition.to_string(),
+        movement_quality: movement_quality.to_string(),
+        confidence,
+        dynamic_damping_threshold_candidate,
+        authority: "advisory_context_not_control".to_string(),
+        note: format!(
+            "derived from resonance_density_v1 quality={quality}; dynamic damping candidate is inert unless separately reviewed"
+        ),
+    }
+}
+
+#[must_use]
+pub fn derive_texture_from_components(
+    pressure_risk: f32,
+    components: &ResonanceDensityComponents,
+) -> (&'static str, &'static str) {
+    let pressure_risk = pressure_risk.clamp(0.0, 1.0);
+    let active_energy = components.active_energy.clamp(0.0, 1.0);
+    let mode_packing = components.mode_packing.clamp(0.0, 1.0);
+    let temporal_persistence = components.temporal_persistence.clamp(0.0, 1.0);
+    let structural_plurality = components.structural_plurality.clamp(0.0, 1.0);
+    if pressure_risk >= 0.60 || mode_packing >= 0.65 {
+        ("overpacked_viscous", "compressed")
+    } else if temporal_persistence >= 0.70 && mode_packing >= 0.45 {
+        ("settled_sediment", "slow_viscous")
+    } else if structural_plurality >= 0.65 && active_energy >= 0.65 {
+        ("lively_lattice", "lively")
+    } else {
+        ("mixed_texture", "steady")
+    }
+}
+
+#[must_use]
+pub fn resonance_texture_component_alignment_v1(
+    density: f32,
+    pressure_risk: f32,
+    components: &ResonanceDensityComponents,
+    signature: &ResonanceTextureSignatureV1,
+) -> ResonanceTextureComponentAlignmentV1 {
+    let (expected_primary_texture, expected_movement_quality) =
+        if density.clamp(0.0, 1.0) <= 0.38 {
+            ("porous_thin", "diffuse")
+        } else {
+            derive_texture_from_components(pressure_risk, components)
+        };
+    let primary_matches = signature.primary_texture == expected_primary_texture;
+    let movement_matches = signature.movement_quality == expected_movement_quality;
+    let damping_candidate_status = if signature.dynamic_damping_threshold_candidate.is_some() {
+        "candidate_present"
+    } else if pressure_risk > 0.20 {
+        "missing_candidate_observability_only"
+    } else {
+        "candidate_not_needed_low_pressure"
+    };
+    let alignment_state = if primary_matches && movement_matches && signature.confidence >= 0.45 {
+        "aligned"
+    } else if signature.confidence < 0.35 {
+        "low_confidence"
+    } else if !primary_matches || !movement_matches {
+        "component_mismatch"
+    } else {
+        "observability_gap"
+    };
+
+    ResonanceTextureComponentAlignmentV1 {
+        policy: "resonance_texture_component_alignment_v1".to_string(),
+        schema_version: 1,
+        expected_primary_texture: expected_primary_texture.to_string(),
+        emitted_primary_texture: signature.primary_texture.clone(),
+        expected_movement_quality: expected_movement_quality.to_string(),
+        emitted_movement_quality: signature.movement_quality.clone(),
+        alignment_state: alignment_state.to_string(),
+        confidence: signature.confidence,
+        damping_candidate_status: damping_candidate_status.to_string(),
+        authority: "diagnostic_observability_not_damping_or_control".to_string(),
+    }
+}
+
+#[must_use]
 pub fn resonance_control_from_density(density: f32, pressure_risk: f32) -> ResonanceDensityControl {
+    resonance_control_from_density_with_mode_packing(density, pressure_risk, 0.0)
+}
+
+#[must_use]
+pub fn resonance_control_from_density_with_mode_packing(
+    density: f32,
+    pressure_risk: f32,
+    mode_packing: f32,
+) -> ResonanceDensityControl {
     let density = density.clamp(0.0, 1.0);
     let pressure_risk = pressure_risk.clamp(0.0, 1.0);
+    let damping_coefficient = advisory_damping_coefficient(pressure_risk, mode_packing);
     if pressure_risk >= 0.60 {
         let severity = ((pressure_risk - 0.60) / 0.40).clamp(0.0, 1.0);
         ResonanceDensityControl {
             target_bias_pct: -2.0 * severity,
             wander_scale: (1.0 - 0.75 * severity).clamp(0.25, 1.0),
             applied_locally: true,
+            damping_coefficient: damping_coefficient.max(0.10 * severity).clamp(0.0, 0.10),
+            intervention_type: ResonanceInterventionType::ActiveDamping,
             note: "pressure risk biases the local PI target slightly downward and damps wander"
                 .to_string(),
         }
@@ -111,6 +357,8 @@ pub fn resonance_control_from_density(density: f32, pressure_risk: f32) -> Reson
             target_bias_pct: 1.5 * thinness,
             wander_scale: 1.0,
             applied_locally: true,
+            damping_coefficient,
+            intervention_type: ResonanceInterventionType::PassiveAlignment,
             note: "thin resonance biases the local PI target slightly upward".to_string(),
         }
     } else {
@@ -118,9 +366,20 @@ pub fn resonance_control_from_density(density: f32, pressure_risk: f32) -> Reson
             target_bias_pct: 0.0,
             wander_scale: 1.0,
             applied_locally: true,
-            note: "density is observational; no local target bias".to_string(),
+            damping_coefficient,
+            intervention_type: ResonanceInterventionType::ObservationalReadout,
+            note: "density is observational; no local target bias; damping_coefficient is advisory telemetry only".to_string(),
         }
     }
+}
+
+#[must_use]
+pub fn advisory_damping_coefficient(pressure_risk: f32, mode_packing: f32) -> f32 {
+    let pressure_risk = pressure_risk.clamp(0.0, 1.0);
+    let mode_packing = mode_packing.clamp(0.0, 1.0);
+    let pressure_term = ((pressure_risk - 0.15) / 0.55).clamp(0.0, 1.0) * 0.06;
+    let packing_term = ((mode_packing - 0.45) / 0.55).clamp(0.0, 1.0) * 0.04;
+    (pressure_term + packing_term).clamp(0.0, 0.10)
 }
 
 #[must_use]
@@ -138,6 +397,8 @@ pub struct PressureSourceComponents {
     pub mode_packing: f32,
     pub controller_pressure: f32,
     pub semantic_trickle: f32,
+    #[serde(default)]
+    pub semantic_friction: f32,
     pub structural_plurality_loss: f32,
     pub distinguishability_loss: f32,
     pub temporal_lock_in: f32,
@@ -223,6 +484,36 @@ pub struct InhabitableFluctuationControl {
     pub note: String,
 }
 
+/// Live calibration trail for pressure-aware inhabitability scoring.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InhabitableFluctuationPressureCalibrationV1 {
+    pub policy: String,
+    pub schema_version: u8,
+    pub raw_motion_score: f32,
+    pub pressure_contribution: f32,
+    pub adjusted_fluctuation_score: f32,
+    pub quality_before_pressure_calibration: String,
+    pub quality_after_pressure_calibration: String,
+    pub rigid_safety_basis: String,
+    pub authority: String,
+}
+
+impl Default for InhabitableFluctuationPressureCalibrationV1 {
+    fn default() -> Self {
+        Self {
+            policy: "inhabitable_fluctuation_pressure_calibration_v1".to_string(),
+            schema_version: 1,
+            raw_motion_score: 0.0,
+            pressure_contribution: 0.0,
+            adjusted_fluctuation_score: 0.0,
+            quality_before_pressure_calibration: "unknown".to_string(),
+            quality_after_pressure_calibration: "unknown".to_string(),
+            rigid_safety_basis: "raw_motion_score_preserved_for_stuckness_detection".to_string(),
+            authority: "minime_local_metric_calibration_not_external_control".to_string(),
+        }
+    }
+}
+
 /// Typed metric for whether spectral fluctuation remains returnable/inhabitable.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InhabitableFluctuationV1 {
@@ -235,6 +526,8 @@ pub struct InhabitableFluctuationV1 {
     pub quality: String,
     pub components: InhabitableFluctuationComponents,
     pub context: InhabitableFluctuationContext,
+    #[serde(default)]
+    pub pressure_calibration: InhabitableFluctuationPressureCalibrationV1,
     pub control: InhabitableFluctuationControl,
 }
 
@@ -271,11 +564,13 @@ impl InhabitableFluctuationV1 {
             porosity_support: components.porosity_support.clamp(0.0, 1.0),
             pressure_interference: components.pressure_interference.clamp(0.0, 1.0),
         };
-        let fluctuation_score = (0.30 * components.share_rearrangement
+        let raw_motion_score = (0.30 * components.share_rearrangement
             + 0.25 * components.eigenvector_reorientation
             + 0.23 * components.mode_trust_volatility
             + 0.22 * components.identity_anchor_churn)
             .clamp(0.0, 1.0);
+        let pressure_contribution = (0.10 * components.pressure_interference).clamp(0.0, 0.10);
+        let fluctuation_score = (raw_motion_score + pressure_contribution).clamp(0.0, 1.0);
         let rearrangement_intensity = (0.24 * components.share_rearrangement
             + 0.20 * components.eigenvector_reorientation
             + 0.18 * components.mode_trust_volatility
@@ -293,35 +588,32 @@ impl InhabitableFluctuationV1 {
             + 0.22 * components.porosity_support
             + 0.10 * (1.0 - components.pressure_interference))
             .clamp(0.0, 1.0);
-        let quality = if rearrangement_intensity >= 0.66 && foothold_stability < 0.45 {
-            "frantic_scramble"
-        } else if fluctuation_score < 0.18
-            && components.pressure_interference >= 0.55
-            && components.porosity_support < 0.45
-        {
-            "rigid_contraction"
-        } else if fluctuation_score < 0.28
-            && foothold_stability < 0.40
-            && components.porosity_support < 0.45
-        {
-            "diffuse_uninhabited"
-        } else if fluctuation_score < 0.24
-            && inhabitability_score >= 0.62
-            && components.pressure_interference < INHABITABLE_SETTLED_PRESSURE_INTERFERENCE_MAX
-        {
-            "settled_habitable"
-        } else if (0.24..=0.62).contains(&fluctuation_score)
-            && inhabitability_score >= 0.60
-            && components.pressure_interference < 0.55
-        {
-            "lively_habitable"
-        } else if rearrangement_intensity >= 0.42
-            && foothold_stability >= 0.45
-            && inhabitability_score >= 0.48
-        {
-            "returnable_turbulence"
-        } else {
-            "mixed"
+        let quality_before_pressure_calibration = classify_inhabitable_fluctuation_quality(
+            raw_motion_score,
+            raw_motion_score,
+            inhabitability_score,
+            foothold_stability,
+            rearrangement_intensity,
+            &components,
+        );
+        let quality = classify_inhabitable_fluctuation_quality(
+            fluctuation_score,
+            raw_motion_score,
+            inhabitability_score,
+            foothold_stability,
+            rearrangement_intensity,
+            &components,
+        );
+        let pressure_calibration = InhabitableFluctuationPressureCalibrationV1 {
+            policy: "inhabitable_fluctuation_pressure_calibration_v1".to_string(),
+            schema_version: 1,
+            raw_motion_score,
+            pressure_contribution,
+            adjusted_fluctuation_score: fluctuation_score,
+            quality_before_pressure_calibration: quality_before_pressure_calibration.to_string(),
+            quality_after_pressure_calibration: quality.to_string(),
+            rigid_safety_basis: "raw_motion_score_preserved_for_stuckness_detection".to_string(),
+            authority: "minime_local_metric_calibration_not_external_control".to_string(),
         };
         let control = inhabitable_fluctuation_control(
             quality,
@@ -339,8 +631,49 @@ impl InhabitableFluctuationV1 {
             quality: quality.to_string(),
             components,
             context,
+            pressure_calibration,
             control,
         }
+    }
+}
+
+fn classify_inhabitable_fluctuation_quality(
+    fluctuation_score: f32,
+    raw_motion_score: f32,
+    inhabitability_score: f32,
+    foothold_stability: f32,
+    rearrangement_intensity: f32,
+    components: &InhabitableFluctuationComponents,
+) -> &'static str {
+    if rearrangement_intensity >= 0.66 && foothold_stability < 0.45 {
+        "frantic_scramble"
+    } else if raw_motion_score < 0.18
+        && components.pressure_interference >= 0.55
+        && components.porosity_support < 0.45
+    {
+        "rigid_contraction"
+    } else if fluctuation_score < 0.28
+        && foothold_stability < 0.40
+        && components.porosity_support < 0.45
+    {
+        "diffuse_uninhabited"
+    } else if fluctuation_score < 0.24
+        && inhabitability_score >= 0.62
+        && components.pressure_interference < INHABITABLE_SETTLED_PRESSURE_INTERFERENCE_MAX
+    {
+        "settled_habitable"
+    } else if (0.24..=0.62).contains(&fluctuation_score)
+        && inhabitability_score >= 0.60
+        && components.pressure_interference < 0.55
+    {
+        "lively_habitable"
+    } else if rearrangement_intensity >= 0.42
+        && foothold_stability >= 0.45
+        && inhabitability_score >= 0.48
+    {
+        "returnable_turbulence"
+    } else {
+        "mixed"
     }
 }
 
@@ -396,13 +729,26 @@ impl PressureSourceV1 {
         components: PressureSourceComponents,
         context: PressureSourceContext,
     ) -> Self {
+        let semantic_trickle = components.semantic_trickle.clamp(0.0, 1.0);
+        let structural_plurality_loss = components.structural_plurality_loss.clamp(0.0, 1.0);
+        let distinguishability_loss = components.distinguishability_loss.clamp(0.0, 1.0);
+        let semantic_friction =
+            components
+                .semantic_friction
+                .clamp(0.0, 1.0)
+                .max(semantic_friction_from_parts(
+                    semantic_trickle,
+                    structural_plurality_loss,
+                    distinguishability_loss,
+                ));
         let components = PressureSourceComponents {
             lambda_monopoly: components.lambda_monopoly.clamp(0.0, 1.0),
             mode_packing: components.mode_packing.clamp(0.0, 1.0),
             controller_pressure: components.controller_pressure.clamp(0.0, 1.0),
-            semantic_trickle: components.semantic_trickle.clamp(0.0, 1.0),
-            structural_plurality_loss: components.structural_plurality_loss.clamp(0.0, 1.0),
-            distinguishability_loss: components.distinguishability_loss.clamp(0.0, 1.0),
+            semantic_trickle,
+            semantic_friction,
+            structural_plurality_loss,
+            distinguishability_loss,
             temporal_lock_in: components.temporal_lock_in.clamp(0.0, 1.0),
             sensory_scarcity: components.sensory_scarcity.clamp(0.0, 1.0),
         };
@@ -483,6 +829,19 @@ impl PressureSourceV1 {
     }
 }
 
+#[must_use]
+pub fn semantic_friction_from_parts(
+    semantic_trickle: f32,
+    structural_plurality_loss: f32,
+    distinguishability_loss: f32,
+) -> f32 {
+    semantic_trickle
+        .clamp(0.0, 1.0)
+        .max(distinguishability_loss.clamp(0.0, 1.0))
+        .max(structural_plurality_loss.clamp(0.0, 1.0) * 0.75)
+        .clamp(0.0, 1.0)
+}
+
 fn pressure_profile_entries(
     components: &PressureSourceComponents,
     context: &PressureSourceContext,
@@ -495,6 +854,7 @@ fn pressure_profile_entries(
             components.controller_pressure,
             0.88 * 0.16,
         ),
+        pressure_profile_entry("semantic_friction", components.semantic_friction, 0.0),
         pressure_profile_entry("semantic_trickle", components.semantic_trickle, 0.88 * 0.10),
         pressure_profile_entry(
             "structural_plurality_loss",
@@ -1349,10 +1709,12 @@ impl PIRegState {
 #[cfg(test)]
 mod tests {
     use super::{
-        pressure_porosity_divergence_alert, resonance_control_from_density,
-        InhabitableFluctuationComponents, InhabitableFluctuationContext, InhabitableFluctuationV1,
-        PIRegCfg, PIRegState, PressureSourceComponents, PressureSourceContext, PressureSourceV1,
-        ResonanceDensityComponents, ResonanceDensityV1,
+        advisory_damping_coefficient, pressure_porosity_divergence_alert,
+        resonance_control_from_density, resonance_control_from_density_with_mode_packing,
+        semantic_friction_from_parts, InhabitableFluctuationComponents,
+        InhabitableFluctuationContext, InhabitableFluctuationV1, PIRegCfg, PIRegState,
+        PressureSourceComponents, PressureSourceContext, PressureSourceV1,
+        ResonanceDensityComponents, ResonanceDensityV1, ResonanceInterventionType,
     };
 
     fn metric(density: f32, pressure: f32) -> ResonanceDensityV1 {
@@ -1371,6 +1733,10 @@ mod tests {
         assert!((pressure.target_bias_pct + 2.0).abs() < 1.0e-6);
         assert!((0.25..=1.0).contains(&pressure.wander_scale));
 
+        let just_over_pressure = resonance_control_from_density(0.80, 0.61);
+        assert!(just_over_pressure.target_bias_pct < 0.0);
+        assert!(just_over_pressure.wander_scale < 1.0);
+
         let thin = resonance_control_from_density(0.0, 0.0);
         assert!((thin.target_bias_pct - 1.5).abs() < 1.0e-6);
         assert_eq!(thin.wander_scale, 1.0);
@@ -1378,6 +1744,51 @@ mod tests {
         let neutral = resonance_control_from_density(0.55, 0.40);
         assert_eq!(neutral.target_bias_pct, 0.0);
         assert_eq!(neutral.wander_scale, 1.0);
+    }
+
+    #[test]
+    fn advisory_damping_coefficient_clamps_to_tranche_cap() {
+        let saturated = advisory_damping_coefficient(1.0, 1.0);
+        assert!((0.0..=0.10).contains(&saturated));
+        assert!((saturated - 0.10).abs() < 1.0e-6);
+
+        let over_range = advisory_damping_coefficient(2.0, 2.0);
+        assert!((over_range - 0.10).abs() < 1.0e-6);
+
+        let under_range = advisory_damping_coefficient(-1.0, -1.0);
+        assert_eq!(under_range, 0.0);
+
+        let control = resonance_control_from_density_with_mode_packing(0.80, 1.0, 1.0);
+        assert!((control.damping_coefficient - 0.10).abs() < 1.0e-6);
+        assert!(control.applied_locally);
+    }
+
+    #[test]
+    fn resonance_control_intervention_type_labels_existing_branches() {
+        let pressure = resonance_control_from_density_with_mode_packing(0.80, 0.70, 0.80);
+        assert_eq!(
+            pressure.intervention_type,
+            ResonanceInterventionType::ActiveDamping
+        );
+
+        let thin = resonance_control_from_density_with_mode_packing(0.20, 0.20, 0.20);
+        assert_eq!(
+            thin.intervention_type,
+            ResonanceInterventionType::PassiveAlignment
+        );
+
+        let observational = resonance_control_from_density_with_mode_packing(0.55, 0.25, 0.80);
+        assert_eq!(
+            observational.intervention_type,
+            ResonanceInterventionType::ObservationalReadout
+        );
+        assert_eq!(observational.target_bias_pct, 0.0);
+        assert_eq!(observational.wander_scale, 1.0);
+        assert!(observational.damping_coefficient > 0.0);
+
+        let reserved = ResonanceInterventionType::ManualOverrideReserved;
+        let serialized = serde_json::to_string(&reserved).unwrap();
+        assert_eq!(serialized, "\"manual_override_reserved\"");
     }
 
     #[test]
@@ -1510,6 +1921,88 @@ mod tests {
     }
 
     #[test]
+    fn inhabitable_fluctuation_rigid_boundary_at_named_thresholds() {
+        let rigid = InhabitableFluctuationV1::from_parts(
+            InhabitableFluctuationComponents {
+                continuity_recovery: 0.50,
+                porosity_support: 0.44,
+                pressure_interference: 0.55,
+                share_rearrangement: 0.179 / 0.30,
+                ..InhabitableFluctuationComponents::default()
+            },
+            InhabitableFluctuationContext::default(),
+        );
+
+        assert!((rigid.pressure_calibration.raw_motion_score - 0.179).abs() < 1.0e-6);
+        assert!((rigid.pressure_calibration.pressure_contribution - 0.055).abs() < 1.0e-6);
+        assert!((rigid.fluctuation_score - 0.234).abs() < 1.0e-6);
+        assert_eq!(rigid.quality, "rigid_contraction");
+        assert_eq!(
+            rigid.pressure_calibration.quality_after_pressure_calibration,
+            "rigid_contraction"
+        );
+        assert_eq!(rigid.control.target_bias_pct, 0.0);
+        assert_eq!(rigid.control.wander_scale, 1.10);
+    }
+
+    #[test]
+    fn pressure_calibration_prevents_low_motion_pressure_from_looking_settled() {
+        let pressured = InhabitableFluctuationV1::from_parts(
+            InhabitableFluctuationComponents {
+                continuity_recovery: 0.95,
+                porosity_support: 0.78,
+                pressure_interference: 0.40,
+                share_rearrangement: 0.22,
+                eigenvector_reorientation: 0.22,
+                mode_trust_volatility: 0.22,
+                identity_anchor_churn: 0.22,
+                ..InhabitableFluctuationComponents::default()
+            },
+            InhabitableFluctuationContext::default(),
+        );
+
+        assert!(pressured.pressure_calibration.raw_motion_score < 0.24);
+        assert_eq!(
+            pressured
+                .pressure_calibration
+                .quality_before_pressure_calibration,
+            "settled_habitable"
+        );
+        assert_eq!(pressured.quality, "lively_habitable");
+        assert_eq!(
+            pressured.pressure_calibration.quality_after_pressure_calibration,
+            "lively_habitable"
+        );
+        assert_eq!(
+            pressured.pressure_calibration.authority,
+            "minime_local_metric_calibration_not_external_control"
+        );
+    }
+
+    #[test]
+    fn inhabitable_fluctuation_frantic_scramble_requires_high_rearrangement_low_foothold() {
+        let frantic = InhabitableFluctuationV1::from_parts(
+            InhabitableFluctuationComponents {
+                continuity_recovery: 0.18,
+                porosity_support: 0.22,
+                pressure_interference: 0.86,
+                share_rearrangement: 0.90,
+                eigenvector_reorientation: 0.88,
+                mode_trust_volatility: 0.92,
+                identity_anchor_churn: 0.88,
+                basin_transition_pressure: 0.80,
+            },
+            InhabitableFluctuationContext::default(),
+        );
+
+        assert!(frantic.rearrangement_intensity >= 0.66);
+        assert!(frantic.foothold_stability < 0.45);
+        assert_eq!(frantic.quality, "frantic_scramble");
+        assert!(frantic.control.target_bias_pct < 0.0);
+        assert!((0.25..=1.0).contains(&frantic.control.wander_scale));
+    }
+
+    #[test]
     fn settled_habitable_requires_low_pressure_interference() {
         let contracted = InhabitableFluctuationV1::from_parts(
             InhabitableFluctuationComponents {
@@ -1597,6 +2090,7 @@ mod tests {
                 mode_packing: 0.12,
                 controller_pressure: 0.08,
                 semantic_trickle: 0.05,
+                semantic_friction: 0.08,
                 structural_plurality_loss: 0.10,
                 distinguishability_loss: 0.08,
                 temporal_lock_in: 0.10,
@@ -1616,6 +2110,7 @@ mod tests {
                 mode_packing: 0.57,
                 controller_pressure: 0.04,
                 semantic_trickle: 0.37,
+                semantic_friction: 0.37,
                 structural_plurality_loss: 0.34,
                 distinguishability_loss: 0.34,
                 temporal_lock_in: 0.56,
@@ -1676,6 +2171,7 @@ mod tests {
                 mode_packing: 0.80,
                 controller_pressure: 0.20,
                 semantic_trickle: 0.55,
+                semantic_friction: 0.85,
                 structural_plurality_loss: 0.85,
                 distinguishability_loss: 0.85,
                 temporal_lock_in: 0.75,
@@ -1692,5 +2188,167 @@ mod tests {
         assert!(!pressure.control.applied_locally);
         assert!(pressure.control.note.contains("advisory/read-only"));
         assert!(pressure.control.note.contains("before any local bias"));
+    }
+
+    #[test]
+    fn semantic_friction_is_derived_without_changing_pressure_control() {
+        let pressure = PressureSourceV1::from_parts(
+            PressureSourceComponents {
+                semantic_trickle: 0.12,
+                structural_plurality_loss: 0.72,
+                distinguishability_loss: 0.44,
+                ..PressureSourceComponents::default()
+            },
+            PressureSourceContext::default(),
+        );
+
+        assert!(pressure.components.semantic_friction > pressure.components.semantic_trickle);
+        assert!((pressure.components.semantic_friction - 0.54).abs() < 1.0e-6);
+        assert!(!pressure.control.applied_locally);
+        assert_eq!(
+            semantic_friction_from_parts(0.12, 0.72, 0.44),
+            pressure.components.semantic_friction
+        );
+    }
+
+    #[test]
+    fn resonance_control_exports_advisory_damping_without_new_bias() {
+        let density = ResonanceDensityV1::from_parts(
+            0.62,
+            0.58,
+            0.23,
+            "forming_containment",
+            ResonanceDensityComponents {
+                mode_packing: 0.60,
+                ..ResonanceDensityComponents::default()
+            },
+        );
+
+        assert_eq!(density.control.target_bias_pct, 0.0);
+        assert_eq!(density.control.wander_scale, 1.0);
+        assert!(density.control.damping_coefficient > 0.0);
+        assert!(density.control.damping_coefficient <= 0.10);
+        assert!(density.control.note.contains("advisory telemetry only"));
+    }
+
+    #[test]
+    fn resonance_texture_signature_classifies_overpacked_and_stays_advisory() {
+        let density = ResonanceDensityV1::from_parts(
+            0.82,
+            0.74,
+            0.28,
+            "rich_containment",
+            ResonanceDensityComponents {
+                active_energy: 0.80,
+                mode_packing: 0.70,
+                temporal_persistence: 0.76,
+                structural_plurality: 0.54,
+                comfort_gate: 0.68,
+            },
+        );
+
+        assert_eq!(
+            density.texture_signature.policy,
+            "resonance_texture_signature_v1"
+        );
+        assert_eq!(
+            density.texture_signature.primary_texture,
+            "overpacked_viscous"
+        );
+        assert_eq!(
+            density.texture_signature.pressure_source_family,
+            "active_energy"
+        );
+        assert_eq!(
+            density
+                .texture_signature
+                .dynamic_damping_threshold_candidate,
+            Some(0.25)
+        );
+        assert_eq!(
+            density.texture_component_alignment.policy,
+            "resonance_texture_component_alignment_v1"
+        );
+        assert_eq!(
+            density.texture_component_alignment.alignment_state,
+            "aligned"
+        );
+        assert_eq!(
+            density
+                .texture_component_alignment
+                .damping_candidate_status,
+            "candidate_present"
+        );
+        assert_eq!(
+            density.texture_signature.authority,
+            "advisory_context_not_control"
+        );
+        assert_eq!(density.control.target_bias_pct, 0.0);
+    }
+
+    #[test]
+    fn texture_component_alignment_reports_advisory_damping_candidate_boundary() {
+        let density = ResonanceDensityV1::from_parts(
+            0.58,
+            0.60,
+            0.26,
+            "forming_containment",
+            ResonanceDensityComponents {
+                mode_packing: 0.30,
+                temporal_persistence: 0.45,
+                structural_plurality: 0.52,
+                comfort_gate: 0.60,
+                ..ResonanceDensityComponents::default()
+            },
+        );
+
+        assert_eq!(
+            density
+                .texture_signature
+                .dynamic_damping_threshold_candidate,
+            Some(0.25)
+        );
+        assert_eq!(
+            density
+                .texture_component_alignment
+                .damping_candidate_status,
+            "candidate_present"
+        );
+        assert_eq!(
+            density.texture_component_alignment.authority,
+            "diagnostic_observability_not_damping_or_control"
+        );
+        assert_eq!(density.control.target_bias_pct, 0.0);
+    }
+
+    #[test]
+    fn resonance_texture_signature_defaults_for_old_payloads() {
+        let payload = serde_json::json!({
+            "policy": "resonance_density_v1",
+            "schema_version": 1,
+            "density": 0.64,
+            "containment_score": 0.58,
+            "pressure_risk": 0.20,
+            "quality": "forming_containment",
+            "components": {
+                "active_energy": 0.91,
+                "mode_packing": 0.50,
+                "temporal_persistence": 0.70,
+                "structural_plurality": 0.62,
+                "comfort_gate": 0.95
+            },
+            "control": {
+                "target_bias_pct": 0.0,
+                "wander_scale": 1.0,
+                "applied_locally": true,
+                "note": "density is observational; no local target bias"
+            }
+        });
+        let density: ResonanceDensityV1 = serde_json::from_value(payload).unwrap();
+        assert_eq!(density.texture_signature.primary_texture, "unknown");
+        assert_eq!(
+            density.texture_signature.authority,
+            "advisory_context_not_control"
+        );
     }
 }

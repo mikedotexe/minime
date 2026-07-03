@@ -6,7 +6,7 @@ sovereignty reflection consumes. That footer form had no listener, so the intent
 silently dropped (the same class as the scar near line 23315, "dropped ~6 days of
 minime's REGIME breathe requests"). `_parse_footer_directives` gives the footer
 form a listener — conservatively (isolated trailing KEY=value lines only; a prose
-mention never matches; bounds mirror the JSON arm; regime + PI gains excluded).
+mention never matches; bounds mirror minime's lease-safe self-regulation ranges; regime + PI gains excluded).
 These pin that behavior.
 """
 import json
@@ -88,8 +88,10 @@ class FooterDirectiveTests(unittest.TestCase):
             "REGIME: breathe\n"
             "exploration_noise=0.12\n"
         )
-        # exploration_noise honored; regime excluded by design (stays gated).
-        self.assertEqual(aa._parse_footer_directives(reply), {"exploration_noise": 0.12})
+        # exploration_noise recognized, then clamped to the 0.08 lease-safe cap
+        # (requested 0.12 preserved in self_regulation/negotiations.jsonl);
+        # regime excluded by design (stays gated).
+        self.assertEqual(aa._parse_footer_directives(reply), {"exploration_noise": 0.08})
 
     def test_colon_and_equals_both_work(self) -> None:
         self.assertEqual(
@@ -117,11 +119,11 @@ class FooterDirectiveTests(unittest.TestCase):
     def test_out_of_range_is_clamped_to_json_arm_bounds(self) -> None:
         self.assertEqual(
             aa._parse_footer_directives("exploration_noise=0.99"),
-            {"exploration_noise": 0.15},
+            {"exploration_noise": 0.08},
         )
         self.assertEqual(
             aa._parse_footer_directives("regulation_strength=-2"),
-            {"regulation_strength": 0.0},
+            {"regulation_strength": 0.4},
         )
 
     def test_unknown_or_stability_key_is_ignored(self) -> None:
@@ -138,7 +140,7 @@ class FooterDirectiveTests(unittest.TestCase):
         # directive at the very end → it IS the footer.
         self.assertEqual(
             aa._parse_footer_directives(filler + "\nexploration_noise=0.12"),
-            {"exploration_noise": 0.12},
+            {"exploration_noise": 0.08},
         )
         # directive at the top, buried far above the tail → not a footer.
         self.assertEqual(
@@ -153,7 +155,7 @@ class FooterDirectiveTests(unittest.TestCase):
     def test_case_insensitive_key(self) -> None:
         self.assertEqual(
             aa._parse_footer_directives("EXPLORATION_NOISE = 0.10"),
-            {"exploration_noise": 0.10},
+            {"exploration_noise": 0.08},
         )
 
 

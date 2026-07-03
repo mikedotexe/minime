@@ -7357,11 +7357,18 @@ fn compute_pressure_source_v1(
     let temporal_lock_in = (resonance.components.temporal_persistence
         * (0.45 + 0.55 * resonance.pressure_risk))
         .clamp(0.0, 1.0);
+    let semantic_trickle = semantic_trickle_pressure(semantic);
+    let semantic_friction = semantic_friction_from_parts(
+        semantic_trickle,
+        structural_plurality_loss,
+        distinguishability_loss,
+    );
     let components = PressureSourceComponents {
         lambda_monopoly,
         mode_packing,
         controller_pressure,
-        semantic_trickle: semantic_trickle_pressure(semantic),
+        semantic_trickle,
+        semantic_friction,
         structural_plurality_loss,
         distinguishability_loss,
         temporal_lock_in,

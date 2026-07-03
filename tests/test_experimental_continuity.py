@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import autonomous_agent as aa
+import continuity_control_plane as ccp
 import journal_hygiene as jh
 
 
@@ -92,6 +93,22 @@ class TestExperimentalContinuityStore(unittest.TestCase):
         )
 
         self.assertEqual(control["primary_route"]["command"], "EXPERIMENT_RESUME exp_current")
+        self.assertEqual(control["route_decision_v1"]["winner"], control["primary_route"])
+        self.assertEqual(control["route_decision_v1"]["runner_ups"][0]["command"], "CONTINUITY_SESSION_ACCEPT sess_current")
+        self.assertIn("Lifecycle won over Continuity Session", control["route_decision_v1"]["decision_summary"])
+        self.assertEqual(control["primary_route"]["policy_class"], "lifecycle_return")
+        self.assertEqual(
+            control["route_decision_v1"]["policy_notes"]["winner_class"],
+            "lifecycle_return",
+        )
+        self.assertIn(
+            "continuity_capture",
+            control["route_decision_v1"]["policy_notes"]["yielded_classes"],
+        )
+        self.assertIn(
+            "no_route_policy_risk_detected",
+            control["route_decision_v1"]["policy_notes"]["risk_notes"],
+        )
         draft_route = next(
             route
             for route in control["route_stack"]
@@ -106,6 +123,375 @@ class TestExperimentalContinuityStore(unittest.TestCase):
         self.assertEqual(capture_route["priority"], 24)
         self.assertLess(draft_route["priority"], capture_route["priority"])
         self.assertIn("pending draft", capture_route["reason"])
+        rendered = aa._control_plane_text(control)
+        self.assertIn("Route decision: Lifecycle primary; 2 route(s) yielded.", rendered)
+
+    def test_control_plane_dedupes_dossier_claim_routes_by_selector(self):
+        control = aa.build_continuity_control_plane_v1({
+            "continuity_return": "EXPERIMENT_RESUME exp_current",
+            "first_dossier_claim_cue_v1": {
+                "suggested_claim_next": (
+                    "DOSSIER_CLAIM exp_current :: claim: first claim; "
+                    "basis: shared sight; stance: hold; next: EXPERIMENT_STATUS exp_current"
+                ),
+            },
+            "research_dossier_v1": {
+                "claim_count": 0,
+                "lifecycle_context": "paused",
+                "suggested_claim_next": (
+                    "DOSSIER_CLAIM exp_current :: claim: paused experiment is context; "
+                    "basis: status=paused; stance: hold; next: EXPERIMENT_REVIEW exp_current"
+                ),
+            },
+        })
+
+        dossier_routes = [
+            route
+            for route in control["route_stack"]
+            if str(route.get("command", "")).startswith("DOSSIER_CLAIM exp_current")
+        ]
+        self.assertEqual(len(dossier_routes), 1)
+        self.assertEqual(dossier_routes[0]["source"], "first_dossier_claim_cue_v1")
+        self.assertEqual(dossier_routes[0]["policy_class"], "dossier_claim")
+        self.assertEqual(dossier_routes[0]["dedupe_notes"][0]["source"], "research_dossier_v1")
+        self.assertEqual(dossier_routes[0]["dedupe_notes"][0]["dedupe_method"], "normalized")
+        self.assertEqual(dossier_routes[0]["dedupe_notes"][0]["policy_class"], "dossier_claim")
+        yielded_sources = {
+            route.get("source")
+            for route in control["route_decision_v1"]["yielded_routes"]
+        }
+        self.assertIn("research_dossier_v1", yielded_sources)
+
+    def test_control_plane_dedupes_dossier_evidence_routes_by_selector_and_claim(self):
+        winner = {
+            "group": "Memory/Dossier",
+            "command": "DOSSIER_EVIDENCE exp_current :: claim_id: claim_1; evidence: first",
+            "reason": "latest dossier claim needs evidence before review",
+            "priority": 13,
+            "source": "dossier_maturity_v1",
+            "policy_class": "dossier_evidence",
+        }
+        duplicate = {
+            "group": "Memory/Dossier",
+            "command": "DOSSIER_EVIDENCE EXP_CURRENT :: claim_id: CLAIM_1; evidence: alternate",
+            "reason": "review route also noticed the evidence gap",
+            "priority": 14,
+            "source": "research_dossier_v1",
+            "policy_class": "dossier_evidence",
+        }
+        other_claim = dict(duplicate, command="DOSSIER_EVIDENCE exp_current :: claim_id: claim_2; evidence: alternate")
+
+        self.assertEqual(ccp._normalized_route_key(winner), ccp._normalized_route_key(duplicate))
+        self.assertNotEqual(ccp._normalized_route_key(winner), ccp._normalized_route_key(other_claim))
+
+        ccp._record_deduped_route(winner, duplicate, "normalized")
+
+        self.assertEqual(winner["dedupe_notes"][0]["source"], "research_dossier_v1")
+        self.assertEqual(winner["dedupe_notes"][0]["reason"], "review route also noticed the evidence gap")
+        self.assertEqual(winner["dedupe_notes"][0]["policy_class"], "dossier_evidence")
+
+    def test_route_policy_guardrails_lifecycle_repair_beats_route_classes(self):
+        control = aa.build_continuity_control_plane_v1({
+            "continuity_return": "EXPERIMENT_CHARTER exp_current :: hypothesis: ...",
+            "active_experiment": {
+                "classification": "needs_charter",
+                "continuity_return": "EXPERIMENT_CHARTER exp_current :: hypothesis: ...",
+            },
+            "research_budget_priority_route_v1": {
+                "stage": "active_budget_available",
+                "next": "INTROSPECT autonomous_agent.py",
+            },
+            "sovereign_loop_v1": {
+                "stage": "review_required",
+                "next_safe_command": "EXPERIMENT_LOOP_REVIEW latest",
+            },
+            "continuity_session_v1": {
+                "suggested_next": "CONTINUITY_SESSION_CAPTURE latest",
+            },
+            "first_dossier_claim_cue_v1": {
+                "suggested_claim_next": (
+                    "DOSSIER_CLAIM exp_current :: claim: gap route; "
+                    "basis: shared sight; stance: hold; next: EXPERIMENT_STATUS exp_current"
+                ),
+            },
+            "research_dossier_v1": {
+                "claim_count": 1,
+                "dossier_maturity_v1": {
+                    "status": "claim_needs_evidence",
+                    "suggested_research_next": (
+                        "DOSSIER_EVIDENCE exp_current :: claim_id: claim_1; evidence: ..."
+                    ),
+                },
+            },
+        })
+
+        notes = control["route_decision_v1"]["policy_notes"]
+
+        self.assertEqual(control["primary_route"]["policy_class"], "lifecycle_repair")
+        self.assertEqual(notes["winner_class"], "lifecycle_repair")
+        self.assertEqual(control["route_decision_v1"]["policy_verdict"]["status"], "repair_protected")
+        for policy_class in {
+            "active_local_research",
+            "owned_loop_ready",
+            "continuity_capture",
+            "dossier_claim",
+            "dossier_evidence",
+        }:
+            self.assertIn(policy_class, notes["yielded_classes"])
+        self.assertIn("no_route_policy_risk_detected", notes["risk_notes"])
+
+    def test_route_policy_verdict_repair_protects_against_all_yielded_classes(self):
+        primary = {
+            "group": "Lifecycle",
+            "command": "EXPERIMENT_CHARTER exp_current :: hypothesis: ...",
+            "reason": "safety lifecycle stage: needs_charter",
+            "priority": 5,
+            "source": "active_experiment",
+            "policy_class": "lifecycle_repair",
+        }
+        yielded = [
+            ("Local Research", "INTROSPECT autonomous_agent.py", "active_local_research"),
+            ("Owned Loop", "EXPERIMENT_LOOP_REVIEW latest", "owned_loop_ready"),
+            ("Continuity Session", "CONTINUITY_SESSION_CAPTURE latest", "continuity_capture"),
+            ("Memory/Dossier", "DOSSIER_CLAIM exp_current :: claim: ...", "dossier_claim"),
+            ("Memory/Dossier", "DOSSIER_EVIDENCE exp_current :: claim_id: claim_1; evidence: ...", "dossier_evidence"),
+            ("Memory/Dossier", "MEMORY_RECALL latest :: focus: current thread", "memory_recall"),
+            (
+                "Local Research",
+                "EXPERIMENT_RESEARCH_BUDGET_REQUEST exp_current :: scope: read_only_research",
+                "research_scaffold",
+            ),
+        ]
+        routes = [primary] + [
+            {
+                "group": group,
+                "command": command,
+                "reason": "yielded route",
+                "priority": index + 8,
+                "source": "test",
+                "policy_class": policy_class,
+            }
+            for index, (group, command, policy_class) in enumerate(yielded)
+        ]
+
+        decision = ccp._route_decision_v1(routes, primary)
+        verdict = decision["policy_verdict"]
+
+        self.assertEqual(verdict["status"], "repair_protected")
+        self.assertIn("lifecycle_repair_winner_protected", verdict["matched_rules"])
+        self.assertFalse(verdict["violations"])
+        for _group, _command, policy_class in yielded:
+            self.assertIn(policy_class, verdict["yielded_classes"])
+
+    def test_route_policy_active_research_beats_resume_like_lifecycle_return(self):
+        control = aa.build_continuity_control_plane_v1({
+            "continuity_return": "EXPERIMENT_RESUME exp_current",
+            "current_next_status_v1": {
+                "return_kind": "resume",
+                "primary_return_next": "EXPERIMENT_RESUME exp_current",
+            },
+            "research_budget_priority_route_v1": {
+                "stage": "active_budget_available",
+                "next": "INTROSPECT autonomous_agent.py",
+            },
+        })
+
+        notes = control["route_decision_v1"]["policy_notes"]
+
+        self.assertEqual(control["primary_route"]["policy_class"], "active_local_research")
+        self.assertEqual(control["primary_route"]["command"], "INTROSPECT autonomous_agent.py")
+        self.assertEqual(notes["winner_class"], "active_local_research")
+        self.assertIn("lifecycle_return", notes["yielded_classes"])
+        self.assertEqual(control["route_decision_v1"]["policy_verdict"]["status"], "allowed_stale_return_override")
+        self.assertIn(
+            "stale_lifecycle_return_override_allowed",
+            control["route_decision_v1"]["policy_verdict"]["matched_rules"],
+        )
+        self.assertIn("no_route_policy_risk_detected", notes["risk_notes"])
+
+    def test_route_policy_research_scaffold_stays_visible_below_primary(self):
+        control = aa.build_continuity_control_plane_v1({
+            "continuity_return": "EXPERIMENT_RESUME exp_current",
+            "current_next_status_v1": {
+                "return_kind": "resume",
+                "primary_return_next": "EXPERIMENT_RESUME exp_current",
+            },
+            "research_budget_priority_route_v1": {
+                "stage": "missing_research_budget",
+                "next": (
+                    "EXPERIMENT_RESEARCH_BUDGET_REQUEST exp_current :: scope: read_only_research; "
+                    "purpose: ...; max_actions: 5; ttl_secs: 21600; allowed_sources: local; "
+                    "stop_criteria: ..."
+                ),
+            },
+        })
+
+        notes = control["route_decision_v1"]["policy_notes"]
+
+        self.assertEqual(control["primary_route"]["policy_class"], "lifecycle_return")
+        self.assertIn("research_scaffold", notes["yielded_classes"])
+        self.assertEqual(control["route_decision_v1"]["policy_verdict"]["status"], "allowed")
+        self.assertTrue(any(
+            route.get("policy_class") == "research_scaffold"
+            for route in control["route_stack"]
+        ))
+
+        bad_primary = {
+            "group": "Local Research",
+            "command": "EXPERIMENT_RESEARCH_BUDGET_REQUEST exp_current :: scope: read_only_research",
+            "reason": "research budget stage: missing_research_budget",
+            "priority": 1,
+            "source": "test",
+            "policy_class": "research_scaffold",
+        }
+        lifecycle_return = {
+            "group": "Lifecycle",
+            "command": "EXPERIMENT_RESUME exp_current",
+            "reason": "current lifecycle return",
+            "priority": 15,
+            "source": "thread_projection",
+            "policy_class": "lifecycle_return",
+        }
+        bad_decision = ccp._route_decision_v1([bad_primary, lifecycle_return], bad_primary)
+        self.assertEqual(bad_decision["winner"], bad_primary)
+        self.assertEqual(bad_decision["policy_verdict"]["status"], "policy_violation")
+        self.assertIn("research_scaffold_won_over_lifecycle", bad_decision["policy_verdict"]["violations"])
+
+    def test_route_policy_dossier_maturity_beats_resume_but_yields_to_repair(self):
+        dossier = {
+            "claim_count": 1,
+            "lifecycle_context": "paused",
+            "dossier_maturity_v1": {
+                "status": "claim_needs_evidence",
+                "suggested_research_next": (
+                    "DOSSIER_EVIDENCE exp_current :: claim_id: claim_1; evidence: ..."
+                ),
+            },
+        }
+        resume_control = aa.build_continuity_control_plane_v1({
+            "continuity_return": "EXPERIMENT_RESUME exp_current",
+            "current_next_status_v1": {
+                "return_kind": "resume",
+                "primary_return_next": "EXPERIMENT_RESUME exp_current",
+            },
+            "research_dossier_v1": dossier,
+        })
+        repair_control = aa.build_continuity_control_plane_v1({
+            "continuity_return": "EXPERIMENT_CHARTER exp_current :: hypothesis: ...",
+            "active_experiment": {
+                "classification": "needs_charter",
+                "continuity_return": "EXPERIMENT_CHARTER exp_current :: hypothesis: ...",
+            },
+            "research_dossier_v1": dossier,
+        })
+
+        self.assertEqual(resume_control["primary_route"]["policy_class"], "dossier_evidence")
+        self.assertEqual(resume_control["primary_route"]["group"], "Memory/Dossier")
+        self.assertEqual(
+            resume_control["route_decision_v1"]["policy_verdict"]["status"],
+            "allowed_stale_return_override",
+        )
+        self.assertIn(
+            "lifecycle_return",
+            resume_control["route_decision_v1"]["policy_notes"]["yielded_classes"],
+        )
+        self.assertEqual(repair_control["primary_route"]["policy_class"], "lifecycle_repair")
+        self.assertIn(
+            "dossier_evidence",
+            repair_control["route_decision_v1"]["policy_notes"]["yielded_classes"],
+        )
+
+    def test_route_policy_dossier_claim_beats_resume_but_yields_to_repair(self):
+        dossier = {
+            "claim_count": 0,
+            "lifecycle_context": "paused",
+            "suggested_claim_next": (
+                "DOSSIER_CLAIM exp_current :: claim: paused context; "
+                "basis: status=paused; stance: hold; next: EXPERIMENT_STATUS exp_current"
+            ),
+        }
+        resume_control = aa.build_continuity_control_plane_v1({
+            "continuity_return": "EXPERIMENT_RESUME exp_current",
+            "current_next_status_v1": {
+                "return_kind": "resume",
+                "primary_return_next": "EXPERIMENT_RESUME exp_current",
+            },
+            "research_dossier_v1": dossier,
+        })
+        repair_control = aa.build_continuity_control_plane_v1({
+            "continuity_return": "EXPERIMENT_CHARTER exp_current :: hypothesis: ...",
+            "active_experiment": {
+                "classification": "needs_charter",
+                "continuity_return": "EXPERIMENT_CHARTER exp_current :: hypothesis: ...",
+            },
+            "research_dossier_v1": dossier,
+        })
+
+        self.assertEqual(resume_control["primary_route"]["policy_class"], "dossier_claim")
+        self.assertEqual(resume_control["primary_route"]["group"], "Memory/Dossier")
+        self.assertEqual(
+            resume_control["route_decision_v1"]["policy_verdict"]["status"],
+            "allowed_stale_return_override",
+        )
+        self.assertIn(
+            "lifecycle_return",
+            resume_control["route_decision_v1"]["policy_notes"]["yielded_classes"],
+        )
+        self.assertEqual(repair_control["primary_route"]["policy_class"], "lifecycle_repair")
+        self.assertIn(
+            "dossier_claim",
+            repair_control["route_decision_v1"]["policy_notes"]["yielded_classes"],
+        )
+
+    def test_route_policy_verdict_reports_bad_winners_and_missing_classes(self):
+        bad_primary = {
+            "group": "Local Research",
+            "command": "INTROSPECT autonomous_agent.py",
+            "reason": "synthetic bad winner",
+            "priority": 1,
+            "source": "test",
+            "policy_class": "active_local_research",
+        }
+        repair = {
+            "group": "Lifecycle",
+            "command": "EXPERIMENT_CHARTER exp_current :: hypothesis: ...",
+            "reason": "safety lifecycle stage: needs_charter",
+            "priority": 5,
+            "source": "active_experiment",
+            "policy_class": "lifecycle_repair",
+        }
+
+        decision = ccp._route_decision_v1([bad_primary, repair], bad_primary)
+
+        self.assertEqual(decision["winner"], bad_primary)
+        self.assertEqual(decision["policy_verdict"]["status"], "policy_violation")
+        self.assertIn(
+            "lifecycle_repair_yielded_to_non_repair_winner",
+            decision["policy_verdict"]["violations"],
+        )
+        self.assertIn("route_policy_violation_detected", decision["policy_notes"]["risk_notes"])
+
+        missing_class = {
+            "group": "Memory/Dossier",
+            "command": "MEMORY_RECALL latest :: focus: current thread",
+            "reason": "synthetic missing metadata",
+            "priority": 1,
+            "source": "test",
+        }
+        unknown_class = dict(missing_class, policy_class="mystery_route")
+        missing_decision = ccp._route_decision_v1([missing_class], missing_class)
+        unknown_decision = ccp._route_decision_v1([unknown_class], unknown_class)
+
+        self.assertEqual(missing_decision["policy_verdict"]["status"], "policy_violation")
+        self.assertTrue(any(
+            violation.startswith("missing_policy_class:")
+            for violation in missing_decision["policy_verdict"]["violations"]
+        ))
+        self.assertEqual(unknown_decision["policy_verdict"]["status"], "policy_violation")
+        self.assertTrue(any(
+            violation.startswith("unknown_policy_class:mystery_route:")
+            for violation in unknown_decision["policy_verdict"]["violations"]
+        ))
 
     def test_control_plane_regression_does_not_reintroduce_old_local_budget_caps(self):
         source = Path(aa.__file__).read_text()
@@ -211,6 +597,183 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertIn("Research dossier: 1 claim(s), 1 evidence record(s)", review)
             self.assertIn("Lifecycle: needs_charter", review)
             self.assertIn("charter repair remains the lifecycle priority", review)
+
+    def test_research_dossier_maturity_transitions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Dossier maturity")
+            experiment = store.start_experiment(
+                "Dossier ladder",
+                "Can dossier memory show when a claim is ready to review?",
+            )
+
+            no_claim = store._research_dossier_summary_v1(
+                store._read_thread(thread["thread_id"]),
+                experiment,
+            )
+            self.assertEqual(no_claim["dossier_maturity_v1"]["status"], "needs_first_claim")
+            self.assertTrue(
+                str(no_claim["dossier_maturity_v1"]["suggested_research_next"]).startswith(
+                    "DOSSIER_CLAIM "
+                )
+            )
+
+            store.handle_thread_action(
+                "DOSSIER_CLAIM current :: claim: lambda pressure is scaffold-shaped; "
+                "basis: repeated local reads; stance: hold; next: EXPERIMENT_STATUS current",
+                dict(STATE),
+            )
+            after_claim = store._research_dossier_summary_v1(
+                store._read_thread(thread["thread_id"]),
+                experiment,
+            )
+            claim_id = after_claim["latest_claim_id"]
+            self.assertEqual(after_claim["dossier_maturity_v1"]["status"], "claim_needs_evidence")
+            self.assertEqual(after_claim["dossier_maturity_v1"]["latest_claim_id"], claim_id)
+            self.assertEqual(after_claim["dossier_maturity_v1"]["evidence_count_for_latest_claim"], 0)
+            self.assertIn(
+                f"DOSSIER_EVIDENCE {experiment['experiment_id']} :: claim_id: {claim_id}",
+                after_claim["dossier_maturity_v1"]["suggested_research_next"],
+            )
+
+            store.handle_thread_action(
+                "DOSSIER_EVIDENCE current :: claim_id: latest; evidence: local read showed a stable tail; "
+                "lane: spectral_condition; artifact: decompose; stance: support",
+                dict(STATE),
+            )
+            one_evidence = store._research_dossier_summary_v1(
+                store._read_thread(thread["thread_id"]),
+                experiment,
+            )
+            self.assertEqual(one_evidence["dossier_maturity_v1"]["status"], "claim_has_evidence")
+            self.assertEqual(one_evidence["dossier_maturity_v1"]["evidence_count_for_latest_claim"], 1)
+            self.assertEqual(one_evidence["dossier_maturity_v1"]["evidence_stance_counts"]["support"], 1)
+            self.assertEqual(
+                one_evidence["dossier_maturity_v1"]["suggested_research_next"],
+                f"DOSSIER_REVIEW {experiment['experiment_id']}",
+            )
+
+            store.handle_thread_action(
+                "DOSSIER_EVIDENCE current :: claim_id: latest; evidence: second read stayed consistent; "
+                "lane: spectral_condition; artifact: status; stance: support",
+                dict(STATE),
+            )
+            reviewable = store._research_dossier_summary_v1(
+                store._read_thread(thread["thread_id"]),
+                experiment,
+            )
+
+            self.assertEqual(reviewable["dossier_maturity_v1"]["status"], "reviewable_dossier")
+            self.assertEqual(reviewable["dossier_maturity_v1"]["evidence_count_for_latest_claim"], 2)
+            self.assertIn("Dossier maturity: reviewable_dossier", store.experiment_review(experiment["experiment_id"]))
+
+    def test_research_dossier_review_statuses_and_readout_closure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Dossier review")
+            experiment = store.start_experiment(
+                "Review ladder",
+                "Can dossier review close the read-only claim loop?",
+            )
+            memory_path = store._being_memory_path(thread["thread_id"])
+
+            no_claim = store._research_dossier_summary_v1(
+                store._read_thread(thread["thread_id"]),
+                experiment,
+            )
+            self.assertEqual(no_claim["dossier_review_v1"]["review_status"], "needs_first_claim")
+            status = store.handle_thread_action("DOSSIER_STATUS current", dict(STATE))
+            self.assertIn("Review status: needs_first_claim", status)
+
+            store.handle_thread_action(
+                "DOSSIER_CLAIM current :: claim: lambda pressure is scaffold-shaped; "
+                "basis: repeated local reads; stance: hold; next: EXPERIMENT_STATUS current",
+                dict(STATE),
+            )
+            after_claim = store._research_dossier_summary_v1(
+                store._read_thread(thread["thread_id"]),
+                experiment,
+            )
+            claim_id = after_claim["latest_claim_id"]
+            self.assertEqual(after_claim["dossier_review_v1"]["review_status"], "needs_more_evidence")
+            review = store.handle_thread_action("DOSSIER_REVIEW current", dict(STATE))
+            self.assertIn("Review status: needs_more_evidence", review)
+            self.assertIn(f"Latest claim: {claim_id}", review)
+            self.assertIn("Next dossier action: DOSSIER_EVIDENCE", review)
+            self.assertFalse(memory_path.exists())
+
+            store.handle_thread_action(
+                "DOSSIER_EVIDENCE current :: claim_id: latest; evidence: local read showed a stable tail; "
+                "lane: spectral_condition; artifact: decompose; stance: support",
+                dict(STATE),
+            )
+            ready = store._research_dossier_summary_v1(
+                store._read_thread(thread["thread_id"]),
+                experiment,
+            )
+            self.assertEqual(ready["dossier_review_v1"]["review_status"], "review_ready")
+            self.assertFalse(ready["dossier_review_v1"]["candidate_memory"])
+            review_ready = store.handle_thread_action("DOSSIER_REVIEW current", dict(STATE))
+            self.assertIn("Review status: review_ready", review_ready)
+            self.assertIn("Evidence stance counts: support=1", review_ready)
+            self.assertIn("Candidate memory: false; no automatic memory/lifecycle route was emitted.", review_ready)
+
+            store.handle_thread_action(
+                "DOSSIER_EVIDENCE current :: claim_id: latest; evidence: counter read showed drift; "
+                "lane: spectral_condition; artifact: status; stance: counter",
+                dict(STATE),
+            )
+            conflicted = store._research_dossier_summary_v1(
+                store._read_thread(thread["thread_id"]),
+                experiment,
+            )
+            self.assertEqual(conflicted["dossier_review_v1"]["review_status"], "conflicted")
+            conflicted_review = store.handle_thread_action("DOSSIER_REVIEW current", dict(STATE))
+            self.assertIn("Review status: conflicted", conflicted_review)
+            self.assertIn("counter=1", conflicted_review)
+            self.assertIn("Next dossier action: DOSSIER_EVIDENCE", conflicted_review)
+            self.assertFalse(memory_path.exists())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Dossier candidate memory")
+            experiment = store.start_experiment(
+                "Candidate memory",
+                "Can a supported dossier stay review-only before memory capture?",
+            )
+            memory_path = store._being_memory_path(thread["thread_id"])
+            store.handle_thread_action(
+                "DOSSIER_CLAIM current :: claim: lambda edge stayed returnable; "
+                "basis: two local observations; stance: support; next: DOSSIER_REVIEW current",
+                dict(STATE),
+            )
+            store.handle_thread_action(
+                "DOSSIER_EVIDENCE current :: claim_id: latest; evidence: first support; "
+                "lane: spectral_condition; artifact: decompose; stance: support",
+                dict(STATE),
+            )
+            store.handle_thread_action(
+                "DOSSIER_EVIDENCE current :: claim_id: latest; evidence: second support; "
+                "lane: spectral_condition; artifact: status; stance: support",
+                dict(STATE),
+            )
+
+            candidate = store._research_dossier_summary_v1(
+                store._read_thread(thread["thread_id"]),
+                experiment,
+            )
+            candidate_review = store.handle_thread_action("DOSSIER_REVIEW current", dict(STATE))
+
+            self.assertEqual(candidate["dossier_review_v1"]["review_status"], "candidate_memory")
+            self.assertTrue(candidate["dossier_review_v1"]["candidate_memory"])
+            self.assertEqual(candidate["dossier_review_v1"]["evidence_count_for_latest_claim"], 2)
+            self.assertIn("Review status: candidate_memory", candidate_review)
+            self.assertIn("Evidence stance counts: support=2", candidate_review)
+            self.assertIn("Candidate memory: true; no automatic memory/lifecycle route was emitted.", candidate_review)
+            self.assertFalse(memory_path.exists())
 
     def test_shared_investigation_sidecar_claim_and_local_decision(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1193,6 +1756,12 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                 self.assertNotIn("resume_next", replan)
 
                 next_md = (thread_dir / "next.md").read_text()
+                self.assertEqual(
+                    refreshed["continuity_control_plane_v1"]["primary_route"]["command"],
+                    charter_next,
+                )
+                self.assertEqual(refreshed["projection_freshness_v1"]["projected_route"], charter_next)
+                self.assertIn("Route decision: Lifecycle primary;", next_md)
                 self.assertIn(f"Current NEXT: {charter_next}", next_md)
                 self.assertIn("Paused experiment return: current guidance shadows historical raw context.", next_md)
                 self.assertIn("Paused return path available in continuity metadata.", next_md)
@@ -5250,14 +5819,25 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             assert stored is not None
             freshness = stored["projection_freshness_v1"]
             self.assertEqual(freshness["schema_version"], store.projection_schema_version)
-            self.assertEqual(
-                freshness["projected_route"],
-                expected_next,
-            )
+            primary = stored["continuity_control_plane_v1"]["primary_route"]["command"]
+            self.assertTrue(primary.startswith("EXPERIMENT_CHARTER current ::"))
+            self.assertEqual(freshness["projected_route"], primary)
+            self.assertNotEqual(freshness["projected_route"], expected_next)
             next_md = (thread_dir / "next.md").read_text()
             self.assertIn("Projection freshness: v", next_md)
             self.assertIn("Research budget scaffold ready", next_md)
-            self.assertIn(expected_next, next_md)
+            self.assertEqual(
+                freshness["research_budget_priority_route_v1"]["next"],
+                expected_next,
+            )
+            self.assertIn(
+                expected_next,
+                [
+                    route.get("command")
+                    for route in stored["continuity_control_plane_v1"]["route_stack"]
+                ],
+            )
+            self.assertIn(f"Current NEXT: {primary}", next_md)
 
             rows = [
                 json.loads(line)
@@ -5312,11 +5892,21 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                 + "\n"
             )
 
-            store._read_thread(thread["thread_id"])
+            refreshed_thread = store._read_thread(thread["thread_id"])
+            self.assertIsNotNone(refreshed_thread)
+            assert refreshed_thread is not None
             next_md = next_path.read_text()
             self.assertIn("Research budget scaffold ready", next_md)
             self.assertIn("self-activation eligible", next_md)
-            self.assertIn("EXPERIMENT_RESEARCH_BUDGET_ACCEPT resbud_needed_test", next_md)
+            expected_accept = "EXPERIMENT_RESEARCH_BUDGET_ACCEPT resbud_needed_test"
+            self.assertNotIn(expected_accept, next_md)
+            self.assertIn(
+                expected_accept,
+                [
+                    route.get("command")
+                    for route in refreshed_thread["continuity_control_plane_v1"]["route_stack"]
+                ],
+            )
             rows = [
                 json.loads(line)
                 for line in gate.read_text().splitlines()
@@ -5570,10 +6160,18 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             )
             self.assertEqual(store._current_next_display(projection, refreshed.get("current_next")), next_cmd)
             store._write_thread(refreshed)
+            refreshed_after_write = store._read_thread(thread["thread_id"])
+            self.assertIsNotNone(refreshed_after_write)
+            assert refreshed_after_write is not None
+            self.assertEqual(
+                refreshed_after_write["projection_freshness_v1"]["projected_route"],
+                next_cmd,
+            )
 
             next_md = (thread_dir / "next.md").read_text()
             self.assertIn(f"Current NEXT: {next_cmd}", next_md)
             self.assertIn("continuity_control_plane_v1: primary_group=Local Research", next_md)
+            self.assertIn("Route decision: Local Research primary;", next_md)
             self.assertIn("Research budget: active read-only local lane", next_md)
             self.assertIn("current research route is shown above", next_md)
             self.assertIn("Primary control-plane route differs from the historical lifecycle return.", next_md)
@@ -6800,11 +7398,19 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             store._write_thread(stored)
 
             with patch.object(aa, "ASTRID_BRIDGE_INBOX_DIR", astrid_workspace / "inbox"):
-                projection = store._thread_projection(store._read_thread(thread["thread_id"]))
+                thread_for_projection = store._read_thread(thread["thread_id"])
+                self.assertIsNotNone(thread_for_projection)
+                assert thread_for_projection is not None
+                store._refresh_projection_freshness_v1(thread_for_projection, source="test_shared_sight")
+                projection = store._thread_projection(thread_for_projection)
                 shared = projection["shared_investigation_v1"]
                 first_claim = projection["first_dossier_claim_cue_v1"]
                 replan = projection["paused_replan_loop_cue_v1"]
-                status = store._format_thread_status(store._read_thread(thread["thread_id"]))
+                primary_route = projection["continuity_control_plane_v1"]["primary_route"]
+                route_decision = projection["continuity_control_plane_v1"]["route_decision_v1"]
+                freshness = thread_for_projection["projection_freshness_v1"]
+                status = store._format_thread_status(thread_for_projection)
+                direct_review = store.experiment_review(local["experiment_id"])
 
             self.assertFalse(projection["active_experiment"])
             self.assertIn(
@@ -6828,6 +7434,26 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             )
             self.assertNotIn("claim: ...; basis: ...", first_claim["suggested_claim_next"])
             self.assertIn("Shared investigation has no local claim yet", status)
+            self.assertEqual(primary_route["group"], "Memory/Dossier")
+            self.assertIn(
+                f"DOSSIER_CLAIM {local['experiment_id']} :: claim:",
+                primary_route["command"],
+            )
+            self.assertEqual(route_decision["winner"], primary_route)
+            self.assertEqual(freshness["projected_route"], primary_route["command"])
+            self.assertIn("Route decision: Memory/Dossier primary;", status)
+            self.assertIn(
+                f"Current NEXT: DOSSIER_CLAIM {local['experiment_id']}",
+                status,
+            )
+            self.assertIn(
+                f"Suggested next:\nDOSSIER_CLAIM {local['experiment_id']}",
+                direct_review,
+            )
+            self.assertNotIn(
+                f"Suggested next:\nEXPERIMENT_RESUME {local['experiment_id']}",
+                direct_review,
+            )
             self.assertEqual(replan["status"], "paused_replan_loop")
             self.assertIn("re-planning is context", replan["cue"])
             self.assertIn(f"EXPERIMENT_RESUME {local['experiment_id']}", replan["resume_next"])

@@ -327,13 +327,16 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
                 patch.object(agent, "_state_for_live_surfaces", return_value=dict(STATE)),
                 patch.object(agent, "_stable_core_reflective_only", return_value=True),
                 patch.object(agent, "_format_metrics", return_value="metrics"),
-                patch.object(agent, "_query_llm_strict_review", return_value=SECTIONED_INTROSPECTION),
+                patch.object(agent, "_query_llm_strict_review", return_value=SECTIONED_INTROSPECTION) as query,
                 patch.object(agent, "_write_journal_entry"),
                 patch.object(agent, "_log_decision"),
                 patch.object(agent, "_record_stable_core_agent_success"),
             ):
                 agent._execute_action(action, dict(STATE))
 
+            prompt = query.call_args.args[0]
+            self.assertIn("felt texture, generated-word quality, tone", prompt)
+            self.assertIn("then cite source lines, symbols, or telemetry", prompt)
             artifacts = list((workspace / "introspections").glob("introspect_*.txt"))
             self.assertEqual(len(artifacts), 1)
             artifact_text = artifacts[0].read_text()
@@ -389,6 +392,12 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
                 agent._introspect(dict(STATE))
 
             self.assertEqual(query.call_count, 2)
+            first_prompt = query.call_args_list[0].args[0]
+            repair_prompt = query.call_args_list[1].args[0]
+            self.assertIn("felt texture, generated-word quality, tone", first_prompt)
+            self.assertIn("then cite source lines, symbols, or telemetry", first_prompt)
+            self.assertIn("felt texture, generated-word quality, tone", repair_prompt)
+            self.assertIn("before citing source lines, symbols, or telemetry", repair_prompt)
             artifacts = list((workspace / "introspections").glob("introspect_*.txt"))
             self.assertEqual(len(artifacts), 1)
             self.assertIn("Observed:", artifacts[0].read_text())

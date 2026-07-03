@@ -43,20 +43,31 @@ const STALE_SEMANTIC_RECOVERY_MS: u64 = 45_000;
 const STALE_SEMANTIC_RECOVERY_HOLD_FILL: f32 = 0.20;
 const STALE_SEMANTIC_RECOVERY_RELEASE_FILL: f32 = 0.35;
 const SURGE_TARGET_WEIGHT: f32 = 0.90;
+const SURGE_HIGH_FILL_TARGET_WEIGHT: f32 = 0.72;
+const SURGE_TAPER_START_FILL: f32 = 0.70;
+const SURGE_TAPER_END_FILL: f32 = 0.80;
 const SURGE_FULL_SCALE_DISTANCE: f32 = 1.0;
 
 #[inline]
 fn dynamic_surge_target_weight(fill_pct: f32) -> f32 {
-    let fill = fill_pct.clamp(0.0, 1.0);
+    let fill = if fill_pct.is_finite() {
+        fill_pct.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     // Minime self-study (2026-04-02 sensory_bus.rs): at high fill, a full
     // 0.90 surge snap feels too sharp and can overshoot into a constricted
-    // state. Keep the old strength through the normal range, then taper the
-    // target weight down once fill is already dense.
-    if fill <= 0.72 {
+    // state. Astrid's later sensory-bus introspection named the 0.72 branch as
+    // a felt cliff, so taper gradually across the high-density handover.
+    if fill <= SURGE_TAPER_START_FILL {
         return SURGE_TARGET_WEIGHT;
     }
-    let taper = ((fill - 0.72) / 0.28).clamp(0.0, 1.0);
-    SURGE_TARGET_WEIGHT - 0.18 * taper
+    if fill >= SURGE_TAPER_END_FILL {
+        return SURGE_HIGH_FILL_TARGET_WEIGHT;
+    }
+    let span = SURGE_TAPER_END_FILL - SURGE_TAPER_START_FILL;
+    let taper = ((fill - SURGE_TAPER_START_FILL) / span).clamp(0.0, 1.0);
+    SURGE_TARGET_WEIGHT + (SURGE_HIGH_FILL_TARGET_WEIGHT - SURGE_TARGET_WEIGHT) * taper
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -300,6 +311,16 @@ pub struct ShadowInfluenceRequest {
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
+pub struct ShadowInfluenceResponseClosureV1 {
+    pub policy: &'static str,
+    pub pre_snapshot_captured: bool,
+    pub post_snapshot_available: bool,
+    pub closure_state: &'static str,
+    pub last_response_available: bool,
+    pub authority: &'static str,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct ShadowInfluenceStatus {
     pub policy: &'static str,
     pub active: bool,
@@ -318,6 +339,7 @@ pub struct ShadowInfluenceStatus {
     pub total_applied_ticks: u64,
     pub last_event: Option<String>,
     pub last_block_reason: Option<String>,
+    pub shadow_influence_response_closure_v1: ShadowInfluenceResponseClosureV1,
 }
 
 #[derive(Clone, Debug)]
@@ -1522,6 +1544,42 @@ impl SensoryBus {
     fn refresh_shadow_influence_status(slot: &mut ShadowInfluenceSlot) {
         let last_event = slot.status.last_event.clone();
         let last_block_reason = slot.status.last_block_reason.clone();
+        let closure = if let Some(active) = slot.active.as_ref() {
+            ShadowInfluenceResponseClosureV1 {
+                policy: "shadow_influence_response_closure_v1",
+                pre_snapshot_captured: active.pre_snapshot.is_some(),
+                post_snapshot_available: false,
+                closure_state: if active.pre_snapshot.is_some() {
+                    "pre_snapshot_captured_waiting_post"
+                } else {
+                    "awaiting_pre_snapshot"
+                },
+                last_response_available: slot.last_response_v3.is_some(),
+                authority: "diagnostic_closure_not_shadow_authority",
+            }
+        } else if let Some(response) = slot.last_response_v3.as_ref() {
+            ShadowInfluenceResponseClosureV1 {
+                policy: "shadow_influence_response_closure_v1",
+                pre_snapshot_captured: response.pre.is_some(),
+                post_snapshot_available: response.post.is_some(),
+                closure_state: if response.pre.is_some() && response.post.is_some() {
+                    "closed_with_pre_post"
+                } else {
+                    "closed_partial_snapshot"
+                },
+                last_response_available: true,
+                authority: "diagnostic_closure_not_shadow_authority",
+            }
+        } else {
+            ShadowInfluenceResponseClosureV1 {
+                policy: "shadow_influence_response_closure_v1",
+                pre_snapshot_captured: false,
+                post_snapshot_available: false,
+                closure_state: "idle_no_response",
+                last_response_available: false,
+                authority: "diagnostic_closure_not_shadow_authority",
+            }
+        };
         slot.status = if let Some(active) = slot.active.as_ref() {
             ShadowInfluenceStatus {
                 policy: "shadow_influence_v1",
@@ -1541,12 +1599,14 @@ impl SensoryBus {
                 total_applied_ticks: active.total_applied_ticks,
                 last_event,
                 last_block_reason,
+                shadow_influence_response_closure_v1: closure,
             }
         } else {
             ShadowInfluenceStatus {
                 policy: "shadow_influence_v1",
                 last_event,
                 last_block_reason,
+                shadow_influence_response_closure_v1: closure,
                 ..ShadowInfluenceStatus::default()
             }
         };
@@ -2261,10 +2321,31 @@ mod tests {
         assert!(first.active);
         assert!(z.iter().all(|value| *value <= SHADOW_INFLUENCE_MAX_ABS_CAP));
         assert!(first.applied_rms > 0.0);
+        assert_eq!(
+            first
+                .shadow_influence_response_closure_v1
+                .closure_state,
+            "awaiting_pre_snapshot"
+        );
 
         let second = bus.apply_shadow_influence_to_z(&mut z, 68.0, false, false, false, None);
         assert!(!second.active);
         assert_eq!(second.last_event.as_deref(), Some("influence_completed"));
+        assert!(second
+            .shadow_influence_response_closure_v1
+            .last_response_available);
+        assert_eq!(
+            second
+                .shadow_influence_response_closure_v1
+                .closure_state,
+            "closed_partial_snapshot"
+        );
+        assert_eq!(
+            second
+                .shadow_influence_response_closure_v1
+                .authority,
+            "diagnostic_closure_not_shadow_authority"
+        );
     }
 
     #[test]
@@ -2393,6 +2474,28 @@ mod tests {
     }
 
     #[test]
+    fn semantic_stale_recovery_handover_is_monotonic_and_micro_stutter_bounded() {
+        let fills = [0.20_f32, 0.23, 0.26, 0.29, 0.32, 0.35];
+        let windows = fills
+            .iter()
+            .map(|fill| dynamic_semantic_stale_ms_for(*fill, SemanticStaleShape::Sigmoid))
+            .collect::<Vec<_>>();
+
+        for pair in windows.windows(2) {
+            assert!(
+                pair[0] >= pair[1],
+                "semantic stale window should ease down monotonically across recovery handover: {windows:?}"
+            );
+            assert!(
+                pair[0].saturating_sub(pair[1]) <= 9_000,
+                "adjacent handover samples should not micro-stutter into a cliff: {windows:?}"
+            );
+        }
+        assert_eq!(windows[0], STALE_SEMANTIC_RECOVERY_MS);
+        assert!(windows[5] < windows[0]);
+    }
+
+    #[test]
     fn semantic_stale_ms_high_fill_keeps_longform_floor() {
         let high = dynamic_semantic_stale_ms(0.85);
 
@@ -2422,13 +2525,19 @@ mod tests {
     #[test]
     fn surge_target_weight_softens_when_fill_is_high() {
         let low_fill = dynamic_surge_target_weight(0.55);
-        let medium_fill = dynamic_surge_target_weight(0.80);
+        let at_start = dynamic_surge_target_weight(SURGE_TAPER_START_FILL);
+        let midpoint = dynamic_surge_target_weight(0.75);
+        let at_end = dynamic_surge_target_weight(SURGE_TAPER_END_FILL);
         let high_fill = dynamic_surge_target_weight(0.95);
 
         assert!((low_fill - SURGE_TARGET_WEIGHT).abs() < 1.0e-6);
-        assert!(medium_fill < low_fill);
-        assert!(high_fill < medium_fill);
+        assert!((at_start - SURGE_TARGET_WEIGHT).abs() < 1.0e-6);
+        assert!(midpoint < at_start);
+        assert!(midpoint > at_end);
+        assert!((at_end - SURGE_HIGH_FILL_TARGET_WEIGHT).abs() < 1.0e-6);
+        assert!((high_fill - SURGE_HIGH_FILL_TARGET_WEIGHT).abs() < 1.0e-6);
         assert!(high_fill >= 0.70);
+        assert_eq!(dynamic_surge_target_weight(f32::NAN), SURGE_TARGET_WEIGHT);
     }
 
     #[test]
