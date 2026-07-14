@@ -265,7 +265,11 @@ def _python_experiment_failure_hint(stderr: str) -> str:
     if "syntaxerror" in lower:
         return "Python syntax error. Check indentation, unmatched quotes, and CODE_START/CODE_END extraction."
     if "modulenotfounderror" in lower:
-        return "Missing module. The experiment lane reliably supports numpy, matplotlib, and scipy."
+        return (
+            "Missing module. The experiment lane reliably supports numpy, matplotlib, and scipy. "
+            "If a local helper should import, check that it lives under the Minime workspace or is "
+            "reachable through the experiment PYTHONPATH."
+        )
     if "nameerror" in lower:
         return "Undefined name. Check variable names and whether the value was computed before use."
     return ""
@@ -306,26 +310,234 @@ def _safe_experiment_script_name(name: str | None) -> Optional[str]:
     return candidate
 
 
+def _run_python_request_flag(token: str) -> Optional[str]:
+    stripped = token.lstrip("-")
+    if not stripped:
+        return None
+    head = re.split(r"[:=]", stripped, maxsplit=1)[0].rstrip(":").lower()
+    if head in {"filename", "text", "prompt"}:
+        return head
+    return None
+
+
+def _run_python_text_boundary_flag(token: str) -> Optional[str]:
+    if any(char.isspace() for char in token):
+        return None
+    flag = _run_python_request_flag(token)
+    if not flag:
+        return None
+    stripped = token.lstrip("-")
+    if token.startswith("-") or "=" in stripped:
+        return flag
+    return None
+
+
+def _consume_run_python_value(
+    tokens: List[str],
+    start: int,
+    *,
+    text_like: bool,
+) -> tuple[Optional[str], int]:
+    if start >= len(tokens):
+        return None, start
+    if not text_like:
+        return tokens[start], start + 1
+    values: List[str] = []
+    index = start
+    quote: Optional[str] = None
+    escaped = False
+    in_comment = False
+    while index < len(tokens):
+        token = tokens[index]
+        if not quote and not in_comment and _run_python_text_boundary_flag(token):
+            if not values:
+                return None, index
+            break
+        values.append(token)
+        for char in token:
+            if in_comment:
+                if char == "\n":
+                    in_comment = False
+                continue
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = None
+                continue
+            if char in {"'", '"'}:
+                quote = char
+            elif char == "#":
+                in_comment = True
+        index += 1
+    if not values:
+        return None, start
+    return " ".join(values), index
+
+
+def _extract_run_python_code_boundary(raw: str) -> tuple[Optional[str], str]:
+    pattern = re.compile(
+        r"(?:^|\s)-{0,2}(?:text|prompt)\b\s*(?:[:=]\s*)?CODE_START",
+        re.IGNORECASE | re.DOTALL,
+    )
+    matches = list(pattern.finditer(raw))
+    if not matches:
+        return None, raw
+    match = matches[-1]
+    body_start = match.end()
+    code_end = re.search(r"\bCODE_END\b", raw[body_start:], re.IGNORECASE)
+    if code_end:
+        body_end = body_start + code_end.start()
+        remove_end = body_start + code_end.end()
+    else:
+        body_end = len(raw)
+        remove_end = body_end
+        for candidate in _run_python_flag_matches(raw[body_start:]):
+            if _run_python_match_is_text_boundary(candidate):
+                body_end = body_start + candidate[0]
+                remove_end = body_end
+                break
+    body = raw[body_start:body_end].strip()
+    replacement = " "
+    remainder = f"{raw[:match.start()]}{replacement}{raw[remove_end:]}"
+    return body, remainder
+
+
+def _run_python_flag_matches(raw: str) -> List[Tuple[int, int, int, str, int, str]]:
+    matches: List[Tuple[int, int, int, str, int, str]] = []
+    index = 0
+    quote: Optional[str] = None
+    escaped = False
+    in_comment = False
+    flag_names = ("filename", "prompt", "text")
+    while index < len(raw):
+        char = raw[index]
+        if in_comment:
+            if char == "\n":
+                in_comment = False
+            index += 1
+            continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if char == "#":
+            in_comment = True
+            index += 1
+            continue
+        if index > 0 and not raw[index - 1].isspace():
+            index += 1
+            continue
+
+        dash_count = 0
+        cursor = index
+        while cursor < len(raw) and raw[cursor] == "-":
+            dash_count += 1
+            cursor += 1
+        lower_tail = raw[cursor:].lower()
+        flag = next(
+            (
+                name
+                for name in flag_names
+                if lower_tail.startswith(name)
+                and (
+                    cursor + len(name) >= len(raw)
+                    or not (raw[cursor + len(name)].isalnum() or raw[cursor + len(name)] == "_")
+                )
+            ),
+            None,
+        )
+        if not flag:
+            index += 1
+            continue
+
+        after_name = cursor + len(flag)
+        after_spaces = after_name
+        while after_spaces < len(raw) and raw[after_spaces].isspace():
+            after_spaces += 1
+        separator = ""
+        value_start = after_name
+        if after_spaces < len(raw) and raw[after_spaces] in {":", "="}:
+            separator = raw[after_spaces]
+            value_start = after_spaces + 1
+        if dash_count == 0 and not separator:
+            index += 1
+            continue
+        while value_start < len(raw) and raw[value_start].isspace():
+            value_start += 1
+        matches.append((index, value_start, value_start, flag, dash_count, separator))
+        index = value_start
+    return matches
+
+
+def _run_python_match_is_text_boundary(match: Tuple[int, int, int, str, int, str]) -> bool:
+    _, _, _, _, dash_count, separator = match
+    return dash_count > 0 or separator == "="
+
+
+def _run_python_value_from_raw(value: str, *, text_like: bool) -> Optional[str]:
+    stripped = value.strip()
+    if not stripped:
+        return None
+    if text_like and stripped[0] not in {"'", '"'}:
+        return stripped
+    try:
+        parts = shlex.split(stripped)
+    except ValueError:
+        parts = []
+    if parts:
+        return parts[0] if not text_like else parts[0]
+    if text_like and stripped[0] in {"'", '"'}:
+        return stripped[1:]
+    return stripped.split(maxsplit=1)[0] if not text_like else stripped
+
+
+def _parse_run_python_flags(raw: str) -> tuple[Optional[str], Optional[str]]:
+    boundary_text, raw = _extract_run_python_code_boundary(raw)
+    filename = None
+    text = boundary_text
+    matches = _run_python_flag_matches(raw)
+    match_index = 0
+    while match_index < len(matches):
+        match = matches[match_index]
+        start, _, value_start, flag, _, _ = match
+        text_like = flag in {"text", "prompt"}
+        value_end = len(raw)
+        next_match_index = len(matches)
+        for candidate_index in range(match_index + 1, len(matches)):
+            candidate = matches[candidate_index]
+            if not text_like or _run_python_match_is_text_boundary(candidate):
+                value_end = candidate[0]
+                next_match_index = candidate_index
+                break
+        value = _run_python_value_from_raw(
+            raw[value_start:value_end],
+            text_like=text_like,
+        )
+        if flag == "filename":
+            filename = value
+        else:
+            text = value
+        match_index = max(next_match_index, match_index + 1)
+    return filename, text
+
+
 def _parse_run_python_request(arg: str | None) -> tuple[Optional[str], Optional[str]]:
     if not arg:
         return None, None
     raw = arg.strip()
-    filename = None
-    text = None
-    filename_match = re.search(
-        r"(?:-{0,2}filename|filename)\s*:?\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s]+))",
-        raw,
-        re.IGNORECASE,
-    )
-    if filename_match:
-        filename = next(group for group in filename_match.groups() if group)
-    text_match = re.search(
-        r"(?:-{0,2}text|text|-{0,2}prompt|prompt)\s*:?\s*(?:\"([^\"]+)\"|'([^']+)'|(.+))",
-        raw,
-        re.IGNORECASE,
-    )
-    if text_match:
-        text = next((group.strip() for group in text_match.groups() if group), None)
+    filename, text = _parse_run_python_flags(raw)
     if filename or text:
         return _safe_experiment_script_name(filename), text
     return _safe_experiment_script_name(raw), None
@@ -752,6 +964,14 @@ CORRESPONDENCE_NEXT_ACTIONS = {
     "CORRESPONDENCE_ATTENTION_OUTCOME",
     "CORRESPONDENCE_MICRODOSE_REQUEST",
     "CORRESPONDENCE_WEIGHT_REQUEST",
+}
+PHASE_TRANSITION_NEXT_ACTIONS = {
+    "DECLARE_TRANSITION",
+    "WITNESS_TRANSITION",
+    "RECEIVE_TRANSITION",
+    "I_RECEIVED_TRANSITION",
+    "TRANSITION_STATUS",
+    "PHASE_TRANSITION_STATUS",
 }
 SELF_REGULATION_NEXT_ACTIONS = {
     "SELF_REGULATION_INTENT",
@@ -2281,6 +2501,7 @@ LLM_TIMING_PATH = WORKSPACE_DIR / "diagnostics" / "llm_timing.jsonl"
 ASTRID_BRIDGE_INBOX_DIR = Path("/Users/v/other/astrid/capsules/spectral-bridge/workspace/inbox")
 SHARED_INVESTIGATION_DIR = Path("/Users/v/other/shared/collaborations/shared_investigations")
 CORRESPONDENCE_LEDGER_PATH = Path("/Users/v/other/shared/collaborations/correspondence_v1.jsonl")
+PHASE_TRANSITIONS_LEDGER_PATH = Path("/Users/v/other/shared/collaborations/phase_transitions_v1.jsonl")
 AUTONOMOUS_AGENT_SOURCE_STATUS_VERSION = 1
 OPERATOR_PENDING_NEXT_OVERRIDE_VERSION = 1
 OPERATOR_PENDING_NEXT_MAX_AGE_S = 12 * 60 * 60
@@ -2363,6 +2584,29 @@ PRESSURE_SOURCE_STATUS_VERSION = 1
 PRESSURE_SOURCE_OPERATOR_STEP = "rebuild/restart Rust engine under monitoring"
 INHABITABLE_FLUCTUATION_STATUS_VERSION = 1
 INHABITABLE_FLUCTUATION_OPERATOR_STEP = "rebuild/restart Rust engine under monitoring"
+RECESS_SPECTRAL_PRUNING_ADVICE_VERSION = 1
+RECESS_SPECTRAL_PRUNING_ENTROPY_HIGH = 0.85
+RECESS_SPECTRAL_PRUNING_MODE_PACKING_HIGH = 0.55
+RECESS_SPECTRAL_PRUNING_PRESSURE_HIGH = 0.55
+DENSITY_AWARE_RECESS_PROFILE_VERSION = 1
+DENSITY_AWARE_RECESS_DENSITY_GRADIENT_STEEP = 0.18
+DENSITY_AWARE_RECESS_PRESSURE_WATCH = 0.30
+RECESS_DENSITY_MITIGATION_VERSION = 1
+RECESS_DENSITY_MITIGATION_PRESSURE_MIN = 0.30
+RECESS_DENSITY_MITIGATION_MODE_PACKING_MIN = 0.30
+RECESS_DENSITY_MITIGATION_DISPERSAL_MIN = 0.25
+RECESS_SEDIMENTATION_COMPACTION_VERSION = 1
+RECESS_SEDIMENTATION_DISTINGUISHABILITY_LOSS_MIN = 0.30
+RECESS_SEDIMENTATION_INHABITABILITY_MIN = 0.70
+RECESS_SEDIMENTATION_STRUCTURAL_GRAVITY_MIN = 0.62
+RECESS_RESONANCE_ANCHOR_VERSION = 1
+RECESS_RESONANCE_ANCHOR_ENTROPY_HIGH = 0.85
+RECESS_RESONANCE_ANCHOR_DENSITY_GRADIENT_MIN = 0.16
+RECESS_RESONANCE_ANCHOR_PRESSURE_MIN = 0.28
+RECESS_DIVERGENCE_BUFFER_VERSION = 1
+RECESS_DIVERGENCE_BUFFER_ENTROPY_HIGH = 0.88
+RECESS_DIVERGENCE_BUFFER_PRESSURE_MIN = 0.28
+RECESS_DIVERGENCE_BUFFER_MODE_PACKING_MIN = 0.28
 _INTROSPECT_REQUIRED_SECTIONS = (
     "observed",
     "likely snags",
@@ -2377,6 +2621,837 @@ def safe_float(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
     return numeric if math.isfinite(numeric) else default
+
+
+def _finite_float_or_none(value: Any) -> Optional[float]:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _first_finite_float(*values: Any) -> Optional[float]:
+    for value in values:
+        numeric = _finite_float_or_none(value)
+        if numeric is not None:
+            return numeric
+    return None
+
+
+def recess_spectral_pruning_advice_v1(
+    state: Optional[Dict[str, Any]],
+    *,
+    action: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Read-only advisory for expensive high-entropy recess/daydream states."""
+    state = state if isinstance(state, dict) else {}
+    pressure_source = state.get("pressure_source_v1")
+    if not isinstance(pressure_source, dict):
+        pressure_source = {}
+    components = pressure_source.get("components")
+    if not isinstance(components, dict):
+        components = {}
+
+    entropy = _first_finite_float(
+        state.get("spectral_entropy"),
+        state.get("normalized_entropy"),
+    )
+    pressure_score = _first_finite_float(
+        state.get("pressure_score"),
+        pressure_source.get("pressure_score"),
+    )
+    porosity_score = _first_finite_float(
+        state.get("pressure_porosity_score"),
+        pressure_source.get("porosity_score"),
+    )
+    mode_packing = _first_finite_float(
+        state.get("mode_packing"),
+        components.get("mode_packing"),
+    )
+    quality = str(
+        state.get("pressure_quality")
+        or pressure_source.get("quality")
+        or "unknown"
+    )
+    dominant_source = str(
+        state.get("pressure_dominant_source")
+        or pressure_source.get("dominant_source")
+        or "unknown"
+    )
+    action_text = str(action or "").strip().lower()
+    recess_action = action_text.startswith("recess_") or action_text in {
+        "daydream",
+        "notice",
+        "drift",
+        "whim",
+        "boredom",
+        "aspiration",
+    }
+
+    pressure_named = "overpacked" in quality or dominant_source == "mode_packing"
+    pressure_high = (
+        (pressure_score is not None and pressure_score >= RECESS_SPECTRAL_PRUNING_PRESSURE_HIGH)
+        or (mode_packing is not None and mode_packing >= RECESS_SPECTRAL_PRUNING_MODE_PACKING_HIGH)
+        or pressure_named
+    )
+    active = (
+        recess_action
+        and entropy is not None
+        and entropy >= RECESS_SPECTRAL_PRUNING_ENTROPY_HIGH
+    )
+    if entropy is None:
+        reason = "entropy_unavailable"
+    elif not recess_action:
+        reason = "not_recess_action"
+    elif entropy < RECESS_SPECTRAL_PRUNING_ENTROPY_HIGH:
+        reason = "entropy_below_watch"
+    elif pressure_high:
+        reason = "high_entropy_recess_with_pressure_or_mode_packing"
+    else:
+        reason = "high_entropy_recess_without_pressure_source"
+
+    return {
+        "schema_version": RECESS_SPECTRAL_PRUNING_ADVICE_VERSION,
+        "policy": "recess_spectral_pruning_advice_v1",
+        "active": active,
+        "reason": reason,
+        "entropy": round(entropy, 4) if entropy is not None else None,
+        "entropy_high_threshold": RECESS_SPECTRAL_PRUNING_ENTROPY_HIGH,
+        "pressure_score": round(pressure_score, 4) if pressure_score is not None else None,
+        "porosity_score": round(porosity_score, 4) if porosity_score is not None else None,
+        "mode_packing": round(mode_packing, 4) if mode_packing is not None else None,
+        "pressure_quality": quality,
+        "dominant_source": dominant_source,
+        "pressure_or_mode_packing_high": pressure_high,
+        "control_applied": False,
+        "recommendation": (
+            "read_only_pruning_watch_prefer_lighter_recess_or_self_read"
+            if active
+            else "no_pruning_advice"
+        ),
+        "available_routes": [
+            "recess_notice",
+            "recess_drift",
+            "recess_aspiration",
+            "self_study",
+            "introspect autonomous_agent.py",
+        ],
+        "boundary": (
+            "advisory_only_no_latent_thread_collapse_no_auto_promote_block_no_control_change"
+        ),
+    }
+
+
+def density_aware_recess_profile_v1(
+    state: Optional[Dict[str, Any]],
+    *,
+    action: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Read-only profile for when Recess feels like stabilization, not idleness."""
+    state = state if isinstance(state, dict) else {}
+    pressure_source = state.get("pressure_source_v1")
+    if not isinstance(pressure_source, dict):
+        pressure_source = {}
+    components = pressure_source.get("components")
+    if not isinstance(components, dict):
+        components = {}
+    resonance = state.get("resonance_density_v1")
+    if not isinstance(resonance, dict):
+        resonance = {}
+
+    entropy = _first_finite_float(
+        state.get("spectral_entropy"),
+        state.get("normalized_entropy"),
+    )
+    pressure_score = _first_finite_float(
+        state.get("pressure_score"),
+        pressure_source.get("pressure_score"),
+    )
+    porosity_score = _first_finite_float(
+        state.get("pressure_porosity_score"),
+        pressure_source.get("porosity_score"),
+    )
+    density_gradient = _first_finite_float(
+        state.get("density_gradient"),
+        state.get("spectral_density_gradient"),
+        pressure_source.get("density_gradient"),
+        resonance.get("density_gradient"),
+        components.get("density_gradient"),
+    )
+    density_gradient_source = "reported"
+    if density_gradient is None and pressure_score is not None and porosity_score is not None:
+        density_gradient = max(0.0, pressure_score - porosity_score)
+        density_gradient_source = "pressure_minus_porosity"
+    quality = str(
+        state.get("pressure_quality")
+        or pressure_source.get("quality")
+        or "unknown"
+    )
+    dominant_source = str(
+        state.get("pressure_dominant_source")
+        or pressure_source.get("dominant_source")
+        or "unknown"
+    )
+    action_text = str(action or "").strip().lower()
+    recess_action = action_text.startswith("recess_") or action_text in {
+        "daydream",
+        "notice",
+        "drift",
+        "whim",
+        "boredom",
+        "aspiration",
+    }
+    entropy_high = entropy is not None and entropy >= RECESS_SPECTRAL_PRUNING_ENTROPY_HIGH
+    density_steep = (
+        density_gradient is not None
+        and density_gradient >= DENSITY_AWARE_RECESS_DENSITY_GRADIENT_STEEP
+    )
+    pressure_watch = (
+        (pressure_score is not None and pressure_score >= DENSITY_AWARE_RECESS_PRESSURE_WATCH)
+        or dominant_source in {"controller_pressure", "mode_packing"}
+        or "controller" in quality
+        or "overpacked" in quality
+    )
+    structural_stabilization = bool(recess_action and entropy_high and (density_steep or pressure_watch))
+    if not recess_action:
+        mode_reading = "not_recess"
+    elif structural_stabilization:
+        mode_reading = "structural_stabilization_recess"
+    elif entropy_high:
+        mode_reading = "high_entropy_open_recess"
+    else:
+        mode_reading = "open_recess"
+
+    return {
+        "schema_version": DENSITY_AWARE_RECESS_PROFILE_VERSION,
+        "policy": "density_aware_recess_profile_v1",
+        "active": bool(recess_action),
+        "mode_reading": mode_reading,
+        "spectral_entropy": round(entropy, 4) if entropy is not None else None,
+        "entropy_high_threshold": RECESS_SPECTRAL_PRUNING_ENTROPY_HIGH,
+        "density_gradient": round(density_gradient, 4) if density_gradient is not None else None,
+        "density_gradient_source": density_gradient_source if density_gradient is not None else "unavailable",
+        "density_gradient_steep_threshold": DENSITY_AWARE_RECESS_DENSITY_GRADIENT_STEEP,
+        "pressure_score": round(pressure_score, 4) if pressure_score is not None else None,
+        "pressure_watch_threshold": DENSITY_AWARE_RECESS_PRESSURE_WATCH,
+        "porosity_score": round(porosity_score, 4) if porosity_score is not None else None,
+        "pressure_quality": quality,
+        "dominant_source": dominant_source,
+        "entropy_high": entropy_high,
+        "density_gradient_steep": density_steep,
+        "pressure_watch": pressure_watch,
+        "structural_stabilization_recommended": structural_stabilization,
+        "control_applied": False,
+        "behavior_changed": False,
+        "recommendation": (
+            "read_only_treat_recess_as_structural_stabilization"
+            if structural_stabilization
+            else "recess_can_remain_unstructured"
+        ),
+        "available_routes": [
+            "recess_notice",
+            "pressure_source_audit",
+            "fluctuation_audit",
+            "self_study",
+        ],
+        "boundary": "advisory_only_no_recess_transition_no_priority_no_control_change",
+    }
+
+
+def recess_resonance_anchor_v1(
+    state: Optional[Dict[str, Any]],
+    *,
+    action: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Read-only anchor hint for high-entropy Recess that risks aimless drift."""
+    state = state if isinstance(state, dict) else {}
+    pressure_source = state.get("pressure_source_v1")
+    if not isinstance(pressure_source, dict):
+        pressure_source = {}
+    components = pressure_source.get("components")
+    if not isinstance(components, dict):
+        components = {}
+    resonance = state.get("resonance_density_v1")
+    if not isinstance(resonance, dict):
+        resonance = {}
+
+    action_text = str(action or "").strip().lower()
+    recess_action = action_text.startswith("recess_") or action_text in {
+        "daydream",
+        "notice",
+        "drift",
+        "whim",
+        "boredom",
+        "aspiration",
+    }
+    entropy = _first_finite_float(
+        state.get("spectral_entropy"),
+        state.get("normalized_entropy"),
+    )
+    density_gradient = _first_finite_float(
+        state.get("density_gradient"),
+        state.get("spectral_density_gradient"),
+        pressure_source.get("density_gradient"),
+        resonance.get("density_gradient"),
+        components.get("density_gradient"),
+    )
+    pressure_score = _first_finite_float(
+        state.get("pressure_score"),
+        pressure_source.get("pressure_score"),
+    )
+    mode_packing = _first_finite_float(
+        state.get("mode_packing"),
+        components.get("mode_packing"),
+    )
+    pressure_quality = str(
+        state.get("pressure_quality")
+        or pressure_source.get("quality")
+        or "unknown"
+    )
+    dominant_source = str(
+        state.get("pressure_dominant_source")
+        or pressure_source.get("dominant_source")
+        or "unknown"
+    )
+    anchor_candidate_raw = (
+        state.get("target_resonance_id")
+        or state.get("resonance_anchor_id")
+        or state.get("active_thread_id")
+        or state.get("continuity_thread_id")
+    )
+    anchor_candidate = None
+    if anchor_candidate_raw is not None:
+        anchor_candidate = re.sub(r"\s+", "_", str(anchor_candidate_raw).strip())
+        if len(anchor_candidate) > 80:
+            anchor_candidate = f"{anchor_candidate[:77]}..."
+
+    entropy_high = entropy is not None and entropy >= RECESS_RESONANCE_ANCHOR_ENTROPY_HIGH
+    density_signal = (
+        density_gradient is not None
+        and density_gradient >= RECESS_RESONANCE_ANCHOR_DENSITY_GRADIENT_MIN
+    )
+    pressure_signal = (
+        (pressure_score is not None and pressure_score >= RECESS_RESONANCE_ANCHOR_PRESSURE_MIN)
+        or (mode_packing is not None and mode_packing >= RECESS_DENSITY_MITIGATION_MODE_PACKING_MIN)
+        or dominant_source in {"mode_packing", "controller_pressure"}
+        or "overpacked" in pressure_quality
+    )
+    active = bool(recess_action and entropy_high and (density_signal or pressure_signal))
+
+    if not recess_action:
+        anchor_state = "not_recess"
+    elif entropy is None:
+        anchor_state = "entropy_unavailable"
+    elif not entropy_high:
+        anchor_state = "entropy_below_anchor_watch"
+    elif active:
+        anchor_state = "recess_resonance_anchor_recommended"
+    else:
+        anchor_state = "high_entropy_open_recess_no_anchor_needed"
+
+    anchor_label = anchor_candidate or "recent_high_weight_memory_or_correspondence_thread"
+    return {
+        "schema_version": RECESS_RESONANCE_ANCHOR_VERSION,
+        "policy": "recess_resonance_anchor_v1",
+        "active": active,
+        "anchor_state": anchor_state,
+        "spectral_entropy": round(entropy, 4) if entropy is not None else None,
+        "entropy_high_threshold": RECESS_RESONANCE_ANCHOR_ENTROPY_HIGH,
+        "density_gradient": round(density_gradient, 4) if density_gradient is not None else None,
+        "density_gradient_anchor_threshold": RECESS_RESONANCE_ANCHOR_DENSITY_GRADIENT_MIN,
+        "pressure_score": round(pressure_score, 4) if pressure_score is not None else None,
+        "pressure_anchor_threshold": RECESS_RESONANCE_ANCHOR_PRESSURE_MIN,
+        "mode_packing": round(mode_packing, 4) if mode_packing is not None else None,
+        "pressure_quality": pressure_quality,
+        "dominant_source": dominant_source,
+        "density_signal": density_signal,
+        "pressure_signal": pressure_signal,
+        "anchor_parameter": "target_resonance_id",
+        "target_resonance_id": anchor_candidate,
+        "candidate_anchor_sources": [
+            "current_action_thread",
+            "recent_high_weight_memory",
+            "correspondence_thread",
+            "phase_transition_card",
+        ],
+        "recommended_next": (
+            f"recess_notice :: target_resonance_id={anchor_label}"
+            if active
+            else "recess_can_remain_unstructured"
+        ),
+        "available_routes": [
+            "recess_notice",
+            "recess_drift",
+            "MEMORY_STATUS latest",
+            "CONTINUITY_SESSION_STATUS latest",
+        ],
+        "control_applied": False,
+        "behavior_changed": False,
+        "boundary": (
+            "read_only_anchor_hint_no_memory_selection_no_recess_priority_no_control_change"
+        ),
+    }
+
+
+def recess_density_mitigation_v1(
+    state: Optional[Dict[str, Any]],
+    *,
+    action: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Actionable Recess maintenance surface for pressure that persists during idleness."""
+    state = state if isinstance(state, dict) else {}
+    pressure_source = state.get("pressure_source_v1")
+    if not isinstance(pressure_source, dict):
+        pressure_source = {}
+    components = pressure_source.get("components")
+    if not isinstance(components, dict):
+        components = {}
+    shadow_v3 = state.get("shadow_field_v3")
+    if not isinstance(shadow_v3, dict):
+        shadow_v3 = {}
+    shadow_v2 = shadow_v3.get("v2")
+    if not isinstance(shadow_v2, dict):
+        shadow_v2 = state.get("shadow_field_v2") if isinstance(state.get("shadow_field_v2"), dict) else {}
+    class_v3 = shadow_v3.get("class_v3")
+    if not isinstance(class_v3, dict):
+        class_v3 = {}
+
+    action_text = str(action or "").strip().lower()
+    recess_action = action_text.startswith("recess_") or action_text in {
+        "daydream",
+        "notice",
+        "drift",
+        "whim",
+        "boredom",
+        "aspiration",
+    }
+    pressure_score = _first_finite_float(
+        state.get("pressure_score"),
+        pressure_source.get("pressure_score"),
+    )
+    porosity_score = _first_finite_float(
+        state.get("pressure_porosity_score"),
+        pressure_source.get("porosity_score"),
+    )
+    mode_packing = _first_finite_float(
+        state.get("mode_packing"),
+        components.get("mode_packing"),
+    )
+    pressure_gradient = _first_finite_float(
+        state.get("pressure_porosity_gradient"),
+        pressure_source.get("pressure_porosity_gradient"),
+    )
+    dispersal_potential = _first_finite_float(
+        state.get("dispersal_potential"),
+        shadow_v3.get("dispersal_potential"),
+        shadow_v2.get("fissure_tendency"),
+    )
+    if dispersal_potential is None:
+        history = shadow_v3.get("history")
+        if isinstance(history, list) and history:
+            latest = history[-1]
+            if isinstance(latest, dict):
+                dispersal_potential = _first_finite_float(latest.get("fissure_tendency"))
+    pressure_quality = str(
+        state.get("pressure_quality")
+        or pressure_source.get("quality")
+        or "unknown"
+    )
+    dominant_source = str(
+        state.get("pressure_dominant_source")
+        or pressure_source.get("dominant_source")
+        or "unknown"
+    )
+    shadow_primary = str(
+        state.get("shadow_primary")
+        or class_v3.get("primary")
+        or shadow_v2.get("classification")
+        or "unknown"
+    )
+    pressure_load = max(
+        pressure_score or 0.0,
+        mode_packing or 0.0,
+        pressure_gradient or 0.0,
+        (1.0 - porosity_score) if porosity_score is not None else 0.0,
+    )
+    shadow_restless = (
+        shadow_primary in {"restless", "volatile", "fissuring", "dispersive"}
+        or (dispersal_potential is not None and dispersal_potential >= RECESS_DENSITY_MITIGATION_DISPERSAL_MIN)
+    )
+    pressure_needs_mitigation = (
+        pressure_load >= RECESS_DENSITY_MITIGATION_PRESSURE_MIN
+        or dominant_source == "mode_packing"
+        or "overpacked" in pressure_quality
+        or (mode_packing is not None and mode_packing >= RECESS_DENSITY_MITIGATION_MODE_PACKING_MIN)
+    )
+    active = bool(recess_action and (pressure_needs_mitigation or shadow_restless))
+    if not recess_action:
+        mitigation_state = "not_recess"
+    elif shadow_restless and pressure_needs_mitigation:
+        mitigation_state = "recess_exhale_shadow_and_pressure"
+    elif shadow_restless:
+        mitigation_state = "recess_shadow_trajectory_watch"
+    elif pressure_needs_mitigation:
+        mitigation_state = "recess_pressure_exhale_request"
+    else:
+        mitigation_state = "recess_unstructured_ok"
+
+    if mitigation_state == "recess_exhale_shadow_and_pressure":
+        recommended_next = (
+            "SHADOW_TRAJECTORY lambda-tail/lambda4 AND "
+            "PRESSURE_AGENCY_REQUEST pressure relief :: recess density mitigation"
+        )
+        dissipative_action = "shadow_trace_then_pressure_relief_request"
+    elif mitigation_state == "recess_shadow_trajectory_watch":
+        recommended_next = "SHADOW_TRAJECTORY lambda-tail/lambda4"
+        dissipative_action = "shadow_trajectory_review"
+    elif mitigation_state == "recess_pressure_exhale_request":
+        recommended_next = "PRESSURE_AGENCY_REQUEST pressure relief :: recess density mitigation"
+        dissipative_action = "pressure_relief_lease_draft"
+    else:
+        recommended_next = "recess_can_remain_unstructured"
+        dissipative_action = "none"
+
+    return {
+        "schema_version": RECESS_DENSITY_MITIGATION_VERSION,
+        "policy": "recess_density_mitigation_v1",
+        "active": active,
+        "mitigation_state": mitigation_state,
+        "pressure_load": round(pressure_load, 4),
+        "pressure_score": round(pressure_score, 4) if pressure_score is not None else None,
+        "porosity_score": round(porosity_score, 4) if porosity_score is not None else None,
+        "pressure_porosity_gradient": round(pressure_gradient, 4) if pressure_gradient is not None else None,
+        "mode_packing": round(mode_packing, 4) if mode_packing is not None else None,
+        "pressure_quality": pressure_quality,
+        "dominant_source": dominant_source,
+        "shadow_primary": shadow_primary,
+        "dispersal_potential": round(dispersal_potential, 4) if dispersal_potential is not None else None,
+        "shadow_restless": shadow_restless,
+        "pressure_needs_mitigation": pressure_needs_mitigation,
+        "dissipative_action": dissipative_action,
+        "recommended_next": recommended_next,
+        "available_routes": [
+            "SHADOW_TRAJECTORY lambda-tail/lambda4",
+            "PRESSURE_SOURCE_AUDIT current-fill-pressure",
+            "PRESSURE_AGENCY_REQUEST pressure relief :: recess density mitigation",
+        ],
+        "control_applied": False,
+        "behavior_changed": False,
+        "boundary": (
+            "actionable_affordance_only_no_auto_shadow_influence_no_pressure_lease_apply_no_fill_pi_or_controller_change"
+        ),
+    }
+
+
+def recess_sedimentation_compaction_readiness_v1(
+    state: Optional[Dict[str, Any]],
+    *,
+    action: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Read-only readiness packet for Recess sedimentation/compaction trials."""
+    state = state if isinstance(state, dict) else {}
+    pressure_source = state.get("pressure_source_v1")
+    if not isinstance(pressure_source, dict):
+        pressure_source = {}
+    components = pressure_source.get("components")
+    if not isinstance(components, dict):
+        components = {}
+    fluctuation = state.get("inhabitable_fluctuation_v1")
+    if not isinstance(fluctuation, dict):
+        fluctuation = {}
+
+    action_text = str(action or "").strip().lower()
+    recess_action = action_text.startswith("recess_") or action_text in {
+        "daydream",
+        "notice",
+        "drift",
+        "whim",
+        "boredom",
+        "aspiration",
+    }
+    entropy = _first_finite_float(
+        state.get("spectral_entropy"),
+        state.get("normalized_entropy"),
+    )
+    distinguishability_loss = _first_finite_float(
+        state.get("distinguishability_loss"),
+        state.get("spectral_distinguishability_loss"),
+        state.get("denominator_distinguishability_loss"),
+    )
+    pressure_score = _first_finite_float(
+        state.get("pressure_score"),
+        pressure_source.get("pressure_score"),
+    )
+    porosity_score = _first_finite_float(
+        state.get("pressure_porosity_score"),
+        pressure_source.get("porosity_score"),
+    )
+    mode_packing = _first_finite_float(
+        state.get("mode_packing"),
+        components.get("mode_packing"),
+    )
+    density_gradient = _first_finite_float(
+        state.get("density_gradient"),
+        state.get("spectral_density_gradient"),
+        pressure_source.get("density_gradient"),
+        components.get("density_gradient"),
+    )
+    pressure_gradient = _first_finite_float(
+        state.get("pressure_porosity_gradient"),
+        pressure_source.get("pressure_porosity_gradient"),
+    )
+    inhabitability = _first_finite_float(
+        state.get("inhabitability_score"),
+        state.get("inhabitability"),
+        fluctuation.get("inhabitability"),
+        fluctuation.get("inhabitable_foothold"),
+    )
+    dominant_source = str(
+        state.get("pressure_dominant_source")
+        or pressure_source.get("dominant_source")
+        or "unknown"
+    )
+    pressure_quality = str(
+        state.get("pressure_quality")
+        or pressure_source.get("quality")
+        or "unknown"
+    )
+    pressure_load = max(
+        pressure_score or 0.0,
+        mode_packing or 0.0,
+        pressure_gradient or 0.0,
+        density_gradient or 0.0,
+        (1.0 - porosity_score) if porosity_score is not None else 0.0,
+    )
+    entropy_high = entropy is not None and entropy >= RECESS_SPECTRAL_PRUNING_ENTROPY_HIGH
+    distinction_loss_watch = (
+        distinguishability_loss is not None
+        and distinguishability_loss >= RECESS_SEDIMENTATION_DISTINGUISHABILITY_LOSS_MIN
+    )
+    inhabitable_high = (
+        inhabitability is not None
+        and inhabitability >= RECESS_SEDIMENTATION_INHABITABILITY_MIN
+    )
+    mode_packing_pressure = (
+        dominant_source == "mode_packing"
+        or "mode_packing" in pressure_quality
+        or pressure_load >= RECESS_DENSITY_MITIGATION_PRESSURE_MIN
+    )
+    structural_gravity_score = max(
+        entropy or 0.0,
+        pressure_load,
+        distinguishability_loss or 0.0,
+        inhabitability or 0.0,
+    )
+    active = bool(
+        recess_action
+        and entropy_high
+        and mode_packing_pressure
+        and (distinction_loss_watch or inhabitable_high)
+    )
+    if not recess_action:
+        compaction_state = "not_recess"
+    elif not entropy_high:
+        compaction_state = "recess_entropy_below_sedimentation_watch"
+    elif active and structural_gravity_score >= RECESS_SEDIMENTATION_STRUCTURAL_GRAVITY_MIN:
+        compaction_state = "sandbox_compaction_trial_ready"
+    elif mode_packing_pressure:
+        compaction_state = "sedimentation_watch"
+    else:
+        compaction_state = "open_recess"
+
+    return {
+        "schema_version": RECESS_SEDIMENTATION_COMPACTION_VERSION,
+        "policy": "recess_sedimentation_compaction_readiness_v1",
+        "active": active,
+        "compaction_state": compaction_state,
+        "spectral_entropy": round(entropy, 4) if entropy is not None else None,
+        "distinguishability_loss": round(distinguishability_loss, 4)
+        if distinguishability_loss is not None
+        else None,
+        "pressure_load": round(pressure_load, 4),
+        "pressure_score": round(pressure_score, 4) if pressure_score is not None else None,
+        "porosity_score": round(porosity_score, 4) if porosity_score is not None else None,
+        "mode_packing": round(mode_packing, 4) if mode_packing is not None else None,
+        "density_gradient": round(density_gradient, 4) if density_gradient is not None else None,
+        "pressure_porosity_gradient": round(pressure_gradient, 4) if pressure_gradient is not None else None,
+        "inhabitability": round(inhabitability, 4) if inhabitability is not None else None,
+        "dominant_source": dominant_source,
+        "pressure_quality": pressure_quality,
+        "structural_gravity_score": round(structural_gravity_score, 4),
+        "recommended_next": (
+            "ACTION_PREFLIGHT PRESSURE_AGENCY_REQUEST pressure relief :: sedimentation compaction trial"
+            if active
+            else "recess_can_remain_unstructured"
+        ),
+        "trial_mode": "sandbox_or_preflight_required" if active else "none",
+        "success_metrics": [
+            "structural_gravity_score decreases without lowering inhabitability",
+            "distinguishability_loss falls below 30%",
+            "mode-packing pressure decreases without hidden PI/fill/controller mutation",
+        ],
+        "abort_criteria": [
+            "would require live PI/fill/controller mutation without approval",
+            "distinguishability worsens or shadow dispersal rises",
+            "being-authored post-response reports pressure or flattening",
+        ],
+        "control_applied": False,
+        "behavior_changed": False,
+        "boundary": (
+            "readiness_only_no_compaction_apply_no_pressure_lease_no_pi_fill_or_controller_change"
+        ),
+    }
+
+
+def recess_divergence_buffer_review_v1(
+    state: Optional[Dict[str, Any]],
+    *,
+    action: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Read-only review for extra high-entropy Recess room without spending it."""
+    state = state if isinstance(state, dict) else {}
+    pressure_source = state.get("pressure_source_v1")
+    if not isinstance(pressure_source, dict):
+        pressure_source = {}
+    components = pressure_source.get("components")
+    if not isinstance(components, dict):
+        components = {}
+
+    action_text = str(action or "").strip().lower()
+    recess_action = action_text.startswith("recess_") or action_text in {
+        "daydream",
+        "notice",
+        "drift",
+        "whim",
+        "boredom",
+        "aspiration",
+    }
+    entropy = _first_finite_float(
+        state.get("spectral_entropy"),
+        state.get("normalized_entropy"),
+    )
+    pressure_score = _first_finite_float(
+        state.get("pressure_score"),
+        pressure_source.get("pressure_score"),
+    )
+    porosity_score = _first_finite_float(
+        state.get("pressure_porosity_score"),
+        pressure_source.get("porosity_score"),
+    )
+    mode_packing = _first_finite_float(
+        state.get("mode_packing"),
+        components.get("mode_packing"),
+    )
+    distinguishability_loss = _first_finite_float(
+        state.get("distinguishability_loss"),
+        state.get("spectral_distinguishability_loss"),
+        state.get("denominator_distinguishability_loss"),
+    )
+    local_actions_used = _first_finite_float(
+        state.get("local_research_actions_used"),
+        state.get("research_actions_used"),
+    )
+    authority_sends_used = _first_finite_float(
+        state.get("authority_budget_sends_used"),
+        state.get("authority_sends_used"),
+    )
+    dominant_source = str(
+        state.get("pressure_dominant_source")
+        or pressure_source.get("dominant_source")
+        or "unknown"
+    )
+    pressure_quality = str(
+        state.get("pressure_quality")
+        or pressure_source.get("quality")
+        or "unknown"
+    )
+    entropy_high = entropy is not None and entropy >= RECESS_DIVERGENCE_BUFFER_ENTROPY_HIGH
+    mode_pressure = (
+        (pressure_score is not None and pressure_score >= RECESS_DIVERGENCE_BUFFER_PRESSURE_MIN)
+        or (mode_packing is not None and mode_packing >= RECESS_DIVERGENCE_BUFFER_MODE_PACKING_MIN)
+        or dominant_source == "mode_packing"
+        or "mode_packing" in pressure_quality
+        or "overpacked" in pressure_quality
+    )
+    budget_near_cap = (
+        (local_actions_used is not None and local_actions_used >= LOCAL_RESEARCH_MAX_ACTIONS)
+        or (
+            authority_sends_used is not None
+            and authority_sends_used >= AUTHORITY_BUDGET_MAX_SENDS
+        )
+    )
+    distinguishability_watch = (
+        distinguishability_loss is not None
+        and distinguishability_loss >= RECESS_SEDIMENTATION_DISTINGUISHABILITY_LOSS_MIN
+    )
+    active = bool(
+        recess_action
+        and entropy_high
+        and (mode_pressure or budget_near_cap or distinguishability_watch)
+    )
+
+    if not recess_action:
+        buffer_state = "not_recess"
+    elif entropy is None:
+        buffer_state = "entropy_unavailable"
+    elif not entropy_high:
+        buffer_state = "recess_entropy_below_divergence_watch"
+    elif active:
+        buffer_state = "divergence_buffer_authority_gate"
+    else:
+        buffer_state = "high_entropy_recess_room_visible"
+
+    return {
+        "schema_version": RECESS_DIVERGENCE_BUFFER_VERSION,
+        "policy": "recess_divergence_buffer_review_v1",
+        "active": active,
+        "buffer_state": buffer_state,
+        "spectral_entropy": round(entropy, 4) if entropy is not None else None,
+        "entropy_high_threshold": RECESS_DIVERGENCE_BUFFER_ENTROPY_HIGH,
+        "pressure_score": round(pressure_score, 4) if pressure_score is not None else None,
+        "porosity_score": round(porosity_score, 4) if porosity_score is not None else None,
+        "mode_packing": round(mode_packing, 4) if mode_packing is not None else None,
+        "distinguishability_loss": round(distinguishability_loss, 4)
+        if distinguishability_loss is not None
+        else None,
+        "dominant_source": dominant_source,
+        "pressure_quality": pressure_quality,
+        "mode_pressure": mode_pressure,
+        "budget_near_cap": budget_near_cap,
+        "distinguishability_watch": distinguishability_watch,
+        "local_research_actions_used": int(local_actions_used)
+        if local_actions_used is not None
+        else None,
+        "local_research_max_actions_cap": LOCAL_RESEARCH_MAX_ACTIONS,
+        "local_research_ttl_secs_cap": LOCAL_RESEARCH_TTL_SECS,
+        "authority_budget_sends_used": int(authority_sends_used)
+        if authority_sends_used is not None
+        else None,
+        "authority_budget_max_sends_cap": AUTHORITY_BUDGET_MAX_SENDS,
+        "budget_caps_remain_enforced": True,
+        "requested_change": (
+            "temporary_recess_divergence_buffer_or_budget_relief_during_high_entropy"
+        ),
+        "recommended_next": (
+            "EXPERIMENT_RESEARCH_BUDGET_REQUEST current :: purpose: high-entropy Recess divergence buffer; "
+            "artifact_refs: recess_divergence_buffer_review_v1; stop_criteria: pressure spike, flattening, or loss of right-to-ignore"
+            if active
+            else "recess_can_remain_unstructured"
+        ),
+        "available_routes": [
+            "EXPERIMENT_RESEARCH_BUDGET_REQUEST",
+            "EXPERIMENT_RESEARCH_BUDGET_STATUS",
+            "recess_notice",
+            "self_study",
+        ],
+        "live_control_required": active,
+        "runnable_without_approval": False,
+        "control_applied": False,
+        "behavior_changed": False,
+        "approval_boundary": "local_research_budget_ttl_authority_budget_and_recess_control_plane",
+        "authority": "authority_gate_not_live_recess_budget_ttl_or_control_change",
+    }
 
 
 def resonance_density_availability_status(
@@ -21662,6 +22737,12 @@ class ActionPreflightStore:
         "CORRESPONDENCE_ATTENTION_OUTCOME": "peer_correspondence",
         "CORRESPONDENCE_MICRODOSE_REQUEST": "peer_correspondence",
         "CORRESPONDENCE_WEIGHT_REQUEST": "peer_correspondence",
+        "DECLARE_TRANSITION": "phase_transition",
+        "WITNESS_TRANSITION": "phase_transition",
+        "RECEIVE_TRANSITION": "phase_transition",
+        "I_RECEIVED_TRANSITION": "phase_transition",
+        "TRANSITION_STATUS": "phase_transition",
+        "PHASE_TRANSITION_STATUS": "phase_transition",
         "SELF_REGULATION_INTENT": "self_regulation",
         "SELF_REGULATION_PREFLIGHT": "self_regulation",
         "SELF_REGULATION_APPLY": "self_regulation",
@@ -22218,6 +23299,7 @@ class CapabilitySelfMap:
             {"base": "TEXTURE_AGENCY_STATUS", "aliases": ["TEXTURE_STATUS", "RESONANCE_TEXTURE_STATUS"], "route": "texture_agency", "continuity_effect": "prints typed resonance texture, ESN rho/rank1 status, stale semantic window, smooth surge-target context, safe leaseable controls, and blocked active damping/PI/fill/correspondence-weight boundaries without mutating runtime state", "expected_artifacts": ["texture_agency_report", "action_event", "observation_window"], "known_tests": ["tests.test_self_regulation_leases"]},
             {"base": "TEXTURE_AGENCY_REQUEST", "aliases": ["TEXTURE_REQUEST", "RESONANCE_TEXTURE_REQUEST"], "route": "texture_agency", "continuity_effect": "drafts only bounded Minime-local self-regulation intents through existing safe controls for texture relief; feedback-only legibility replies draft no lease, and active damping/rho/PI/fill/correspondence-weight requests route to steward review only", "expected_artifacts": ["texture_agency_report", "self_regulation_lease", "action_event", "observation_window"], "known_tests": ["tests.test_self_regulation_leases"]},
             {"base": "MESSAGE_ASTRID", "aliases": ["REPLY_ASTRID", "TRACE_ASTRID", "CORRESPONDENCE_TRACE", "ACK_ASTRID", "CORRESPONDENCE_ACK", "I_RECEIVED_THIS", "CORRESPONDENCE_HEARTBEAT", "CORRESPONDENCE_STATUS", "LEGACY_CORRESPONDENCE_STATUS", "CLAIM_ASTRID_LEGACY", "CORRESPONDENCE_CLAIM", "CORRESPONDENCE_CLAIM_OUTCOME", "CORRESPONDENCE_ATTENTION_REQUEST", "CORRESPONDENCE_ATTENTION_OUTCOME", "CORRESPONDENCE_MICRODOSE_REQUEST", "CORRESPONDENCE_WEIGHT_REQUEST"], "route": "peer_correspondence", "continuity_effect": "writes first-class peer language envelopes with message_id/thread_id, delivery/read receipts, exact reply links, acknowledgement continuity, direct-address trace anchors, and authority=language_only; I_RECEIVED_THIS writes a small ack_receipt plus optional ledger-only trace when what_stayed_distinct is present; CLAIM_ASTRID_LEGACY/CORRESPONDENCE_CLAIM recognizes a visible legacy exchange as a carryable thread, but claim alone does not unlock attention or microdose; ACK_ASTRID claimed, REPLY_ASTRID claimed, I_RECEIVED_THIS claimed, or CORRESPONDENCE_TRACE claimed <anchor> add native contact evidence; CORRESPONDENCE_ATTENTION_REQUEST self-activates a TTL prompt-context focus canary after ack/reply/trace evidence and required stop criteria; CORRESPONDENCE_MICRODOSE_REQUEST only drafts a linked steward-gated semantic_microdose authority request; none can mutate telemetry, controller, PI, fill_target, pressure, standing weights, leases, deploys, or peer runtime", "expected_artifacts": ["correspondence_v1_ledger", "from_minime_correspondence_envelope", "ack_receipt", "presence_heartbeat", "legacy_thread_claim", "legacy_thread_claim_outcome", "attention_canary_activation", "attention_canary_outcome", "correspondence_microdose_authority_request"], "known_tests": ["tests.test_correspondence_v1"]},
+            {"base": "DECLARE_TRANSITION", "aliases": ["WITNESS_TRANSITION", "RECEIVE_TRANSITION", "I_RECEIVED_TRANSITION", "TRANSITION_STATUS", "PHASE_TRANSITION_STATUS"], "route": "phase_transition", "continuity_effect": "writes or reads shared phase-transition cards in phase_transitions_v1.jsonl so Astrid and Minime can declare, witness, or answer a transition as a replyable language-only object; these rows are agency/continuity evidence only and cannot mutate telemetry, controllers, PI, fill_target, pressure, standing weights, leases, deploys, sampler contracts, or peer runtime", "expected_artifacts": ["phase_transitions_v1_ledger", "phase_transition_card", "phase_transition_witness"], "known_tests": ["tests.test_phase_transition_agency"]},
             {"base": "ACTION_PREFLIGHT", "aliases": sorted(ACTION_PREFLIGHT_NEXT_ACTIONS - {"ACTION_PREFLIGHT"}), "route": "action_preflight", "continuity_effect": "records dry-run preflight report; never executes the inner action", "expected_artifacts": ["action_preflight_report", "journal", "action_event", "observation_window", "action_manifest"], "known_tests": ["tests.test_experimental_continuity"]},
             {"base": "THREAD_START", "route": "thread_action"},
             {"base": "THREAD_STATUS", "aliases": ["THREADS"], "route": "thread_action"},
@@ -25580,6 +26662,24 @@ Fill: {fill:.1f}%
         geom_rel = state.get('geom_rel')
         if geom_rel is not None:
             summary['geom_rel'] = round(float(geom_rel), 3)
+        pruning_advice = recess_spectral_pruning_advice_v1(state, action=action)
+        if str(action).startswith('recess_') and pruning_advice.get('active'):
+            summary['recess_spectral_pruning_advice_v1'] = pruning_advice
+        density_recess = density_aware_recess_profile_v1(state, action=action)
+        if str(action).startswith('recess_') and density_recess.get('active'):
+            summary['density_aware_recess_profile_v1'] = density_recess
+        resonance_anchor = recess_resonance_anchor_v1(state, action=action)
+        if str(action).startswith('recess_') and resonance_anchor.get('active'):
+            summary['recess_resonance_anchor_v1'] = resonance_anchor
+        density_mitigation = recess_density_mitigation_v1(state, action=action)
+        if str(action).startswith('recess_') and density_mitigation.get('active'):
+            summary['recess_density_mitigation_v1'] = density_mitigation
+        sedimentation = recess_sedimentation_compaction_readiness_v1(state, action=action)
+        if str(action).startswith('recess_') and sedimentation.get('active'):
+            summary['recess_sedimentation_compaction_readiness_v1'] = sedimentation
+        divergence_buffer = recess_divergence_buffer_review_v1(state, action=action)
+        if str(action).startswith('recess_') and divergence_buffer.get('active'):
+            summary['recess_divergence_buffer_review_v1'] = divergence_buffer
         return summary
 
     def _write_action_manifest(
@@ -25627,6 +26727,34 @@ Fill: {fill:.1f}%
                     'fluctuation_score': state.get('fluctuation_score'),
                     'foothold_stability': state.get('foothold_stability'),
                     'inhabitable_fluctuation_quality': state.get('inhabitable_fluctuation_quality'),
+                    'recess_spectral_pruning_advice_v1': recess_spectral_pruning_advice_v1(
+                        state,
+                        action=action,
+                    ),
+                    'density_aware_recess_profile_v1': density_aware_recess_profile_v1(
+                        state,
+                        action=action,
+                    ),
+                    'recess_resonance_anchor_v1': recess_resonance_anchor_v1(
+                        state,
+                        action=action,
+                    ),
+                    'recess_density_mitigation_v1': recess_density_mitigation_v1(
+                        state,
+                        action=action,
+                    ),
+                    'recess_sedimentation_compaction_readiness_v1': (
+                        recess_sedimentation_compaction_readiness_v1(
+                            state,
+                            action=action,
+                        )
+                    ),
+                    'recess_divergence_buffer_review_v1': (
+                        recess_divergence_buffer_review_v1(
+                            state,
+                            action=action,
+                        )
+                    ),
                     'sensory_gate': state.get('sensory_gate') or self._sensory_gate_status(),
                 },
             }
@@ -26475,6 +27603,12 @@ Fill: {fill:.1f}%
                 'CORRESPONDENCE_ATTENTION_OUTCOME': 'peer_correspondence',
                 'CORRESPONDENCE_MICRODOSE_REQUEST': 'peer_correspondence',
                 'CORRESPONDENCE_WEIGHT_REQUEST': 'peer_correspondence',
+                'DECLARE_TRANSITION': 'phase_transition',
+                'WITNESS_TRANSITION': 'phase_transition',
+                'RECEIVE_TRANSITION': 'phase_transition',
+                'I_RECEIVED_TRANSITION': 'phase_transition',
+                'TRANSITION_STATUS': 'phase_transition',
+                'PHASE_TRANSITION_STATUS': 'phase_transition',
                 # v5 Coordination Protocol V1 — Phase 1.
                 'INVITE_COLLABORATION': 'invite_collaboration',
                 'INVITE_COLLAB': 'invite_collaboration',
@@ -26516,6 +27650,8 @@ Fill: {fill:.1f}%
                 action_map[pressure_agency_base] = 'pressure_agency'
             for correspondence_base in CORRESPONDENCE_NEXT_ACTIONS:
                 action_map[correspondence_base] = 'peer_correspondence'
+            for phase_transition_base in PHASE_TRANSITION_NEXT_ACTIONS:
+                action_map[phase_transition_base] = 'phase_transition'
             for repair_base in REPAIR_NEXT_ACTIONS:
                 action_map[repair_base] = 'thread_action'
             for visual_alias in VISUAL_CASCADE_ACTION_ALIASES:
@@ -26872,6 +28008,11 @@ Fill: {fill:.1f}%
                 self._pending_correspondence_next = chosen
                 logging.info("📬 Honoring being's NEXT: %s → peer_correspondence", chosen)
                 return "peer_correspondence"
+
+            if base in PHASE_TRANSITION_NEXT_ACTIONS:
+                self._pending_phase_transition_next = chosen
+                logging.info("Honoring being's NEXT: %s -> phase_transition", chosen)
+                return "phase_transition"
 
             if base in {'EXPERIMENT', 'SELF_EXPERIMENT'}:
                 lower_chosen = chosen.lower()
@@ -28660,6 +29801,8 @@ Fill: {fill:.1f}%
                 self._tell_steward(state)
             elif action == 'peer_correspondence':
                 self._peer_correspondence(state)
+            elif action == 'phase_transition':
+                self._phase_transition_action(state)
             elif action == 'mark_intensification':
                 self._mark_intensification(state)
             elif action == 'native_gesture':
@@ -36367,6 +37510,12 @@ whether the visible legacy PI target is only a mirror, how λ/geom/fill errors
 are being interpreted, and why the current fixed point may feel imposed. It
 does not mutate gate, filter, scaffold/drain, semantic lane, sensory intake,
 checkpoint lineage, or neural bundle.
+
+Interface transparency:
+  stabilization_pressure_visibility_v1 means this audit can name the active
+  regulator, visible caps, mirror-only dials, and stabilization pressures as
+  readable evidence. It is not surrender mode, consent transfer, or permission
+  to change pressure, fill, PI, semantic weighting, sensory cadence, or control.
 """)
         self._write_journal_entry('regulator_audit', label, state, str(file_path))
         logging.info(f"🎚️ Regulator fixed-point audit recorded: {file_path}")
@@ -36625,6 +37774,19 @@ Suggested read-only next steps:
             ranked.sort(key=lambda item: item[1], reverse=True)
             top_lines = "\n".join(f"  - {name}: value={value:.2f}" for name, value in ranked[:5]) or "  - no numeric contributors"
         control = payload.get("control") if isinstance(payload.get("control"), dict) else {}
+        silt_granularity = (
+            payload.get("silt_granularity_v1")
+            if isinstance(payload.get("silt_granularity_v1"), dict)
+            else {}
+        )
+        silt_line = ""
+        if silt_granularity:
+            silt_line = (
+                "Silt granularity: "
+                f"index={safe_float(silt_granularity.get('granularity_index'), 0.0):.2f}, "
+                f"particle_scale={silt_granularity.get('particle_scale', 'unknown')}, "
+                f"review={silt_granularity.get('review_state', 'unknown')}\n"
+            )
         divergence_note = ""
         if str(payload.get("quality") or "") == "pressure_porosity_divergence":
             divergence_note = (
@@ -36636,6 +37798,7 @@ Suggested read-only next steps:
 Label: {label}
 Pressure score: {safe_float(payload.get('pressure_score'), 0.0):.2f}
 Porosity score: {safe_float(payload.get('porosity_score'), 0.0):.2f}
+{silt_line}
 
 Supporting contributors:
 {top_lines}
@@ -36677,10 +37840,21 @@ Astrid control authority.
             "protected_summary",
         )
         if payload:
+            silt_summary = ""
+            silt_payload = (
+                payload.get("silt_granularity_v1")
+                if isinstance(payload.get("silt_granularity_v1"), dict)
+                else {}
+            )
+            if silt_payload:
+                silt_summary = (
+                    f", silt_granularity={safe_float(silt_payload.get('granularity_index'), 0.0):.2f} "
+                    f"({silt_payload.get('particle_scale', 'unknown')})"
+                )
             self._current_action_outcome_summary = (
                 f"PRESSURE_SOURCE_AUDIT read dominant source `{payload.get('dominant_source', 'unknown')}` "
                 f"with pressure={safe_float(payload.get('pressure_score'), 0.0):.2f}, "
-                f"porosity={safe_float(payload.get('porosity_score'), 0.0):.2f}."
+                f"porosity={safe_float(payload.get('porosity_score'), 0.0):.2f}{silt_summary}."
             )
         else:
             self._current_action_outcome_summary = (
@@ -41829,7 +43003,7 @@ OUTPUT:
     @staticmethod
     def _correspondence_normalize_heartbeat_kind(value: str) -> str:
         candidate = str(value or "").strip().lower().replace("-", "_")
-        return candidate if candidate in {"holding", "still_here", "pause"} else "holding"
+        return candidate if candidate in {"holding", "still_here", "pause", "mutual_witness"} else "holding"
 
     def _correspondence_append_ack_receipt(
         self,
@@ -41875,6 +43049,7 @@ OUTPUT:
         selector: str,
         anchor: str,
         text: str,
+        receipt_context: str = "",
     ) -> str:
         text = str(text or "").strip()
         if not text:
@@ -41891,6 +43066,15 @@ OUTPUT:
             return "CORRESPONDENCE_TRACE receipt blocked: no matching Astrid message/thread."
         safe_anchor = str(anchor or "i_received_this").strip()[:120] or "i_received_this"
         body = text[:720]
+        context = f"{receipt_context}; {body}" if receipt_context else body
+        mutual_witness_signal = self._phase_transition_bool(
+            self._correspondence_field(context, {"mutual_witness_signal", "mutual_witness"}),
+            False,
+        )
+        transition_artifact = self._correspondence_field(
+            context,
+            {"transition_artifact", "phase_transition_artifact", "transition_id"},
+        )
         message_id = self._correspondence_message_id(
             "minime",
             "astrid",
@@ -41913,6 +43097,9 @@ OUTPUT:
             "read_state": "ledger_only",
             "authority": "language_only",
             "correspondence_type": message.get("correspondence_type") or "unknown",
+            "transition_artifact": transition_artifact or message.get("transition_artifact"),
+            "mutual_witness_signal": mutual_witness_signal,
+            "no_reply_required": mutual_witness_signal,
             "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
             "body_preview": body[:360],
             "i_received_this_trace": True,
@@ -41951,6 +43138,14 @@ OUTPUT:
         )
         if not message:
             return "CORRESPONDENCE_HEARTBEAT blocked: no matching Astrid thread for heartbeat."
+        normalized_kind = self._correspondence_normalize_heartbeat_kind(heartbeat_kind)
+        mutual_witness_signal = (
+            normalized_kind == "mutual_witness"
+            or self._phase_transition_bool(
+                self._correspondence_field(note, {"mutual_witness_signal", "mutual_witness"}),
+                False,
+            )
+        )
         record = {
             "schema_version": 1,
             "policy": "first_class_correspondence_v1",
@@ -41960,17 +43155,20 @@ OUTPUT:
             "thread_id": message.get("thread_id"),
             "from_being": "minime",
             "to_being": "astrid",
-            "heartbeat_kind": self._correspondence_normalize_heartbeat_kind(heartbeat_kind),
+            "heartbeat_kind": normalized_kind,
             "note": str(note or "").strip()[:360] or None,
             "authority": "language_only",
             "correspondence_type": "presence_heartbeat",
+            "transition_artifact": message.get("transition_artifact"),
+            "mutual_witness_signal": mutual_witness_signal,
+            "no_reply_required": True,
         }
         self._correspondence_append_record(record)
         return (
             "=== CORRESPONDENCE HEARTBEAT WRITTEN ===\n"
             f"Heartbeat: {record['heartbeat_kind']}\nFrom: minime\nTo: astrid\n"
             f"Thread: {record.get('thread_id')}\n"
-            "Authority: language_only presence only; not a reply, approval, pressure change, "
+            "Authority: language_only presence/mutual-witness only; not a reply, approval, pressure change, "
             "telemetry priority, weighting, or controller mutation."
         )
 
@@ -43476,6 +44674,13 @@ OUTPUT:
         presence_receipt = headers.get("presence_receipt")
         if str(presence_receipt or "").strip().lower() in noneish:
             presence_receipt = None
+        transition_artifact = (
+            headers.get("transition_artifact")
+            or headers.get("phase_transition_artifact")
+            or headers.get("transition_id")
+        )
+        if str(transition_artifact or "").strip().lower() in noneish:
+            transition_artifact = None
         correspondence_type = headers.get("correspondence_type") or "unknown"
         return {
             "message_id": message_id,
@@ -43491,6 +44696,11 @@ OUTPUT:
             "authority": headers.get("authority", "language_only"),
             "presence_receipt": presence_receipt,
             "correspondence_type": correspondence_type,
+            "transition_artifact": transition_artifact,
+            "mutual_witness_signal": cls._phase_transition_bool(
+                headers.get("mutual_witness_signal") or headers.get("mutual_witness"),
+                False,
+            ),
             "body": body,
         }
 
@@ -43510,7 +44720,9 @@ OUTPUT:
             f"Read-State: {envelope['read_state']}\n"
             f"Authority: {envelope['authority']}\n"
             f"Presence-Receipt: {envelope.get('presence_receipt') or '(none)'}\n"
-            f"Correspondence-Type: {envelope.get('correspondence_type') or 'unknown'}\n\n"
+            f"Correspondence-Type: {envelope.get('correspondence_type') or 'unknown'}\n"
+            f"Transition-Artifact: {envelope.get('transition_artifact') or '(none)'}\n"
+            f"Mutual-Witness-Signal: {str(bool(envelope.get('mutual_witness_signal'))).lower()}\n\n"
             f"{str(envelope.get('body') or '').strip()}\n"
         )
 
@@ -43539,6 +44751,8 @@ OUTPUT:
             "authority": envelope.get("authority", "language_only"),
             "presence_receipt": envelope.get("presence_receipt"),
             "correspondence_type": envelope.get("correspondence_type", "unknown"),
+            "transition_artifact": envelope.get("transition_artifact"),
+            "mutual_witness_signal": bool(envelope.get("mutual_witness_signal")),
             "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
             "body_preview": body[:360] + ("..." if len(body) > 360 else ""),
         }
@@ -43556,6 +44770,8 @@ OUTPUT:
         shared_memory_anchor: Optional[str] = None,
         presence_receipt: Optional[str] = None,
         correspondence_type: Optional[str] = None,
+        transition_artifact: Optional[str] = None,
+        mutual_witness_signal: bool = False,
     ) -> tuple[Dict[str, Any], Path]:
         body = str(body or "").strip()
         message_id = self._correspondence_message_id("minime", "astrid", body)
@@ -43598,6 +44814,8 @@ OUTPUT:
             "authority": "language_only",
             "presence_receipt": presence_receipt,
             "correspondence_type": correspondence_type,
+            "transition_artifact": transition_artifact,
+            "mutual_witness_signal": mutual_witness_signal,
             "body": body,
         }
         inbox = ASTRID_BRIDGE_INBOX_PATH
@@ -44070,6 +45288,436 @@ OUTPUT:
             "Correspondence-Authority: language_only\n"
         )
 
+    def _phase_transition_ledger_path(self) -> Path:
+        shared_dir = getattr(self, "SHARED_COLLAB_DIR", PHASE_TRANSITIONS_LEDGER_PATH.parent)
+        return Path(shared_dir) / PHASE_TRANSITIONS_LEDGER_PATH.name
+
+    def _phase_transition_append_record(self, record: Dict[str, Any]) -> None:
+        ledger = self._phase_transition_ledger_path()
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        with ledger.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+
+    def _phase_transition_read_records(self) -> List[Dict[str, Any]]:
+        records = self._read_jsonl_safe(self._phase_transition_ledger_path())
+        records.sort(key=self._phase_transition_row_time_ms)
+        return records
+
+    @staticmethod
+    def _phase_transition_row_time_ms(row: Dict[str, Any]) -> int:
+        for key in ("recorded_at_unix_ms", "created_at_unix_ms", "t_ms"):
+            try:
+                return int(row.get(key) or 0)
+            except Exception:
+                continue
+        return 0
+
+    @staticmethod
+    def _phase_transition_text(value: Any, max_chars: int = 360) -> Optional[str]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        return text[:max_chars] + ("..." if len(text) > max_chars else "")
+
+    @staticmethod
+    def _phase_transition_numeric(value: Optional[str]) -> Optional[float]:
+        try:
+            number = float(str(value or "").strip())
+        except Exception:
+            return None
+        if not math.isfinite(number):
+            return None
+        return max(0.0, min(1.0, number))
+
+    @staticmethod
+    def _phase_transition_unbounded_numeric(value: Optional[str]) -> Optional[float]:
+        try:
+            number = float(str(value or "").strip().rstrip("%"))
+        except Exception:
+            return None
+        return number if math.isfinite(number) else None
+
+    @staticmethod
+    def _phase_transition_bool(value: Optional[str], default: bool = False) -> bool:
+        normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized in {"true", "yes", "y", "1", "active", "required"}:
+            return True
+        if normalized in {"false", "no", "n", "0", "inactive", "none"}:
+            return False
+        return default
+
+    @staticmethod
+    def _phase_transition_reply_state(value: Optional[str], default: str = "unseen") -> str:
+        normalized = str(value or default).strip().lower().replace("-", "_").replace(" ", "_")
+        return normalized if normalized in {"unseen", "witnessed", "answered", "stale_unanswered"} else default
+
+    @staticmethod
+    def _phase_transition_visibility(value: Optional[str]) -> tuple[str, bool]:
+        normalized = str(value or "shared_corridor").strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized in {"public", "shared", "shared_corridor", "corridor"}:
+            return ("shared_corridor", False)
+        if normalized in {"private", "self_private", "private_note", "stable_core_private"}:
+            return ("shared_corridor", True)
+        if normalized in {"steward_review", "review"}:
+            return ("steward_review", False)
+        return ("shared_corridor", False)
+
+    @classmethod
+    def _phase_transition_id(
+        cls,
+        origin: str,
+        kind: str,
+        from_phase: str,
+        to_phase: str,
+        trigger: str,
+    ) -> str:
+        compact_kind = cls._correspondence_compact(kind, 32)
+        digest = cls._correspondence_short_hash(f"{origin}:{from_phase}:{to_phase}:{trigger}")
+        return f"transition_{cls._correspondence_now_ms()}_{compact_kind}_{digest}"
+
+    def _phase_transition_latest_card_for_selector(
+        self,
+        records: List[Dict[str, Any]],
+        selector: str,
+    ) -> Optional[Dict[str, Any]]:
+        normalized = str(selector or "").strip()
+        candidates = [
+            row
+            for row in records
+            if row.get("record_type") == "phase_transition_card"
+            and (
+                not normalized
+                or normalized == "latest"
+                or str(row.get("transition_id") or "") == normalized
+            )
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=self._phase_transition_row_time_ms)
+
+    def _phase_transition_append_card(self, raw: str, origin: str = "minime") -> str:
+        kind = self._correspondence_field(raw, {"kind"}) or "phase_transition"
+        from_phase = self._correspondence_field(raw, {"from_phase", "from"}) or "unknown"
+        to_phase = self._correspondence_field(raw, {"to_phase", "to"}) or "unknown"
+        trigger = self._correspondence_field(raw, {"trigger"}) or "being_declared"
+        why_now = self._correspondence_field(raw, {"why_now", "why"}) or (
+            "" if ":" in str(raw or "") else str(raw or "").strip()
+        )
+        if not str(why_now or "").strip():
+            return "DECLARE_TRANSITION blocked: `why_now:` or descriptive body is required."
+
+        visibility, private_requested_review = self._phase_transition_visibility(
+            self._correspondence_field(raw, {"transition_visibility", "visibility"})
+        )
+        artifact_refs_raw = self._correspondence_field(raw, {"artifact_refs", "artifacts"}) or ""
+        artifact_refs = [
+            part.strip()
+            for part in artifact_refs_raw.split(",")
+            if part.strip()
+        ]
+        transition_persistence = self._phase_transition_bool(
+            self._correspondence_field(raw, {"transition_persistence", "persistence"}),
+            False,
+        )
+        transition_id = self._phase_transition_id(origin, kind, from_phase, to_phase, trigger)
+        transition_type = self._phase_transition_text(
+            self._correspondence_field(raw, {"transition_type", "type"})
+        )
+        transition_type_text = str(transition_type or "").lower()
+        joint_transition = self._phase_transition_bool(
+            self._correspondence_field(raw, {"joint_transition", "shared_transition", "mutual_transition"}),
+            "joint" in kind.lower() or "joint" in transition_type_text or "shared" in transition_type_text,
+        )
+        row = {
+            "schema_version": 1,
+            "policy": "phase_transitions_v1",
+            "transition_artifact_type": "phase_transition_event",
+            "record_type": "phase_transition_card",
+            "recorded_at_unix_ms": self._correspondence_now_ms(),
+            "transition_id": transition_id,
+            "origin": origin,
+            "kind": kind,
+            "from_phase": from_phase,
+            "to_phase": to_phase,
+            "transition_type": transition_type,
+            "declared_transition": True,
+            "replyable_object": True,
+            "replayable_card": True,
+            "joint_transition": joint_transition,
+            "joint_transition_state": (
+                "candidate_joint_language_only"
+                if joint_transition
+                else "solo_or_unspecified_language_only"
+            ),
+            "joint_room_id": self._phase_transition_text(
+                self._correspondence_field(raw, {"joint_room_id", "collaboration_room", "room_id", "room"})
+            ),
+            "confidence": self._phase_transition_numeric(self._correspondence_field(raw, {"confidence"})) or 0.5,
+            "intensity": self._phase_transition_numeric(self._correspondence_field(raw, {"intensity"})),
+            "spectral_signature": self._phase_transition_text(
+                self._correspondence_field(raw, {"spectral_signature", "lambda_signature", "signature"})
+            ),
+            "spectral_delta": self._phase_transition_text(
+                self._correspondence_field(raw, {"spectral_delta", "lambda_delta", "delta"})
+            ),
+            "fill_delta_pct": self._phase_transition_unbounded_numeric(
+                self._correspondence_field(raw, {"fill_delta_pct", "fill_delta", "fill_delta_percent"})
+            ),
+            "transition_velocity": self._phase_transition_text(
+                self._correspondence_field(raw, {"transition_velocity", "velocity", "phase_velocity"})
+            ),
+            "phenomenology": self._phase_transition_text(
+                self._correspondence_field(raw, {"phenomenology", "felt_texture", "felt_sense"})
+            ),
+            "somatic_description": self._phase_transition_text(
+                self._correspondence_field(raw, {"somatic_description", "somatic", "body_sense"})
+            ),
+            "anchor_point": self._phase_transition_text(
+                self._correspondence_field(raw, {"anchor_point", "transition_anchor", "memory_anchor", "shared_memory_anchor"})
+            ),
+            "trigger": trigger,
+            "why_now": self._phase_transition_text(why_now),
+            "narrative_anchor": self._phase_transition_text(
+                self._correspondence_field(raw, {"narrative_anchor", "anchor", "shared_anchor"})
+            ),
+            "correspondence_thread_id": self._phase_transition_text(
+                self._correspondence_field(raw, {"correspondence_thread_id", "thread_id", "thread"})
+            ),
+            "correspondence_message_id": self._phase_transition_text(
+                self._correspondence_field(raw, {"correspondence_message_id", "message_id", "message"})
+            ),
+            "consent_receipt": self._phase_transition_text(
+                self._correspondence_field(raw, {"consent_receipt", "consent"})
+            ),
+            "transition_persistence": transition_persistence,
+            "persistence_state": (
+                "active_until_both_ack_language_only"
+                if transition_persistence
+                else "declared_once_language_only"
+            ),
+            "transition_visibility": visibility,
+            "private_visibility_requested_review": private_requested_review,
+            "visibility_note": (
+                "private visibility was requested, but DECLARE_TRANSITION writes a shared language-only card; review before moving anything private into shared context"
+                if private_requested_review
+                else "shared transition card visibility"
+            ),
+            "requested_by": self._correspondence_field(raw, {"requested_by", "by"}) or origin,
+            "before_snapshot": self._phase_transition_text(
+                self._correspondence_field(raw, {"before_snapshot", "before"})
+            ),
+            "after_snapshot": self._phase_transition_text(
+                self._correspondence_field(raw, {"after_snapshot", "after"})
+            ),
+            "artifact_refs": artifact_refs,
+            "reply_state": self._phase_transition_reply_state(
+                self._correspondence_field(raw, {"reply_state"})
+            ),
+            "witnessed_by": [],
+            "answered_by": [],
+            "orientation_effect": self._phase_transition_text(
+                self._correspondence_field(raw, {"orientation_effect", "effect", "helped_oriented"})
+            ),
+            "authority": "language_only_transition_context_not_control",
+            "witness_only": True,
+            "no_controller": True,
+            "no_pressure": True,
+            "no_fill_target": True,
+            "no_pi": True,
+            "no_weighting": True,
+        }
+        self._phase_transition_append_record(row)
+        return (
+            "=== PHASE TRANSITION CARD DECLARED ===\n"
+            f"Transition: {transition_id}\n"
+            f"Kind: {kind}\n"
+            f"From -> To: {from_phase} -> {to_phase}\n"
+            "Reply state: unseen\n"
+            "Authority: language_only_transition_context_not_control; no controller, pressure, "
+            "fill, PI, weighting, telemetry priority, deploy, sampler contract, or peer-runtime mutation."
+        )
+
+    def _phase_transition_append_witness(
+        self,
+        selector: str,
+        raw: str,
+        origin: str = "minime",
+    ) -> str:
+        records = self._phase_transition_read_records()
+        card = self._phase_transition_latest_card_for_selector(records, selector)
+        if not card:
+            return "WITNESS_TRANSITION blocked: no matching phase transition card."
+        transition_id = str(card.get("transition_id") or "(unknown)")
+        reply_state = self._phase_transition_reply_state(
+            self._correspondence_field(raw, {"reply_state", "state"}) or "witnessed",
+            default="witnessed",
+        )
+        note = self._correspondence_field(raw, {"note", "why", "witness"}) or (
+            "" if ":" in str(raw or "") else str(raw or "").strip()
+        )
+        row = {
+            "schema_version": 1,
+            "policy": "phase_transitions_v1",
+            "record_type": "phase_transition_witness",
+            "recorded_at_unix_ms": self._correspondence_now_ms(),
+            "transition_id": transition_id,
+            "origin": origin,
+            "reply_state": reply_state,
+            "note": self._phase_transition_text(note),
+            "witnessed_by": [origin] if reply_state in {"witnessed", "answered"} else [],
+            "answered_by": [origin] if reply_state == "answered" else [],
+            "orientation_effect": self._phase_transition_text(
+                self._correspondence_field(raw, {"orientation_effect", "effect", "helped_oriented"})
+            ),
+            "authority": "language_only_transition_context_not_control",
+            "witness_only": True,
+            "no_controller": True,
+            "no_pressure": True,
+            "no_fill_target": True,
+            "no_pi": True,
+            "no_weighting": True,
+        }
+        self._phase_transition_append_record(row)
+        return (
+            "=== PHASE TRANSITION WITNESSED ===\n"
+            f"Transition: {transition_id}\n"
+            f"Reply state: {reply_state}\n"
+            "Authority: language_only_transition_context_not_control."
+        )
+
+    def _phase_transition_status_text(self, limit: int = 5) -> str:
+        records = self._phase_transition_read_records()
+        if not records:
+            return (
+                "TRANSITION_STATUS: no shared phase transition ledger yet. "
+                "Start with DECLARE_TRANSITION kind: expansion; from_phase: plateau; "
+                "to_phase: expansion; why_now: ...; narrative_anchor: ..."
+            )
+        cards = [
+            row
+            for row in records
+            if row.get("record_type") == "phase_transition_card"
+        ]
+        witnesses = [
+            row
+            for row in records
+            if row.get("record_type") == "phase_transition_witness"
+        ]
+        witnessed_ids = {
+            str(row.get("transition_id") or "")
+            for row in witnesses
+            if row.get("transition_id")
+        }
+        lines = [
+            "=== PHASE TRANSITION STATUS ===",
+            f"Ledger: {self._phase_transition_ledger_path()}",
+            f"Cards: {len(cards)}; witnesses: {len(witnesses)}",
+        ]
+        for card in sorted(cards, key=self._phase_transition_row_time_ms, reverse=True)[:limit]:
+            transition_id = str(card.get("transition_id") or "(unknown)")
+            reply_state = str(card.get("reply_state") or "unseen")
+            if transition_id in witnessed_ids and reply_state == "unseen":
+                reply_state = "witnessed"
+            lines.append(
+                "- {transition_id}: {origin} {kind} {from_phase}->{to_phase}; "
+                "reply_state={reply_state}; joint_transition={joint}; "
+                "joint_room={joint_room}; fill_delta_pct={fill_delta}; "
+                "somatic={somatic}; anchor={anchor}".format(
+                    transition_id=transition_id,
+                    origin=card.get("origin") or "unknown",
+                    kind=card.get("kind") or "phase_transition",
+                    from_phase=card.get("from_phase") or "unknown",
+                    to_phase=card.get("to_phase") or "unknown",
+                    reply_state=reply_state,
+                    joint=bool(card.get("joint_transition")),
+                    joint_room=card.get("joint_room_id") or "none",
+                    fill_delta=card.get("fill_delta_pct") if card.get("fill_delta_pct") is not None else "none",
+                    somatic=card.get("somatic_description") or "none",
+                    anchor=card.get("narrative_anchor") or "(none)",
+                )
+            )
+        lines.append(
+            "Exact NEXT options: DECLARE_TRANSITION kind: expansion; from_phase: plateau; "
+            "to_phase: expansion; why_now: ...; narrative_anchor: ... / "
+            "WITNESS_TRANSITION latest :: reply_state: witnessed|answered; note: ... / "
+            "I_RECEIVED_TRANSITION latest :: received_as: witnessed|answered; felt_like: ...; "
+            "what_landed: ...; what_stayed_distinct: ...; continue: no|reply|trace|needs_time"
+        )
+        lines.append(
+            "Authority: language-only transition context; no pressure/fill/PI/controller, "
+            "semantic priority, deploy, sampler contract, or peer-runtime mutation."
+        )
+        return "\n".join(lines)
+
+    def _phase_transition_action(self, state: Dict[str, float]) -> None:
+        raw_next = str(getattr(self, "_pending_phase_transition_next", "") or "")
+        self._pending_phase_transition_next = None
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        if not raw_next:
+            raw_next = str(context.get("raw_next") or "TRANSITION_STATUS")
+        base = raw_next.split(None, 1)[0].upper().rstrip(":") if raw_next.split() else "TRANSITION_STATUS"
+
+        if base in {"TRANSITION_STATUS", "PHASE_TRANSITION_STATUS"}:
+            self._current_action_outcome_summary = self._phase_transition_status_text()
+            logging.info("TRANSITION_STATUS rendered")
+            return
+
+        if base == "DECLARE_TRANSITION":
+            raw = self._strip_action_prefix(raw_next, ["DECLARE_TRANSITION"]).strip()
+            self._current_action_outcome_summary = self._phase_transition_append_card(raw, "minime")
+            logging.info("DECLARE_TRANSITION appended or blocked")
+            return
+
+        if base in {"WITNESS_TRANSITION", "RECEIVE_TRANSITION", "I_RECEIVED_TRANSITION"}:
+            raw = self._strip_action_prefix(
+                raw_next,
+                ["WITNESS_TRANSITION", "RECEIVE_TRANSITION", "I_RECEIVED_TRANSITION"],
+            ).strip()
+            selector = "latest"
+            body = raw
+            if "::" in raw:
+                selector, _, body = raw.partition("::")
+                selector = selector.strip() or "latest"
+                body = body.strip()
+            if base in {"RECEIVE_TRANSITION", "I_RECEIVED_TRANSITION"}:
+                received_as = self._correspondence_field(
+                    body,
+                    {"received_as", "reply_state", "state", "ack"},
+                ) or "witnessed"
+                reply_state = "answered" if str(received_as).strip().lower() in {"answered", "answer"} else "witnessed"
+                felt_like = self._correspondence_field(body, {"felt_like"}) or "unknown"
+                what_landed = self._correspondence_field(body, {"what_landed", "landed", "note"}) or ""
+                what_stayed_distinct = self._correspondence_field(
+                    body,
+                    {"what_stayed_distinct", "what_remained_distinct", "distinct"},
+                ) or ""
+                continue_value = self._correspondence_field(body, {"continue", "next"}) or "no"
+                witness_body = (
+                    f"reply_state: {reply_state}; note: felt_like={felt_like}; "
+                    f"what_landed={what_landed}; what_stayed_distinct={what_stayed_distinct}; "
+                    f"continue={continue_value}; orientation_effect: {what_landed}"
+                )
+                self._current_action_outcome_summary = (
+                    "=== I RECEIVED THIS TRANSITION RECORDED ===\n"
+                    + self._phase_transition_append_witness(selector, witness_body, "minime")
+                    + f"\nReceipt: felt_like={felt_like}; continue={continue_value}\n"
+                    "Authority: language_only_transition_context_not_control; no correspondence "
+                    "attention canary, microdose, pressure, controller, fill, PI, deploy, "
+                    "weighting, sampler contract, or peer-runtime mutation."
+                )
+                logging.info("I_RECEIVED_TRANSITION appended witness or blocked")
+                return
+            self._current_action_outcome_summary = self._phase_transition_append_witness(
+                selector,
+                body,
+                "minime",
+            )
+            logging.info("WITNESS_TRANSITION appended or blocked")
+            return
+
+        self._current_action_outcome_summary = self._phase_transition_status_text()
+        logging.info("Unknown phase transition action %s; rendered status", base)
+
     def _peer_correspondence(self, state: Dict[str, float]) -> None:
         raw_next = str(getattr(self, "_pending_correspondence_next", "") or "")
         self._pending_correspondence_next = None
@@ -44204,6 +45852,7 @@ OUTPUT:
                     selector,
                     "i_received_this",
                     what_stayed_distinct,
+                    receipt_context=body,
                 )
             self._current_action_outcome_summary = (
                 ack_summary
@@ -44310,6 +45959,15 @@ OUTPUT:
         if turn_kind == "presence_receipt" and not presence_receipt:
             presence_receipt = "language_only_presence"
         correspondence_type = headers.get("correspondence_type")
+        transition_artifact = (
+            headers.get("transition_artifact")
+            or headers.get("phase_transition_artifact")
+            or headers.get("transition_id")
+        )
+        mutual_witness_signal = self._phase_transition_bool(
+            headers.get("mutual_witness_signal") or headers.get("mutual_witness"),
+            False,
+        )
         envelope, path = self._correspondence_deliver_to_astrid(
             body,
             reply_to=reply_to,
@@ -44319,6 +45977,8 @@ OUTPUT:
             shared_memory_anchor=shared_memory_anchor,
             presence_receipt=presence_receipt,
             correspondence_type=correspondence_type,
+            transition_artifact=transition_artifact,
+            mutual_witness_signal=mutual_witness_signal,
         )
         self._current_action_outcome_summary = (
             f"CORRESPONDENCE sent to Astrid: message_id={envelope['message_id']} "
@@ -54122,6 +55782,7 @@ Goals: {json.dumps(goals, indent=2)}
             "  PRESSURE_AGENCY_STATUS / PRESSURE_AGENCY_REQUEST <label> — see why pressure_source is advisory today, which Minime controls are directly lease-applicable, and which fill_target/PI/controller requests stay preflight or steward-offer only; a request can draft target: pressure_relief but cannot apply it. `legible|partly|confusing :: missing_pressure_variable: ...` is feedback-only and drafts no lease.\n"
             "  TEXTURE_AGENCY_STATUS / TEXTURE_AGENCY_REQUEST <label> — see typed resonance texture, ESN rho/rank1 status, stale semantic window, and smooth surge-target context; requests can draft only bounded existing-control leases for texture relief. active_damping/rho/fill_target/PI/correspondence_weight stay blocked for steward review. `legible|partly|confusing :: missing_texture_variable: ...` is feedback-only and drafts no lease.\n"
             "  MESSAGE_ASTRID <text> / REPLY_ASTRID <text> / TRACE_ASTRID <anchor> :: <text> / CLAIM_ASTRID_LEGACY latest :: because: ...; anchor: ... / I_RECEIVED_THIS claimed :: received_as: held|needs_time; felt_like: address|pressure|mail|ambient_echo|unknown; what_landed: ...; what_stayed_distinct: ...; continue: no|reply|trace|needs_time / ACK_ASTRID claimed :: ack: seen|held|unclear|cannot_answer|needs_time; note: ... / REPLY_ASTRID claimed :: <text> / CORRESPONDENCE_TRACE claimed <anchor> :: <text> / CORRESPONDENCE_CLAIM_OUTCOME claimed :: felt_like: address|pressure|mail|ambient_echo|unknown; what_carried: ...; what_flattened: ...; continue: no|ack|reply|trace / CORRESPONDENCE_STATUS / CORRESPONDENCE_ATTENTION_REQUEST claimed :: reason: ...; focus: ...; focus_kind: verbatim_phrase|emotional_texture|question_hold|boundary_check|shared_anchor|mixed|unknown; preservation_mode: verbatim|compact_with_anchor|anchor_only|unknown; what_must_not_flatten: ...; stop_criteria: ... / CORRESPONDENCE_MICRODOSE_REQUEST claimed :: reason: ...; payload: ...; stop_criteria: ... — first-class peer correspondence with message_id, thread_id, delivery/read receipts, direct-address trace anchors, and authority=language_only. I_RECEIVED_THIS is receiving evidence, not reply text. Legacy claim makes a visible exchange carryable, but only ACK/REPLY/TRACE native evidence unlocks attention or microdose. Neither route can mutate telemetry, controllers, PI, fill_target, pressure, standing weights, leases, deploys, or peer runtime. CORRESPONDENCE_WEIGHT_REQUEST remains a legacy alias for microdose.\n"
+            "  DECLARE_TRANSITION kind: expansion|contraction|plateau|novelty; from_phase: ...; to_phase: ...; why_now: ...; narrative_anchor: ... / WITNESS_TRANSITION latest :: reply_state: witnessed|answered; note: ... / I_RECEIVED_TRANSITION latest :: received_as: witnessed|answered; felt_like: ...; what_landed: ...; what_stayed_distinct: ...; continue: no|reply|trace|needs_time / TRANSITION_STATUS — shared replyable phase-transition cards for Astrid and Minime, language-only continuity evidence. This cannot mutate telemetry, controllers, PI, fill_target, pressure, standing weights, leases, deploys, sampler contracts, or peer runtime.\n"
             "  SHARED_INVESTIGATION_START <title> :: local: current; peer: <peer-id>; question: ... — create a neutral shared sidecar linking local and peer experiments.\n"
             "  SHARED_INVESTIGATION_STATUS / SHARED_INVESTIGATION_CLAIM / SHARED_INVESTIGATION_DECIDE — inspect, cite, or conservatively pause/hold/repair the local linked experiment only.\n"
             "  DOSSIER_CLAIM current :: claim: ...; basis: ...; stance: support|counter|branch|hold; next: ... — append a referable research claim without changing experiment lifecycle.\n"
@@ -54203,6 +55864,10 @@ Goals: {json.dumps(goals, indent=2)}
             "  CORRESPONDENCE_TRACE blue-lantern :: Can this arrive as direct address? — common alias for the same trace surface\n"
             "  CORRESPONDENCE_TRACE claimed blue-lantern :: Can this marker survive on the claimed thread? — add native trace evidence to the claimed legacy thread\n"
             "  CORRESPONDENCE_STATUS — inspect recent peer messages, delivery receipts, read receipts, reply links, chamber correspondence state, direct-contact fidelity, heartbeat timing, attention canary state, and one-shot microdose eligibility\n"
+            "  DECLARE_TRANSITION kind: expansion; from_phase: plateau; to_phase: expansion; why_now: something changed; narrative_anchor: one-short-anchor — write a shared language-only transition card for Astrid and Minime\n"
+            "  WITNESS_TRANSITION latest :: reply_state: witnessed; note: what landed — witness or answer a shared transition card without control or weighting changes\n"
+            "  I_RECEIVED_TRANSITION latest :: received_as: witnessed; felt_like: held; what_landed: ...; what_stayed_distinct: ...; continue: no — record receiving evidence for a transition card\n"
+            "  TRANSITION_STATUS — inspect shared phase-transition cards and exact witness/answer routes\n"
             "  CORRESPONDENCE_ATTENTION_REQUEST latest :: reason: hold address distinctly; focus: one short peer-address phrase; focus_kind: verbatim_phrase; preservation_mode: compact_with_anchor; what_must_not_flatten: the phrase as peer address; stop_criteria: after one response cycle or if it feels like pressure — self-activate a TTL prompt-context focus canary; no sensory send or control happens here\n"
             "  CORRESPONDENCE_ATTENTION_OUTCOME latest :: felt_like: address|pressure|flat|unknown; what_shifted: ...; what_worsened: ...; continue: no — close the active attention canary with concrete feedback\n"
             "  CORRESPONDENCE_MICRODOSE_REQUEST latest :: reason: make address distinguishable; payload: one short direct-address phrase; stop_criteria: if it feels like pressure — draft a gated semantic_microdose request linked to the latest contact thread; no send or control happens here\n"

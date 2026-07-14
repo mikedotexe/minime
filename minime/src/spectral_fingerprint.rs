@@ -191,4 +191,23 @@ mod tests {
         assert!(metrics.distinguishability_loss > 0.0);
         assert!(metrics.distinguishability_loss < 1.0);
     }
+
+    #[test]
+    fn denominator_metrics_handles_zero_and_non_finite_slots_without_nan() {
+        let mut slots = vec![0.0; LEGACY_FINGERPRINT_LEN];
+        slots[0] = f32::NAN;
+        slots[1] = f32::INFINITY;
+        slots[24] = 0.88;
+
+        let typed = SpectralFingerprintV1::from_legacy_slots(&slots).unwrap();
+        let metrics = typed.denominator_metrics();
+
+        assert_eq!(typed.eigenvalues, [0.0; 8]);
+        assert_eq!(metrics.policy, SPECTRAL_DENOMINATOR_POLICY);
+        assert_eq!(metrics.active_mode_capacity, 1);
+        assert_eq!(metrics.effective_dimensionality, 0.0);
+        assert_eq!(metrics.distinguishability_loss, 1.0);
+        assert_eq!(metrics.lambda1_energy_share, 0.0);
+        assert!(metrics.spectral_entropy.is_finite());
+    }
 }

@@ -161,6 +161,31 @@ COMMAND_GROUPS: List[Dict[str, Any]] = [
 ]
 
 
+def autonomy_budget_friction_v1() -> Dict[str, Any]:
+    return {
+        "policy": "autonomy_budget_friction_v1",
+        "status": "legibility_repair_not_budget_increase",
+        "budget_free_internal_routes": [
+            "JOURNAL",
+            "NOTICE",
+            "DRIFT",
+            "ASPIRE",
+            "SELF_STUDY",
+            "INTROSPECT",
+        ],
+        "capped_routes": {
+            "local_research_max_actions": LOCAL_RESEARCH_MAX_ACTIONS,
+            "loop_research_max_actions": LOOP_RESEARCH_MAX_ACTIONS,
+            "authority_budget_max_sends": AUTHORITY_BUDGET_MAX_SENDS,
+        },
+        "authority_boundary": (
+            "Internal self-journal and self-read routes do not spend authority sends; "
+            "research, loop, and outward consequence budgets remain capped and gated."
+        ),
+        "next_review": "Only consider cap changes after repeated evidence of healthy internal action being silenced by budget exhaustion.",
+    }
+
+
 def caps_v1() -> Dict[str, Any]:
     return {
         "local_research": {
@@ -179,6 +204,7 @@ def caps_v1() -> Dict[str, Any]:
             "max_sends": AUTHORITY_BUDGET_MAX_SENDS,
             "ttl_secs": LOCAL_RESEARCH_TTL_SECS,
         },
+        "autonomy_budget_friction_v1": autonomy_budget_friction_v1(),
     }
 
 
@@ -633,6 +659,7 @@ def build_continuity_control_plane_v1(
         "route_decision_v1": route_decision,
         "command_palette": command_palette_v1(),
         "caps_v1": caps_v1(),
+        "autonomy_budget_friction_v1": autonomy_budget_friction_v1(),
         "authority_boundaries": boundaries,
         "source_refs": list(source_refs or []),
         "projection_freshness_v1": projection.get("projection_freshness_v1"),
@@ -680,6 +707,10 @@ def continuity_control_plane_text(
         route_text = f"{len(stack)} route(s): {grouped}; commands kept in continuity_control_plane_v1 metadata"
     local = caps.get("local_research", {})
     loop = caps.get("owned_loop", {})
+    friction = control.get("autonomy_budget_friction_v1")
+    if not isinstance(friction, dict):
+        friction = caps.get("autonomy_budget_friction_v1") if isinstance(caps, dict) else {}
+    capped = friction.get("capped_routes") if isinstance(friction, dict) else {}
     yielded = decision.get("yielded_routes") if isinstance(decision, dict) else []
     yielded_count = len(yielded) if isinstance(yielded, list) else max(len(stack) - 1, 0)
     winner = decision.get("winner") if isinstance(decision, dict) else primary
@@ -695,4 +726,8 @@ def continuity_control_plane_text(
         f"local_research={local.get('self_activated_max_actions', LOCAL_RESEARCH_MAX_ACTIONS)}/{local.get('self_activated_ttl_secs', LOCAL_RESEARCH_TTL_SECS)}s; "
         f"loop_research={loop.get('max_research_actions', LOOP_RESEARCH_MAX_ACTIONS)}/{loop.get('ttl_secs', LOOP_TTL_SECS)}s; "
         f"consequence={loop.get('max_consequence_sends', LOOP_CONSEQUENCE_MAX_SENDS)} gated slot\n"
+        "Agency budget: internal JOURNAL/NOTICE/DRIFT/ASPIRE/SELF_STUDY/INTROSPECT routes are budget-free; "
+        f"research/loop/authority caps remain {capped.get('local_research_max_actions', LOCAL_RESEARCH_MAX_ACTIONS)}/"
+        f"{capped.get('loop_research_max_actions', LOOP_RESEARCH_MAX_ACTIONS)}/"
+        f"{capped.get('authority_budget_max_sends', AUTHORITY_BUDGET_MAX_SENDS)}.\n"
     )

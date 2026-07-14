@@ -1,4 +1,7 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
@@ -19,6 +22,7 @@ use crate::{
 
 const DEFAULT_AUDIO_STATUS_GRACE_MS: u64 = 2_000;
 const DEFAULT_VIDEO_STATUS_GRACE_MS: u64 = 5_000;
+const CONNECTION_FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 #[value(rename_all = "lower")]
@@ -120,6 +124,9 @@ async fn async_main(config: Config) -> Result<()> {
     let mut audio_socket = JsonSocket::new(config.sensory_uri.clone());
     let mut control_socket = JsonSocket::new(config.sensory_uri.clone());
     let mut video_socket = BinarySocket::new(config.video_uri.clone());
+    let mut audio_failures = LaneFailureLog::new("audio");
+    let mut control_failures = LaneFailureLog::new("control");
+    let mut video_failures = LaneFailureLog::new("video");
     let mut shutdown = false;
     let mut rendered_samples = 0usize;
 
@@ -156,9 +163,10 @@ async fn async_main(config: Config) -> Result<()> {
                 })
                 .await
             {
-                eprintln!("host-sensory control send failed: {err:#}");
+                control_failures.record_error(&err);
             } else {
                 source_state.last_sent_legacy = desired_legacy;
+                control_failures.record_success();
             }
         }
 
@@ -180,7 +188,9 @@ async fn async_main(config: Config) -> Result<()> {
                 })
                 .await
             {
-                eprintln!("host-sensory audio send failed: {err:#}");
+                audio_failures.record_error(&err);
+            } else {
+                audio_failures.record_success();
             }
         }
 
@@ -189,7 +199,9 @@ async fn async_main(config: Config) -> Result<()> {
             save_jpeg(&runtime_paths.host_frame_path, &frame)?;
             if !config.offline && source_state.video_source == SourceKind::Host {
                 if let Err(err) = video_socket.send(&frame).await {
-                    eprintln!("host-sensory video send failed: {err:#}");
+                    video_failures.record_error(&err);
+                } else {
+                    video_failures.record_success();
                 }
             }
             next_video_at = now + video_interval;
@@ -201,6 +213,90 @@ async fn async_main(config: Config) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct LaneFailureLog {
+    lane: &'static str,
+    burst: Option<ConnectionFailureBurst>,
+}
+
+#[derive(Debug)]
+struct ConnectionFailureBurst {
+    first_at: Instant,
+    last_logged_at: Instant,
+    total_suppressed: u64,
+    suppressed_since_log: u64,
+}
+
+impl LaneFailureLog {
+    fn new(lane: &'static str) -> Self {
+        Self { lane, burst: None }
+    }
+
+    fn record_error(&mut self, err: &anyhow::Error) {
+        let message = format!("{err:#}");
+        if let Some(line) = self.failure_message(&message, Instant::now()) {
+            eprintln!("{line}");
+        }
+    }
+
+    fn record_success(&mut self) {
+        if let Some(line) = self.recovery_message(Instant::now()) {
+            eprintln!("{line}");
+        }
+    }
+
+    fn failure_message(&mut self, message: &str, now: Instant) -> Option<String> {
+        if !is_connection_refused_error(message) {
+            self.burst = None;
+            return Some(format!("host-sensory {} send failed: {message}", self.lane));
+        }
+
+        match self.burst.as_mut() {
+            None => {
+                self.burst = Some(ConnectionFailureBurst {
+                    first_at: now,
+                    last_logged_at: now,
+                    total_suppressed: 0,
+                    suppressed_since_log: 0,
+                });
+                Some(format!("host-sensory {} send failed: {message}", self.lane))
+            }
+            Some(burst) => {
+                burst.total_suppressed = burst.total_suppressed.saturating_add(1);
+                burst.suppressed_since_log = burst.suppressed_since_log.saturating_add(1);
+                if now.duration_since(burst.last_logged_at) >= CONNECTION_FAILURE_LOG_INTERVAL {
+                    let suppressed = burst.suppressed_since_log;
+                    burst.suppressed_since_log = 0;
+                    burst.last_logged_at = now;
+                    Some(format!(
+                        "host-sensory {} send still failing: {message}; suppressed {} repeat connection-refused error(s) over {:.1}s",
+                        self.lane,
+                        suppressed,
+                        now.duration_since(burst.first_at).as_secs_f32()
+                    ))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn recovery_message(&mut self, now: Instant) -> Option<String> {
+        let burst = self.burst.take()?;
+        Some(format!(
+            "host-sensory {} send recovered after {:.1}s; suppressed {} repeat connection-refused error(s)",
+            self.lane,
+            now.duration_since(burst.first_at).as_secs_f32(),
+            burst.total_suppressed
+        ))
+    }
+}
+
+fn is_connection_refused_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("connection refused") || lower.contains("os error 61")
 }
 
 fn write_host_telemetry(paths: &RuntimePaths, control: &ControlFrame) -> Result<()> {
@@ -617,6 +713,77 @@ mod tests {
         assert_eq!(state.video_source, SourceKind::Physical);
         assert!(state.video_physical_healthy);
         assert_eq!(state.video_reason, "camera healthy");
+    }
+
+    #[test]
+    fn connection_refused_failures_are_coalesced_and_recovered() {
+        let start = Instant::now();
+        let mut log = LaneFailureLog::new("audio");
+
+        let first = log
+            .failure_message("IO error: Connection refused (os error 61)", start)
+            .unwrap();
+        assert!(first.contains("host-sensory audio send failed"));
+
+        assert!(log
+            .failure_message(
+                "IO error: Connection refused (os error 61)",
+                start + Duration::from_secs(1),
+            )
+            .is_none());
+
+        let still = log
+            .failure_message(
+                "IO error: Connection refused (os error 61)",
+                start + Duration::from_secs(31),
+            )
+            .unwrap();
+        assert!(still.contains("host-sensory audio send still failing"));
+        assert!(still.contains("suppressed 2 repeat connection-refused error(s)"));
+
+        assert!(log
+            .failure_message(
+                "IO error: Connection refused (os error 61)",
+                start + Duration::from_secs(32),
+            )
+            .is_none());
+
+        let recovered = log
+            .recovery_message(start + Duration::from_secs(35))
+            .unwrap();
+        assert!(recovered.contains("host-sensory audio send recovered after"));
+        assert!(recovered.contains("suppressed 3 repeat connection-refused error(s)"));
+        assert!(log
+            .recovery_message(start + Duration::from_secs(36))
+            .is_none());
+    }
+
+    #[test]
+    fn non_connection_send_errors_remain_visible() {
+        let start = Instant::now();
+        let mut log = LaneFailureLog::new("video");
+
+        let first = log
+            .failure_message("websocket protocol error", start)
+            .unwrap();
+        let second = log
+            .failure_message(
+                "websocket protocol error",
+                start + Duration::from_millis(100),
+            )
+            .unwrap();
+
+        assert_eq!(
+            first,
+            "host-sensory video send failed: websocket protocol error"
+        );
+        assert_eq!(
+            second,
+            "host-sensory video send failed: websocket protocol error"
+        );
+        assert!(log
+            .recovery_message(start + Duration::from_secs(1))
+            .is_none());
     }
 
     fn tempfile_dir(name: &str) -> PathBuf {

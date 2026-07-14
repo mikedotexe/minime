@@ -140,6 +140,233 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             candidate = agent._guard_low_fill_fallback("recess_drift", {"fill_ratio": 0.22})
         self.assertEqual(candidate, "recess_drift")
 
+    def test_recess_spectral_pruning_advice_is_read_only_for_high_entropy_daydream(self):
+        agent = self._agent()
+        state = {
+            "spectral_entropy": 0.91,
+            "pressure_source_v1": {
+                "pressure_score": 0.62,
+                "porosity_score": 0.38,
+                "dominant_source": "mode_packing",
+                "quality": "overpacked_mode_packing",
+                "components": {"mode_packing": 0.72},
+            },
+        }
+
+        advice = aa.recess_spectral_pruning_advice_v1(state, action="recess_daydream")
+        summary = agent._action_summary("recess_daydream", state)
+
+        self.assertTrue(advice["active"])
+        self.assertFalse(advice["control_applied"])
+        self.assertEqual(
+            advice["reason"],
+            "high_entropy_recess_with_pressure_or_mode_packing",
+        )
+        self.assertIn("self_study", advice["available_routes"])
+        self.assertIn("recess_spectral_pruning_advice_v1", summary)
+        self.assertFalse(summary["recess_spectral_pruning_advice_v1"]["control_applied"])
+
+    def test_recess_spectral_pruning_advice_does_not_fire_for_non_recess_action(self):
+        advice = aa.recess_spectral_pruning_advice_v1(
+            {"spectral_entropy": 0.92},
+            action="pressure_source_audit",
+        )
+
+        self.assertFalse(advice["active"])
+        self.assertEqual(advice["reason"], "not_recess_action")
+
+    def test_density_aware_recess_names_structural_stabilization_without_control(self):
+        agent = self._agent()
+        state = {
+            "spectral_entropy": 0.88,
+            "density_gradient": 0.19,
+            "pressure_source_v1": {
+                "pressure_score": 0.33,
+                "porosity_score": 0.49,
+                "dominant_source": "controller_pressure",
+                "quality": "controller_pressure",
+            },
+        }
+
+        profile = aa.density_aware_recess_profile_v1(state, action="recess_daydream")
+        summary = agent._action_summary("recess_daydream", state)
+
+        self.assertTrue(profile["active"])
+        self.assertEqual(profile["mode_reading"], "structural_stabilization_recess")
+        self.assertTrue(profile["structural_stabilization_recommended"])
+        self.assertEqual(
+            profile["recommendation"],
+            "read_only_treat_recess_as_structural_stabilization",
+        )
+        self.assertFalse(profile["control_applied"])
+        self.assertFalse(profile["behavior_changed"])
+        self.assertIn("density_aware_recess_profile_v1", summary)
+        self.assertFalse(summary["density_aware_recess_profile_v1"]["control_applied"])
+
+    def test_recess_resonance_anchor_recommends_target_without_control(self):
+        agent = self._agent()
+        state = {
+            "spectral_entropy": 0.89,
+            "density_gradient": 0.18,
+            "target_resonance_id": "shared sediment thread",
+            "pressure_source_v1": {
+                "pressure_score": 0.32,
+                "dominant_source": "mode_packing",
+                "quality": "overpacked_mode_packing",
+                "components": {"mode_packing": 0.31},
+            },
+        }
+
+        anchor = aa.recess_resonance_anchor_v1(state, action="recess_daydream")
+        summary = agent._action_summary("recess_daydream", state)
+
+        self.assertTrue(anchor["active"])
+        self.assertEqual(
+            anchor["anchor_state"],
+            "recess_resonance_anchor_recommended",
+        )
+        self.assertEqual(anchor["anchor_parameter"], "target_resonance_id")
+        self.assertEqual(anchor["target_resonance_id"], "shared_sediment_thread")
+        self.assertIn("recess_notice", anchor["recommended_next"])
+        self.assertIn("MEMORY_STATUS latest", anchor["available_routes"])
+        self.assertFalse(anchor["control_applied"])
+        self.assertFalse(anchor["behavior_changed"])
+        self.assertIn("recess_resonance_anchor_v1", summary)
+        self.assertFalse(summary["recess_resonance_anchor_v1"]["control_applied"])
+
+    def test_recess_resonance_anchor_does_not_fire_for_non_recess_action(self):
+        anchor = aa.recess_resonance_anchor_v1(
+            {"spectral_entropy": 0.91, "density_gradient": 0.22},
+            action="pressure_source_audit",
+        )
+
+        self.assertFalse(anchor["active"])
+        self.assertEqual(anchor["anchor_state"], "not_recess")
+
+    def test_recess_density_mitigation_names_exhale_route_without_control(self):
+        agent = self._agent()
+        state = {
+            "spectral_entropy": 0.86,
+            "pressure_source_v1": {
+                "pressure_score": 0.42,
+                "porosity_score": 0.53,
+                "pressure_porosity_gradient": 0.11,
+                "dominant_source": "mode_packing",
+                "quality": "overpacked_mode_packing",
+                "components": {"mode_packing": 0.34},
+            },
+            "shadow_field_v3": {
+                "class_v3": {"primary": "restless"},
+                "history": [{"fissure_tendency": 0.31}],
+            },
+        }
+
+        mitigation = aa.recess_density_mitigation_v1(state, action="recess_daydream")
+        summary = agent._action_summary("recess_daydream", state)
+
+        self.assertTrue(mitigation["active"])
+        self.assertEqual(
+            mitigation["mitigation_state"],
+            "recess_exhale_shadow_and_pressure",
+        )
+        self.assertEqual(
+            mitigation["dissipative_action"],
+            "shadow_trace_then_pressure_relief_request",
+        )
+        self.assertIn("SHADOW_TRAJECTORY", mitigation["recommended_next"])
+        self.assertIn("PRESSURE_AGENCY_REQUEST", mitigation["recommended_next"])
+        self.assertFalse(mitigation["control_applied"])
+        self.assertFalse(mitigation["behavior_changed"])
+        self.assertIn("recess_density_mitigation_v1", summary)
+        self.assertFalse(summary["recess_density_mitigation_v1"]["control_applied"])
+
+    def test_recess_sedimentation_compaction_readiness_routes_to_preflight_without_control(self):
+        agent = self._agent()
+        state = {
+            "spectral_entropy": 0.88,
+            "distinguishability_loss": 0.31,
+            "inhabitability_score": 0.71,
+            "pressure_source_v1": {
+                "pressure_score": 0.29,
+                "porosity_score": 0.50,
+                "pressure_porosity_gradient": 0.10,
+                "dominant_source": "mode_packing",
+                "quality": "mixed_pressure",
+                "components": {"mode_packing": 0.34},
+            },
+        }
+
+        readiness = aa.recess_sedimentation_compaction_readiness_v1(
+            state,
+            action="recess_daydream",
+        )
+        summary = agent._action_summary("recess_daydream", state)
+
+        self.assertTrue(readiness["active"])
+        self.assertEqual(
+            readiness["compaction_state"],
+            "sandbox_compaction_trial_ready",
+        )
+        self.assertEqual(readiness["trial_mode"], "sandbox_or_preflight_required")
+        self.assertIn("ACTION_PREFLIGHT", readiness["recommended_next"])
+        self.assertIn("distinguishability_loss falls below 30%", readiness["success_metrics"])
+        self.assertFalse(readiness["control_applied"])
+        self.assertFalse(readiness["behavior_changed"])
+        self.assertIn("recess_sedimentation_compaction_readiness_v1", summary)
+        self.assertFalse(
+            summary["recess_sedimentation_compaction_readiness_v1"]["control_applied"]
+        )
+
+    def test_recess_divergence_buffer_review_gates_budget_relief_without_spending(self):
+        agent = self._agent()
+        state = {
+            "spectral_entropy": 0.89,
+            "distinguishability_loss": 0.31,
+            "local_research_actions_used": aa.LOCAL_RESEARCH_MAX_ACTIONS,
+            "authority_budget_sends_used": aa.AUTHORITY_BUDGET_MAX_SENDS,
+            "pressure_source_v1": {
+                "pressure_score": 0.29,
+                "porosity_score": 0.66,
+                "dominant_source": "mode_packing",
+                "quality": "mixed_pressure",
+                "components": {"mode_packing": 0.29},
+            },
+        }
+
+        review = aa.recess_divergence_buffer_review_v1(state, action="recess_daydream")
+        summary = agent._action_summary("recess_daydream", state)
+
+        self.assertTrue(review["active"])
+        self.assertEqual(review["buffer_state"], "divergence_buffer_authority_gate")
+        self.assertEqual(
+            review["local_research_max_actions_cap"],
+            aa.LOCAL_RESEARCH_MAX_ACTIONS,
+        )
+        self.assertEqual(
+            review["authority_budget_max_sends_cap"],
+            aa.AUTHORITY_BUDGET_MAX_SENDS,
+        )
+        self.assertTrue(review["budget_caps_remain_enforced"])
+        self.assertTrue(review["live_control_required"])
+        self.assertFalse(review["runnable_without_approval"])
+        self.assertFalse(review["control_applied"])
+        self.assertFalse(review["behavior_changed"])
+        self.assertIn("EXPERIMENT_RESEARCH_BUDGET_REQUEST", review["recommended_next"])
+        self.assertIn("recess_divergence_buffer_review_v1", summary)
+        self.assertFalse(
+            summary["recess_divergence_buffer_review_v1"]["control_applied"]
+        )
+
+    def test_recess_divergence_buffer_review_does_not_fire_for_non_recess_action(self):
+        review = aa.recess_divergence_buffer_review_v1(
+            {"spectral_entropy": 0.93, "local_research_actions_used": 99},
+            action="pressure_source_audit",
+        )
+
+        self.assertFalse(review["active"])
+        self.assertEqual(review["buffer_state"], "not_recess")
+        self.assertTrue(review["budget_caps_remain_enforced"])
+
     def test_prompt_guidance_mentions_hard_reset_clamp(self):
         agent = self._agent()
         with patch.object(
@@ -3459,6 +3686,13 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertIn("Matplotlib x/y length mismatch", hint)
         self.assertIn("len(lambda1_relative)", hint)
 
+    def test_python_experiment_failure_hint_names_pythonpath_for_missing_modules(self):
+        hint = aa._python_experiment_failure_hint(
+            "ModuleNotFoundError: No module named 'local_probe'"
+        )
+        self.assertIn("Missing module", hint)
+        self.assertIn("experiment PYTHONPATH", hint)
+
     def test_run_python_request_parses_filename_and_text(self):
         filename, text = aa._parse_run_python_request(
             '-filename: "pie_controller_test.py" -text "Implement a basic PI controller"'
@@ -3466,10 +3700,258 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertEqual(filename, "pie_controller_test.py")
         self.assertEqual(text, "Implement a basic PI controller")
 
+    def test_run_python_text_value_keeps_complex_multiline_punctuation(self):
+        value, consumed = aa._consume_run_python_value(
+            ["--text", "print('Hello', 'World')\nprint(\"again\")", "--filename", "later.py"],
+            1,
+            text_like=True,
+        )
+
+        self.assertEqual(value, "print('Hello', 'World')\nprint(\"again\")")
+        self.assertEqual(consumed, 2)
+
+    def test_run_python_prompt_value_stops_before_following_filename_flag(self):
+        value, consumed = aa._consume_run_python_value(
+            ["--prompt", "print('hello')", "--filename", "test.py"],
+            1,
+            text_like=True,
+        )
+
+        self.assertEqual(value, "print('hello')")
+        self.assertEqual(consumed, 2)
+
+    def test_run_python_text_value_keeps_quoted_flag_like_token(self):
+        value, consumed = aa._consume_run_python_value(
+            ["--text", "note =", "--filename: not a flag", "--filename", "later.py"],
+            1,
+            text_like=True,
+        )
+
+        self.assertEqual(value, "note = --filename: not a flag")
+        self.assertEqual(consumed, 3)
+
+    def test_run_python_flags_handle_multiple_flags_with_last_text_and_filename(self):
+        filename, text = aa._parse_run_python_request(
+            "--text 'first draft' --filename demo.py --prompt 'print(42); # final text'"
+        )
+
+        self.assertEqual(filename, "demo.py")
+        self.assertEqual(text, "print(42); # final text")
+
+    def test_run_python_request_keeps_pathlike_prompt_text_separate(self):
+        filename, text = aa._parse_run_python_request(
+            "--filename 'test_script.py' --prompt "
+            "'Run the script and print the results for the file ./data/input.csv'"
+        )
+        self.assertEqual(filename, "test_script.py")
+        self.assertEqual(
+            text,
+            "Run the script and print the results for the file ./data/input.csv",
+        )
+
+    def test_run_python_request_keeps_flag_words_inside_quoted_prompt(self):
+        filename, text = aa._parse_run_python_request(
+            'text="The filename: is important" filename="test script.py"'
+        )
+        self.assertEqual(filename, "test_script.py")
+        self.assertEqual(text, "The filename: is important")
+
+    def test_run_python_request_keeps_json_text_with_colon_and_equals(self):
+        filename, text = aa._parse_run_python_request(
+            "--text '{\"key\": \"value\", \"note\": \"use = for assignment\"}' "
+            "--filename json_probe.py"
+        )
+        self.assertEqual(filename, "json_probe.py")
+        self.assertEqual(text, '{"key": "value", "note": "use = for assignment"}')
+
+    def test_run_python_text_does_not_treat_bare_filename_phrase_as_flag(self):
+        filename, text = aa._parse_run_python_request(
+            "--text filename: is a label and prompt: is not a flag "
+            "--filename parser_probe.py"
+        )
+        self.assertEqual(filename, "parser_probe.py")
+        self.assertEqual(
+            text,
+            "filename: is a label and prompt: is not a flag",
+        )
+
+    def test_run_python_plain_text_keeps_comment_fake_flag(self):
+        filename, text = aa._parse_run_python_request(
+            "--text # --filename: is a comment, not a flag\n"
+            "print('still code')\n"
+            "--filename comment_probe.py"
+        )
+
+        self.assertEqual(filename, "comment_probe.py")
+        self.assertEqual(text, "# --filename: is a comment, not a flag\nprint('still code')")
+
+    def test_run_python_plain_text_keeps_quoted_fake_flag(self):
+        filename, text = aa._parse_run_python_request(
+            "--text note = '--filename: still text, not a boundary'\n"
+            "print(note)\n"
+            "--filename quoted_probe.py"
+        )
+
+        self.assertEqual(filename, "quoted_probe.py")
+        self.assertEqual(
+            text,
+            "note = '--filename: still text, not a boundary'\nprint(note)",
+        )
+
+    def test_run_python_code_boundary_preserves_nested_quotes_and_filename(self):
+        filename, text = aa._parse_run_python_request(
+            "--text CODE_START\n"
+            "print('Hello', \"World\")\n"
+            "note = \"filename: is data, not a flag\"\n"
+            "CODE_END --filename nested_quotes.py"
+        )
+        self.assertEqual(filename, "nested_quotes.py")
+        self.assertEqual(
+            text,
+            "print('Hello', \"World\")\nnote = \"filename: is data, not a flag\"",
+        )
+
+    def test_run_python_missing_code_end_stops_before_next_flag(self):
+        filename, text = aa._parse_run_python_request(
+            "--text CODE_START\n"
+            "print('still code')\n"
+            "--filename missing_boundary.py"
+        )
+        self.assertEqual(filename, "missing_boundary.py")
+        self.assertEqual(text, "print('still code')")
+
+    def test_run_python_code_boundary_keeps_hyphen_comments_and_colons(self):
+        filename, text = aa._parse_run_python_request(
+            "--text CODE_START\n"
+            "# - This is a comment, not a flag: keep it\n"
+            "value = {'label': 'filename: not a boundary'}\n"
+            "print(value)\n"
+            "CODE_END --filename boundary_comments.py"
+        )
+        self.assertEqual(filename, "boundary_comments.py")
+        self.assertEqual(
+            text,
+            "# - This is a comment, not a flag: keep it\n"
+            "value = {'label': 'filename: not a boundary'}\n"
+            "print(value)",
+        )
+
+    def test_run_python_code_boundary_keeps_flag_like_comments_before_code_end(self):
+        filename, text = aa._parse_run_python_request(
+            "--text CODE_START\n"
+            "# --filename: is commentary, not a boundary\n"
+            "print('still code')\n"
+            "CODE_END --filename comment_fake_boundary.py"
+        )
+
+        self.assertEqual(filename, "comment_fake_boundary.py")
+        self.assertEqual(
+            text,
+            "# --filename: is commentary, not a boundary\nprint('still code')",
+        )
+
+    def test_run_python_missing_code_end_ignores_fake_flags_in_code(self):
+        filename, text = aa._parse_run_python_request(
+            "--text CODE_START\n"
+            "# --text is a flag-looking comment, not a boundary\n"
+            "note = \"--filename remains string data\"\n"
+            "print(note)\n"
+            "--filename missing_code_fake_flags.py"
+        )
+
+        self.assertEqual(filename, "missing_code_fake_flags.py")
+        self.assertEqual(
+            text,
+            "# --text is a flag-looking comment, not a boundary\n"
+            "note = \"--filename remains string data\"\n"
+            "print(note)",
+        )
+
+    def test_run_python_token_value_keeps_comment_flag_tokens(self):
+        value, consumed = aa._consume_run_python_value(
+            [
+                "--text",
+                "#",
+                "--text",
+                "is a flag-looking comment\nprint('after')",
+                "--filename",
+                "later.py",
+            ],
+            1,
+            text_like=True,
+        )
+
+        self.assertEqual(
+            value,
+            "# --text is a flag-looking comment\nprint('after')",
+        )
+        self.assertEqual(consumed, 4)
+
+    def test_sovereignty_state_restores_cycle_count_across_restart(self):
+        agent = self._agent()
+        agent._hard_recovery_reset = False
+        agent._stable_core_reflective_only = lambda: False
+        agent._current_regime = None
+        agent.cycle_count = 418
+        agent._save_sovereignty_state({"kind": "control"}, "cycle-count regression")
+
+        restored = self._agent()
+        restored._hard_recovery_reset = False
+        restored._stable_core_reflective_only = lambda: False
+        restored._test_sovereignty_tmp = agent._test_sovereignty_tmp
+        restored._test_sovereignty_state_path = agent._test_sovereignty_state_path
+        restored._sovereignty_state_path = lambda: str(restored._test_sovereignty_state_path)
+        restored.cycle_count = 0
+        restored._current_regime = None
+        restored._restore_sovereignty_state()
+
+        self.assertEqual(restored.cycle_count, 418)
+
+    def test_experiment_pythonpath_clean_env_includes_base_once(self):
+        old_pythonpath = os.environ.pop("PYTHONPATH", None)
+        try:
+            paths = aa._experiment_pythonpath().split(os.pathsep)
+        finally:
+            if old_pythonpath is None:
+                os.environ.pop("PYTHONPATH", None)
+            else:
+                os.environ["PYTHONPATH"] = old_pythonpath
+
+        base_dir = str(Path(aa.__file__).resolve().parent)
+        self.assertEqual(paths[0], base_dir)
+        self.assertEqual(paths.count(base_dir), 1)
+        self.assertEqual(len(paths), len(set(paths)))
+
+    def test_experiment_pythonpath_keeps_base_when_site_packages_unavailable(self):
+        import site
+
+        old_pythonpath = os.environ.pop("PYTHONPATH", None)
+        try:
+            with (
+                patch.object(site, "getsitepackages", side_effect=RuntimeError("restricted")),
+                patch.object(site, "getusersitepackages", side_effect=RuntimeError("restricted")),
+            ):
+                paths = aa._experiment_pythonpath().split(os.pathsep)
+        finally:
+            if old_pythonpath is None:
+                os.environ.pop("PYTHONPATH", None)
+            else:
+                os.environ["PYTHONPATH"] = old_pythonpath
+
+        base_dir = str(Path(aa.__file__).resolve().parent)
+        self.assertEqual(paths[0], base_dir)
+        self.assertIn(base_dir, paths)
+
     def test_run_python_request_sanitizes_script_name(self):
         filename, text = aa._parse_run_python_request("../bad dir/controller")
         self.assertEqual(filename, "controller.py")
         self.assertIsNone(text)
+
+    def test_safe_experiment_script_name_preserves_visible_separator_shape(self):
+        self.assertEqual(
+            aa._safe_experiment_script_name("My Experiment! @2024"),
+            "My_Experiment___2024.py",
+        )
 
     def test_parameterized_perturb_uses_literal_lanes_without_hidden_entropy(self):
         spec = aa.build_perturbation_vector(
@@ -3483,6 +3965,20 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertAlmostEqual(spec.features[12], 0.1, places=3)
         self.assertAlmostEqual(spec.features[28], 0.0, places=3)
         self.assertIn("TARGETED PALETTE", spec.mode_desc)
+
+    def test_parameterized_perturb_curiosity_maps_to_lane_26(self):
+        spec = aa.build_perturbation_vector(
+            "curiosity=0.17",
+            {"fill_ratio": 0.66, "stable_core": {"enabled": True}},
+        )
+
+        self.assertIsInstance(spec, aa.PerturbationVector)
+        self.assertEqual(aa.PERTURB_GROUP_DIMS["curiosity"], (26,))
+        self.assertEqual(len(spec.features), 32)
+        self.assertAlmostEqual(spec.features[26], 0.17, places=3)
+        active = [idx for idx, value in enumerate(spec.features) if abs(value) > 0.001]
+        self.assertEqual(active, [26])
+        self.assertIn("curiosity=+0.17", spec.mode_desc)
 
     def test_parameterized_perturb_caps_hot_stable_core_values(self):
         spec = aa.build_perturbation_vector(

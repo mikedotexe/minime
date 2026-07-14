@@ -72,6 +72,23 @@ STATE = {
             "sensory_scarcity": 0.0,
         },
         "context": {},
+        "silt_granularity_v1": {
+            "policy": "silt_granularity_v1",
+            "schema_version": 1,
+            "granularity_index": 0.44,
+            "mean_orientation_delta": 0.01,
+            "mode_packing": 0.32,
+            "distinguishability_loss": 0.33,
+            "structural_plurality_loss": 0.18,
+            "pressure_score": 0.24,
+            "porosity_score": 0.72,
+            "particle_scale": "mixed_packed_silt",
+            "review_state": "pressure_source_audit_grain_probe",
+            "suggested_route": "PRESSURE_SOURCE_AUDIT grain; SHADOW_TRAJECTORY named-grain-vs-field",
+            "live_control_changed": False,
+            "authority": "read_only_not_pressure_porosity_or_regulator_control",
+            "note": "fixture review only",
+        },
         "control": {
             "applied_locally": False,
             "note": "advisory only",
@@ -738,6 +755,9 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
             self.assertIn("controller_pressure", text)
             self.assertIn("weighted=0.034", text)
             self.assertIn("share=31%", text)
+            self.assertIn("Silt granularity: index=0.44", text)
+            self.assertIn("particle_scale=mixed_packed_silt", text)
+            self.assertIn("review=pressure_source_audit_grain_probe", text)
             manifests = list((workspace / "actions").glob("*_pressure_source_audit.json"))
             self.assertEqual(len(manifests), 1)
             manifest = json.loads(manifests[0].read_text())
@@ -748,6 +768,31 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
                     for artifact in manifest["action_continuity"].get("artifacts", [])
                 )
             )
+
+    def test_regulator_audit_names_interface_transparency_without_control(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            db_path = Path(tmp) / "minime.db"
+            (workspace / "journal").mkdir(parents=True)
+            agent = self._agent(workspace, db_path)
+            agent._pending_regulator_audit_label = "distance-contact-control"
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "DB_PATH", db_path),
+                patch.object(aa, "build_controller_gradient_audit", return_value={}),
+                patch.object(aa, "format_controller_gradient_audit_block", return_value="active controller: test"),
+                patch.object(agent, "_write_journal_entry"),
+            ):
+                agent._regulator_audit(dict(STATE))
+
+            journals = list((workspace / "journal").glob("regulator_audit_*.txt"))
+            self.assertEqual(len(journals), 1)
+            text = journals[0].read_text()
+            self.assertIn("Interface transparency", text)
+            self.assertIn("stabilization_pressure_visibility_v1", text)
+            self.assertIn("not surrender mode", text)
+            self.assertIn("or permission", text)
+            self.assertIn("to change pressure, fill, PI", text)
 
     def test_constraint_audit_is_read_only_artifact_and_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:

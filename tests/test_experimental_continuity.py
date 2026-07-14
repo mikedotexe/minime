@@ -66,6 +66,10 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                 self.assertIn("local_research=5/21600s", surface)
                 self.assertIn("loop_research=5/21600s", surface)
                 self.assertIn("consequence=1 gated slot", surface)
+                self.assertIn(
+                    "internal JOURNAL/NOTICE/DRIFT/ASPIRE/SELF_STUDY/INTROSPECT routes are budget-free",
+                    surface,
+                )
             self.assertIn("Command palette (generated):", prompt)
             self.assertIn("Local Research: EXPERIMENT_RESEARCH_BUDGET_ACCEPT", prompt)
             self.assertEqual(
@@ -75,6 +79,10 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertEqual(
                 stored["continuity_control_plane_v1"]["caps_v1"]["owned_loop"]["max_consequence_sends"],
                 1,
+            )
+            self.assertEqual(
+                stored["continuity_control_plane_v1"]["autonomy_budget_friction_v1"]["status"],
+                "legibility_repair_not_budget_increase",
             )
             if (thread_dir / "authority_gate.jsonl").exists():
                 self.assertFalse((thread_dir / "authority_gate.jsonl").read_text().strip())
@@ -5285,6 +5293,63 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             rows = [json.loads(line) for line in gate.read_text().splitlines()]
             self.assertNotIn("authority_consequence_v1", [row.get("record_schema") for row in rows])
             self.assertNotIn("budget_debit", [row.get("record_type") for row in rows])
+
+    def test_authority_budget_blocks_after_max_send_debits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            store = aa.ActionContinuityStore(workspace, session_id=7)
+            thread = store.create_thread("Authority budget debit cap")
+            experiment = store.start_experiment("Budget cap", "Can ten fast sends exhaust the cap?")
+            gate = workspace / "action_threads" / "threads" / thread["thread_id"] / "authority_gate.jsonl"
+            approval = {
+                "schema_version": 1,
+                "record_schema": "authority_budget_v1",
+                "record_type": "budget_approval",
+                "record_id": "authbud_cap_approval",
+                "budget_id": "authbud_cap_budget",
+                "being": "minime",
+                "thread_id": thread["thread_id"],
+                "experiment_id": experiment["experiment_id"],
+                "scope": "semantic_microdose",
+                "status": "active",
+                "max_sends": aa.AUTHORITY_BUDGET_MAX_SENDS,
+                "ttl_secs": 21600,
+                "expires_at_unix_s": 4102444800,
+                "peer_mutation": False,
+            }
+            gate.parent.mkdir(parents=True, exist_ok=True)
+            with gate.open("a") as handle:
+                handle.write(json.dumps(approval, sort_keys=True) + "\n")
+                for index in range(aa.AUTHORITY_BUDGET_MAX_SENDS):
+                    handle.write(json.dumps({
+                        "schema_version": 1,
+                        "record_schema": "authority_budget_v1",
+                        "record_type": "budget_debit",
+                        "record_id": f"authbud_cap_debit_{index}",
+                        "budget_id": "authbud_cap_budget",
+                        "thread_id": thread["thread_id"],
+                        "experiment_id": experiment["experiment_id"],
+                        "scope": "semantic_microdose",
+                        "send_index": index + 1,
+                    }, sort_keys=True) + "\n")
+
+            active = store._active_authority_budget(
+                thread["thread_id"],
+                experiment["experiment_id"],
+                "semantic_microdose",
+            )
+            status = store._authority_budget_status_v1(
+                thread,
+                experiment,
+                dict(STATE),
+                selector="current",
+                budget_id="authbud_cap_budget",
+            )
+
+            self.assertIsNone(active)
+            self.assertEqual(status["stage"], "budget_exhausted")
+            self.assertEqual(status["remaining_sends"], 0)
+            self.assertEqual(status["max_sends"], aa.AUTHORITY_BUDGET_MAX_SENDS)
 
     def test_authority_budget_requires_consequence_review_before_next_send(self):
         with tempfile.TemporaryDirectory() as tmp:

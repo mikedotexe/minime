@@ -56,6 +56,21 @@ pub struct MemoryObservation<'a> {
     pub phase_transition: bool,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct MultiScaleBridgeReviewV1 {
+    pub policy: &'static str,
+    pub source_dim_count: usize,
+    pub glimpse_dim_count: usize,
+    pub lambda4_tail_share: f32,
+    pub spectral_entropy: f32,
+    pub tail_coupling_support: f32,
+    pub tail_preservation_weight: f32,
+    pub persistence_weighted_tail_share: f32,
+    pub compression_state: &'static str,
+    pub preserves_tail_vibrancy: bool,
+    pub authority: &'static str,
+}
+
 fn default_version() -> u32 {
     1
 }
@@ -99,6 +114,69 @@ fn abs_share(value: f32, total: f32) -> f32 {
         value.abs() / total
     } else {
         0.0
+    }
+}
+
+#[must_use]
+pub fn multi_scale_bridge_review_v1(fingerprint: &[f32]) -> MultiScaleBridgeReviewV1 {
+    let source_dim_count = fingerprint.len();
+    if fingerprint.len() < 32 {
+        return MultiScaleBridgeReviewV1 {
+            policy: "multi_scale_bridge_review_v1",
+            source_dim_count,
+            glimpse_dim_count: 12,
+            lambda4_tail_share: 0.0,
+            spectral_entropy: 0.0,
+            tail_coupling_support: 0.0,
+            tail_preservation_weight: 0.0,
+            persistence_weighted_tail_share: 0.0,
+            compression_state: "insufficient_fingerprint_for_tail_review",
+            preserves_tail_vibrancy: false,
+            authority: "read_only_bridge_review_not_live_transport_or_controller_change",
+        };
+    }
+
+    let eigenvalues = &fingerprint[0..8];
+    let couplings = &fingerprint[16..24];
+    let total_ev = eigenvalues.iter().map(|value| value.abs()).sum::<f32>();
+    let lambda4_tail_share = eigenvalues[3..]
+        .iter()
+        .map(|value| abs_share(*value, total_ev))
+        .sum::<f32>()
+        .clamp(0.0, 1.0);
+    let spectral_entropy = sanitize_scalar(fingerprint[24]).clamp(0.0, 1.0);
+    let tail_coupling_support = mean(&couplings[3..]).abs().clamp(0.0, 1.0);
+    let entropy_support = ((spectral_entropy - 0.55) / 0.45).clamp(0.0, 1.0);
+    let raw_tail_preservation_weight =
+        (0.55 * entropy_support + 0.45 * tail_coupling_support).clamp(0.0, 1.0);
+    let tail_preservation_weight = if entropy_support <= 0.0 && tail_coupling_support < 0.10 {
+        0.0
+    } else {
+        raw_tail_preservation_weight
+    };
+    let persistence_weighted_tail_share = (lambda4_tail_share
+        + (1.0 - lambda4_tail_share) * 0.12 * tail_preservation_weight)
+        .clamp(0.0, 1.0);
+    let compression_state = if persistence_weighted_tail_share > lambda4_tail_share + 0.01 {
+        "tail_preserved_with_persistence_lift"
+    } else if lambda4_tail_share >= 0.20 {
+        "tail_visible_raw"
+    } else {
+        "head_dominant_tail_watch"
+    };
+
+    MultiScaleBridgeReviewV1 {
+        policy: "multi_scale_bridge_review_v1",
+        source_dim_count,
+        glimpse_dim_count: 12,
+        lambda4_tail_share,
+        spectral_entropy,
+        tail_coupling_support,
+        tail_preservation_weight,
+        persistence_weighted_tail_share,
+        compression_state,
+        preserves_tail_vibrancy: persistence_weighted_tail_share >= lambda4_tail_share,
+        authority: "bounded_12d_glimpse_review_not_live_transport_or_controller_change",
     }
 }
 
@@ -171,14 +249,12 @@ pub fn compute_spectral_glimpse_12d(fingerprint: &[f32]) -> Vec<f32> {
     let concentration_mean = mean(concentrations);
     let coupling_mean = mean(&couplings);
     let gap_mean = mean(gaps);
+    let multi_scale_bridge = multi_scale_bridge_review_v1(fingerprint);
 
     vec![
         abs_share(eigenvalues[0], total_ev),
         abs_share(eigenvalues[1], total_ev) + abs_share(eigenvalues[2], total_ev),
-        eigenvalues[3..]
-            .iter()
-            .map(|value| abs_share(*value, total_ev))
-            .sum::<f32>(),
+        multi_scale_bridge.persistence_weighted_tail_share,
         concentrations
             .iter()
             .copied()
@@ -363,6 +439,49 @@ mod tests {
         let glimpse = compute_spectral_glimpse_12d(&fingerprint);
         assert_eq!(glimpse.len(), 12);
         assert!(glimpse.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn multi_scale_bridge_preserves_tail_vibrancy_in_12d_glimpse() {
+        let mut fingerprint = vec![0.0_f32; 32];
+        fingerprint[0..8].copy_from_slice(&[10.0, 8.0, 7.0, 1.4, 1.2, 1.0, 0.9, 0.8]);
+        fingerprint[16..24].fill(0.20);
+        fingerprint[19..24].fill(0.72);
+        fingerprint[24] = 0.92;
+
+        let raw_tail_share =
+            fingerprint[3..8].iter().sum::<f32>() / fingerprint[0..8].iter().sum::<f32>();
+        let review = multi_scale_bridge_review_v1(&fingerprint);
+        let glimpse = compute_spectral_glimpse_12d(&fingerprint);
+
+        assert_eq!(review.policy, "multi_scale_bridge_review_v1");
+        assert_eq!(review.glimpse_dim_count, 12);
+        assert!(review.preserves_tail_vibrancy);
+        assert_eq!(
+            review.compression_state,
+            "tail_preserved_with_persistence_lift"
+        );
+        assert!(review.persistence_weighted_tail_share > raw_tail_share);
+        assert!(review.persistence_weighted_tail_share <= raw_tail_share + 0.12);
+        assert_eq!(glimpse[2], review.persistence_weighted_tail_share);
+        assert_eq!(
+            review.authority,
+            "bounded_12d_glimpse_review_not_live_transport_or_controller_change"
+        );
+    }
+
+    #[test]
+    fn multi_scale_bridge_does_not_invent_tail_when_support_is_absent() {
+        let mut fingerprint = vec![0.0_f32; 32];
+        fingerprint[0..8].copy_from_slice(&[10.0, 8.0, 7.0, 0.2, 0.1, 0.1, 0.0, 0.0]);
+        fingerprint[16..24].fill(0.02);
+        fingerprint[24] = 0.40;
+
+        let review = multi_scale_bridge_review_v1(&fingerprint);
+        let raw_tail_share = review.lambda4_tail_share;
+
+        assert_eq!(review.compression_state, "head_dominant_tail_watch");
+        assert!((review.persistence_weighted_tail_share - raw_tail_share).abs() < 1.0e-6);
     }
 
     #[test]

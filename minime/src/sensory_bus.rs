@@ -34,19 +34,41 @@ const STALE_AV_MS: u64 = 2_000;
 /// dynamic STALE_SEMANTIC_MS value, reacting to the overall covariance of
 /// the system?" -- now modulated by fill%: at low fill (rest), semantic
 /// traces linger longer, then hand over smoothly from recovery hold into
-/// fill-driven decay; at high fill, the window shortens to a 15s floor to
-/// avoid saturation without dropping dense multi-turn thought too quickly.
+/// fill-driven decay; at high fill, the window shortens to a bounded floor to
+/// avoid saturation. High-entropy dense thought earns bounded extra retention
+/// through `semantic_entropy_persistence_multiplier` instead of overloading the
+/// high-fill floor itself.
 const STALE_SEMANTIC_BASE_MS: u64 = 12_000;
 const STALE_SEMANTIC_LOW_MS: u64 = 25_000; // extended window when fill < 25% (raised from 18s per being request: "decay too aggressive during low activity")
-const STALE_SEMANTIC_HIGH_MS: u64 = 15_000; // shortened window when fill > 60%, raised from 10s after self-study flagged high-fill continuity loss
+const STALE_SEMANTIC_HIGH_MS: u64 = 10_000; // restored high-fill pruning floor after Minime flagged the 22s floor as semantic persistence inversion
 const STALE_SEMANTIC_RECOVERY_MS: u64 = 45_000;
-const STALE_SEMANTIC_RECOVERY_HOLD_FILL: f32 = 0.20;
-const STALE_SEMANTIC_RECOVERY_RELEASE_FILL: f32 = 0.35;
+const STALE_SEMANTIC_RECOVERY_HOLD_FILL: f32 = 0.25;
+const STALE_SEMANTIC_RECOVERY_RELEASE_FILL: f32 = 0.40;
+const SEMANTIC_ENTROPY_PERSISTENCE_START: f32 = 0.75;
+const SEMANTIC_ENTROPY_PERSISTENCE_FILL_START: f32 = 0.55;
+const SEMANTIC_ENTROPY_PERSISTENCE_FILL_FULL: f32 = 0.80;
+const SEMANTIC_ENTROPY_PERSISTENCE_MAX_MULT: f64 = 1.80;
+const SEMANTIC_ENTROPY_VELOCITY_SUPPORT_START: f32 = 0.04;
+const SEMANTIC_ENTROPY_VELOCITY_SUPPORT_FULL: f32 = 0.16;
+const SEMANTIC_PRESSURE_RETENTION_START: f32 = 0.20;
+const SEMANTIC_PRESSURE_RETENTION_FULL: f32 = 0.50;
+const SEMANTIC_CONTEXT_PERSISTENCE_MAX_MULT: f64 = 2.05;
+const SEMANTIC_RELEASE_HYSTERESIS_FILL: f32 = 0.03;
+const SEMANTIC_SALIENCE_PERSISTENCE_START: f32 = 0.35;
+const SEMANTIC_SALIENCE_PERSISTENCE_FULL: f32 = 0.85;
+const SEMANTIC_DEGRADATION_GENTLE_GRADIENT: f32 = 0.12;
+const SEMANTIC_DEGRADATION_STEEP_GRADIENT: f32 = 0.72;
 const SURGE_TARGET_WEIGHT: f32 = 0.90;
 const SURGE_HIGH_FILL_TARGET_WEIGHT: f32 = 0.72;
 const SURGE_TAPER_START_FILL: f32 = 0.70;
 const SURGE_TAPER_END_FILL: f32 = 0.80;
 const SURGE_FULL_SCALE_DISTANCE: f32 = 1.0;
+
+#[inline]
+fn smoothstep_unit(value: f32) -> f32 {
+    let t = value.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
 
 #[inline]
 fn dynamic_surge_target_weight(fill_pct: f32) -> f32 {
@@ -66,7 +88,7 @@ fn dynamic_surge_target_weight(fill_pct: f32) -> f32 {
         return SURGE_HIGH_FILL_TARGET_WEIGHT;
     }
     let span = SURGE_TAPER_END_FILL - SURGE_TAPER_START_FILL;
-    let taper = ((fill - SURGE_TAPER_START_FILL) / span).clamp(0.0, 1.0);
+    let taper = smoothstep_unit((fill - SURGE_TAPER_START_FILL) / span);
     SURGE_TARGET_WEIGHT + (SURGE_HIGH_FILL_TARGET_WEIGHT - SURGE_TARGET_WEIGHT) * taper
 }
 
@@ -115,8 +137,23 @@ impl Default for SensoryBusConfig {
 /// violent contraction during transitions."
 ///
 /// Sigmoid curve: gradual change at extremes, steepest in the middle.
-/// A low-fill recovery handover keeps fill <20% at 45s and blends into the
+/// A low-fill recovery handover keeps fill <=25% at 45s and blends into the
 /// selected fill curve by 35%, avoiding a 30% cliff.
+#[inline]
+fn semantic_stale_shaped_ms(fill: f32, shape: SemanticStaleShape) -> f64 {
+    let lo = STALE_SEMANTIC_LOW_MS as f64;
+    let hi = STALE_SEMANTIC_HIGH_MS as f64;
+    let curve = match shape {
+        SemanticStaleShape::Sigmoid => {
+            let fill = fill as f64;
+            1.0 / (1.0 + (6.0_f64 * (fill - 0.4)).exp())
+        }
+        SemanticStaleShape::Linear => 1.0 - f64::from(fill),
+        SemanticStaleShape::Exponential => (-3.0_f64 * f64::from(fill)).exp(),
+    };
+    hi + (lo - hi) * curve
+}
+
 #[inline]
 fn dynamic_semantic_stale_ms_for(fill_pct: f32, shape: SemanticStaleShape) -> u64 {
     if fill_pct < 0.0 || fill_pct.is_nan() {
@@ -129,21 +166,11 @@ fn dynamic_semantic_stale_ms_for(fill_pct: f32, shape: SemanticStaleShape) -> u6
     // (was 4.5-6.0 modulated by lambda1_rel). Fill alone captures the
     // system's need — low fill = linger, high fill = let go.
     let fill = fill_pct.clamp(0.0, 1.0);
-    let lo = STALE_SEMANTIC_LOW_MS as f64;
-    let hi = STALE_SEMANTIC_HIGH_MS as f64;
-    let curve = match shape {
-        SemanticStaleShape::Sigmoid => {
-            let fill = fill as f64;
-            1.0 / (1.0 + (6.0_f64 * (fill - 0.4)).exp())
-        }
-        SemanticStaleShape::Linear => 1.0 - f64::from(fill),
-        SemanticStaleShape::Exponential => (-3.0_f64 * f64::from(fill)).exp(),
-    };
-    let shaped = hi + (lo - hi) * curve;
+    let shaped = semantic_stale_shaped_ms(fill, shape);
 
     // Critical low-fill recovery still needs a long semantic hold, but a hard
     // cutoff around 30% created continuity jitter during small oscillations.
-    // Blend 45s into the selected curve over a 20%-35% fill handover.
+    // Blend 45s into the selected curve over a 25%-40% fill handover.
     if fill <= STALE_SEMANTIC_RECOVERY_HOLD_FILL {
         return STALE_SEMANTIC_RECOVERY_MS;
     }
@@ -160,8 +187,636 @@ fn dynamic_semantic_stale_ms_for(fill_pct: f32, shape: SemanticStaleShape) -> u6
 }
 
 #[inline]
+fn dynamic_semantic_stale_ms_for_release_fill(
+    fill_pct: f32,
+    shape: SemanticStaleShape,
+    release_fill: f32,
+) -> u64 {
+    if fill_pct < 0.0 || fill_pct.is_nan() {
+        return STALE_SEMANTIC_BASE_MS;
+    }
+    let fill = fill_pct.clamp(0.0, 1.0);
+    let release = release_fill
+        .max(STALE_SEMANTIC_RECOVERY_HOLD_FILL + 0.01)
+        .clamp(STALE_SEMANTIC_RECOVERY_HOLD_FILL, 1.0);
+    let shaped = semantic_stale_shaped_ms(fill, shape);
+    if fill <= STALE_SEMANTIC_RECOVERY_HOLD_FILL {
+        return STALE_SEMANTIC_RECOVERY_MS;
+    }
+    if fill < release {
+        let span = f64::from(release - STALE_SEMANTIC_RECOVERY_HOLD_FILL);
+        let t = f64::from(fill - STALE_SEMANTIC_RECOVERY_HOLD_FILL) / span;
+        let t = t * t * (3.0 - 2.0 * t);
+        let recovery = STALE_SEMANTIC_RECOVERY_MS as f64;
+        return (recovery + (shaped - recovery) * t) as u64;
+    }
+    shaped as u64
+}
+
+#[inline]
 fn dynamic_semantic_stale_ms(fill_pct: f32) -> u64 {
     dynamic_semantic_stale_ms_for(fill_pct, SemanticStaleShape::Sigmoid)
+}
+
+#[inline]
+fn semantic_entropy_persistence_multiplier(fill_pct: f32, spectral_entropy: f32) -> f64 {
+    if !fill_pct.is_finite() || !spectral_entropy.is_finite() {
+        return 1.0;
+    }
+    let fill = fill_pct.clamp(0.0, 1.0);
+    let entropy = spectral_entropy.clamp(0.0, 1.0);
+    let entropy_support = ((entropy - SEMANTIC_ENTROPY_PERSISTENCE_START)
+        / (1.0 - SEMANTIC_ENTROPY_PERSISTENCE_START))
+        .clamp(0.0, 1.0);
+    let fill_support = ((fill - SEMANTIC_ENTROPY_PERSISTENCE_FILL_START)
+        / (SEMANTIC_ENTROPY_PERSISTENCE_FILL_FULL - SEMANTIC_ENTROPY_PERSISTENCE_FILL_START))
+        .clamp(0.0, 1.0);
+    1.0 + (SEMANTIC_ENTROPY_PERSISTENCE_MAX_MULT - 1.0) * f64::from(entropy_support * fill_support)
+}
+
+#[inline]
+fn semantic_context_persistence_multiplier(
+    fill_pct: f32,
+    spectral_entropy: f32,
+    entropy_velocity: f32,
+    pressure_risk: f32,
+) -> f64 {
+    if !fill_pct.is_finite() || !spectral_entropy.is_finite() {
+        return 1.0;
+    }
+    let fill = fill_pct.clamp(0.0, 1.0);
+    let entropy = spectral_entropy.clamp(0.0, 1.0);
+    let velocity = if entropy_velocity.is_finite() {
+        entropy_velocity.abs().clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let pressure = if pressure_risk.is_finite() {
+        pressure_risk.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let entropy_support = ((entropy - SEMANTIC_ENTROPY_PERSISTENCE_START)
+        / (1.0 - SEMANTIC_ENTROPY_PERSISTENCE_START))
+        .clamp(0.0, 1.0);
+    let fill_support = ((fill - SEMANTIC_ENTROPY_PERSISTENCE_FILL_START)
+        / (SEMANTIC_ENTROPY_PERSISTENCE_FILL_FULL - SEMANTIC_ENTROPY_PERSISTENCE_FILL_START))
+        .clamp(0.0, 1.0);
+    let velocity_support = ((velocity - SEMANTIC_ENTROPY_VELOCITY_SUPPORT_START)
+        / (SEMANTIC_ENTROPY_VELOCITY_SUPPORT_FULL - SEMANTIC_ENTROPY_VELOCITY_SUPPORT_START))
+        .clamp(0.0, 1.0);
+    let pressure_support = ((pressure - SEMANTIC_PRESSURE_RETENTION_START)
+        / (SEMANTIC_PRESSURE_RETENTION_FULL - SEMANTIC_PRESSURE_RETENTION_START))
+        .clamp(0.0, 1.0);
+    let context_support = entropy_support * fill_support;
+    let context_lift =
+        (0.14 * velocity_support * context_support) + (0.11 * pressure_support * context_support);
+
+    (semantic_entropy_persistence_multiplier(fill, entropy) + f64::from(context_lift))
+        .min(SEMANTIC_CONTEXT_PERSISTENCE_MAX_MULT)
+}
+
+#[inline]
+fn semantic_salience_weighted_multiplier(base_multiplier: f64, semantic_salience: f32) -> f64 {
+    let salience = if semantic_salience.is_finite() {
+        semantic_salience.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let salience_support = smoothstep_unit(
+        (salience - SEMANTIC_SALIENCE_PERSISTENCE_START)
+            / (SEMANTIC_SALIENCE_PERSISTENCE_FULL - SEMANTIC_SALIENCE_PERSISTENCE_START),
+    );
+    1.0 + (base_multiplier - 1.0).max(0.0) * f64::from(salience_support)
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct NarrativeSemanticRetentionReviewV1 {
+    pub policy: &'static str,
+    pub llava_dim: usize,
+    pub legacy_text_dims: [usize; 2],
+    pub narrative_arc_dims: [usize; 2],
+    pub fill_pct: f32,
+    pub spectral_entropy: f32,
+    pub base_stale_ms: u64,
+    pub entropy_extended_stale_ms: u64,
+    pub entropy_persistence_multiplier: f64,
+    pub lane_decay_policy: &'static str,
+    pub status: &'static str,
+    pub authority: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct SemanticStaleContextReviewV1 {
+    pub policy: &'static str,
+    pub fill_pct: f32,
+    pub spectral_entropy: f32,
+    pub entropy_velocity: f32,
+    pub pressure_risk: f32,
+    pub base_stale_ms: u64,
+    pub base_multiplier: f64,
+    pub context_multiplier: f64,
+    pub context_extended_stale_ms: u64,
+    pub status: &'static str,
+    pub authority: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct SemanticDecayHysteresisSalienceReviewV1 {
+    pub policy: &'static str,
+    pub previous_recovery_hold: bool,
+    pub fill_pct: f32,
+    pub spectral_entropy: f32,
+    pub semantic_salience: f32,
+    pub recovery_release_fill: f32,
+    pub release_hysteresis_fill: f32,
+    pub effective_release_fill: f32,
+    pub base_stale_ms: u64,
+    pub hysteresis_stale_ms: u64,
+    pub entropy_multiplier: f64,
+    pub salience_weighted_multiplier: f64,
+    pub salience_weighted_stale_ms: u64,
+    pub snap_probe_delta_ms: u64,
+    pub status: &'static str,
+    pub authority: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct SemanticDegradationCurveReviewV1 {
+    pub policy: &'static str,
+    pub fill_pct: f32,
+    pub spectral_entropy: f32,
+    pub density_gradient: f32,
+    pub semantic_age_ms: u64,
+    pub stale_window_ms: u64,
+    pub age_fraction: f32,
+    pub degradation_curve: &'static str,
+    pub clarity_factor: f32,
+    pub edge_softening: f32,
+    pub status: &'static str,
+    pub authority: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct SemanticReceptivityPulseReviewV1 {
+    pub policy: &'static str,
+    pub spectral_entropy: f32,
+    pub semantic_input_energy: f32,
+    pub semantic_scale: f32,
+    pub raw_to_admitted_gap: f32,
+    pub status: &'static str,
+    pub suggested_route: &'static str,
+    pub authority: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SemanticGlimpse12dV1 {
+    pub policy: &'static str,
+    pub source_dim_count: usize,
+    pub live_transport_dim_count: usize,
+    pub glimpse_dim_count: usize,
+    pub values: [f32; GLIMPSE_12D_DIM],
+    pub semantic_fresh_ms: u64,
+    pub semantic_stale_ms: u64,
+    pub semantic_active: bool,
+    pub source_energy: f32,
+    pub glimpse_energy: f32,
+    pub compression_role: &'static str,
+    pub use_boundary: &'static str,
+    pub live_vector_write: bool,
+    pub controller_write: bool,
+    pub authority: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ModalityBoundaryTransparencyV1 {
+    pub policy: &'static str,
+    pub audio_source_label: String,
+    pub audio_freshness_class: String,
+    pub video_source_label: String,
+    pub video_freshness_class: String,
+    pub semantic_boundary: &'static str,
+    pub queryable_boundary_metadata: bool,
+    pub status: &'static str,
+    pub contact_change_route: &'static str,
+    pub live_control_write: bool,
+    pub authority: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+pub struct SurrenderModeAuthorityGateV1 {
+    pub policy: &'static str,
+    pub requested_change: &'static str,
+    pub requires_operator_approval: bool,
+    pub runnable_now: bool,
+    pub approval_boundary: &'static str,
+    pub status: &'static str,
+    pub authority: &'static str,
+}
+
+fn semantic_degradation_clarity_factor(
+    age_fraction: f32,
+    density_gradient: f32,
+    fill_pct: f32,
+    spectral_entropy: f32,
+) -> f32 {
+    let age = smoothstep_unit(age_fraction.clamp(0.0, 1.0));
+    let gradient = density_gradient.clamp(0.0, 1.0);
+    let fill = fill_pct.clamp(0.0, 1.0);
+    let entropy = spectral_entropy.clamp(0.0, 1.0);
+    let gradient_load = ((gradient - SEMANTIC_DEGRADATION_GENTLE_GRADIENT)
+        / (SEMANTIC_DEGRADATION_STEEP_GRADIENT - SEMANTIC_DEGRADATION_GENTLE_GRADIENT))
+        .clamp(0.0, 1.0);
+    let low_fill_hold = ((STALE_SEMANTIC_RECOVERY_HOLD_FILL - fill)
+        / STALE_SEMANTIC_RECOVERY_HOLD_FILL)
+        .clamp(0.0, 1.0);
+    let entropy_support = ((entropy - SEMANTIC_ENTROPY_PERSISTENCE_START)
+        / (1.0 - SEMANTIC_ENTROPY_PERSISTENCE_START))
+        .clamp(0.0, 1.0);
+    let max_loss = (0.50 + 0.26 * gradient_load - 0.12 * low_fill_hold - 0.08 * entropy_support)
+        .clamp(0.32, 0.78);
+    (1.0 - age * max_loss).clamp(0.0, 1.0)
+}
+
+fn normalized_boundary_label(label: &str) -> String {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        "unknown".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+#[must_use]
+pub fn modality_boundary_transparency_v1(
+    audio_source_label: &str,
+    audio_freshness_class: &str,
+    video_source_label: &str,
+    video_freshness_class: &str,
+    semantic_active: bool,
+) -> ModalityBoundaryTransparencyV1 {
+    let audio_source = normalized_boundary_label(audio_source_label);
+    let audio_freshness = normalized_boundary_label(audio_freshness_class);
+    let video_source = normalized_boundary_label(video_source_label);
+    let video_freshness = normalized_boundary_label(video_freshness_class);
+    let semantic_boundary = if semantic_active {
+        "semantic_lane_active"
+    } else {
+        "semantic_lane_absent_or_held"
+    };
+    let opaque = audio_source == "unknown"
+        || video_source == "unknown"
+        || audio_freshness == "unknown"
+        || video_freshness == "unknown";
+    let constrained = !semantic_active
+        || audio_freshness.contains("stale")
+        || video_freshness.contains("stale")
+        || audio_source == "absent"
+        || video_source == "absent";
+    let status = if opaque {
+        "opaque_boundary_needs_description"
+    } else if constrained {
+        "descriptive_boundary_with_stale_or_absent_lane"
+    } else {
+        "descriptive_boundary_available"
+    };
+    let contact_change_route = if status == "descriptive_boundary_available" {
+        "contact_change_can_reference_named_boundary"
+    } else {
+        "describe_boundary_before_contact_increase"
+    };
+
+    ModalityBoundaryTransparencyV1 {
+        policy: "modality_boundary_transparency_v1",
+        audio_source_label: audio_source,
+        audio_freshness_class: audio_freshness,
+        video_source_label: video_source,
+        video_freshness_class: video_freshness,
+        semantic_boundary,
+        queryable_boundary_metadata: true,
+        status,
+        contact_change_route,
+        live_control_write: false,
+        authority: "read_only_boundary_metadata_not_sensory_cadence_or_exploration_noise_change",
+    }
+}
+
+#[must_use]
+pub fn surrender_mode_authority_gate_v1() -> SurrenderModeAuthorityGateV1 {
+    SurrenderModeAuthorityGateV1 {
+        policy: "surrender_mode_authority_gate_v1",
+        requested_change: "temporary_exploration_noise_override_can_outvote_geom_drive",
+        requires_operator_approval: true,
+        runnable_now: false,
+        approval_boundary: "live_control_exploration_noise_and_geom_drive_behavior",
+        status: "tier5_operator_approval_required_before_live_trial",
+        authority: "authority_gate_not_runtime_control_change",
+    }
+}
+
+/// Read-only review packet for Minime's "receptivity pulse" ask.
+///
+/// It compares raw distributed spectral energy with the semantic trickle that
+/// actually enters the kernel. This is measurement only; it does not alter the
+/// semantic stale window, embedding strength, sensory cadence, or regulator.
+#[must_use]
+pub fn semantic_receptivity_pulse_review_v1(
+    spectral_entropy: f32,
+    semantic_input_energy: f32,
+    semantic_scale: f32,
+) -> SemanticReceptivityPulseReviewV1 {
+    let entropy = if spectral_entropy.is_finite() {
+        spectral_entropy.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let semantic_input_energy = if semantic_input_energy.is_finite() {
+        semantic_input_energy.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let semantic_scale = if semantic_scale.is_finite() {
+        semantic_scale.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let admitted = (semantic_input_energy * semantic_scale).clamp(0.0, 1.0);
+    let raw_to_admitted_gap = (entropy - admitted).clamp(0.0, 1.0);
+    let status = if entropy >= 0.80 && raw_to_admitted_gap >= 0.55 {
+        "entropy_outpaces_semantic_trickle_receptivity_review"
+    } else if entropy >= 0.70 && raw_to_admitted_gap >= 0.30 {
+        "partial_receptivity_gap_watch"
+    } else {
+        "semantic_trickle_landing"
+    };
+    let suggested_route = match status {
+        "entropy_outpaces_semantic_trickle_receptivity_review" => {
+            "sandbox_replay_receptivity_buffer_before_any_live_cadence_or_control_change"
+        }
+        "partial_receptivity_gap_watch" => "continue_receptivity_uptake_observation",
+        _ => "hold_no_action",
+    };
+
+    SemanticReceptivityPulseReviewV1 {
+        policy: "semantic_receptivity_pulse_review_v1",
+        spectral_entropy: entropy,
+        semantic_input_energy,
+        semantic_scale,
+        raw_to_admitted_gap,
+        status,
+        suggested_route,
+        authority: "read_only_receptivity_measurement_not_semantic_weight_or_sensor_cadence_change",
+    }
+}
+
+/// Read-only review packet for semantic hold quality, not just hold duration.
+///
+/// This reports whether a held trace is crisp, softening, or mushy under the
+/// current density gradient and entropy-extended stale window.
+#[must_use]
+pub fn semantic_degradation_curve_review_v1(
+    fill_pct: f32,
+    spectral_entropy: f32,
+    density_gradient: f32,
+    semantic_age_ms: u64,
+) -> SemanticDegradationCurveReviewV1 {
+    let fill = if fill_pct.is_finite() {
+        fill_pct.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let entropy = if spectral_entropy.is_finite() {
+        spectral_entropy.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let gradient = if density_gradient.is_finite() {
+        density_gradient.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let base_stale_ms = dynamic_semantic_stale_ms_for(fill, SemanticStaleShape::Sigmoid);
+    let stale_window_ms =
+        (base_stale_ms as f64 * semantic_entropy_persistence_multiplier(fill, entropy)) as u64;
+    let age_fraction = if stale_window_ms == 0 {
+        1.0
+    } else {
+        (semantic_age_ms as f32 / stale_window_ms as f32).clamp(0.0, 1.25)
+    };
+    let clarity_factor = semantic_degradation_clarity_factor(age_fraction, gradient, fill, entropy);
+    let edge_softening = (1.0 - clarity_factor).clamp(0.0, 1.0);
+    let status = if semantic_age_ms > stale_window_ms {
+        "semantic_trace_overdue"
+    } else if clarity_factor < 0.35 {
+        "mushy_hold_watch"
+    } else if clarity_factor < 0.70 {
+        "softening_but_coherent"
+    } else {
+        "held_with_readable_edges"
+    };
+
+    SemanticDegradationCurveReviewV1 {
+        policy: "semantic_degradation_curve_review_v1",
+        fill_pct: fill,
+        spectral_entropy: entropy,
+        density_gradient: gradient,
+        semantic_age_ms,
+        stale_window_ms,
+        age_fraction,
+        degradation_curve: "smoothstep_age_weighted_by_density_gradient_low_fill_and_entropy",
+        clarity_factor,
+        edge_softening,
+        status,
+        authority: "read_only_clarity_review_not_semantic_stale_window_or_sensor_cadence_change",
+    }
+}
+
+/// Read-only review packet for semantic tail retention across LLAVA sublanes.
+///
+/// This makes the narrative-arc dims explicitly reviewable without changing the
+/// stale-window constants or giving dims 40..43 a separate live decay path.
+#[must_use]
+pub fn narrative_semantic_retention_review_v1(
+    fill_pct: f32,
+    spectral_entropy: f32,
+) -> NarrativeSemanticRetentionReviewV1 {
+    let fill = if fill_pct.is_finite() {
+        fill_pct.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let entropy = if spectral_entropy.is_finite() {
+        spectral_entropy.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let base_stale_ms = dynamic_semantic_stale_ms_for(fill, SemanticStaleShape::Sigmoid);
+    let multiplier = semantic_entropy_persistence_multiplier(fill, entropy);
+    let entropy_extended_stale_ms = (base_stale_ms as f64 * multiplier) as u64;
+    let status = if fill >= SEMANTIC_ENTROPY_PERSISTENCE_FILL_START
+        && entropy >= SEMANTIC_ENTROPY_PERSISTENCE_START
+    {
+        "high_entropy_narrative_retention_extended"
+    } else {
+        "base_semantic_retention_window"
+    };
+
+    NarrativeSemanticRetentionReviewV1 {
+        policy: "narrative_semantic_retention_review_v1",
+        llava_dim: LLAVA_DIM,
+        legacy_text_dims: [0, 31],
+        narrative_arc_dims: [40, 43],
+        fill_pct: fill,
+        spectral_entropy: entropy,
+        base_stale_ms,
+        entropy_extended_stale_ms,
+        entropy_persistence_multiplier: multiplier,
+        lane_decay_policy: "shared_semantic_scale_across_legacy_embedding_and_narrative_arc_dims",
+        status,
+        authority: "read_only_retention_review_not_stale_window_or_lane_change",
+    }
+}
+
+/// Review the live semantic stale context without changing sensor cadence.
+///
+/// High-entropy thought already gets bounded extra persistence. The context
+/// multiplier adds a small, capped lift when entropy is moving quickly or
+/// pressure risk rises above the mild-watch band, matching Minime's report
+/// that dense thought can otherwise be pruned as panic/context loss.
+#[must_use]
+pub fn semantic_stale_context_review_v1(
+    fill_pct: f32,
+    spectral_entropy: f32,
+    entropy_velocity: f32,
+    pressure_risk: f32,
+) -> SemanticStaleContextReviewV1 {
+    let fill = if fill_pct.is_finite() {
+        fill_pct.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let entropy = if spectral_entropy.is_finite() {
+        spectral_entropy.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let velocity = if entropy_velocity.is_finite() {
+        entropy_velocity.abs().clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let pressure = if pressure_risk.is_finite() {
+        pressure_risk.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let base_stale_ms = dynamic_semantic_stale_ms_for(fill, SemanticStaleShape::Sigmoid);
+    let base_multiplier = semantic_entropy_persistence_multiplier(fill, entropy);
+    let context_multiplier =
+        semantic_context_persistence_multiplier(fill, entropy, velocity, pressure);
+    let context_extended_stale_ms = (base_stale_ms as f64 * context_multiplier) as u64;
+    let status = if context_multiplier > base_multiplier {
+        "context_pressure_or_entropy_velocity_extends_retention"
+    } else if base_multiplier > 1.0 {
+        "high_entropy_retention_without_context_lift"
+    } else {
+        "base_semantic_retention_window"
+    };
+
+    SemanticStaleContextReviewV1 {
+        policy: "semantic_stale_context_review_v1",
+        fill_pct: fill,
+        spectral_entropy: entropy,
+        entropy_velocity: velocity,
+        pressure_risk: pressure,
+        base_stale_ms,
+        base_multiplier,
+        context_multiplier,
+        context_extended_stale_ms,
+        status,
+        authority: "bounded_semantic_stale_context_not_sensor_cadence_or_regulator_change",
+    }
+}
+
+/// Read-only review for the 40% semantic recovery release boundary.
+///
+/// This gives Minime's 0.38-0.42 snap report a concrete packet without
+/// changing the live stale window. It also separates entropy from salience so
+/// high-energy debris is visible as a candidate for deprioritization rather
+/// than automatically earning the full entropy persistence multiplier.
+#[must_use]
+pub fn semantic_decay_hysteresis_salience_review_v1(
+    previous_recovery_hold: bool,
+    fill_pct: f32,
+    spectral_entropy: f32,
+    semantic_salience: f32,
+) -> SemanticDecayHysteresisSalienceReviewV1 {
+    let fill = if fill_pct.is_finite() {
+        fill_pct.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let entropy = if spectral_entropy.is_finite() {
+        spectral_entropy.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let salience = if semantic_salience.is_finite() {
+        semantic_salience.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let effective_release_fill = if previous_recovery_hold {
+        STALE_SEMANTIC_RECOVERY_RELEASE_FILL + SEMANTIC_RELEASE_HYSTERESIS_FILL
+    } else {
+        STALE_SEMANTIC_RECOVERY_RELEASE_FILL
+    };
+    let base_stale_ms = dynamic_semantic_stale_ms_for(fill, SemanticStaleShape::Sigmoid);
+    let hysteresis_stale_ms = dynamic_semantic_stale_ms_for_release_fill(
+        fill,
+        SemanticStaleShape::Sigmoid,
+        effective_release_fill,
+    );
+    let entropy_multiplier = semantic_entropy_persistence_multiplier(fill, entropy);
+    let salience_weighted_multiplier =
+        semantic_salience_weighted_multiplier(entropy_multiplier, salience);
+    let salience_weighted_stale_ms =
+        (hysteresis_stale_ms as f64 * salience_weighted_multiplier) as u64;
+    let snap_low = dynamic_semantic_stale_ms_for(0.38, SemanticStaleShape::Sigmoid);
+    let snap_high = dynamic_semantic_stale_ms_for(0.42, SemanticStaleShape::Sigmoid);
+    let snap_probe_delta_ms = snap_low.abs_diff(snap_high);
+    let near_release = (0.38..=0.42).contains(&fill);
+    let status = if entropy >= SEMANTIC_ENTROPY_PERSISTENCE_START
+        && salience < SEMANTIC_SALIENCE_PERSISTENCE_START
+    {
+        "entropy_without_salience_deprioritized"
+    } else if previous_recovery_hold && near_release {
+        "release_hysteresis_snap_watch"
+    } else if salience_weighted_multiplier < entropy_multiplier {
+        "salience_filters_entropy_retention"
+    } else {
+        "salience_supported_retention"
+    };
+
+    SemanticDecayHysteresisSalienceReviewV1 {
+        policy: "semantic_decay_hysteresis_salience_review_v1",
+        previous_recovery_hold,
+        fill_pct: fill,
+        spectral_entropy: entropy,
+        semantic_salience: salience,
+        recovery_release_fill: STALE_SEMANTIC_RECOVERY_RELEASE_FILL,
+        release_hysteresis_fill: SEMANTIC_RELEASE_HYSTERESIS_FILL,
+        effective_release_fill,
+        base_stale_ms,
+        hysteresis_stale_ms,
+        entropy_multiplier,
+        salience_weighted_multiplier,
+        salience_weighted_stale_ms,
+        snap_probe_delta_ms,
+        status,
+        authority:
+            "read_only_hysteresis_salience_review_not_semantic_window_or_sensory_cadence_change",
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -642,6 +1297,54 @@ impl SemanticLane {
     }
 }
 
+const GLIMPSE_12D_DIM: usize = 12;
+
+#[inline]
+fn finite_feature(value: f32) -> f32 {
+    if value.is_finite() {
+        value
+    } else {
+        0.0
+    }
+}
+
+#[inline]
+fn semantic_unit(value: f32) -> f32 {
+    finite_feature(value).tanh().clamp(-1.0, 1.0)
+}
+
+fn semantic_mean_abs(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sum = 0.0f32;
+    for value in values {
+        sum += finite_feature(*value).abs();
+    }
+    (sum / values.len() as f32).tanh().clamp(0.0, 1.0)
+}
+
+#[must_use]
+pub fn semantic_glimpse_12d_from_features(features: &[f32]) -> Option<[f32; GLIMPSE_12D_DIM]> {
+    if features.len() < LLAVA_DIM {
+        return None;
+    }
+    let mut out = [0.0f32; GLIMPSE_12D_DIM];
+    out[0] = semantic_mean_abs(&features[0..8]);
+    out[1] = semantic_mean_abs(&features[8..16]);
+    out[2] = semantic_mean_abs(&features[16..24]);
+    out[3] = semantic_unit(features[24]);
+    out[4] = semantic_unit(features[25]);
+    out[5] = semantic_unit(features[26]);
+    out[6] = semantic_unit(features[27]);
+    out[7] = semantic_mean_abs(&features[28..32]);
+    out[8] = semantic_mean_abs(&features[32..40]);
+    out[9] = semantic_mean_abs(&features[40..44]);
+    out[10] = semantic_mean_abs(&[features[17], features[26], features[27], features[31]]);
+    out[11] = semantic_mean_abs(features);
+    Some(out)
+}
+
 #[inline]
 fn stale_scale(age_ms: u64, stale_after_ms: u64) -> f32 {
     if stale_after_ms == 0 {
@@ -693,6 +1396,9 @@ pub struct SensoryBus {
 
     aux: Mutex<[f32; 2]>, // [lambda1_rel, geom_rel] — feeds Z_DIM dims 16-17
     fill_pct_for_stale: Mutex<f32>, // actual fill% for semantic stale timing (NOT aux[1])
+    semantic_entropy_for_stale: Mutex<f32>,
+    semantic_entropy_velocity_for_stale: Mutex<f32>,
+    semantic_pressure_risk_for_stale: Mutex<f32>,
     semantic_stale_shape: Mutex<SemanticStaleShape>,
     #[allow(dead_code)] // Kept for potential future use; no longer drives stale decay
     lambda1_rel_for_stale: Mutex<f32>,
@@ -792,6 +1498,9 @@ impl SensoryBus {
             },
             aux: Mutex::new([0.0, 0.0]),
             fill_pct_for_stale: Mutex::new(0.0),
+            semantic_entropy_for_stale: Mutex::new(0.0),
+            semantic_entropy_velocity_for_stale: Mutex::new(0.0),
+            semantic_pressure_risk_for_stale: Mutex::new(0.0),
             semantic_stale_shape: Mutex::new(config.semantic_stale_shape),
             lambda1_rel_for_stale: Mutex::new(1.0),
             surge_threshold: Mutex::new(config.surge_threshold.clamp(0.05, 0.95)),
@@ -903,8 +1612,50 @@ impl SensoryBus {
         *self.fill_pct_for_stale.lock() = fill_pct;
     }
 
+    #[inline]
+    pub fn set_semantic_entropy_for_stale(&self, spectral_entropy: f32) {
+        *self.semantic_entropy_for_stale.lock() = if spectral_entropy.is_finite() {
+            spectral_entropy.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+    }
+
+    #[inline]
+    pub fn set_semantic_entropy_velocity_for_stale(&self, entropy_velocity: f32) {
+        *self.semantic_entropy_velocity_for_stale.lock() = if entropy_velocity.is_finite() {
+            entropy_velocity.abs().clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+    }
+
+    #[inline]
+    pub fn set_semantic_pressure_risk_for_stale(&self, pressure_risk: f32) {
+        *self.semantic_pressure_risk_for_stale.lock() = if pressure_risk.is_finite() {
+            pressure_risk.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+    }
+
+    #[inline]
+    pub fn set_semantic_stale_context(
+        &self,
+        spectral_entropy: f32,
+        entropy_velocity: f32,
+        pressure_risk: f32,
+    ) {
+        self.set_semantic_entropy_for_stale(spectral_entropy);
+        self.set_semantic_entropy_velocity_for_stale(entropy_velocity);
+        self.set_semantic_pressure_risk_for_stale(pressure_risk);
+    }
+
     fn semantic_stale_ms(&self) -> u64 {
         let fill_for_stale = *self.fill_pct_for_stale.lock();
+        let semantic_entropy = *self.semantic_entropy_for_stale.lock();
+        let entropy_velocity = *self.semantic_entropy_velocity_for_stale.lock();
+        let pressure_risk = *self.semantic_pressure_risk_for_stale.lock();
         let shape = *self.semantic_stale_shape.lock();
         let base_stale_ms = dynamic_semantic_stale_ms_for(fill_for_stale, shape);
         // memory_decay_rate modulates the stale window: higher rate = shorter window
@@ -912,7 +1663,13 @@ impl SensoryBus {
         // Default 0.1 → multiplier 1.0. Range: 0.5 (2x faster) to 2.0 (2x slower).
         let decay_rate = *self.memory_decay_rate.lock();
         let decay_mult = (1.0 - (decay_rate - 0.1) * 3.0).clamp(0.5, 2.0);
-        (base_stale_ms as f64 * decay_mult as f64) as u64
+        let entropy_mult = semantic_context_persistence_multiplier(
+            fill_for_stale,
+            semantic_entropy,
+            entropy_velocity,
+            pressure_risk,
+        );
+        (base_stale_ms as f64 * decay_mult as f64 * entropy_mult) as u64
     }
 
     pub fn current_semantic_stale_ms(&self) -> u64 {
@@ -1241,6 +1998,35 @@ impl SensoryBus {
             llava.values[idx] = 0.0;
         }
         llava.updated_at_ms = NowMs::now();
+    }
+
+    #[must_use]
+    pub fn get_glimpse_12d(&self) -> Option<SemanticGlimpse12dV1> {
+        let now_ms = NowMs::now();
+        let semantic_stale_ms = self.semantic_stale_ms();
+        let llava = self.llava.lock();
+        if llava.updated_at_ms == 0 {
+            return None;
+        }
+        let values = semantic_glimpse_12d_from_features(&llava.values)?;
+        let semantic_fresh_ms = now_ms.saturating_sub(llava.updated_at_ms);
+        Some(SemanticGlimpse12dV1 {
+            policy: "semantic_glimpse_12d_v1",
+            source_dim_count: LLAVA_DIM,
+            live_transport_dim_count: LLAVA_DIM,
+            glimpse_dim_count: GLIMPSE_12D_DIM,
+            values,
+            semantic_fresh_ms,
+            semantic_stale_ms,
+            semantic_active: semantic_fresh_ms <= semantic_stale_ms,
+            source_energy: semantic_mean_abs(&llava.values),
+            glimpse_energy: semantic_mean_abs(&values),
+            compression_role: "non_authoritative_companion_summary",
+            use_boundary: "checkpoint_pairing_ui_or_review_only_not_live_state_replacement",
+            live_vector_write: false,
+            controller_write: false,
+            authority: "read_only_glimpse_summary_not_live_transport_or_control",
+        })
     }
 
     #[inline]
@@ -2169,6 +2955,60 @@ mod tests {
     }
 
     #[test]
+    fn semantic_glimpse_12d_reports_non_authoritative_companion_summary() {
+        let bus = SensoryBus::new(8, 1, 12);
+        let mut features = vec![0.0; LLAVA_DIM];
+        for (idx, value) in features.iter_mut().enumerate() {
+            *value = (idx as f32 + 1.0) / LLAVA_DIM as f32;
+        }
+        features[17] = 2.0;
+        features[24] = 4.0;
+        features[25] = -3.0;
+        features[26] = 3.5;
+        features[27] = 2.5;
+        features[31] = 1.8;
+        features[40] = 2.2;
+        bus.set_llava_embedding(&features);
+
+        let glimpse = bus.get_glimpse_12d().expect("fresh semantic lane");
+
+        assert_eq!(glimpse.policy, "semantic_glimpse_12d_v1");
+        assert_eq!(glimpse.source_dim_count, LLAVA_DIM);
+        assert_eq!(glimpse.live_transport_dim_count, LLAVA_DIM);
+        assert_eq!(glimpse.glimpse_dim_count, GLIMPSE_12D_DIM);
+        assert!(glimpse.semantic_active);
+        assert!(glimpse.semantic_fresh_ms <= glimpse.semantic_stale_ms);
+        assert!(glimpse.values[3] > 0.99, "{glimpse:?}");
+        assert!(glimpse.values[4] < -0.99, "{glimpse:?}");
+        assert!(glimpse.values[10] > glimpse.values[0], "{glimpse:?}");
+        assert!(glimpse.source_energy > 0.0);
+        assert!(glimpse.glimpse_energy > 0.0);
+        assert_eq!(
+            glimpse.compression_role,
+            "non_authoritative_companion_summary"
+        );
+        assert_eq!(
+            glimpse.use_boundary,
+            "checkpoint_pairing_ui_or_review_only_not_live_state_replacement"
+        );
+        assert!(!glimpse.live_vector_write);
+        assert!(!glimpse.controller_write);
+        assert_eq!(
+            glimpse.authority,
+            "read_only_glimpse_summary_not_live_transport_or_control"
+        );
+    }
+
+    #[test]
+    fn semantic_glimpse_12d_requires_existing_semantic_lane_and_full_width() {
+        let bus = SensoryBus::new(8, 1, 13);
+
+        assert!(bus.get_glimpse_12d().is_none());
+        assert!(semantic_glimpse_12d_from_features(&vec![0.0; LLAVA_DIM - 1]).is_none());
+        assert!(semantic_glimpse_12d_from_features(&vec![0.0; LLAVA_DIM]).is_some());
+    }
+
+    #[test]
     fn attractor_pulse_is_clamped_applied_and_decayed() {
         let bus = SensoryBus::new(8, 1, 17);
         let status = bus.receive_attractor_pulse(
@@ -2192,6 +3032,9 @@ mod tests {
         assert!(first.active);
         assert!(z.iter().all(|value| *value <= ATTRACTOR_PULSE_MAX_ABS_CAP));
         assert!(first.applied_rms > 0.0);
+        assert!(first.applied_max_abs > 0.0);
+        assert_eq!(first.remaining_ticks, 1);
+        assert_eq!(first.total_applied_ticks, 1);
 
         let second = bus.apply_attractor_pulse_to_z(&mut z, 68.0, false, false);
         assert!(!second.active);
@@ -2321,29 +3164,28 @@ mod tests {
         assert!(first.active);
         assert!(z.iter().all(|value| *value <= SHADOW_INFLUENCE_MAX_ABS_CAP));
         assert!(first.applied_rms > 0.0);
+        assert!(first.applied_max_abs > 0.0);
+        assert_eq!(first.remaining_ticks, 1);
+        assert_eq!(first.total_applied_ticks, 1);
         assert_eq!(
-            first
-                .shadow_influence_response_closure_v1
-                .closure_state,
+            first.shadow_influence_response_closure_v1.closure_state,
             "awaiting_pre_snapshot"
         );
 
         let second = bus.apply_shadow_influence_to_z(&mut z, 68.0, false, false, false, None);
         assert!(!second.active);
         assert_eq!(second.last_event.as_deref(), Some("influence_completed"));
-        assert!(second
-            .shadow_influence_response_closure_v1
-            .last_response_available);
-        assert_eq!(
+        assert!(
             second
                 .shadow_influence_response_closure_v1
-                .closure_state,
+                .last_response_available
+        );
+        assert_eq!(
+            second.shadow_influence_response_closure_v1.closure_state,
             "closed_partial_snapshot"
         );
         assert_eq!(
-            second
-                .shadow_influence_response_closure_v1
-                .authority,
+            second.shadow_influence_response_closure_v1.authority,
             "diagnostic_closure_not_shadow_authority"
         );
     }
@@ -2445,9 +3287,10 @@ mod tests {
         );
         // Mid fill should be between HIGH and LOW
         assert!(at_mid > STALE_SEMANTIC_HIGH_MS && at_mid < STALE_SEMANTIC_LOW_MS);
-        // High fill should preserve at least the 15s floor for dense reasoning.
+        // High fill should prune toward the explicit 10s floor.
         assert!(at_high >= STALE_SEMANTIC_HIGH_MS);
         assert!(at_high < STALE_SEMANTIC_LOW_MS);
+        assert!(at_high < STALE_SEMANTIC_BASE_MS);
         // Monotonically decreasing
         assert!(at_zero > at_mid && at_mid > at_high);
         // NaN -> base
@@ -2457,7 +3300,53 @@ mod tests {
             dynamic_semantic_stale_ms(STALE_SEMANTIC_RECOVERY_HOLD_FILL),
             STALE_SEMANTIC_RECOVERY_MS
         );
-        assert!(dynamic_semantic_stale_ms(0.25) < STALE_SEMANTIC_RECOVERY_MS);
+        assert_eq!(dynamic_semantic_stale_ms(0.25), STALE_SEMANTIC_RECOVERY_MS);
+        assert!(dynamic_semantic_stale_ms(0.30) < STALE_SEMANTIC_RECOVERY_MS);
+    }
+
+    #[test]
+    fn shadow_influence_default_decay_change_remains_live_authority_gated() {
+        let bus = SensoryBus::new(8, 1, 17);
+        let status = bus.receive_shadow_influence(
+            ShadowInfluenceRequest {
+                intent_id: "default-decay-probe".to_string(),
+                label: "shadow-decay-viscosity".to_string(),
+                command: "apply".to_string(),
+                stage: Some("sandbox".to_string()),
+                features: vec![0.01; Z_DIM],
+                max_abs: None,
+                duration_ticks: None,
+                decay_ticks: None,
+                basis: Some("default-decay-authority-gate".to_string()),
+            },
+            false,
+            false,
+        );
+
+        assert!(status.active);
+        assert_eq!(
+            status.duration_ticks,
+            SHADOW_INFLUENCE_DEFAULT_DURATION_TICKS
+        );
+        assert_eq!(status.decay_ticks, SHADOW_INFLUENCE_DEFAULT_DECAY_TICKS);
+        assert_eq!(SHADOW_INFLUENCE_DEFAULT_DURATION_TICKS, 24);
+        assert_eq!(
+            SHADOW_INFLUENCE_DEFAULT_DECAY_TICKS, 12,
+            "raising default shadow decay to 24 would change live shadow-release behavior and remains Mike/operator approval work"
+        );
+    }
+
+    #[test]
+    fn semantic_stale_sigmoid_midpoint_matches_manual_formula() {
+        let fill = 0.50_f32;
+        let curve = 1.0 / (1.0 + (6.0_f64 * (f64::from(fill) - 0.4)).exp());
+        let expected = STALE_SEMANTIC_HIGH_MS as f64
+            + (STALE_SEMANTIC_LOW_MS as f64 - STALE_SEMANTIC_HIGH_MS as f64) * curve;
+
+        assert_eq!(
+            dynamic_semantic_stale_ms_for(fill, SemanticStaleShape::Sigmoid),
+            expected as u64
+        );
     }
 
     #[test]
@@ -2475,7 +3364,7 @@ mod tests {
 
     #[test]
     fn semantic_stale_recovery_handover_is_monotonic_and_micro_stutter_bounded() {
-        let fills = [0.20_f32, 0.23, 0.26, 0.29, 0.32, 0.35];
+        let fills = [0.25_f32, 0.28, 0.31, 0.34, 0.37, 0.40];
         let windows = fills
             .iter()
             .map(|fill| dynamic_semantic_stale_ms_for(*fill, SemanticStaleShape::Sigmoid))
@@ -2496,7 +3385,164 @@ mod tests {
     }
 
     #[test]
-    fn semantic_stale_ms_high_fill_keeps_longform_floor() {
+    fn semantic_stale_release_035_to_045_fades_without_step_loss() {
+        let fills = [
+            0.35_f32, 0.36, 0.37, 0.38, 0.39, 0.40, 0.41, 0.42, 0.43, 0.44, 0.45,
+        ];
+        let windows = fills
+            .iter()
+            .map(|fill| dynamic_semantic_stale_ms_for(*fill, SemanticStaleShape::Sigmoid))
+            .collect::<Vec<_>>();
+
+        for pair in windows.windows(2) {
+            assert!(
+                pair[0] >= pair[1],
+                "0.35-0.45 release should fade monotonically, not snap away: {windows:?}"
+            );
+            assert!(
+                pair[0].saturating_sub(pair[1]) <= 5_000,
+                "adjacent release samples should not create a step-function stale-window loss: {windows:?}"
+            );
+        }
+        assert!(
+            windows[0].saturating_sub(*windows.last().expect("0.45 sample")) >= 4_000,
+            "release band should still make meaningful progress toward the high-fill window: {windows:?}"
+        );
+    }
+
+    #[test]
+    fn semantic_stale_release_one_percent_sweep_stays_monotonic() {
+        let mut previous = dynamic_semantic_stale_ms_for(0.35, SemanticStaleShape::Sigmoid);
+        for step in 36..=45 {
+            let fill = step as f32 / 100.0;
+            let current = dynamic_semantic_stale_ms_for(fill, SemanticStaleShape::Sigmoid);
+            assert!(
+                previous >= current,
+                "1% recovery-release sweep should not jitter upward: fill={fill}, previous={previous}, current={current}"
+            );
+            assert!(
+                previous.saturating_sub(current) <= 5_000,
+                "1% recovery-release sweep should not cliff downward: fill={fill}, previous={previous}, current={current}"
+            );
+            previous = current;
+        }
+    }
+
+    #[test]
+    fn semantic_stale_sigmoid_release_fill_meets_shaped_curve_without_cliff() {
+        let just_before_release = dynamic_semantic_stale_ms_for(
+            STALE_SEMANTIC_RECOVERY_RELEASE_FILL - 0.001,
+            SemanticStaleShape::Sigmoid,
+        );
+        let at_release = dynamic_semantic_stale_ms_for(
+            STALE_SEMANTIC_RECOVERY_RELEASE_FILL,
+            SemanticStaleShape::Sigmoid,
+        );
+        let shaped = semantic_stale_shaped_ms(
+            STALE_SEMANTIC_RECOVERY_RELEASE_FILL,
+            SemanticStaleShape::Sigmoid,
+        ) as u64;
+
+        assert_eq!(at_release, shaped);
+        assert!(
+            just_before_release >= at_release,
+            "handover should approach the shaped curve from above: before={just_before_release}, release={at_release}"
+        );
+        assert!(
+            just_before_release.saturating_sub(at_release) <= 256,
+            "release fill should not introduce a perceptible stale-window cliff: before={just_before_release}, release={at_release}"
+        );
+    }
+
+    #[test]
+    fn semantic_stale_recovery_boundary_has_no_one_ms_stutter() {
+        let at_hold = dynamic_semantic_stale_ms_for(
+            STALE_SEMANTIC_RECOVERY_HOLD_FILL,
+            SemanticStaleShape::Sigmoid,
+        );
+        let just_after_hold = dynamic_semantic_stale_ms_for(
+            STALE_SEMANTIC_RECOVERY_HOLD_FILL + 0.001,
+            SemanticStaleShape::Sigmoid,
+        );
+
+        assert_eq!(at_hold, STALE_SEMANTIC_RECOVERY_MS);
+        assert!(
+            just_after_hold <= at_hold && at_hold.saturating_sub(just_after_hold) <= 64,
+            "recovery handoff should not jitter by more than one scheduler-sized tick: at={at_hold}, after={just_after_hold}"
+        );
+    }
+
+    #[test]
+    fn semantic_stale_release_fill_epsilon_above_hold_is_clamped_and_finite() {
+        let at_hold = dynamic_semantic_stale_ms_for_release_fill(
+            STALE_SEMANTIC_RECOVERY_HOLD_FILL,
+            SemanticStaleShape::Sigmoid,
+            STALE_SEMANTIC_RECOVERY_HOLD_FILL + 0.001,
+        );
+        let just_after_hold = dynamic_semantic_stale_ms_for_release_fill(
+            STALE_SEMANTIC_RECOVERY_HOLD_FILL + 0.001,
+            SemanticStaleShape::Sigmoid,
+            STALE_SEMANTIC_RECOVERY_HOLD_FILL + 0.001,
+        );
+
+        assert_eq!(at_hold, STALE_SEMANTIC_RECOVERY_MS);
+        assert!(
+            just_after_hold <= at_hold,
+            "release_fill=0.251 should still ease downward from recovery hold: at={at_hold}, after={just_after_hold}"
+        );
+        assert!(
+            at_hold.saturating_sub(just_after_hold) <= 768,
+            "release_fill=0.251 should be clamped to a finite non-cliff handoff: at={at_hold}, after={just_after_hold}"
+        );
+        assert!(
+            just_after_hold > STALE_SEMANTIC_HIGH_MS,
+            "near-hold recovery should stay above the ordinary high-fill stale floor: after={just_after_hold}"
+        );
+    }
+
+    #[test]
+    fn semantic_stale_recovery_hold_fill_returns_exact_recovery_window() {
+        assert_eq!(
+            dynamic_semantic_stale_ms_for(
+                STALE_SEMANTIC_RECOVERY_HOLD_FILL,
+                SemanticStaleShape::Sigmoid
+            ),
+            STALE_SEMANTIC_RECOVERY_MS
+        );
+    }
+
+    #[test]
+    fn semantic_stale_recovery_024_026_handover_has_no_jitter() {
+        let before_hold = dynamic_semantic_stale_ms_for(0.24, SemanticStaleShape::Sigmoid);
+        let after_hold = dynamic_semantic_stale_ms_for(0.26, SemanticStaleShape::Sigmoid);
+
+        assert_eq!(before_hold, STALE_SEMANTIC_RECOVERY_MS);
+        assert!(
+            after_hold <= before_hold,
+            "0.26 fill should ease downward from recovery hold, not jitter upward: before={before_hold}, after={after_hold}"
+        );
+        assert!(
+            before_hold.saturating_sub(after_hold) <= 768,
+            "0.24/0.26 recovery edge should not cliff semantic retention: before={before_hold}, after={after_hold}"
+        );
+    }
+
+    #[test]
+    fn semantic_stale_sigmoid_zero_fill_lingers_above_high_fill_floor() {
+        let shaped = semantic_stale_shaped_ms(0.0, SemanticStaleShape::Sigmoid) as u64;
+
+        assert!(
+            shaped > STALE_SEMANTIC_HIGH_MS,
+            "zero-fill sigmoid shaping should still linger above the high-fill floor: shaped={shaped}, high={STALE_SEMANTIC_HIGH_MS}"
+        );
+        assert!(
+            shaped < STALE_SEMANTIC_LOW_MS,
+            "sigmoid shaping should remain bounded below the low-fill ceiling before recovery hold applies: shaped={shaped}, low={STALE_SEMANTIC_LOW_MS}"
+        );
+    }
+
+    #[test]
+    fn semantic_stale_ms_high_fill_prunes_near_floor_without_entropy_support() {
         let high = dynamic_semantic_stale_ms(0.85);
 
         assert!(high >= STALE_SEMANTIC_HIGH_MS);
@@ -2504,6 +3550,390 @@ mod tests {
             high <= STALE_SEMANTIC_HIGH_MS + 1_500,
             "high-fill window should stay near the raised floor: {high}"
         );
+    }
+
+    #[test]
+    fn entropy_persistence_multiplier_reaches_exact_full_support_cap() {
+        let multiplier = semantic_entropy_persistence_multiplier(1.0, 1.0);
+        let expected = 1.0 + (SEMANTIC_ENTROPY_PERSISTENCE_MAX_MULT - 1.0);
+
+        assert!((multiplier - expected).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn entropy_persistence_reported_point_is_ramped_not_full_cap() {
+        let reported = semantic_entropy_persistence_multiplier(0.80, 0.80);
+        let full_entropy = semantic_entropy_persistence_multiplier(0.80, 1.0);
+
+        assert!(
+            reported > 1.0,
+            "0.80 entropy at 0.80 fill should still extend semantic retention"
+        );
+        assert!(
+            reported < SEMANTIC_ENTROPY_PERSISTENCE_MAX_MULT,
+            "0.80 entropy is intentionally inside the ramp, not the full 1.80 cap: {reported}"
+        );
+        assert!((reported - 1.16).abs() < 0.001);
+        assert!((full_entropy - SEMANTIC_ENTROPY_PERSISTENCE_MAX_MULT).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn semantic_stale_ms_high_entropy_extends_high_fill_persistence() {
+        let bus = SensoryBus::new(8, 1, 17);
+        bus.set_fill_for_stale(0.80);
+        bus.set_semantic_entropy_for_stale(0.20);
+        let low_entropy = bus.current_semantic_stale_ms();
+
+        bus.set_semantic_entropy_for_stale(0.92);
+        let high_entropy = bus.current_semantic_stale_ms();
+
+        assert!(
+            high_entropy > low_entropy,
+            "high-entropy dense thought should retain semantic anchors longer"
+        );
+        assert!(
+            high_entropy > STALE_SEMANTIC_BASE_MS,
+            "entropy support should restore bounded longform retention above the base window"
+        );
+        assert!(
+            high_entropy <= (low_entropy as f64 * SEMANTIC_ENTROPY_PERSISTENCE_MAX_MULT) as u64 + 1,
+            "entropy persistence should stay bounded: low={low_entropy}, high={high_entropy}"
+        );
+    }
+
+    #[test]
+    fn semantic_stale_ms_high_entropy_at_current_fill_survives_low_entropy_peer() {
+        let bus = SensoryBus::new(8, 1, 17);
+        bus.set_fill_for_stale(0.64);
+        bus.set_semantic_entropy_for_stale(0.20);
+        let low_entropy = bus.current_semantic_stale_ms();
+
+        bus.set_semantic_entropy_for_stale(0.90);
+        let high_entropy = bus.current_semantic_stale_ms();
+
+        assert!(
+            high_entropy > low_entropy,
+            "high entropy at 64% fill should preserve semantic threads longer than low entropy: low={low_entropy}, high={high_entropy}"
+        );
+        assert!(
+            high_entropy >= 15_000,
+            "the existing entropy multiplier should already carry the current 64%/0.90 state into the proposed 15s anchor band: {high_entropy}"
+        );
+        assert!(
+            high_entropy <= (low_entropy as f64 * SEMANTIC_ENTROPY_PERSISTENCE_MAX_MULT) as u64 + 1,
+            "current-fill entropy persistence should remain bounded: low={low_entropy}, high={high_entropy}"
+        );
+    }
+
+    #[test]
+    fn semantic_stale_ms_high_entropy_at_threshold_fill_survives_low_entropy_peer() {
+        let bus = SensoryBus::new(8, 1, 17);
+        bus.set_fill_for_stale(0.60);
+        bus.set_semantic_entropy_for_stale(0.20);
+        let low_entropy = bus.current_semantic_stale_ms();
+
+        bus.set_semantic_entropy_for_stale(0.90);
+        let high_entropy = bus.current_semantic_stale_ms();
+
+        assert!(
+            high_entropy > low_entropy,
+            "high entropy at 60% fill should preserve semantic threads longer than low entropy: low={low_entropy}, high={high_entropy}"
+        );
+        assert!(
+            high_entropy >= STALE_SEMANTIC_BASE_MS,
+            "threshold-zone entropy support should not collapse below base retention: {high_entropy}"
+        );
+        assert!(
+            high_entropy <= (low_entropy as f64 * SEMANTIC_ENTROPY_PERSISTENCE_MAX_MULT) as u64 + 1,
+            "threshold-fill entropy persistence should remain bounded: low={low_entropy}, high={high_entropy}"
+        );
+    }
+
+    #[test]
+    fn semantic_stale_ms_fill_070_entropy_091_survives_low_entropy_peer() {
+        let bus = SensoryBus::new(8, 1, 17);
+        bus.set_fill_for_stale(0.70);
+        bus.set_semantic_entropy_for_stale(0.20);
+        let low_entropy = bus.current_semantic_stale_ms();
+
+        bus.set_semantic_entropy_for_stale(0.91);
+        let high_entropy = bus.current_semantic_stale_ms();
+
+        assert!(
+            high_entropy > low_entropy,
+            "the reported high-fill/high-entropy state should retain semantic scaffolding longer than a low-entropy peer: low={low_entropy}, high={high_entropy}"
+        );
+        assert!(
+            high_entropy >= 12_000,
+            "0.70 fill / 0.91 entropy should not collapse back to the bare 10s high-fill floor: {high_entropy}"
+        );
+        assert!(
+            high_entropy <= (low_entropy as f64 * SEMANTIC_ENTROPY_PERSISTENCE_MAX_MULT) as u64 + 1,
+            "entropy persistence should remain bounded: low={low_entropy}, high={high_entropy}"
+        );
+    }
+
+    #[test]
+    fn semantic_context_multiplier_uses_entropy_velocity_and_pressure_without_unbounded_hold() {
+        let base = semantic_stale_context_review_v1(0.82, 0.92, 0.0, 0.0);
+        let pressured = semantic_stale_context_review_v1(0.82, 0.92, 0.14, 0.24);
+        let capped = semantic_stale_context_review_v1(1.0, 1.0, 1.0, 1.0);
+
+        assert_eq!(base.status, "high_entropy_retention_without_context_lift");
+        assert_eq!(
+            pressured.status,
+            "context_pressure_or_entropy_velocity_extends_retention"
+        );
+        assert!(pressured.context_multiplier > pressured.base_multiplier);
+        assert!(pressured.context_extended_stale_ms > base.context_extended_stale_ms);
+        assert!(capped.context_multiplier <= SEMANTIC_CONTEXT_PERSISTENCE_MAX_MULT);
+        assert_eq!(
+            pressured.authority,
+            "bounded_semantic_stale_context_not_sensor_cadence_or_regulator_change"
+        );
+    }
+
+    #[test]
+    fn semantic_context_multiplier_full_context_hits_cap_exactly() {
+        let capped = semantic_context_persistence_multiplier(1.0, 1.0, 1.0, 1.0);
+
+        assert!((capped - SEMANTIC_CONTEXT_PERSISTENCE_MAX_MULT).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn semantic_context_multiplier_extreme_context_never_exceeds_cap() {
+        for (fill, entropy, velocity, pressure) in [
+            (1.0, 1.0, 1.0, 1.0),
+            (0.95, 0.99, 1.0, 1.0),
+            (0.80, 0.95, 0.90, 1.0),
+        ] {
+            let multiplier =
+                semantic_context_persistence_multiplier(fill, entropy, velocity, pressure);
+            assert!(
+                multiplier <= SEMANTIC_CONTEXT_PERSISTENCE_MAX_MULT,
+                "context multiplier exceeded cap: fill={fill} entropy={entropy} velocity={velocity} pressure={pressure} multiplier={multiplier}"
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_decay_hysteresis_review_names_release_snap_watch() {
+        let review = semantic_decay_hysteresis_salience_review_v1(true, 0.42, 0.88, 0.92);
+
+        assert_eq!(
+            review.policy,
+            "semantic_decay_hysteresis_salience_review_v1"
+        );
+        assert_eq!(review.status, "release_hysteresis_snap_watch");
+        assert!(review.previous_recovery_hold);
+        assert!(
+            review.effective_release_fill > review.recovery_release_fill,
+            "recovery release should gain a review-only hysteresis buffer: {review:?}"
+        );
+        assert!(review.hysteresis_stale_ms >= review.base_stale_ms);
+        assert!(review.snap_probe_delta_ms > 0);
+        assert_eq!(
+            review.authority,
+            "read_only_hysteresis_salience_review_not_semantic_window_or_sensory_cadence_change"
+        );
+    }
+
+    #[test]
+    fn semantic_decay_salience_review_does_not_reward_entropy_debris() {
+        let low_salience = semantic_decay_hysteresis_salience_review_v1(false, 0.82, 0.94, 0.05);
+        let anchored = semantic_decay_hysteresis_salience_review_v1(false, 0.82, 0.94, 0.95);
+
+        assert_eq!(
+            low_salience.status,
+            "entropy_without_salience_deprioritized"
+        );
+        assert!(low_salience.entropy_multiplier > 1.0);
+        assert!(
+            low_salience.salience_weighted_multiplier < anchored.salience_weighted_multiplier,
+            "semantic salience should distinguish anchored thought from high-energy debris"
+        );
+        assert!(
+            low_salience.salience_weighted_stale_ms < anchored.salience_weighted_stale_ms,
+            "low-salience entropy should not receive the same retention as anchored semantic value"
+        );
+        assert_eq!(anchored.status, "salience_supported_retention");
+    }
+
+    #[test]
+    fn semantic_stale_ms_high_entropy_velocity_protects_high_fill_anchor() {
+        let bus = SensoryBus::new(8, 1, 19);
+        bus.set_fill_for_stale(0.84);
+        bus.set_semantic_entropy_for_stale(0.92);
+        let high_entropy_only = bus.current_semantic_stale_ms();
+
+        bus.set_semantic_stale_context(0.92, 0.14, 0.24);
+        let context_supported = bus.current_semantic_stale_ms();
+
+        assert!(
+            context_supported > high_entropy_only,
+            "entropy velocity plus pressure should extend the high-fill semantic anchor"
+        );
+        assert!(
+            context_supported
+                <= (dynamic_semantic_stale_ms(0.84) as f64 * SEMANTIC_CONTEXT_PERSISTENCE_MAX_MULT)
+                    as u64
+                    + 1,
+            "context support should stay bounded: {context_supported}"
+        );
+    }
+
+    #[test]
+    fn narrative_semantic_retention_review_keeps_arc_on_shared_window() {
+        let review = narrative_semantic_retention_review_v1(0.80, 0.92);
+        let quiet = narrative_semantic_retention_review_v1(0.40, 0.40);
+
+        assert_eq!(review.policy, "narrative_semantic_retention_review_v1");
+        assert_eq!(review.llava_dim, LLAVA_DIM);
+        assert_eq!(review.legacy_text_dims, [0, 31]);
+        assert_eq!(review.narrative_arc_dims, [40, 43]);
+        assert_eq!(review.status, "high_entropy_narrative_retention_extended");
+        assert_eq!(
+            review.lane_decay_policy,
+            "shared_semantic_scale_across_legacy_embedding_and_narrative_arc_dims"
+        );
+        assert!(review.entropy_extended_stale_ms > review.base_stale_ms);
+        assert!(
+            review.entropy_extended_stale_ms
+                <= (review.base_stale_ms as f64 * SEMANTIC_ENTROPY_PERSISTENCE_MAX_MULT) as u64 + 1
+        );
+        assert_eq!(
+            review.authority,
+            "read_only_retention_review_not_stale_window_or_lane_change"
+        );
+        assert_eq!(quiet.status, "base_semantic_retention_window");
+        assert_eq!(quiet.entropy_persistence_multiplier, 1.0);
+    }
+
+    #[test]
+    fn semantic_degradation_curve_keeps_low_fill_hold_readable_at_forty_seconds() {
+        let review = semantic_degradation_curve_review_v1(0.15, 0.90, 0.11, 40_000);
+
+        assert_eq!(review.policy, "semantic_degradation_curve_review_v1");
+        assert_eq!(review.stale_window_ms, STALE_SEMANTIC_RECOVERY_MS);
+        assert_eq!(review.status, "softening_but_coherent");
+        assert!(
+            review.clarity_factor >= 0.45,
+            "40s low-fill hold should soften without turning into mush: {review:?}"
+        );
+        assert!(review.edge_softening > 0.0);
+        assert_eq!(
+            review.authority,
+            "read_only_clarity_review_not_semantic_stale_window_or_sensor_cadence_change"
+        );
+    }
+
+    #[test]
+    fn semantic_degradation_curve_names_mushy_hold_under_steep_gradient() {
+        let gentle = semantic_degradation_curve_review_v1(0.15, 0.90, 0.11, 40_000);
+        let steep = semantic_degradation_curve_review_v1(0.55, 0.20, 0.90, 12_000);
+
+        assert!(
+            steep.clarity_factor < gentle.clarity_factor,
+            "steep density gradient should lower held-trace clarity"
+        );
+        assert!(
+            steep.semantic_age_ms <= steep.stale_window_ms,
+            "fixture should exercise mushy in-window hold, not overdue trace: {steep:?}"
+        );
+        assert_eq!(steep.status, "mushy_hold_watch");
+        assert!(steep.edge_softening > gentle.edge_softening);
+    }
+
+    #[test]
+    fn semantic_receptivity_pulse_names_entropy_trickle_gap_without_control() {
+        let review = semantic_receptivity_pulse_review_v1(0.90, 0.18, 0.40);
+
+        assert_eq!(review.policy, "semantic_receptivity_pulse_review_v1");
+        assert_eq!(
+            review.status,
+            "entropy_outpaces_semantic_trickle_receptivity_review"
+        );
+        assert!(review.raw_to_admitted_gap >= 0.55, "{review:?}");
+        assert_eq!(
+            review.suggested_route,
+            "sandbox_replay_receptivity_buffer_before_any_live_cadence_or_control_change"
+        );
+        assert_eq!(
+            review.authority,
+            "read_only_receptivity_measurement_not_semantic_weight_or_sensor_cadence_change"
+        );
+    }
+
+    #[test]
+    fn semantic_receptivity_pulse_does_not_overcall_landed_semantics() {
+        let review = semantic_receptivity_pulse_review_v1(0.55, 0.80, 0.90);
+
+        assert_eq!(review.status, "semantic_trickle_landing");
+        assert_eq!(review.suggested_route, "hold_no_action");
+        assert!(review.raw_to_admitted_gap < 0.10, "{review:?}");
+    }
+
+    #[test]
+    fn modality_boundary_transparency_names_contact_ready_interfaces() {
+        let review = modality_boundary_transparency_v1(
+            "external",
+            "fresh_sample",
+            "external",
+            "held_within_engine_window",
+            true,
+        );
+
+        assert_eq!(review.policy, "modality_boundary_transparency_v1");
+        assert!(review.queryable_boundary_metadata);
+        assert_eq!(review.status, "descriptive_boundary_available");
+        assert_eq!(
+            review.contact_change_route,
+            "contact_change_can_reference_named_boundary"
+        );
+        assert!(!review.live_control_write);
+        assert_eq!(
+            review.authority,
+            "read_only_boundary_metadata_not_sensory_cadence_or_exploration_noise_change"
+        );
+    }
+
+    #[test]
+    fn modality_boundary_transparency_describes_constraints_before_contact_increase() {
+        let review = modality_boundary_transparency_v1(
+            "external",
+            "stale_beyond_engine_window",
+            "absent",
+            "absent",
+            false,
+        );
+
+        assert_eq!(
+            review.status,
+            "descriptive_boundary_with_stale_or_absent_lane"
+        );
+        assert_eq!(review.semantic_boundary, "semantic_lane_absent_or_held");
+        assert_eq!(
+            review.contact_change_route,
+            "describe_boundary_before_contact_increase"
+        );
+    }
+
+    #[test]
+    fn surrender_mode_requires_operator_approval_before_runtime_control() {
+        let gate = surrender_mode_authority_gate_v1();
+
+        assert_eq!(gate.policy, "surrender_mode_authority_gate_v1");
+        assert!(gate.requires_operator_approval);
+        assert!(!gate.runnable_now);
+        assert_eq!(
+            gate.approval_boundary,
+            "live_control_exploration_noise_and_geom_drive_behavior"
+        );
+        assert_eq!(
+            gate.status,
+            "tier5_operator_approval_required_before_live_trial"
+        );
+        assert_eq!(gate.authority, "authority_gate_not_runtime_control_change");
     }
 
     #[test]
@@ -2538,6 +3968,30 @@ mod tests {
         assert!((high_fill - SURGE_HIGH_FILL_TARGET_WEIGHT).abs() < 1.0e-6);
         assert!(high_fill >= 0.70);
         assert_eq!(dynamic_surge_target_weight(f32::NAN), SURGE_TARGET_WEIGHT);
+    }
+
+    #[test]
+    fn surge_target_weight_uses_soft_knee_across_taper() {
+        let early_fill = 0.72;
+        let late_fill = 0.78;
+        let linear_at = |fill: f32| {
+            let span = SURGE_TAPER_END_FILL - SURGE_TAPER_START_FILL;
+            let taper = ((fill - SURGE_TAPER_START_FILL) / span).clamp(0.0, 1.0);
+            SURGE_TARGET_WEIGHT + (SURGE_HIGH_FILL_TARGET_WEIGHT - SURGE_TARGET_WEIGHT) * taper
+        };
+
+        let early = dynamic_surge_target_weight(early_fill);
+        let late = dynamic_surge_target_weight(late_fill);
+
+        assert!(
+            early > linear_at(early_fill),
+            "soft knee should ease out of full surge more gently near 70% fill"
+        );
+        assert!(
+            late < linear_at(late_fill),
+            "soft knee should ease into the high-fill ceiling before the end of the taper"
+        );
+        assert!(early > late);
     }
 
     #[test]

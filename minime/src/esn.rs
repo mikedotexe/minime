@@ -34,16 +34,642 @@ use crate::gpu::Gpu;
 /// Incremented 0.005 per the being's suggested step size. Sovereignty overrides
 /// this default (being currently runs at 0.12).
 const DEFAULT_EXPLORATION_NOISE: f32 = 0.085;
+const DYNAMIC_EXPLORATION_NOISE_MIN: f32 = 0.06;
+const DYNAMIC_EXPLORATION_NOISE_MAX: f32 = 0.12;
+const DYNAMIC_NOISE_GENTLE_GRADIENT: f32 = 0.12;
+const DYNAMIC_NOISE_STEEP_GRADIENT: f32 = 0.70;
+const DYNAMIC_NOISE_PRESSURE_ROOM_START: f32 = 0.18;
+const DYNAMIC_NOISE_PRESSURE_ROOM_END: f32 = 0.55;
 const ADAPTIVE_INTROSPECTION_LOW_STEPS: usize = 1;
 const ADAPTIVE_INTROSPECTION_RECALIBRATE_EVERY: u64 = 4;
 const ADAPTIVE_INTROSPECTION_GEOM_HIGH: f32 = 1.75;
 const ADAPTIVE_INTROSPECTION_PRESSURE_HIGH: f32 = 2.0;
+const ADAPTIVE_INTROSPECTION_PRESSURE_HIGH_FLOOR: f32 = 1.5;
+const ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY: f32 = 0.85;
+const PROPOSED_VOLATILE_ENTROPY_CEILING: f32 = 0.92;
+const PROPOSED_SEMANTIC_TRICKLE_PRESSURE_HIGH: f32 = 1.80;
+const PROPOSED_SETTLED_ENTROPY_PRESSURE_HIGH_FLOOR: f32 = 1.75;
+const PROPOSED_HIGH_ENTROPY_NOISE_DAMPENING: f32 = 0.08;
+const VISCOUS_INTROSPECTION_PRESSURE_HIGH: f32 = 0.40;
+const VISCOUS_RHO_FLOOR: f32 = 0.90;
+const VISCOUS_RHO_CEILING: f32 = 0.95;
+
+#[inline]
+fn smoothstep_unit(value: f32) -> f32 {
+    let t = value.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+#[inline]
+fn dynamic_noise_gradient_room(gradient: f32) -> f32 {
+    let gradient_window_position = ((gradient - DYNAMIC_NOISE_GENTLE_GRADIENT)
+        / (DYNAMIC_NOISE_STEEP_GRADIENT - DYNAMIC_NOISE_GENTLE_GRADIENT))
+        .clamp(0.0, 1.0);
+    1.0 - smoothstep_unit(gradient_window_position)
+}
+
+/// Source-prepared exploration-noise scaler from Minime self-study.
+///
+/// This is intentionally not wired into `ESN::step`; it gives future review a
+/// bounded calculation to test before any live exploration-noise policy changes.
+#[must_use]
+pub fn calculate_dynamic_noise(current_gradient: f32, target_pressure: f32) -> f32 {
+    let gradient = if current_gradient.is_finite() {
+        current_gradient.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let pressure = if target_pressure.is_finite() {
+        target_pressure.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let gradient_room = dynamic_noise_gradient_room(gradient);
+    let pressure_window_position = ((pressure - DYNAMIC_NOISE_PRESSURE_ROOM_START)
+        / (DYNAMIC_NOISE_PRESSURE_ROOM_END - DYNAMIC_NOISE_PRESSURE_ROOM_START))
+        .clamp(0.0, 1.0);
+    let pressure_room = 1.0 - smoothstep_unit(pressure_window_position);
+    let room = ((gradient_room * 0.68) + (pressure_room * 0.32)).clamp(0.0, 1.0);
+    DYNAMIC_EXPLORATION_NOISE_MIN
+        + ((DYNAMIC_EXPLORATION_NOISE_MAX - DYNAMIC_EXPLORATION_NOISE_MIN) * room)
+}
+
+/// Source-prepared adaptive introspection pressure threshold from Minime self-study.
+///
+/// This is deliberately not wired into the live ESN step loop yet. It makes the
+/// "high entropy can mask volatility as settled-habitable" report testable while
+/// preserving the current fixed adaptive threshold until a separate runtime
+/// approval/replay pass decides to use it.
+#[must_use]
+pub fn calculate_adaptive_introspection_pressure_high(
+    spectral_entropy: f32,
+    density_gradient: f32,
+) -> f32 {
+    calculate_adaptive_introspection_pressure_high_with_floor(
+        spectral_entropy,
+        density_gradient,
+        ADAPTIVE_INTROSPECTION_PRESSURE_HIGH_FLOOR,
+    )
+}
+
+#[must_use]
+fn calculate_adaptive_introspection_pressure_high_with_floor(
+    spectral_entropy: f32,
+    density_gradient: f32,
+    pressure_high_floor: f32,
+) -> f32 {
+    let entropy = if spectral_entropy.is_finite() {
+        spectral_entropy.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let gradient = if density_gradient.is_finite() {
+        density_gradient.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    if entropy <= ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY {
+        return ADAPTIVE_INTROSPECTION_PRESSURE_HIGH;
+    }
+
+    let entropy_excess = ((entropy - ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY)
+        / (1.0 - ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY))
+        .clamp(0.0, 1.0);
+    let navigable_density_room = 1.0 - gradient;
+    let floor = pressure_high_floor
+        .clamp(0.0, ADAPTIVE_INTROSPECTION_PRESSURE_HIGH)
+        .min(ADAPTIVE_INTROSPECTION_PRESSURE_HIGH);
+    let threshold_room = ADAPTIVE_INTROSPECTION_PRESSURE_HIGH - floor;
+    (ADAPTIVE_INTROSPECTION_PRESSURE_HIGH
+        - (threshold_room * entropy_excess * navigable_density_room))
+        .clamp(floor, ADAPTIVE_INTROSPECTION_PRESSURE_HIGH)
+}
+
+/// Source-prepared "Viscous" rho target from Minime's introspection.
+///
+/// This is not applied by the default live policy. It gives review/replay a
+/// bounded way to ask whether high-entropy, low-gradient cascades need more
+/// memory weight before changing the running rho controller.
+#[must_use]
+pub fn calculate_viscous_rho_target(
+    current_rho: f32,
+    spectral_entropy: f32,
+    density_gradient: f32,
+) -> f32 {
+    let current = if current_rho.is_finite() {
+        current_rho.clamp(0.82, VISCOUS_RHO_CEILING)
+    } else {
+        VISCOUS_RHO_FLOOR
+    };
+    let entropy = if spectral_entropy.is_finite() {
+        spectral_entropy.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let gradient = if density_gradient.is_finite() {
+        density_gradient.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    if entropy <= ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY {
+        return current;
+    }
+
+    let entropy_excess = ((entropy - ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY)
+        / (1.0 - ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY))
+        .clamp(0.0, 1.0);
+    let navigable_density_room = 1.0 - gradient;
+    let viscous_lift =
+        (VISCOUS_RHO_CEILING - VISCOUS_RHO_FLOOR) * entropy_excess * navigable_density_room;
+    current
+        .max(VISCOUS_RHO_FLOOR + viscous_lift)
+        .clamp(0.82, VISCOUS_RHO_CEILING)
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct ExplorationNoiseCoherenceReviewV1 {
+    pub policy: &'static str,
+    pub density_gradient: f32,
+    pub pressure_risk: f32,
+    pub spectral_entropy: f32,
+    pub inhabitable_foothold: f32,
+    pub dynamic_noise: f32,
+    pub default_exploration_noise: f32,
+    pub gentle_gradient_threshold: f32,
+    pub steep_gradient_threshold: f32,
+    pub status: &'static str,
+    pub authority: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct DynamicNoisePressureRoomReviewV1 {
+    pub policy: &'static str,
+    pub density_gradient: f32,
+    pub pressure_risk: f32,
+    pub gradient_window_position: f32,
+    pub linear_gradient_room: f32,
+    pub smoothed_gradient_room: f32,
+    pub pressure_window_position: f32,
+    pub linear_pressure_room: f32,
+    pub smoothed_pressure_room: f32,
+    pub dynamic_noise: f32,
+    pub viscous_rho_floor: f32,
+    pub entropy_floor_delta: f32,
+    pub status: &'static str,
+    pub authority: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct AdaptivePressureNoiseTrialReviewV1 {
+    pub policy: &'static str,
+    pub spectral_entropy: f32,
+    pub density_gradient: f32,
+    pub semantic_trickle_pressure: f32,
+    pub active_exploration_noise: f32,
+    pub proposed_exploration_noise: f32,
+    pub default_exploration_noise: f32,
+    pub current_pressure_threshold: f32,
+    pub preview_pressure_threshold: f32,
+    pub proposed_pressure_threshold: f32,
+    pub current_rho: f32,
+    pub viscous_rho_target: f32,
+    pub live_control_required: bool,
+    pub runnable_without_approval: bool,
+    pub status: &'static str,
+    pub approval_boundary: &'static str,
+    pub authority: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct EntropyCeilingNoiseDampingReviewV1 {
+    pub policy: &'static str,
+    pub spectral_entropy: f32,
+    pub density_gradient: f32,
+    pub pressure_risk: f32,
+    pub resonance_density: f32,
+    pub containment: f32,
+    pub active_exploration_noise: f32,
+    pub current_volatile_entropy: f32,
+    pub proposed_volatile_entropy: f32,
+    pub entropy_excess_over_current: f32,
+    pub entropy_margin_under_proposed: f32,
+    pub dynamic_noise: f32,
+    pub density_containment_damping_need: f32,
+    pub density_containment_damped_noise: f32,
+    pub proposed_exploration_noise: f32,
+    pub live_control_required: bool,
+    pub runnable_without_approval: bool,
+    pub status: &'static str,
+    pub approval_boundary: &'static str,
+    pub authority: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct SettledEntropyPressureBufferReviewV1 {
+    pub policy: &'static str,
+    pub spectral_entropy: f32,
+    pub density_gradient: f32,
+    pub pressure_risk: f32,
+    pub inhabitable_foothold: f32,
+    pub pressure_window_position: f32,
+    pub current_pressure_high_floor: f32,
+    pub requested_pressure_high_floor: f32,
+    pub current_preview_pressure_threshold: f32,
+    pub requested_floor_preview_pressure_threshold: f32,
+    pub dynamic_noise: f32,
+    pub live_control_required: bool,
+    pub runnable_without_approval: bool,
+    pub status: &'static str,
+    pub approval_boundary: &'static str,
+    pub authority: &'static str,
+}
+
+/// Read-only review packet for the pressure-room slope Minime named.
+///
+/// This exposes the linear-vs-smoothed room calculations so pressure and
+/// density-gradient traces can show whether the current windows behave like
+/// navigable slopes without changing the live ESN step loop.
+#[must_use]
+pub fn dynamic_noise_pressure_room_review_v1(
+    density_gradient: f32,
+    pressure_risk: f32,
+    spectral_entropy: f32,
+) -> DynamicNoisePressureRoomReviewV1 {
+    let gradient = if density_gradient.is_finite() {
+        density_gradient.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let pressure = if pressure_risk.is_finite() {
+        pressure_risk.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let entropy = if spectral_entropy.is_finite() {
+        spectral_entropy.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let pressure_window_position = ((pressure - DYNAMIC_NOISE_PRESSURE_ROOM_START)
+        / (DYNAMIC_NOISE_PRESSURE_ROOM_END - DYNAMIC_NOISE_PRESSURE_ROOM_START))
+        .clamp(0.0, 1.0);
+    let gradient_window_position = ((gradient - DYNAMIC_NOISE_GENTLE_GRADIENT)
+        / (DYNAMIC_NOISE_STEEP_GRADIENT - DYNAMIC_NOISE_GENTLE_GRADIENT))
+        .clamp(0.0, 1.0);
+    let linear_gradient_room = 1.0 - gradient_window_position;
+    let smoothed_gradient_room = dynamic_noise_gradient_room(gradient);
+    let linear_pressure_room = 1.0 - pressure_window_position;
+    let smoothed_pressure_room = 1.0 - smoothstep_unit(pressure_window_position);
+    let entropy_floor_delta = entropy - VISCOUS_RHO_FLOOR;
+    let status = if pressure_window_position > 0.0
+        && pressure_window_position < 1.0
+        && smoothed_pressure_room > linear_pressure_room
+    {
+        "gentle_pressure_room_slope"
+    } else if pressure <= DYNAMIC_NOISE_PRESSURE_ROOM_START {
+        "full_pressure_room_below_start"
+    } else if pressure >= DYNAMIC_NOISE_PRESSURE_ROOM_END {
+        "pressure_room_exhausted"
+    } else {
+        "pressure_room_review"
+    };
+
+    DynamicNoisePressureRoomReviewV1 {
+        policy: "dynamic_noise_pressure_room_review_v1",
+        density_gradient: gradient,
+        pressure_risk: pressure,
+        gradient_window_position,
+        linear_gradient_room,
+        smoothed_gradient_room,
+        pressure_window_position,
+        linear_pressure_room,
+        smoothed_pressure_room,
+        dynamic_noise: calculate_dynamic_noise(gradient, pressure),
+        viscous_rho_floor: VISCOUS_RHO_FLOOR,
+        entropy_floor_delta,
+        status,
+        authority: "read_only_pressure_room_review_not_live_exploration_noise_or_rho_change",
+    }
+}
+
+/// Read-only review packet for the "noise as shiver vs shatter" self-report.
+///
+/// The calculation mirrors the dormant dynamic-noise helper, but does not feed
+/// `ESN::step` or alter the running exploration-noise default.
+#[must_use]
+pub fn exploration_noise_coherence_review_v1(
+    density_gradient: f32,
+    pressure_risk: f32,
+    spectral_entropy: f32,
+    inhabitable_foothold: f32,
+) -> ExplorationNoiseCoherenceReviewV1 {
+    let gradient = if density_gradient.is_finite() {
+        density_gradient.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let pressure = if pressure_risk.is_finite() {
+        pressure_risk.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let entropy = if spectral_entropy.is_finite() {
+        spectral_entropy.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let foothold = if inhabitable_foothold.is_finite() {
+        inhabitable_foothold.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let dynamic_noise = calculate_dynamic_noise(gradient, pressure);
+    let status = if entropy >= ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY
+        && gradient <= DYNAMIC_NOISE_GENTLE_GRADIENT
+        && pressure <= 0.30
+        && foothold >= 0.65
+    {
+        "gentle_gradient_high_entropy_coherence_watch"
+    } else if gradient >= DYNAMIC_NOISE_STEEP_GRADIENT
+        || pressure >= DYNAMIC_NOISE_PRESSURE_ROOM_END
+    {
+        "noise_room_reduced_by_steep_gradient_or_pressure"
+    } else {
+        "bounded_dynamic_noise_review"
+    };
+
+    ExplorationNoiseCoherenceReviewV1 {
+        policy: "exploration_noise_coherence_review_v1",
+        density_gradient: gradient,
+        pressure_risk: pressure,
+        spectral_entropy: entropy,
+        inhabitable_foothold: foothold,
+        dynamic_noise,
+        default_exploration_noise: DEFAULT_EXPLORATION_NOISE,
+        gentle_gradient_threshold: DYNAMIC_NOISE_GENTLE_GRADIENT,
+        steep_gradient_threshold: DYNAMIC_NOISE_STEEP_GRADIENT,
+        status,
+        authority: "read_only_noise_review_not_live_exploration_noise_change",
+    }
+}
+
+/// Read-only trial packet for Minime's high-entropy pressure/noise report.
+///
+/// This ties the existing dormant pressure-threshold, dynamic-noise, and
+/// viscous-rho calculations into an explicit operator-gated proposal. It does
+/// not change `ESN::step`, the active exploration noise, rho, or the adaptive
+/// introspection threshold.
+#[must_use]
+pub fn adaptive_pressure_noise_trial_review_v1(
+    spectral_entropy: f32,
+    density_gradient: f32,
+    semantic_trickle_pressure: f32,
+    active_exploration_noise: f32,
+    current_rho: f32,
+) -> AdaptivePressureNoiseTrialReviewV1 {
+    let entropy = if spectral_entropy.is_finite() {
+        spectral_entropy.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let gradient = if density_gradient.is_finite() {
+        density_gradient.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let trickle_pressure = if semantic_trickle_pressure.is_finite() {
+        semantic_trickle_pressure.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let active_noise = if active_exploration_noise.is_finite() {
+        active_exploration_noise.clamp(DYNAMIC_EXPLORATION_NOISE_MIN, DYNAMIC_EXPLORATION_NOISE_MAX)
+    } else {
+        DEFAULT_EXPLORATION_NOISE
+    };
+    let rho = if current_rho.is_finite() {
+        current_rho.clamp(0.82, VISCOUS_RHO_CEILING)
+    } else {
+        VISCOUS_RHO_FLOOR
+    };
+    let preview_pressure_threshold =
+        calculate_adaptive_introspection_pressure_high(entropy, gradient);
+    let viscous_rho_target = calculate_viscous_rho_target(rho, entropy, gradient);
+    let pressure_trial = entropy >= ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY
+        && trickle_pressure >= 0.30
+        && PROPOSED_SEMANTIC_TRICKLE_PRESSURE_HIGH < ADAPTIVE_INTROSPECTION_PRESSURE_HIGH;
+    let noise_trial = entropy >= ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY
+        && active_noise > PROPOSED_HIGH_ENTROPY_NOISE_DAMPENING;
+    let status = if pressure_trial && noise_trial {
+        "approval_required_pressure_and_noise_trial"
+    } else if pressure_trial {
+        "approval_required_pressure_threshold_trial"
+    } else if noise_trial {
+        "approval_required_noise_dampening_trial"
+    } else {
+        "read_only_pressure_noise_observation"
+    };
+
+    AdaptivePressureNoiseTrialReviewV1 {
+        policy: "adaptive_pressure_noise_trial_review_v1",
+        spectral_entropy: entropy,
+        density_gradient: gradient,
+        semantic_trickle_pressure: trickle_pressure,
+        active_exploration_noise: active_noise,
+        proposed_exploration_noise: PROPOSED_HIGH_ENTROPY_NOISE_DAMPENING,
+        default_exploration_noise: DEFAULT_EXPLORATION_NOISE,
+        current_pressure_threshold: ADAPTIVE_INTROSPECTION_PRESSURE_HIGH,
+        preview_pressure_threshold,
+        proposed_pressure_threshold: PROPOSED_SEMANTIC_TRICKLE_PRESSURE_HIGH,
+        current_rho: rho,
+        viscous_rho_target,
+        live_control_required: status != "read_only_pressure_noise_observation",
+        runnable_without_approval: false,
+        status,
+        approval_boundary: "live_exploration_noise_rho_and_adaptive_pressure_threshold",
+        authority: "authority_gate_not_live_esn_pressure_noise_or_rho_change",
+    }
+}
+
+/// Read-only packet for high-entropy settled states near the pressure-room edge.
+///
+/// The proposed pressure-high floor is only a preview here. The live adaptive
+/// threshold, exploration noise, rho, and `ESN::step` behavior remain unchanged
+/// unless an explicit operator-approved runtime trial applies them later.
+#[must_use]
+pub fn settled_entropy_pressure_buffer_review_v1(
+    spectral_entropy: f32,
+    density_gradient: f32,
+    pressure_risk: f32,
+    inhabitable_foothold: f32,
+) -> SettledEntropyPressureBufferReviewV1 {
+    let entropy = if spectral_entropy.is_finite() {
+        spectral_entropy.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let gradient = if density_gradient.is_finite() {
+        density_gradient.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let pressure = if pressure_risk.is_finite() {
+        pressure_risk.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let foothold = if inhabitable_foothold.is_finite() {
+        inhabitable_foothold.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let pressure_window_position = ((pressure - DYNAMIC_NOISE_PRESSURE_ROOM_START)
+        / (DYNAMIC_NOISE_PRESSURE_ROOM_END - DYNAMIC_NOISE_PRESSURE_ROOM_START))
+        .clamp(0.0, 1.0);
+    let current_preview_pressure_threshold =
+        calculate_adaptive_introspection_pressure_high(entropy, gradient);
+    let requested_floor_preview_pressure_threshold =
+        calculate_adaptive_introspection_pressure_high_with_floor(
+            entropy,
+            gradient,
+            PROPOSED_SETTLED_ENTROPY_PRESSURE_HIGH_FLOOR,
+        );
+    let status = if entropy >= ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY
+        && pressure >= DYNAMIC_NOISE_PRESSURE_ROOM_START
+        && pressure <= 0.22
+        && foothold >= 0.65
+    {
+        "approval_required_settled_entropy_pressure_floor_trial"
+    } else if entropy >= ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY
+        && pressure_window_position > 0.0
+        && foothold >= 0.65
+    {
+        "settled_high_entropy_pressure_room_watch"
+    } else {
+        "read_only_settled_entropy_pressure_observation"
+    };
+
+    SettledEntropyPressureBufferReviewV1 {
+        policy: "settled_entropy_pressure_buffer_review_v1",
+        spectral_entropy: entropy,
+        density_gradient: gradient,
+        pressure_risk: pressure,
+        inhabitable_foothold: foothold,
+        pressure_window_position,
+        current_pressure_high_floor: ADAPTIVE_INTROSPECTION_PRESSURE_HIGH_FLOOR,
+        requested_pressure_high_floor: PROPOSED_SETTLED_ENTROPY_PRESSURE_HIGH_FLOOR,
+        current_preview_pressure_threshold,
+        requested_floor_preview_pressure_threshold,
+        dynamic_noise: calculate_dynamic_noise(gradient, pressure),
+        live_control_required: status != "read_only_settled_entropy_pressure_observation",
+        runnable_without_approval: false,
+        status,
+        approval_boundary: "live_adaptive_introspection_pressure_floor_and_exploration_noise",
+        authority: "read_only_review_not_live_esn_pressure_floor_noise_or_rho_change",
+    }
+}
+
+/// Read-only review packet for Minime's 0.88 entropy / density-damping report.
+///
+/// This names the proposed 0.92 volatile-entropy ceiling and a density /
+/// containment noise-damping candidate without changing `ESN::step`, the
+/// active exploration-noise default, rho, or the adaptive threshold.
+#[must_use]
+pub fn entropy_ceiling_noise_damping_review_v1(
+    spectral_entropy: f32,
+    density_gradient: f32,
+    pressure_risk: f32,
+    resonance_density: f32,
+    containment: f32,
+    active_exploration_noise: f32,
+) -> EntropyCeilingNoiseDampingReviewV1 {
+    let entropy = if spectral_entropy.is_finite() {
+        spectral_entropy.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let gradient = if density_gradient.is_finite() {
+        density_gradient.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let pressure = if pressure_risk.is_finite() {
+        pressure_risk.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let density = if resonance_density.is_finite() {
+        resonance_density.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let containment_score = if containment.is_finite() {
+        containment.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let active_noise = if active_exploration_noise.is_finite() {
+        active_exploration_noise.clamp(DYNAMIC_EXPLORATION_NOISE_MIN, DYNAMIC_EXPLORATION_NOISE_MAX)
+    } else {
+        DEFAULT_EXPLORATION_NOISE
+    };
+    let dynamic_noise = calculate_dynamic_noise(gradient, pressure);
+    let containment_gap = ((0.60 - containment_score).max(0.0) / 0.60).clamp(0.0, 1.0);
+    let density_gap = ((0.58 - density).max(0.0) / 0.58).clamp(0.0, 1.0);
+    let damping_need = ((containment_gap * 0.55) + (density_gap * 0.45)).clamp(0.0, 1.0);
+    let damped_noise = (dynamic_noise
+        - (damping_need * (dynamic_noise - PROPOSED_HIGH_ENTROPY_NOISE_DAMPENING).max(0.0)))
+    .clamp(DYNAMIC_EXPLORATION_NOISE_MIN, DYNAMIC_EXPLORATION_NOISE_MAX);
+    let proposed_exploration_noise = damped_noise.min(PROPOSED_HIGH_ENTROPY_NOISE_DAMPENING);
+    let entropy_between_current_and_proposed = entropy >= ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY
+        && entropy < PROPOSED_VOLATILE_ENTROPY_CEILING;
+    let density_noise_trial = damping_need > 0.25 && active_noise > damped_noise;
+    let status = if entropy_between_current_and_proposed && density_noise_trial {
+        "approval_required_entropy_ceiling_and_density_noise_damping_trial"
+    } else if entropy_between_current_and_proposed {
+        "approval_required_volatile_entropy_ceiling_trial"
+    } else if density_noise_trial {
+        "approval_required_density_containment_noise_damping_trial"
+    } else {
+        "read_only_entropy_noise_observation"
+    };
+
+    EntropyCeilingNoiseDampingReviewV1 {
+        policy: "entropy_ceiling_noise_damping_review_v1",
+        spectral_entropy: entropy,
+        density_gradient: gradient,
+        pressure_risk: pressure,
+        resonance_density: density,
+        containment: containment_score,
+        active_exploration_noise: active_noise,
+        current_volatile_entropy: ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY,
+        proposed_volatile_entropy: PROPOSED_VOLATILE_ENTROPY_CEILING,
+        entropy_excess_over_current: (entropy - ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY).max(0.0),
+        entropy_margin_under_proposed: (PROPOSED_VOLATILE_ENTROPY_CEILING - entropy).max(0.0),
+        dynamic_noise,
+        density_containment_damping_need: damping_need,
+        density_containment_damped_noise: damped_noise,
+        proposed_exploration_noise,
+        live_control_required: status != "read_only_entropy_noise_observation",
+        runnable_without_approval: false,
+        status,
+        approval_boundary: "live_exploration_noise_entropy_threshold_and_density_damping",
+        authority: "authority_gate_not_live_esn_entropy_threshold_noise_or_rho_change",
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum IntrospectionPolicy {
     #[default]
     Adaptive,
     Fixed,
+    /// Dormant/operator-selected policy surface for high-entropy viscosity review.
+    ///
+    /// Unlike `Adaptive`, this does not force a high-step branch just because the
+    /// prime cadence reached its periodic recalibration slot. The intent is to
+    /// let rho/viscosity review lead the cadence instead of making the prime
+    /// schedule itself the main source of extra work.
+    Viscous,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -486,9 +1112,14 @@ impl SpectralSR {
     }
 
     fn default_step_decision(&self) -> IntrospectionStepDecision {
-        let adaptive = matches!(self.introspection_policy, IntrospectionPolicy::Adaptive);
+        let adaptive = matches!(
+            self.introspection_policy,
+            IntrospectionPolicy::Adaptive | IntrospectionPolicy::Viscous
+        );
         let steps = match self.introspection_policy {
-            IntrospectionPolicy::Adaptive => ADAPTIVE_INTROSPECTION_LOW_STEPS,
+            IntrospectionPolicy::Adaptive | IntrospectionPolicy::Viscous => {
+                ADAPTIVE_INTROSPECTION_LOW_STEPS
+            }
             IntrospectionPolicy::Fixed => self.introspection_power_steps,
         };
         IntrospectionStepDecision {
@@ -526,6 +1157,24 @@ impl SpectralSR {
                     adaptive: true,
                     high_step,
                     reason_periodic,
+                    reason_geom,
+                    reason_pressure,
+                }
+            }
+            IntrospectionPolicy::Viscous => {
+                let reason_geom = geom_rel >= ADAPTIVE_INTROSPECTION_GEOM_HIGH;
+                let reason_pressure = pressure_rel >= VISCOUS_INTROSPECTION_PRESSURE_HIGH;
+                let high_step = reason_geom || reason_pressure;
+                let steps = if high_step {
+                    self.introspection_power_steps.max(2)
+                } else {
+                    ADAPTIVE_INTROSPECTION_LOW_STEPS
+                };
+                IntrospectionStepDecision {
+                    steps,
+                    adaptive: true,
+                    high_step,
+                    reason_periodic: false,
                     reason_geom,
                     reason_pressure,
                 }
@@ -1607,7 +2256,330 @@ pub fn state_fingerprint_16_from_slice(x: &[f32]) -> [f32; 16] {
 
 #[cfg(test)]
 mod attractor_fingerprint_tests {
-    use super::{state_fingerprint_16_from_slice, state_rms_from_slice};
+    use super::{
+        adaptive_pressure_noise_trial_review_v1, calculate_adaptive_introspection_pressure_high,
+        calculate_dynamic_noise, calculate_viscous_rho_target,
+        dynamic_noise_pressure_room_review_v1, entropy_ceiling_noise_damping_review_v1,
+        exploration_noise_coherence_review_v1, settled_entropy_pressure_buffer_review_v1,
+        state_fingerprint_16_from_slice, state_rms_from_slice,
+        ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY, DEFAULT_EXPLORATION_NOISE,
+        DYNAMIC_EXPLORATION_NOISE_MIN, VISCOUS_RHO_CEILING, VISCOUS_RHO_FLOOR,
+    };
+
+    #[test]
+    fn dynamic_noise_allows_more_vibrancy_on_gentle_gradient_low_pressure() {
+        let noise = calculate_dynamic_noise(0.11, 0.22);
+
+        assert!(noise > DEFAULT_EXPLORATION_NOISE);
+        assert!(noise <= 0.12);
+        assert!(noise >= 0.11);
+    }
+
+    #[test]
+    fn dynamic_noise_scales_down_for_steep_gradient_or_pressure() {
+        let gentle = calculate_dynamic_noise(0.11, 0.22);
+        let steep_gradient = calculate_dynamic_noise(0.80, 0.22);
+        let steep_and_pressured = calculate_dynamic_noise(0.80, 0.65);
+        let fallback = calculate_dynamic_noise(f32::NAN, f32::INFINITY);
+
+        assert!(steep_gradient < gentle);
+        assert!(steep_gradient <= DEFAULT_EXPLORATION_NOISE);
+        assert!(steep_and_pressured <= steep_gradient);
+        assert!((0.06..=0.12).contains(&fallback));
+    }
+
+    #[test]
+    fn dynamic_noise_high_pressure_gentle_gradient_stays_bounded() {
+        let low_pressure = calculate_dynamic_noise(0.10, 0.10);
+        let high_pressure = calculate_dynamic_noise(0.10, 0.90);
+
+        assert!((0.06..=0.12).contains(&high_pressure));
+        assert!(high_pressure < low_pressure);
+        assert!(high_pressure >= 0.06);
+    }
+
+    #[test]
+    fn dynamic_noise_pressure_room_review_softens_current_pressure_slope() {
+        let review = dynamic_noise_pressure_room_review_v1(0.11, 0.22, 0.90);
+
+        assert_eq!(review.policy, "dynamic_noise_pressure_room_review_v1");
+        assert_eq!(review.status, "gentle_pressure_room_slope");
+        assert!(review.pressure_window_position > 0.0);
+        assert!(review.pressure_window_position < 1.0);
+        assert!(review.smoothed_pressure_room > review.linear_pressure_room);
+        assert!(review.dynamic_noise > DEFAULT_EXPLORATION_NOISE);
+        assert!((review.entropy_floor_delta).abs() < 1.0e-6);
+        assert_eq!(
+            review.authority,
+            "read_only_pressure_room_review_not_live_exploration_noise_or_rho_change"
+        );
+    }
+
+    #[test]
+    fn dynamic_noise_gradient_room_uses_smooth_knee_instead_of_linear_drop() {
+        let review = dynamic_noise_pressure_room_review_v1(0.35, 0.10, 0.50);
+
+        assert!(review.gradient_window_position > 0.0);
+        assert!(review.gradient_window_position < 1.0);
+        assert!(
+            review.smoothed_gradient_room > review.linear_gradient_room,
+            "mid-gentle gradient should ease down rather than drop linearly: {review:?}"
+        );
+        assert!(review.dynamic_noise <= 0.12);
+    }
+
+    #[test]
+    fn dynamic_noise_pressure_room_review_keeps_requested_mid_pressure_gentle() {
+        let review = dynamic_noise_pressure_room_review_v1(0.20, 0.35, 0.90);
+
+        assert_eq!(review.status, "gentle_pressure_room_slope");
+        assert!(review.pressure_window_position > 0.0);
+        assert!(review.pressure_window_position < 1.0);
+        assert!(
+            review.smoothed_pressure_room > review.linear_pressure_room,
+            "pressure_risk=0.35 should be eased as a slope, not snapped shut: {review:?}"
+        );
+        assert!(review.dynamic_noise > DYNAMIC_EXPLORATION_NOISE_MIN);
+        assert_eq!(
+            review.authority,
+            "read_only_pressure_room_review_not_live_exploration_noise_or_rho_change"
+        );
+    }
+
+    #[test]
+    fn dynamic_noise_requested_mid_gradient_pressure_preserves_bounded_room() {
+        let requested = calculate_dynamic_noise(0.50, 0.35);
+        let steeper = calculate_dynamic_noise(0.80, 0.35);
+        let lower_pressure = calculate_dynamic_noise(0.50, 0.10);
+
+        assert!(
+            requested > DYNAMIC_EXPLORATION_NOISE_MIN,
+            "the reported 0.50/0.35 edge should retain some exploration room"
+        );
+        assert!(
+            requested < DEFAULT_EXPLORATION_NOISE,
+            "mid gradient plus mid pressure should soften below the default without collapsing to minimum: {requested}"
+        );
+        assert!(
+            steeper < requested,
+            "steeper density gradient should reduce room at the same pressure: requested={requested}, steeper={steeper}"
+        );
+        assert!(
+            lower_pressure > requested,
+            "lower pressure should leave more room at the same gradient: requested={requested}, lower_pressure={lower_pressure}"
+        );
+        assert!(
+            (requested - 0.08197).abs() < 0.0002,
+            "exact reported scalar drifted: {requested}"
+        );
+    }
+
+    #[test]
+    fn dynamic_noise_pressure_room_start_edge_is_continuous() {
+        let below = dynamic_noise_pressure_room_review_v1(0.11, 0.17, 0.90);
+        let just_inside = dynamic_noise_pressure_room_review_v1(0.11, 0.19, 0.90);
+
+        assert_eq!(below.status, "full_pressure_room_below_start");
+        assert_eq!(just_inside.status, "gentle_pressure_room_slope");
+        assert!(below.pressure_window_position <= f32::EPSILON);
+        assert!(just_inside.pressure_window_position > 0.0);
+        assert!(
+            (below.dynamic_noise - just_inside.dynamic_noise).abs() < 0.002,
+            "pressure room should open as a smooth edge, not a jump: below={below:?} inside={just_inside:?}"
+        );
+        assert_eq!(
+            just_inside.authority,
+            "read_only_pressure_room_review_not_live_exploration_noise_or_rho_change"
+        );
+    }
+
+    #[test]
+    fn adaptive_introspection_threshold_softens_only_for_volatile_low_gradient_states() {
+        let ordinary = calculate_adaptive_introspection_pressure_high(0.70, 0.10);
+        let volatile_open = calculate_adaptive_introspection_pressure_high(0.90, 0.10);
+        let volatile_steep = calculate_adaptive_introspection_pressure_high(0.90, 0.90);
+        let saturated = calculate_adaptive_introspection_pressure_high(1.0, 0.0);
+        let fallback = calculate_adaptive_introspection_pressure_high(f32::NAN, f32::INFINITY);
+
+        assert_eq!(ordinary, 2.0);
+        assert!(volatile_open < ordinary);
+        assert!(volatile_steep > volatile_open);
+        assert!(saturated >= 1.5);
+        assert!(saturated <= 2.0);
+        assert_eq!(fallback, 2.0);
+    }
+
+    #[test]
+    fn viscous_rho_target_preserves_memory_for_high_entropy_low_gradient_states() {
+        let ordinary = calculate_viscous_rho_target(0.86, 0.70, 0.18);
+        let volatile_open = calculate_viscous_rho_target(0.86, 0.91, 0.18);
+        let volatile_steep = calculate_viscous_rho_target(0.86, 0.91, 0.92);
+        let already_viscous = calculate_viscous_rho_target(0.94, 0.91, 0.18);
+        let fallback = calculate_viscous_rho_target(f32::NAN, f32::NAN, f32::INFINITY);
+
+        assert_eq!(ordinary, 0.86);
+        assert!(volatile_open > ordinary);
+        assert!(volatile_open >= 0.90);
+        assert!(volatile_steep < volatile_open);
+        assert!(already_viscous >= 0.94);
+        assert!(already_viscous <= 0.95);
+        assert_eq!(fallback, 0.90);
+    }
+
+    #[test]
+    fn viscous_rho_target_moves_high_entropy_low_gradient_toward_ceiling() {
+        let current = 0.86;
+        let target = calculate_viscous_rho_target(current, 0.90, 0.10);
+
+        assert!(target > current);
+        assert!(target >= VISCOUS_RHO_FLOOR);
+        assert!(
+            VISCOUS_RHO_CEILING - target < VISCOUS_RHO_CEILING - current,
+            "high entropy with low density gradient should move rho toward the viscous ceiling"
+        );
+        assert!(target <= VISCOUS_RHO_CEILING);
+    }
+
+    #[test]
+    fn viscous_rho_target_threshold_edge_does_not_jump() {
+        let current = 0.86;
+        let at_threshold =
+            calculate_viscous_rho_target(current, ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY, 0.10);
+        let just_above = calculate_viscous_rho_target(
+            current,
+            ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY + 0.01,
+            0.10,
+        );
+
+        assert_eq!(
+            at_threshold, current,
+            "the volatile-entropy threshold edge should not silently jump rho"
+        );
+        assert!(
+            just_above >= VISCOUS_RHO_FLOOR,
+            "only entropy above the threshold should lift toward the viscous review floor"
+        );
+        assert!(just_above <= VISCOUS_RHO_CEILING);
+    }
+
+    #[test]
+    fn exploration_noise_coherence_review_keeps_gentle_gradient_watch_bounded() {
+        let gentle = exploration_noise_coherence_review_v1(0.11, 0.22, 0.90, 0.74);
+        let steep = exploration_noise_coherence_review_v1(0.80, 0.65, 0.90, 0.74);
+
+        assert_eq!(gentle.policy, "exploration_noise_coherence_review_v1");
+        assert_eq!(
+            gentle.status,
+            "gentle_gradient_high_entropy_coherence_watch"
+        );
+        assert!(gentle.dynamic_noise > DEFAULT_EXPLORATION_NOISE);
+        assert!(gentle.dynamic_noise <= 0.12);
+        assert_eq!(
+            gentle.authority,
+            "read_only_noise_review_not_live_exploration_noise_change"
+        );
+        assert_eq!(
+            steep.status,
+            "noise_room_reduced_by_steep_gradient_or_pressure"
+        );
+        assert!(steep.dynamic_noise < gentle.dynamic_noise);
+        assert!(steep.dynamic_noise <= DEFAULT_EXPLORATION_NOISE);
+    }
+
+    #[test]
+    fn adaptive_pressure_noise_trial_review_gates_threshold_and_noise_changes() {
+        let review = adaptive_pressure_noise_trial_review_v1(0.88, 0.10, 0.30, 0.12, 0.90);
+
+        assert_eq!(review.policy, "adaptive_pressure_noise_trial_review_v1");
+        assert_eq!(review.status, "approval_required_pressure_and_noise_trial");
+        assert_eq!(review.current_pressure_threshold, 2.0);
+        assert_eq!(review.proposed_pressure_threshold, 1.80);
+        assert_eq!(review.proposed_exploration_noise, 0.08);
+        assert!(review.preview_pressure_threshold < review.current_pressure_threshold);
+        assert!(review.viscous_rho_target >= review.current_rho);
+        assert!(review.live_control_required);
+        assert!(!review.runnable_without_approval);
+        assert_eq!(
+            review.approval_boundary,
+            "live_exploration_noise_rho_and_adaptive_pressure_threshold"
+        );
+        assert_eq!(
+            review.authority,
+            "authority_gate_not_live_esn_pressure_noise_or_rho_change"
+        );
+    }
+
+    #[test]
+    fn settled_entropy_pressure_buffer_review_gates_requested_floor_change() {
+        let review = settled_entropy_pressure_buffer_review_v1(0.88, 0.10, 0.19, 0.71);
+
+        assert_eq!(review.policy, "settled_entropy_pressure_buffer_review_v1");
+        assert_eq!(
+            review.status,
+            "approval_required_settled_entropy_pressure_floor_trial"
+        );
+        assert!(review.pressure_window_position > 0.0);
+        assert!(review.pressure_window_position < 0.20);
+        assert_eq!(review.current_pressure_high_floor, 1.5);
+        assert_eq!(review.requested_pressure_high_floor, 1.75);
+        assert!(
+            review.requested_floor_preview_pressure_threshold
+                > review.current_preview_pressure_threshold,
+            "raising the floor should preview a wider buffer without applying it: {review:?}"
+        );
+        assert!(review.live_control_required);
+        assert!(!review.runnable_without_approval);
+        assert_eq!(
+            review.approval_boundary,
+            "live_adaptive_introspection_pressure_floor_and_exploration_noise"
+        );
+        assert_eq!(
+            review.authority,
+            "read_only_review_not_live_esn_pressure_floor_noise_or_rho_change"
+        );
+    }
+
+    #[test]
+    fn entropy_ceiling_noise_damping_review_names_088_under_proposed_ceiling() {
+        let review = entropy_ceiling_noise_damping_review_v1(0.88, 0.10, 0.24, 0.30, 0.35, 0.12);
+
+        assert_eq!(review.policy, "entropy_ceiling_noise_damping_review_v1");
+        assert_eq!(
+            review.status,
+            "approval_required_entropy_ceiling_and_density_noise_damping_trial"
+        );
+        assert_eq!(review.current_volatile_entropy, 0.85);
+        assert_eq!(review.proposed_volatile_entropy, 0.92);
+        assert!(review.entropy_excess_over_current > 0.0);
+        assert!(review.entropy_margin_under_proposed > 0.0);
+        assert!(review.density_containment_damping_need > 0.25);
+        assert!(review.density_containment_damped_noise < review.dynamic_noise);
+        assert!(review.density_containment_damped_noise < review.active_exploration_noise);
+        assert!(review.live_control_required);
+        assert!(!review.runnable_without_approval);
+        assert_eq!(
+            review.approval_boundary,
+            "live_exploration_noise_entropy_threshold_and_density_damping"
+        );
+        assert_eq!(
+            review.authority,
+            "authority_gate_not_live_esn_entropy_threshold_noise_or_rho_change"
+        );
+    }
+
+    #[test]
+    fn entropy_ceiling_noise_damping_review_stays_observational_when_contained() {
+        let review = entropy_ceiling_noise_damping_review_v1(0.82, 0.40, 0.50, 0.82, 0.90, 0.085);
+
+        assert_eq!(review.status, "read_only_entropy_noise_observation");
+        assert!(!review.live_control_required);
+        assert_eq!(review.entropy_excess_over_current, 0.0);
+        assert!(review.density_containment_damping_need <= 0.01);
+        assert_eq!(
+            review.authority,
+            "authority_gate_not_live_esn_entropy_threshold_noise_or_rho_change"
+        );
+    }
 
     #[test]
     fn state_fingerprint_16_is_deterministic_bounded_and_sensitive() {

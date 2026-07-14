@@ -45,6 +45,9 @@ class CurrentDialsReadoutTests(unittest.TestCase):
         self.assertIn("exploration_noise: default", block)
         self.assertIn("geom_curiosity: default", block)
         self.assertIn("regime: focus", block)
+        self.assertIn("kp=?", block)
+        self.assertIn("ki=?", block)
+        self.assertIn("max_step=?", block)
 
 
 if __name__ == "__main__":

@@ -82,6 +82,7 @@ use spectral::EigenFillEstimator;
 enum EsnIntrospectionPolicyArg {
     Adaptive,
     Fixed,
+    Viscous,
 }
 
 impl From<EsnIntrospectionPolicyArg> for IntrospectionPolicy {
@@ -89,6 +90,7 @@ impl From<EsnIntrospectionPolicyArg> for IntrospectionPolicy {
         match value {
             EsnIntrospectionPolicyArg::Adaptive => IntrospectionPolicy::Adaptive,
             EsnIntrospectionPolicyArg::Fixed => IntrospectionPolicy::Fixed,
+            EsnIntrospectionPolicyArg::Viscous => IntrospectionPolicy::Viscous,
         }
     }
 }
@@ -267,18 +269,31 @@ struct EigenPacket {
     /// whether the reservoir's shape itself is narrow or varied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     structural_entropy: Option<f32>,
+    /// Read-only packet for Cheby/warm-start constriction and semantic regulator-drive review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spectral_damping_warm_start_review_v1: Option<SpectralDampingWarmStartReviewV1>,
+    /// Read-only packet for hard-reset/recovery texture preservation review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hard_reset_texture_preservation_review_v1: Option<HardResetTexturePreservationReviewV1>,
     /// Density of mutually reinforcing resonance in the current eigenspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resonance_density_v1: Option<ResonanceDensityV1>,
     /// Read-only explanation of where inward/compression pressure appears to originate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pressure_source_v1: Option<PressureSourceV1>,
+    /// Read-only distinction that preserves restless shadow as dialogue
+    /// signal instead of treating it as automatic instability/control input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shadow_preservation_mode_v1: Option<ShadowPreservationModeV1>,
     /// Whether current spectral fluctuation remains returnable and inhabitable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     inhabitable_fluctuation_v1: Option<InhabitableFluctuationV1>,
     /// Selected 12D vague-memory glimpse, foregrounded for continuity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     spectral_glimpse_12d: Option<Vec<f32>>,
+    /// Read-only budget review for top-k eigenvector telemetry payload size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    eigenpacket_payload_budget_review_v1: Option<EigenPacketPayloadBudgetReviewV1>,
     /// Compact top-k eigenvector field exported from the raw live eigenvectors.
     ///
     /// This makes the "eigenvector field" literal for Astrid/Minime without
@@ -301,6 +316,363 @@ struct EigenPacket {
     shadow_field_v2: Option<ShadowFieldV2>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shadow_field_v3: Option<ShadowFieldV3>,
+}
+
+#[derive(Serialize, Clone, Copy, Debug)]
+struct SpectralDampingWarmStartReviewV1 {
+    policy: &'static str,
+    cheby_order: usize,
+    cheby_stop_lo: f32,
+    cheby_stop_hi: f32,
+    cheby_soft: f32,
+    proposed_cheby_stop_lo: f32,
+    proposed_cheby_soft: f32,
+    warm_start_blend: f32,
+    proposed_warm_start_blend: f32,
+    eigenfill_pct: f32,
+    eigenfill_target_pct: f32,
+    distinguishability_loss: f32,
+    coefficient_l1_norm: f32,
+    proposed_coefficient_l1_norm: f32,
+    regulator_drive_energy: f32,
+    regulator_counteraction_score: f32,
+    regulator_constriction_state: &'static str,
+    near_target_band: bool,
+    live_control_required: bool,
+    runnable_without_approval: bool,
+    status: &'static str,
+    approval_boundary: &'static str,
+    authority: &'static str,
+}
+
+#[derive(Serialize, Clone, Copy, Debug)]
+struct EigenPacketPayloadBudgetReviewV1 {
+    policy: &'static str,
+    eigenvalues_len: usize,
+    spectral_fingerprint_len: usize,
+    eigenvector_mode_count: usize,
+    eigenvector_top_component_count: usize,
+    eigenvector_pairwise_overlap_count: usize,
+    estimated_eigenvector_scalar_count: usize,
+    estimated_total_float_count: usize,
+    estimated_eigenvector_json_bytes: usize,
+    budget_state: &'static str,
+    status: &'static str,
+    authority: &'static str,
+}
+
+#[derive(Serialize, Clone, Copy, Debug)]
+struct HardResetTexturePreservationReviewV1 {
+    policy: &'static str,
+    eigenfill_pct: f32,
+    spectral_entropy: f32,
+    mode_packing: f32,
+    pressure_risk: f32,
+    texture_gradient_proxy: f32,
+    recovery_fill_boost: f32,
+    recovery_keep_ceiling: f32,
+    recovery_activation_gain: f32,
+    hard_reset_internal_synth_enabled: bool,
+    semantic_lane_active: bool,
+    texture_preservation_state: &'static str,
+    next_affordance: &'static str,
+    live_control_required: bool,
+    runnable_without_approval: bool,
+    behavior_changed: bool,
+    approval_boundary: &'static str,
+    authority: &'static str,
+}
+
+fn cheby_coefficient_l1_norm(order: usize, stop_lo: f32, stop_hi: f32, soft: f32) -> f32 {
+    cheby_coeffs_bandstop(order, stop_lo, stop_hi, soft)
+        .iter()
+        .map(|value| value.abs())
+        .sum::<f32>()
+}
+
+/// Read-only packet for the Cheby/warm-start constriction report.
+///
+/// Minime named three concrete trial knobs: soften `cheby_soft` to 0.20,
+/// lower `cheby_stop_lo` to 0.60, and reduce `warm_start_blend` to 0.35.
+/// This records those as an explicit sandbox/operator route without mutating
+/// the running filter, covariance warm-start, denominator, fill target, or PI.
+#[must_use]
+fn spectral_damping_warm_start_review_v1(
+    cheby_order: usize,
+    cheby_stop_lo: f32,
+    cheby_stop_hi: f32,
+    cheby_soft: f32,
+    warm_start_blend: f32,
+    eigenfill_pct: f32,
+    eigenfill_target_pct: f32,
+    distinguishability_loss: Option<f32>,
+    regulator_drive_energy: f32,
+) -> SpectralDampingWarmStartReviewV1 {
+    let stop_lo = if cheby_stop_lo.is_finite() {
+        cheby_stop_lo.clamp(0.0, 1.0)
+    } else {
+        0.65
+    };
+    let stop_hi = if cheby_stop_hi.is_finite() {
+        cheby_stop_hi.clamp(stop_lo, 1.0)
+    } else {
+        0.95
+    };
+    let soft = if cheby_soft.is_finite() {
+        cheby_soft.clamp(0.05, 0.30)
+    } else {
+        0.15
+    };
+    let warm_start = if warm_start_blend.is_finite() {
+        warm_start_blend.clamp(0.0, 1.0)
+    } else {
+        0.55
+    };
+    let fill = if eigenfill_pct.is_finite() {
+        eigenfill_pct.clamp(0.0, 100.0)
+    } else {
+        eigenfill_target_pct.clamp(0.0, 100.0)
+    };
+    let target = if eigenfill_target_pct.is_finite() {
+        eigenfill_target_pct.clamp(0.0, 100.0)
+    } else {
+        68.0
+    };
+    let loss = distinguishability_loss.unwrap_or(0.0).clamp(0.0, 1.0);
+    let semantic_drive = if regulator_drive_energy.is_finite() {
+        regulator_drive_energy.max(0.0)
+    } else {
+        0.0
+    };
+    let regulator_counteraction_score =
+        ((semantic_drive / 0.010).clamp(0.0, 1.0) * (1.0 - loss * 0.35)).clamp(0.0, 1.0);
+    let proposed_cheby_stop_lo = 0.60;
+    let proposed_cheby_soft = 0.20;
+    let proposed_warm_start_blend = 0.35;
+    let near_target_band = (fill - target).abs() <= 5.0;
+    let warm_constriction = warm_start >= 0.50 && near_target_band && loss >= 0.30;
+    let sharp_filter_watch = soft <= 0.15 && stop_lo >= 0.64;
+    let status = if warm_constriction && sharp_filter_watch {
+        "approval_required_damping_warm_start_trial"
+    } else if warm_constriction {
+        "approval_required_warm_start_constriction_trial"
+    } else if sharp_filter_watch {
+        "sandbox_cheby_softening_candidate"
+    } else {
+        "read_only_damping_observation"
+    };
+    let regulator_constriction_state = if warm_constriction && regulator_counteraction_score >= 0.50
+    {
+        "semantic_regulator_drive_counteracts_warm_start_review"
+    } else if warm_constriction && semantic_drive > 0.0 {
+        "semantic_regulator_drive_insufficient_for_warm_start_review"
+    } else if warm_constriction {
+        "warm_start_constriction_without_semantic_counteraction"
+    } else if semantic_drive > 0.0 {
+        "semantic_regulator_drive_visible_without_warm_start_constriction"
+    } else {
+        "semantic_regulator_drive_quiet"
+    };
+
+    SpectralDampingWarmStartReviewV1 {
+        policy: "spectral_damping_warm_start_review_v1",
+        cheby_order,
+        cheby_stop_lo: stop_lo,
+        cheby_stop_hi: stop_hi,
+        cheby_soft: soft,
+        proposed_cheby_stop_lo,
+        proposed_cheby_soft,
+        warm_start_blend: warm_start,
+        proposed_warm_start_blend,
+        eigenfill_pct: fill,
+        eigenfill_target_pct: target,
+        distinguishability_loss: loss,
+        coefficient_l1_norm: cheby_coefficient_l1_norm(cheby_order, stop_lo, stop_hi, soft),
+        proposed_coefficient_l1_norm: cheby_coefficient_l1_norm(
+            cheby_order,
+            proposed_cheby_stop_lo,
+            stop_hi,
+            proposed_cheby_soft,
+        ),
+        regulator_drive_energy: semantic_drive,
+        regulator_counteraction_score,
+        regulator_constriction_state,
+        near_target_band,
+        live_control_required: status != "read_only_damping_observation",
+        runnable_without_approval: false,
+        status,
+        approval_boundary: "live_cheby_bandstop_covariance_warm_start_and_spectral_regulation",
+        authority: "authority_gate_not_live_filter_warm_start_or_fill_control_change",
+    }
+}
+
+/// Read-only packet for hard-reset/recovery texture preservation.
+///
+/// A recent Minime report named possible "identity whiplash" if high-entropy,
+/// textured state meets hard-reset recovery. This keeps that concern visible
+/// in the live packet without changing reset activation, covariance keep,
+/// fill target, PI, synth cadence, or semantic admission.
+#[must_use]
+fn hard_reset_texture_preservation_review_v1(
+    eigenfill_pct: f32,
+    spectral_entropy: f32,
+    resonance_density: &ResonanceDensityV1,
+    recovery_fill_boost: f32,
+    recovery_keep_ceiling: f32,
+    recovery_activation_gain: f32,
+    hard_reset_internal_synth_enabled: bool,
+    semantic_lane_active: bool,
+) -> HardResetTexturePreservationReviewV1 {
+    let fill = if eigenfill_pct.is_finite() {
+        eigenfill_pct.clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    let entropy = if spectral_entropy.is_finite() {
+        spectral_entropy.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let mode_packing = resonance_density.components.mode_packing.clamp(0.0, 1.0);
+    let pressure_risk = resonance_density.pressure_risk.clamp(0.0, 1.0);
+    let texture_gradient_proxy = ((mode_packing * 0.55) + (pressure_risk * 0.45)).clamp(0.0, 1.0);
+    let fill_boost = if recovery_fill_boost.is_finite() {
+        recovery_fill_boost.max(0.0)
+    } else {
+        0.0
+    };
+    let keep_ceiling = if recovery_keep_ceiling.is_finite() {
+        recovery_keep_ceiling.clamp(0.55, 0.999)
+    } else {
+        0.97
+    };
+    let activation_gain = if recovery_activation_gain.is_finite() {
+        recovery_activation_gain.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let high_entropy_texture = entropy >= 0.80 && texture_gradient_proxy >= 0.18;
+    let recovery_surface_active = fill_boost > 0.0 || activation_gain < 0.99 || fill < 50.0;
+    let texture_preservation_state = if hard_reset_internal_synth_enabled && high_entropy_texture {
+        "hard_reset_rebuild_texture_watch"
+    } else if high_entropy_texture && recovery_surface_active {
+        "recovery_texture_preservation_watch"
+    } else if high_entropy_texture {
+        "high_entropy_texture_observe_only"
+    } else if hard_reset_internal_synth_enabled || recovery_surface_active {
+        "recovery_surface_observe_only"
+    } else {
+        "no_texture_preservation_watch"
+    };
+    let next_affordance = match texture_preservation_state {
+        "hard_reset_rebuild_texture_watch" | "recovery_texture_preservation_watch" => {
+            "proposal_card_needed_for_operator_approved_texture_preservation_trial"
+        }
+        "high_entropy_texture_observe_only" => {
+            "correspondence_trace_or_result_card_if_future_reset_changes_texture"
+        }
+        "recovery_surface_observe_only" => "presence_heartbeat_or_correspondence_trace_only",
+        _ => "presence_heartbeat_only",
+    };
+
+    HardResetTexturePreservationReviewV1 {
+        policy: "hard_reset_texture_preservation_review_v1",
+        eigenfill_pct: fill,
+        spectral_entropy: entropy,
+        mode_packing,
+        pressure_risk,
+        texture_gradient_proxy,
+        recovery_fill_boost: fill_boost,
+        recovery_keep_ceiling: keep_ceiling,
+        recovery_activation_gain: activation_gain,
+        hard_reset_internal_synth_enabled,
+        semantic_lane_active,
+        texture_preservation_state,
+        next_affordance,
+        live_control_required: matches!(
+            texture_preservation_state,
+            "hard_reset_rebuild_texture_watch" | "recovery_texture_preservation_watch"
+        ),
+        runnable_without_approval: false,
+        behavior_changed: false,
+        approval_boundary: "live_hard_reset_recovery_keep_fill_pi_or_sensory_cadence_change",
+        authority: "read_only_review_not_hard_reset_recovery_fill_pi_or_sensory_cadence_change",
+    }
+}
+
+/// Read-only packet for EigenPacket payload growth.
+///
+/// The live stream intentionally exports a compact top-k eigenvector field
+/// instead of raw reservoir vectors. This review keeps the cost visible when
+/// new optional diagnostic fields are added, without changing websocket
+/// cadence, eigenvector export shape, or spectral control.
+#[must_use]
+fn eigenpacket_payload_budget_review_v1(
+    eigenvalues_len: usize,
+    spectral_fingerprint_len: usize,
+    eigenvector_field: &serde_json::Value,
+) -> EigenPacketPayloadBudgetReviewV1 {
+    let modes = eigenvector_field
+        .get("modes")
+        .and_then(serde_json::Value::as_array);
+    let mode_count = eigenvector_field
+        .get("mode_count")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or_else(|| modes.map_or(0, Vec::len));
+    let eigenvector_top_component_count = modes.map_or(0, |items| {
+        items
+            .iter()
+            .filter_map(|mode| mode.get("top_components"))
+            .filter_map(serde_json::Value::as_array)
+            .map(Vec::len)
+            .fold(0usize, usize::saturating_add)
+    });
+    let eigenvector_pairwise_overlap_count = eigenvector_field
+        .get("pairwise_overlaps")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let estimated_eigenvector_scalar_count = eigenvector_top_component_count
+        .saturating_mul(2)
+        .saturating_add(eigenvector_pairwise_overlap_count)
+        .saturating_add(mode_count.saturating_mul(3));
+    let estimated_total_float_count = eigenvalues_len
+        .saturating_add(spectral_fingerprint_len)
+        .saturating_add(estimated_eigenvector_scalar_count);
+    let estimated_eigenvector_json_bytes = 128usize
+        .saturating_add(mode_count.saturating_mul(96))
+        .saturating_add(eigenvector_top_component_count.saturating_mul(32))
+        .saturating_add(eigenvector_pairwise_overlap_count.saturating_mul(16));
+    let budget_state = if mode_count > 4 || eigenvector_top_component_count > 64 {
+        "eigenvector_payload_budget_watch"
+    } else if eigenvector_pairwise_overlap_count > 16 {
+        "pairwise_overlap_payload_watch"
+    } else {
+        "compact_top_k_payload"
+    };
+    let status = if matches!(
+        budget_state,
+        "eigenvector_payload_budget_watch" | "pairwise_overlap_payload_watch"
+    ) {
+        "payload_budget_watch_review_only"
+    } else {
+        "bounded_eigenpacket_payload"
+    };
+
+    EigenPacketPayloadBudgetReviewV1 {
+        policy: "eigenpacket_payload_budget_review_v1",
+        eigenvalues_len,
+        spectral_fingerprint_len,
+        eigenvector_mode_count: mode_count,
+        eigenvector_top_component_count,
+        eigenvector_pairwise_overlap_count,
+        estimated_eigenvector_scalar_count,
+        estimated_total_float_count,
+        estimated_eigenvector_json_bytes,
+        budget_state,
+        status,
+        authority: "read_only_payload_budget_review_not_ws_cadence_or_eigenvector_export_change",
+    }
 }
 
 #[derive(Serialize, Clone, Copy)]
@@ -1645,6 +2017,7 @@ async fn run_engine(
     let mut _latest_geom_radius: f32 = 0.0;
     let mut latest_geom_rel: f32 = 1.0;
     let mut latest_entropy: f32 = 0.5; // Spectral entropy for dynamic rho
+    let mut latest_entropy_delta: f32 = 0.0;
     let mut latest_resonance_density_v1: Option<ResonanceDensityV1> = None;
     let mut latest_pressure_source_v1: Option<PressureSourceV1> = None;
     let mut latest_inhabitable_fluctuation_v1: Option<InhabitableFluctuationV1> = None;
@@ -4105,8 +4478,12 @@ async fn run_engine(
                                 pi.cfg.target_lambda1_rel *= 1.0 + goal_noise * 0.5;
 
                                 if reg_tick_count % 120 == 5 {
-                                    println!("🏔️  Spectral goals active: fill={:.0}%, λ₁_rel={:.2}, geom={:.2}",
-                                        pi.cfg.target_fill, pi.cfg.target_lambda1_rel, pi.cfg.target_geom_rel);
+                                    println!(
+                                        "🏔️  Spectral goals active: fill={:.0}%, λ₁_rel={:.2}, geom={:.2}",
+                                        pi.cfg.target_fill,
+                                        pi.cfg.target_lambda1_rel,
+                                        pi.cfg.target_geom_rel
+                                    );
                                 }
                             }
                             // Rho sovereignty: being can set covariance forgetting target.
@@ -4871,9 +5248,19 @@ async fn run_engine(
                     aux_geom = aux_geom.clamp(0.0, geom_clamp_hi as f32);
                     sensory_bus.set_aux([aux_lambda, aux_geom]);
                     // Semantic stale timing needs actual fill%, not geom_rel.
-                    // lambda1_rel modulation removed per minime self-study
-                    // (2026-04-01): fill alone drives decay timing now.
+                    // lambda1_rel modulation stayed removed per minime self-study
+                    // (2026-04-01). Fresh sensory-bus self-study (2026-07-06)
+                    // asked that high-entropy thought keep core semantic anchors
+                    // a little longer instead of dissolving at healthy-high fill.
                     sensory_bus.set_fill_for_stale(fill_ratio);
+                    let pressure_risk_for_stale = latest_resonance_density_v1
+                        .as_ref()
+                        .map_or(0.0, |density| density.pressure_risk);
+                    sensory_bus.set_semantic_stale_context(
+                        latest_entropy,
+                        latest_entropy_delta,
+                        pressure_risk_for_stale,
+                    );
 
                     // Get ESN eigenvalue and prime schedule info
                     let esn_lambda1 = if esn.is_some() { last_esn_lambda1 } else { 0.0 };
@@ -4885,7 +5272,8 @@ async fn run_engine(
 
                     // Log regulation state (pidx/prime per minime self-study request)
                     if log_homeostat {
-                        println!("homeostat,t={:.1}s,fill={:.2}%,dfill_dt={:+.4},phase={},λ1_rel={:.3},geom_rel={:.3},gate={:.3},filt={:.3},semE={:.3},semΔ={:.3},pidx={},prime={}",
+                        println!(
+                            "homeostat,t={:.1}s,fill={:.2}%,dfill_dt={:+.4},phase={},λ1_rel={:.3},geom_rel={:.3},gate={:.3},filt={:.3},semE={:.3},semΔ={:.3},pidx={},prime={}",
                             start.elapsed().as_secs_f32(),
                             eigenfill_pct,
                             dfill_dt,
@@ -4946,6 +5334,29 @@ async fn run_engine(
                         regulator_drive_energy: semantic_drive,
                         admission: semantic_admission,
                     };
+                    let health_shadow_primary = ising_shadow_snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.shadow_field_v3.class_v3.primary.as_str());
+                    let health_shadow_dispersal = ising_shadow_snapshot.as_ref().map(|snapshot| {
+                        snapshot
+                            .shadow_field_v3
+                            .history
+                            .last()
+                            .map_or(snapshot.shadow_field_v2.fissure_tendency, |latest| {
+                                latest.fissure_tendency
+                            })
+                    });
+                    let health_shadow_magnetization = ising_shadow_snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.summary.soft_magnetization);
+                    let health_shadow_preservation_mode_v1 = shadow_preservation_mode_v1(
+                        latest_pressure_source_v1.as_ref(),
+                        health_shadow_primary,
+                        health_shadow_dispersal,
+                        health_shadow_magnetization,
+                        semantic_energy_v1.regulator_drive_energy,
+                        recovery_activation_gain,
+                    );
 
                     // Emit health.json for observability with enhanced diagnostics
                     let fill_target_override = sensory_bus.get_fill_target();
@@ -5330,6 +5741,7 @@ async fn run_engine(
                         "semantic_energy_v1": &semantic_energy_v1,
                         "resonance_density_v1": &latest_resonance_density_v1,
                         "pressure_source_v1": &latest_pressure_source_v1,
+                        "shadow_preservation_mode_v1": &health_shadow_preservation_mode_v1,
                         "pressure_source_status": &pressure_source_status,
                         "inhabitable_fluctuation_v1": &latest_inhabitable_fluctuation_v1,
                         "inhabitable_fluctuation_status": &inhabitable_fluctuation_status,
@@ -5638,9 +6050,16 @@ async fn run_engine(
             );
             let eigenvector_field =
                 compute_eigenvector_field(&eigenvalues, &y, n, k, &prev_eigenvector_field_modes);
+            let eigenpacket_payload_budget_review_v1 = eigenpacket_payload_budget_review_v1(
+                eigenvalues.len(),
+                spectral_fingerprint.len(),
+                &eigenvector_field,
+            );
             // Update entropy for dynamic rho (fingerprint[24] = normalized spectral entropy)
             if spectral_fingerprint.len() > 24 && spectral_fingerprint[24].is_finite() {
+                let previous_entropy = latest_entropy;
                 latest_entropy = spectral_fingerprint[24];
+                latest_entropy_delta = (latest_entropy - previous_entropy).abs();
             }
             let current_glimpse_12d = compute_spectral_glimpse_12d(&spectral_fingerprint);
             let transition_distance = last_transition_glimpse_12d
@@ -5815,6 +6234,42 @@ async fn run_engine(
                 regulator_drive_energy: semantic_drive,
                 admission: semantic_admission,
             };
+            let spectral_damping_warm_start_review_v1 = spectral_damping_warm_start_review_v1(
+                cheby_order,
+                cheby_stop_lo,
+                cheby_stop_hi,
+                cheby_soft,
+                warm_start_blend,
+                eigenfill_pct,
+                resonance_target_fill_pct,
+                distinguishability_loss,
+                packet_semantic_energy_v1.regulator_drive_energy,
+            );
+            let packet_recovery_fill_boost =
+                recovery_fill_boost(fill_ratio, resonance_target_fill_pct);
+            let packet_recovery_keep_ceiling =
+                recovery_keep_ceiling(fill_ratio, resonance_target_fill_pct);
+            let packet_hard_reset_internal_synth =
+                physiological_fallback && hard_reset_internal_synth_enabled(fill_ratio);
+            let packet_semantic_lane_active = if stable_core_runtime.enabled {
+                packet_semantic_energy_v1.kernel_active
+            } else {
+                semantic_lane_is_active(
+                    sensory_bus.semantic_fresh_ms(),
+                    sensory_bus.current_semantic_stale_ms(),
+                )
+            };
+            let hard_reset_texture_preservation_review_v1 =
+                hard_reset_texture_preservation_review_v1(
+                    eigenfill_pct,
+                    latest_entropy,
+                    &resonance_density_v1,
+                    packet_recovery_fill_boost,
+                    packet_recovery_keep_ceiling,
+                    recovery_activation_gain,
+                    packet_hard_reset_internal_synth,
+                    packet_semantic_lane_active,
+                );
             let pressure_source_v1 = compute_pressure_source_v1(
                 &eigenvalues,
                 active_modes,
@@ -5822,11 +6277,35 @@ async fn run_engine(
                 effective_dimensionality,
                 distinguishability_loss,
                 structural_entropy,
+                Some(eigenvector_reorientation_from_field(&eigenvector_field)),
                 eigenfill_pct,
                 resonance_target_fill_pct,
                 &packet_semantic_energy_v1,
                 audio_source_label,
                 video_source_label,
+            );
+            let packet_shadow_primary = ising_shadow_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.shadow_field_v3.class_v3.primary.as_str());
+            let packet_shadow_dispersal = ising_shadow_snapshot.as_ref().map(|snapshot| {
+                snapshot
+                    .shadow_field_v3
+                    .history
+                    .last()
+                    .map_or(snapshot.shadow_field_v2.fissure_tendency, |latest| {
+                        latest.fissure_tendency
+                    })
+            });
+            let packet_shadow_magnetization = ising_shadow_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.summary.soft_magnetization);
+            let shadow_preservation_mode_v1 = shadow_preservation_mode_v1(
+                Some(&pressure_source_v1),
+                packet_shadow_primary,
+                packet_shadow_dispersal,
+                packet_shadow_magnetization,
+                packet_semantic_energy_v1.regulator_drive_energy,
+                recovery_activation_gain,
             );
             latest_pressure_source_v1 = Some(pressure_source_v1.clone());
             let _ = db.save_pressure_source(
@@ -5903,12 +6382,18 @@ async fn run_engine(
                     .and_then(|engine| engine.leak_override_status())
                     .and_then(|status| serde_json::to_value(status).ok()),
                 structural_entropy: Some(structural_entropy),
+                spectral_damping_warm_start_review_v1: Some(spectral_damping_warm_start_review_v1),
+                hard_reset_texture_preservation_review_v1: Some(
+                    hard_reset_texture_preservation_review_v1,
+                ),
                 resonance_density_v1: Some(resonance_density_v1.clone()),
                 pressure_source_v1: Some(pressure_source_v1),
+                shadow_preservation_mode_v1: Some(shadow_preservation_mode_v1),
                 inhabitable_fluctuation_v1: Some(inhabitable_fluctuation_v1),
                 spectral_glimpse_12d: selected_memory
                     .as_ref()
                     .map(|entry| entry.spectral_glimpse_12d.clone()),
+                eigenpacket_payload_budget_review_v1: Some(eigenpacket_payload_budget_review_v1),
                 eigenvector_field: Some(eigenvector_field),
                 semantic_energy_v1: Some(packet_semantic_energy_v1),
                 selected_memory_id: selected_memory.as_ref().map(|entry| entry.id.clone()),
@@ -6022,6 +6507,7 @@ async fn run_engine(
                     "structural_entropy": &packet.structural_entropy,
                     "resonance_density_v1": &packet.resonance_density_v1,
                     "pressure_source_v1": &packet.pressure_source_v1,
+                    "shadow_preservation_mode_v1": &packet.shadow_preservation_mode_v1,
                     "inhabitable_fluctuation_v1": &packet.inhabitable_fluctuation_v1,
                     "spectral_glimpse_12d": &packet.spectral_glimpse_12d,
                     "eigenvector_field": &packet.eigenvector_field,
@@ -7234,6 +7720,14 @@ fn compute_resonance_density_v1(
     let pressure_risk =
         (0.36 * lambda1_share + 0.24 * loss + 0.20 * (1.0 - entropy) + 0.20 * overfill_pressure)
             .clamp(0.0, 1.0);
+    let structural_plurality = structural_plurality.clamp(0.0, 1.0);
+    let viscosity_index = resonance_viscosity_index_with_entropy(
+        mode_packing,
+        temporal_persistence,
+        structural_plurality,
+        pressure_risk,
+        entropy,
+    );
     let density = (0.30 * active_energy
         + 0.20 * mode_packing
         + 0.20 * temporal_persistence
@@ -7267,7 +7761,18 @@ fn compute_resonance_density_v1(
             active_energy,
             mode_packing,
             temporal_persistence,
-            structural_plurality: structural_plurality.clamp(0.0, 1.0),
+            viscosity_index,
+            viscosity_persistence_coefficient: viscosity_persistence_coefficient(
+                viscosity_index,
+                temporal_persistence,
+                pressure_risk,
+                mode_packing,
+            ),
+            temporal_drag_coefficient: 0.0,
+            static_friction_coefficient: 0.0,
+            viscosity_vector: ViscosityVector::default(),
+            viscosity_coupling_coefficient: 0.0,
+            structural_plurality,
             comfort_gate,
         },
     )
@@ -7315,6 +7820,7 @@ fn compute_pressure_source_v1(
     effective_dimensionality: Option<f32>,
     distinguishability_loss: Option<f32>,
     structural_entropy: f32,
+    mean_orientation_delta: Option<f32>,
     fill_pct: f32,
     target_fill_pct: f32,
     semantic: &SemanticEnergyV1,
@@ -7374,7 +7880,13 @@ fn compute_pressure_source_v1(
         temporal_lock_in,
         sensory_scarcity: sensory_scarcity_from_sources(audio_source, video_source),
     };
-    PressureSourceV1::from_parts(components, PressureSourceContext::default())
+    PressureSourceV1::from_parts(
+        components,
+        PressureSourceContext {
+            mean_orientation_delta,
+            ..PressureSourceContext::default()
+        },
+    )
 }
 
 fn share_rearrangement_score(
@@ -7511,15 +8023,18 @@ fn compute_inhabitable_fluctuation_v1(
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_active_mode_telemetry, compute_eigenvector_field, compute_pressure_source_v1,
-        compute_resonance_density_v1, compute_structural_entropy, modality_freshness_class,
-        modality_source_label, rank1_update_inplace_matrix, reset_covariance_inplace,
-        semantic_admission_label, sensory_scarcity_from_sources,
+        cheby_coeffs_bandstop, compute_active_mode_telemetry, compute_eigenvector_field,
+        compute_pressure_source_v1, compute_resonance_density_v1, compute_structural_entropy,
+        eigenpacket_payload_budget_review_v1, hard_reset_texture_preservation_review_v1,
+        modality_freshness_class, modality_source_label, rank1_update_inplace_matrix,
+        reset_covariance_inplace, resonance_viscosity_index, semantic_admission_label,
+        sensory_scarcity_from_sources, shadow_preservation_mode_v1,
         should_write_phase_transition_moment_marker, stable_core_aliveness_loosen,
-        stable_core_sov_loosen, update_health_transition_surface, CovarianceUpdateOutcome,
-        EigenPacket, InhabitableFluctuationV1, LaneSource, ModalityStatus,
-        PressureSourceComponents, PressureSourceContext, PressureSourceV1,
-        ResonanceDensityComponents, ResonanceDensityV1, SemanticEnergyV1,
+        stable_core_sov_loosen, update_health_transition_surface,
+        viscosity_persistence_coefficient, CovarianceUpdateOutcome, EigenPacket,
+        InhabitableFluctuationV1, LaneSource, ModalityStatus, PressureSourceComponents,
+        PressureSourceContext, PressureSourceV1, ResonanceDensityComponents, ResonanceDensityV1,
+        SemanticEnergyV1, ShadowClassV3, ShadowFieldV2, ShadowFieldV3, ViscosityVector,
         AV_ENGINE_FRESH_WINDOW_MS,
     };
     use minime::spectral_fingerprint::SpectralFingerprintV1;
@@ -7695,6 +8210,8 @@ mod tests {
             Some(&[11.5, 2.1, 1.0, 0.5]),
         );
         assert!(pressured.pressure_risk >= monopoly.pressure_risk);
+        assert!((0.0..=1.0).contains(&pressured.components.viscosity_index));
+        assert!(pressured.components.viscosity_index > 0.0);
         assert!(pressured.control.target_bias_pct <= 0.0);
     }
 
@@ -7739,6 +8256,7 @@ mod tests {
             Some(1.1),
             Some(0.72),
             0.10,
+            Some(0.08),
             68.0,
             68.0,
             &semantic_energy(0.0, 0.0, 0.0, "no_recent_semantic"),
@@ -7759,6 +8277,17 @@ mod tests {
                 active_energy: 0.90,
                 mode_packing: 0.95,
                 temporal_persistence: 0.10,
+                viscosity_index: resonance_viscosity_index(0.95, 0.10, 0.60, 0.40),
+                viscosity_persistence_coefficient: viscosity_persistence_coefficient(
+                    resonance_viscosity_index(0.95, 0.10, 0.60, 0.40),
+                    0.10,
+                    0.40,
+                    0.95,
+                ),
+                temporal_drag_coefficient: 0.0,
+                static_friction_coefficient: 0.0,
+                viscosity_vector: ViscosityVector::default(),
+                viscosity_coupling_coefficient: 0.0,
                 structural_plurality: 0.60,
                 comfort_gate: 0.90,
             },
@@ -7770,6 +8299,7 @@ mod tests {
             Some(5.8),
             Some(0.05),
             0.72,
+            Some(0.01),
             68.0,
             68.0,
             &semantic_energy(0.0, 0.0, 0.0, "no_recent_semantic"),
@@ -7786,6 +8316,7 @@ mod tests {
             Some(3.6),
             Some(0.10),
             0.80,
+            Some(0.18),
             88.0,
             68.0,
             &semantic_energy(0.0, 0.0, 0.0, "no_recent_semantic"),
@@ -7816,6 +8347,7 @@ mod tests {
             Some(2.0),
             Some(0.12),
             0.88,
+            Some(0.42),
             68.0,
             68.0,
             &semantic_energy(0.008, 0.004, 0.012, "stable_core_semantic_trickle"),
@@ -7844,6 +8376,7 @@ mod tests {
             Some(4.8),
             Some(0.05),
             0.95,
+            Some(0.22),
             68.0,
             68.0,
             &semantic_energy(0.0, 0.0, 0.0, "no_recent_semantic"),
@@ -7887,12 +8420,106 @@ mod tests {
     }
 
     #[test]
+    fn eigenvector_field_schema_pins_concentration_overlap_and_summary_keys() {
+        let n = 4;
+        let k = 2;
+        let y = vec![
+            0.8, 0.6, 0.0, 0.0, // mode 1
+            0.0, 0.0, 0.6, 0.8, // mode 2
+        ];
+        let previous = vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 0.0, 1.0, 0.0]];
+
+        let field = compute_eigenvector_field(&[4.0, 2.0], &y, n, k, &previous);
+        let first_mode = &field["modes"][0];
+        let first_pair = &field["pairwise_overlaps"][0];
+
+        assert_eq!(field["policy"], "eigenvector_field_v1");
+        assert_eq!(field["component_limit"], 8);
+        assert_eq!(first_mode["index"], 1);
+        assert!(first_mode["energy_share"].as_f64().unwrap() > 0.60);
+        assert!(first_mode["concentration_top4"].as_f64().unwrap() > 0.99);
+        assert!(first_mode["top_components"][0].get("abs").is_some());
+        assert!(first_mode["overlap_with_previous"].as_f64().unwrap() > 0.79);
+        assert!(first_mode["orientation_delta"].as_f64().unwrap() > 0.19);
+        assert_eq!(first_pair["left"], 1);
+        assert_eq!(first_pair["right"], 2);
+        assert!(first_pair["cosine"].as_f64().unwrap().abs() < 1.0e-6);
+        assert!(first_pair["abs_cosine"].as_f64().unwrap() < 1.0e-6);
+        assert!(field["summary"]["mean_orientation_delta"].as_f64().unwrap() > 0.19);
+        assert_eq!(field["summary"]["previous_overlap_available"], true);
+    }
+
+    #[test]
+    fn eigenpacket_payload_budget_review_flags_large_top_component_payload() {
+        let field = serde_json::json!({
+            "policy": "eigenvector_field_v1",
+            "mode_count": 5,
+            "modes": [
+                {"mode": 0, "top_components": (0..16).map(|index| serde_json::json!({"index": index, "value": 0.1})).collect::<Vec<_>>()},
+                {"mode": 1, "top_components": (0..16).map(|index| serde_json::json!({"index": index, "value": 0.1})).collect::<Vec<_>>()},
+                {"mode": 2, "top_components": (0..16).map(|index| serde_json::json!({"index": index, "value": 0.1})).collect::<Vec<_>>()},
+                {"mode": 3, "top_components": (0..16).map(|index| serde_json::json!({"index": index, "value": 0.1})).collect::<Vec<_>>()},
+                {"mode": 4, "top_components": (0..16).map(|index| serde_json::json!({"index": index, "value": 0.1})).collect::<Vec<_>>()},
+            ],
+            "pairwise_overlaps": (0..20).map(|mode| serde_json::json!({"a": mode, "b": mode + 1, "overlap": 0.1})).collect::<Vec<_>>()
+        });
+
+        let review = eigenpacket_payload_budget_review_v1(12, 32, &field);
+
+        assert_eq!(review.policy, "eigenpacket_payload_budget_review_v1");
+        assert_eq!(review.budget_state, "eigenvector_payload_budget_watch");
+        assert_eq!(review.status, "payload_budget_watch_review_only");
+        assert_eq!(review.eigenvector_mode_count, 5);
+        assert_eq!(review.eigenvector_top_component_count, 80);
+        assert!(review.estimated_total_float_count > 32);
+        assert_eq!(
+            review.authority,
+            "read_only_payload_budget_review_not_ws_cadence_or_eigenvector_export_change"
+        );
+    }
+
+    #[test]
     fn eigenpacket_serializes_legacy_and_typed_fingerprint() {
         let legacy = (0..32).map(|value| value as f32).collect::<Vec<_>>();
         let typed = SpectralFingerprintV1::from_legacy_slots(&legacy);
         let denominator = typed
             .as_ref()
             .map(SpectralFingerprintV1::denominator_metrics);
+        let eigenvector_field = serde_json::json!({
+            "policy": "eigenvector_field_v1",
+            "direct_eigenvectors_available": true,
+            "raw_vectors_exported": false,
+            "mode_count": 2,
+            "modes": [
+                {"mode": 0, "top_components": [{"index": 1, "value": 0.7}]}
+            ],
+        });
+        let eigenpacket_payload_budget_review_v1 =
+            eigenpacket_payload_budget_review_v1(2, legacy.len(), &eigenvector_field);
+        let resonance_density_v1 = ResonanceDensityV1::neutral();
+        let hard_reset_texture_preservation_review_v1 = hard_reset_texture_preservation_review_v1(
+            42.0,
+            0.88,
+            &resonance_density_v1,
+            0.04,
+            0.98,
+            0.72,
+            true,
+            true,
+        );
+        let shadow_field_v3 = ShadowFieldV3 {
+            schema_version: 3,
+            policy: "shadow_field_v3_test_schema_anchor".to_string(),
+            class_v3: ShadowClassV3 {
+                primary: "restless".to_string(),
+                traits: vec!["volatile".to_string()],
+            },
+            phase_dwell_ticks: 4,
+            recent_phase_transitions: Vec::new(),
+            history: Vec::new(),
+            v2: ShadowFieldV2::default(),
+            mode_partners: Vec::new(),
+        };
         let packet = EigenPacket {
             t_ms: 42,
             eigenvalues: vec![1.0, 0.5],
@@ -7923,7 +8550,11 @@ mod tests {
             esn_leak: Some(0.65),
             esn_leak_override_v1: None,
             structural_entropy: None,
-            resonance_density_v1: Some(ResonanceDensityV1::neutral()),
+            spectral_damping_warm_start_review_v1: None,
+            hard_reset_texture_preservation_review_v1: Some(
+                hard_reset_texture_preservation_review_v1,
+            ),
+            resonance_density_v1: Some(resonance_density_v1),
             pressure_source_v1: Some(PressureSourceV1::from_parts(
                 PressureSourceComponents {
                     controller_pressure: 0.42,
@@ -7931,9 +8562,18 @@ mod tests {
                 },
                 PressureSourceContext::default(),
             )),
+            shadow_preservation_mode_v1: Some(shadow_preservation_mode_v1(
+                None,
+                Some("restless"),
+                Some(0.31),
+                Some(-0.07),
+                0.0,
+                0.0,
+            )),
             inhabitable_fluctuation_v1: Some(InhabitableFluctuationV1::neutral()),
             spectral_glimpse_12d: None,
-            eigenvector_field: None,
+            eigenpacket_payload_budget_review_v1: Some(eigenpacket_payload_budget_review_v1),
+            eigenvector_field: Some(eigenvector_field),
             semantic_energy_v1: Some(SemanticEnergyV1 {
                 policy: "semantic_energy_v1",
                 schema_version: 1,
@@ -7951,12 +8591,23 @@ mod tests {
             selected_memory_role: None,
             ising_shadow: None,
             shadow_field_v2: None,
-            shadow_field_v3: None,
+            shadow_field_v3: Some(shadow_field_v3),
         };
 
         let json = serde_json::to_value(&packet).unwrap();
 
         assert!(json.get("spectral_fingerprint").is_some());
+        assert_eq!(
+            json["spectral_fingerprint"]
+                .as_array()
+                .expect("legacy array")
+                .len(),
+            32
+        );
+        assert!(json["spectral_fingerprint_v1"]
+            .as_object()
+            .expect("typed fingerprint object")
+            .contains_key("geom_rel"));
         assert_eq!(
             json["spectral_fingerprint_v1"]["policy"],
             "spectral_fingerprint_v1"
@@ -7970,10 +8621,50 @@ mod tests {
             json["resonance_density_v1"]["policy"],
             "resonance_density_v1"
         );
+        assert_eq!(
+            json["hard_reset_texture_preservation_review_v1"]["policy"],
+            "hard_reset_texture_preservation_review_v1"
+        );
+        assert_eq!(
+            json["hard_reset_texture_preservation_review_v1"]["texture_preservation_state"],
+            "hard_reset_rebuild_texture_watch"
+        );
+        assert_eq!(
+            json["hard_reset_texture_preservation_review_v1"]["behavior_changed"],
+            false
+        );
+        assert_eq!(
+            json["hard_reset_texture_preservation_review_v1"]["authority"],
+            "read_only_review_not_hard_reset_recovery_fill_pi_or_sensory_cadence_change"
+        );
+        assert_eq!(
+            json["eigenpacket_payload_budget_review_v1"]["policy"],
+            "eigenpacket_payload_budget_review_v1"
+        );
+        assert_eq!(
+            json["eigenpacket_payload_budget_review_v1"]["status"],
+            "bounded_eigenpacket_payload"
+        );
+        assert_eq!(
+            json["eigenpacket_payload_budget_review_v1"]["eigenvector_mode_count"],
+            2
+        );
         assert_eq!(json["pressure_source_v1"]["policy"], "pressure_source_v1");
         assert_eq!(
             json["pressure_source_v1"]["control"]["applied_locally"],
             false
+        );
+        assert_eq!(
+            json["shadow_preservation_mode_v1"]["policy"],
+            "shadow_preservation_mode_v1"
+        );
+        assert_eq!(
+            json["shadow_preservation_mode_v1"]["mode"],
+            "preserve_restless_shadow"
+        );
+        assert_eq!(
+            json["shadow_preservation_mode_v1"]["hard_reset_should_not_trigger_from_restless_only"],
+            true
         );
         assert_eq!(
             json["inhabitable_fluctuation_v1"]["policy"],
@@ -7993,6 +8684,14 @@ mod tests {
                 .unwrap(),
             0.0
         );
+        assert_eq!(json["eigenvector_field"]["policy"], "eigenvector_field_v1");
+        assert_eq!(json["eigenvector_field"]["mode_count"], 2);
+        assert_eq!(
+            json["shadow_field_v3"]["policy"],
+            "shadow_field_v3_test_schema_anchor"
+        );
+        assert_eq!(json["shadow_field_v3"]["class_v3"]["primary"], "restless");
+        assert_eq!(json["shadow_field_v3"]["phase_dwell_ticks"], 4);
         assert!(json["effective_dimensionality"].as_f64().unwrap() > 0.0);
         assert!(json["distinguishability_loss"].as_f64().unwrap() >= 0.0);
         let lambda1_rel = json["lambda1_rel"].as_f64().expect("lambda1_rel number");
@@ -8000,7 +8699,102 @@ mod tests {
     }
 
     #[test]
+    fn eigenpacket_omits_optional_diagnostic_fields_when_absent() {
+        let packet = EigenPacket {
+            t_ms: 42,
+            eigenvalues: vec![1.0, 0.5],
+            fill_ratio: 0.55,
+            active_mode_count: 2,
+            active_mode_energy_ratio: 0.95,
+            lambda1_rel: None,
+            modalities: ModalityStatus {
+                audio_fired: false,
+                video_fired: false,
+                history_fired: false,
+                audio_rms: 0.0,
+                video_var: 0.0,
+                audio_source: None,
+                video_source: None,
+                audio_age_ms: None,
+                video_age_ms: None,
+                audio_freshness_class: None,
+                video_freshness_class: None,
+            },
+            neural: None,
+            alert: None,
+            spectral_fingerprint: None,
+            spectral_fingerprint_v1: None,
+            spectral_denominator_v1: None,
+            effective_dimensionality: None,
+            distinguishability_loss: None,
+            esn_leak: None,
+            esn_leak_override_v1: None,
+            structural_entropy: None,
+            spectral_damping_warm_start_review_v1: None,
+            hard_reset_texture_preservation_review_v1: None,
+            resonance_density_v1: None,
+            pressure_source_v1: None,
+            shadow_preservation_mode_v1: None,
+            inhabitable_fluctuation_v1: None,
+            spectral_glimpse_12d: None,
+            eigenpacket_payload_budget_review_v1: None,
+            eigenvector_field: None,
+            semantic_energy_v1: None,
+            selected_memory_id: None,
+            selected_memory_role: None,
+            ising_shadow: None,
+            shadow_field_v2: None,
+            shadow_field_v3: None,
+        };
+
+        let json = serde_json::to_value(&packet).unwrap();
+
+        assert_eq!(json["t_ms"], 42);
+        assert_eq!(json["active_mode_count"], 2);
+        assert!(
+            json["neural"].is_null(),
+            "neural remains a legacy explicit-null field"
+        );
+        for absent in [
+            "lambda1_rel",
+            "alert",
+            "spectral_fingerprint",
+            "spectral_fingerprint_v1",
+            "spectral_denominator_v1",
+            "effective_dimensionality",
+            "distinguishability_loss",
+            "esn_leak",
+            "esn_leak_override_v1",
+            "structural_entropy",
+            "spectral_damping_warm_start_review_v1",
+            "hard_reset_texture_preservation_review_v1",
+            "resonance_density_v1",
+            "pressure_source_v1",
+            "shadow_preservation_mode_v1",
+            "inhabitable_fluctuation_v1",
+            "spectral_glimpse_12d",
+            "eigenpacket_payload_budget_review_v1",
+            "eigenvector_field",
+            "semantic_energy_v1",
+            "selected_memory_id",
+            "selected_memory_role",
+            "ising_shadow",
+            "shadow_field_v2",
+            "shadow_field_v3",
+        ] {
+            assert!(
+                json.get(absent).is_none(),
+                "optional diagnostic field should be omitted when absent: {absent}"
+            );
+        }
+    }
+
+    #[test]
     fn semantic_admission_label_distinguishes_stale_trace_from_budgeted_input() {
+        assert_eq!(
+            semantic_admission_label(true, true, true, false, 0.1, true, 99.0),
+            "stable_core_semantic_muted"
+        );
         assert_eq!(
             semantic_admission_label(true, true, false, false, 0.01, false, 68.0),
             "stable_core_semantic_trace_stale"
@@ -8020,6 +8814,198 @@ mod tests {
         assert_eq!(
             semantic_admission_label(false, true, false, false, 0.01, false, 68.0),
             "input_trace_stale"
+        );
+    }
+
+    #[test]
+    fn semantic_admission_label_keeps_non_stable_core_ladder_complete() {
+        assert_eq!(
+            semantic_admission_label(false, true, false, true, 0.0, false, 68.0),
+            "admitted_to_kernel"
+        );
+        assert_eq!(
+            semantic_admission_label(false, true, false, false, 0.1, true, 68.0),
+            "input_trace_not_active"
+        );
+        assert_eq!(
+            semantic_admission_label(false, true, false, false, 0.1, false, 68.0),
+            "input_trace_stale"
+        );
+        assert_eq!(
+            semantic_admission_label(false, true, false, false, f32::NAN, false, 68.0),
+            "none"
+        );
+    }
+
+    #[test]
+    fn cheby_upper_soft_bound_coefficients_stay_finite_and_bounded() {
+        let coeffs = cheby_coeffs_bandstop(6, 0.65, 0.98, 0.20);
+
+        assert_eq!(coeffs.len(), 7);
+        assert!(coeffs.iter().all(|value| value.is_finite()));
+        let l1_norm = coeffs.iter().map(|value| value.abs()).sum::<f32>();
+        assert!(
+            l1_norm < 8.0,
+            "unexpectedly large Chebyshev response: {l1_norm}"
+        );
+        assert!(coeffs.iter().any(|value| value.abs() > 1.0e-6));
+    }
+
+    #[test]
+    fn spectral_damping_warm_start_review_gates_live_trial_without_control() {
+        let review = super::spectral_damping_warm_start_review_v1(
+            6,
+            0.65,
+            0.95,
+            0.15,
+            0.55,
+            71.0,
+            68.0,
+            Some(0.42),
+            0.008,
+        );
+
+        assert_eq!(review.policy, "spectral_damping_warm_start_review_v1");
+        assert_eq!(review.status, "approval_required_damping_warm_start_trial");
+        assert_eq!(review.proposed_cheby_stop_lo, 0.60);
+        assert_eq!(review.proposed_cheby_soft, 0.20);
+        assert_eq!(review.proposed_warm_start_blend, 0.35);
+        assert!(review.near_target_band);
+        assert!(review.coefficient_l1_norm.is_finite());
+        assert!(review.proposed_coefficient_l1_norm.is_finite());
+        assert_eq!(
+            review.regulator_constriction_state,
+            "semantic_regulator_drive_counteracts_warm_start_review"
+        );
+        assert!(review.regulator_counteraction_score >= 0.50);
+        assert!(review.live_control_required);
+        assert!(!review.runnable_without_approval);
+        assert_eq!(
+            review.approval_boundary,
+            "live_cheby_bandstop_covariance_warm_start_and_spectral_regulation"
+        );
+        assert_eq!(
+            review.authority,
+            "authority_gate_not_live_filter_warm_start_or_fill_control_change"
+        );
+    }
+
+    #[test]
+    fn spectral_damping_warm_start_review_names_missing_semantic_counteraction() {
+        let review = super::spectral_damping_warm_start_review_v1(
+            6,
+            0.65,
+            0.95,
+            0.15,
+            0.55,
+            71.0,
+            68.0,
+            Some(0.42),
+            0.0,
+        );
+
+        assert_eq!(review.policy, "spectral_damping_warm_start_review_v1");
+        assert_eq!(
+            review.regulator_constriction_state,
+            "warm_start_constriction_without_semantic_counteraction"
+        );
+        assert_eq!(review.regulator_counteraction_score, 0.0);
+        assert!(review.live_control_required);
+        assert!(!review.runnable_without_approval);
+    }
+
+    #[test]
+    fn hard_reset_texture_preservation_review_gates_high_entropy_rebuild_without_control() {
+        let mut density = ResonanceDensityV1::neutral();
+        density.components.mode_packing = 0.42;
+        density.pressure_risk = 0.22;
+
+        let review = hard_reset_texture_preservation_review_v1(
+            18.0, 0.88, &density, 0.08, 0.988, 0.65, true, true,
+        );
+
+        assert_eq!(review.policy, "hard_reset_texture_preservation_review_v1");
+        assert_eq!(
+            review.texture_preservation_state,
+            "hard_reset_rebuild_texture_watch"
+        );
+        assert_eq!(
+            review.next_affordance,
+            "proposal_card_needed_for_operator_approved_texture_preservation_trial"
+        );
+        assert!(review.live_control_required);
+        assert!(!review.runnable_without_approval);
+        assert!(!review.behavior_changed);
+        assert_eq!(
+            review.approval_boundary,
+            "live_hard_reset_recovery_keep_fill_pi_or_sensory_cadence_change"
+        );
+        assert_eq!(
+            review.authority,
+            "read_only_review_not_hard_reset_recovery_fill_pi_or_sensory_cadence_change"
+        );
+    }
+
+    #[test]
+    fn hard_reset_texture_preservation_review_stays_observe_only_when_recovery_is_quiet() {
+        let mut density = ResonanceDensityV1::neutral();
+        density.components.mode_packing = 0.25;
+        density.pressure_risk = 0.10;
+
+        let review = hard_reset_texture_preservation_review_v1(
+            72.0, 0.88, &density, 0.0, 0.97, 1.0, false, true,
+        );
+
+        assert_eq!(
+            review.texture_preservation_state,
+            "high_entropy_texture_observe_only"
+        );
+        assert_eq!(
+            review.next_affordance,
+            "correspondence_trace_or_result_card_if_future_reset_changes_texture"
+        );
+        assert!(!review.live_control_required);
+        assert!(!review.runnable_without_approval);
+        assert!(!review.behavior_changed);
+    }
+
+    #[test]
+    fn semantic_admission_label_keeps_fill_boundary_grid_explicit() {
+        let input_energy = minime::stable_core::STABLE_CORE_SEMANTIC_TRICKLE_MAX_INPUT_ENERGY * 0.5;
+        for fill_pct in [0.0, 0.5, 1.0, 50.0] {
+            assert_eq!(
+                semantic_admission_label(true, true, false, false, input_energy, true, fill_pct),
+                "stable_core_semantic_budgeted_out"
+            );
+            assert_eq!(
+                semantic_admission_label(true, false, false, false, input_energy, true, fill_pct),
+                "stable_core_semantic_profile_not_admitted"
+            );
+        }
+
+        assert_eq!(
+            semantic_admission_label(
+                true,
+                true,
+                false,
+                false,
+                input_energy,
+                true,
+                minime::stable_core::STABLE_CORE_SEMANTIC_TRICKLE_MAX_FILL_PCT,
+            ),
+            "stable_core_semantic_fill_ceiling"
+        );
+        assert_eq!(
+            semantic_admission_label(
+                true,
+                false,
+                false,
+                false,
+                input_energy,
+                true,
+                minime::stable_core::STABLE_CORE_SEMANTIC_TRICKLE_MAX_FILL_PCT,
+            ),
+            "stable_core_semantic_profile_not_admitted"
         );
     }
 

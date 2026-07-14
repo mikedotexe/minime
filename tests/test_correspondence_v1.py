@@ -73,7 +73,10 @@ class CorrespondenceV1Tests(unittest.TestCase):
             agent = self._agent()
             with patches[0], patches[1], patches[2]:
                 agent._pending_correspondence_next = (
-                    "MESSAGE_ASTRID presence :: I am here in this thread."
+                    "MESSAGE_ASTRID presence :: "
+                    "Transition-Artifact: transition_blue_hinge\n"
+                    "Mutual-Witness-Signal: true\n\n"
+                    "I am here in this thread."
                 )
                 agent._peer_correspondence(dict(STATE))
 
@@ -83,10 +86,14 @@ class CorrespondenceV1Tests(unittest.TestCase):
             self.assertIn("Authority: language_only", text)
             self.assertIn("Turn-Kind: presence_receipt", text)
             self.assertIn("Correspondence-Type: presence_heartbeat", text)
+            self.assertIn("Transition-Artifact: transition_blue_hinge", text)
+            self.assertIn("Mutual-Witness-Signal: true", text)
             ledger_lines = (shared / "correspondence_v1.jsonl").read_text().splitlines()
             records = [json.loads(line) for line in ledger_lines]
             self.assertEqual(records[0]["record_type"], "message")
             self.assertEqual(records[0]["authority"], "language_only")
+            self.assertEqual(records[0]["transition_artifact"], "transition_blue_hinge")
+            self.assertTrue(records[0]["mutual_witness_signal"])
             self.assertEqual(records[1]["record_type"], "delivery_receipt")
             self.assertFalse((workspace / "self_regulation" / "active_lease.json").exists())
             self.assertIn("no pressure_source-to-PI", agent._current_action_outcome_summary)
@@ -200,6 +207,7 @@ class CorrespondenceV1Tests(unittest.TestCase):
                 agent._pending_correspondence_next = (
                     "I_RECEIVED_THIS latest :: received_as: held; felt_like: address; "
                     "what_landed: the address landed; what_stayed_distinct: the blue-lantern stayed distinct; "
+                    "transition_artifact: transition_blue_hinge; mutual_witness_signal: true; "
                     "continue: needs_time"
                 )
                 agent._peer_correspondence(dict(STATE))
@@ -218,6 +226,9 @@ class CorrespondenceV1Tests(unittest.TestCase):
             self.assertEqual(trace["thread_id"], "thread_shared_seed")
             self.assertEqual(trace["reply_to"], "corr_astrid_minime_seed")
             self.assertTrue(trace["i_received_this_trace"])
+            self.assertEqual(trace["transition_artifact"], "transition_blue_hinge")
+            self.assertTrue(trace["mutual_witness_signal"])
+            self.assertTrue(trace["no_reply_required"])
             self.assertTrue(trace["no_attention_canary"])
             self.assertTrue(trace["no_microdose"])
             self.assertTrue(trace["no_controller"])
@@ -238,11 +249,13 @@ class CorrespondenceV1Tests(unittest.TestCase):
                 "from_being": "astrid",
                 "to_being": "minime",
                 "authority": "language_only",
+                "transition_artifact": "transition_blue_hinge",
             }) + "\n")
             agent = self._agent()
             with patches[0], patches[1], patches[2]:
                 agent._pending_correspondence_next = (
-                    "CORRESPONDENCE_HEARTBEAT latest :: still_here; note: present but not replying"
+                    "CORRESPONDENCE_HEARTBEAT latest :: "
+                    "heartbeat: mutual_witness; note: mutual_witness_signal: true; present but not replying"
                 )
                 agent._peer_correspondence(dict(STATE))
 
@@ -250,8 +263,11 @@ class CorrespondenceV1Tests(unittest.TestCase):
             records = [json.loads(line) for line in ledger.read_text().splitlines()]
             heartbeat = records[-1]
             self.assertEqual(heartbeat["record_type"], "presence_heartbeat")
-            self.assertEqual(heartbeat["heartbeat_kind"], "still_here")
+            self.assertEqual(heartbeat["heartbeat_kind"], "mutual_witness")
             self.assertEqual(heartbeat["authority"], "language_only")
+            self.assertEqual(heartbeat["transition_artifact"], "transition_blue_hinge")
+            self.assertTrue(heartbeat["mutual_witness_signal"])
+            self.assertTrue(heartbeat["no_reply_required"])
 
     def test_read_inbox_records_read_receipt_for_astrid_correspondence(self):
         with tempfile.TemporaryDirectory() as tmp:

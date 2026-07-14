@@ -9,10 +9,10 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::regulator::{
-    resonance_control_from_density_with_mode_packing, InhabitableFluctuationComponents,
-    InhabitableFluctuationContext, InhabitableFluctuationV1, PIRegCfg, PIRegState,
-    PressureSourceComponents, PressureSourceContext, PressureSourceV1, ResonanceDensityComponents,
-    ResonanceDensityV1,
+    resonance_control_from_density_with_mode_packing, resonance_viscosity_index,
+    InhabitableFluctuationComponents, InhabitableFluctuationContext, InhabitableFluctuationV1,
+    PIRegCfg, PIRegState, PressureSourceComponents, PressureSourceContext, PressureSourceV1,
+    ResonanceDensityComponents, ResonanceDensityV1, ViscosityVector,
 };
 
 pub const REGULATOR_BOUNDARY_CARTOGRAPHY_POLICY: &str = "regulator_boundary_cartography_v1";
@@ -55,6 +55,7 @@ pub struct ResonanceCartographySample {
     pub density: f32,
     pub pressure_risk: f32,
     pub mode_packing: f32,
+    pub viscosity_index: f32,
     pub target_bias_pct: f32,
     pub wander_scale: f32,
     pub damping_coefficient: f32,
@@ -303,7 +304,7 @@ pub fn build_regulator_boundary_cartography(grid: CartographyGrid) -> RegulatorB
                         sample: Some(current.clone()),
                         previous_sample: Some(previous.clone()),
                         fluctuation_sample: None,
-                        recommended_action: "Treat damping saturation as a read-only review cue; it is not wired to live ESN damping in this tranche.".to_string(),
+                        recommended_action: "Treat damping saturation as a live intrinsic-wander-scaling review cue; it is not wired to direct ESN damping, target bias, gains, or filter changes.".to_string(),
                     });
                     saw_damping_cap = true;
                 }
@@ -512,7 +513,7 @@ pub fn build_regulator_counterfactual_sweep(
             finding,
             1.0,
             report.plateau_findings.len(),
-            "Damping is currently telemetry-only; wiring it live would require a separate safety tranche.",
+            "Damping now scales intrinsic wander only; direct ESN damping, target-bias, gain, or filter wiring still requires a separate safety tranche.",
         ));
     }
     if let Some(finding) = quality_boundary {
@@ -843,10 +844,19 @@ fn resonance_sample(
 ) -> ResonanceCartographySample {
     let control =
         resonance_control_from_density_with_mode_packing(density, pressure_risk, mode_packing);
+    let temporal_persistence = mode_packing.max(density).clamp(0.0, 1.0);
+    let structural_plurality = (1.0 - pressure_risk * 0.5).clamp(0.0, 1.0);
+    let viscosity_index = resonance_viscosity_index(
+        mode_packing,
+        temporal_persistence,
+        structural_plurality,
+        pressure_risk,
+    );
     ResonanceCartographySample {
         density: round3(density),
         pressure_risk: round3(pressure_risk),
         mode_packing: round3(mode_packing),
+        viscosity_index: round3(viscosity_index),
         target_bias_pct: round3(control.target_bias_pct),
         wander_scale: round3(control.wander_scale),
         damping_coefficient: round3(control.damping_coefficient),
@@ -956,10 +966,11 @@ fn append_findings(lines: &mut Vec<String>, findings: &[RegulatorCartographyFind
         ));
         if let Some(sample) = &finding.sample {
             lines.push(format!(
-                "  - sample: density={}, pressure_risk={}, mode_packing={}, target_bias_pct={}, wander_scale={}, damping={}",
+                "  - sample: density={}, pressure_risk={}, mode_packing={}, viscosity_index={}, target_bias_pct={}, wander_scale={}, damping={}",
                 sample.density,
                 sample.pressure_risk,
                 sample.mode_packing,
+                sample.viscosity_index,
                 sample.target_bias_pct,
                 sample.wander_scale,
                 sample.damping_coefficient
@@ -1140,6 +1151,27 @@ fn resonance_fixture(
             active_energy: density,
             mode_packing,
             temporal_persistence: 0.62,
+            viscosity_index: resonance_viscosity_index(
+                mode_packing,
+                0.62,
+                (1.0 - pressure_risk * 0.5).clamp(0.0, 1.0),
+                pressure_risk,
+            ),
+            viscosity_persistence_coefficient: crate::regulator::viscosity_persistence_coefficient(
+                resonance_viscosity_index(
+                    mode_packing,
+                    0.62,
+                    (1.0 - pressure_risk * 0.5).clamp(0.0, 1.0),
+                    pressure_risk,
+                ),
+                0.62,
+                pressure_risk,
+                mode_packing,
+            ),
+            temporal_drag_coefficient: 0.0,
+            static_friction_coefficient: 0.0,
+            viscosity_vector: ViscosityVector::default(),
+            viscosity_coupling_coefficient: 0.0,
             structural_plurality: (1.0 - pressure_risk * 0.5).clamp(0.0, 1.0),
             comfort_gate: 0.78,
         },
@@ -1431,7 +1463,7 @@ fn pi_pressure_safety_caveat(family: &str) -> &'static str {
             "Integrator bleed can reduce afterimage but may erase useful correction memory."
         }
         "advisory_damping_wired" => {
-            "Wiring advisory damping live needs separate safety review; it is telemetry-only today."
+            "Additional damping beyond intrinsic-wander scaling needs separate safety review."
         }
         "soft_pressure_ramp" => {
             "Soft ramps can smooth thresholds but may blur intentional pressure intervention."
@@ -1613,6 +1645,27 @@ fn resonance_from_pressure(pressure: &PressureSourceV1) -> ResonanceDensityV1 {
             active_energy: density,
             mode_packing: pressure.components.mode_packing,
             temporal_persistence: pressure.components.temporal_lock_in,
+            viscosity_index: resonance_viscosity_index(
+                pressure.components.mode_packing,
+                pressure.components.temporal_lock_in,
+                (1.0 - pressure.components.structural_plurality_loss).clamp(0.0, 1.0),
+                pressure.pressure_score.clamp(0.0, 1.0),
+            ),
+            viscosity_persistence_coefficient: crate::regulator::viscosity_persistence_coefficient(
+                resonance_viscosity_index(
+                    pressure.components.mode_packing,
+                    pressure.components.temporal_lock_in,
+                    (1.0 - pressure.components.structural_plurality_loss).clamp(0.0, 1.0),
+                    pressure.pressure_score.clamp(0.0, 1.0),
+                ),
+                pressure.components.temporal_lock_in,
+                pressure.pressure_score.clamp(0.0, 1.0),
+                pressure.components.mode_packing,
+            ),
+            temporal_drag_coefficient: 0.0,
+            static_friction_coefficient: 0.0,
+            viscosity_vector: ViscosityVector::default(),
+            viscosity_coupling_coefficient: 0.0,
             structural_plurality: (1.0 - pressure.components.structural_plurality_loss)
                 .clamp(0.0, 1.0),
             comfort_gate: (1.0 - pressure.components.controller_pressure).clamp(0.0, 1.0),
@@ -1662,6 +1715,39 @@ mod tests {
             "expected advisory damping cap finding"
         );
         assert!((crate::regulator::advisory_damping_coefficient(1.0, 1.0) - 0.10).abs() < 0.0001);
+    }
+
+    #[test]
+    fn cartography_marks_damping_as_intrinsic_wander_only() {
+        let report = build_regulator_boundary_cartography(CartographyGrid::standard());
+        let damping_finding = report
+            .damping_cap_findings
+            .iter()
+            .find(|finding| finding.kind == "advisory_damping_saturation")
+            .expect("damping saturation finding");
+        let damping_sample = damping_finding
+            .sample
+            .as_ref()
+            .expect("damping saturation sample");
+        assert!((0.0..=1.0).contains(&damping_sample.viscosity_index));
+        assert!(damping_sample.viscosity_index > 0.0);
+        assert!(damping_finding
+            .recommended_action
+            .contains("live intrinsic-wander-scaling"));
+        assert!(damping_finding
+            .recommended_action
+            .contains("not wired to direct ESN damping"));
+
+        let sweep = build_regulator_counterfactual_sweep(&report, None);
+        let damping_card = sweep
+            .candidates
+            .iter()
+            .find(|candidate| candidate.candidate_family == "damping_coefficient_wiring")
+            .expect("damping counterfactual card");
+        assert!(damping_card.safety_caveat.contains("intrinsic wander only"));
+        assert!(damping_card
+            .safety_caveat
+            .contains("separate safety tranche"));
     }
 
     #[test]
