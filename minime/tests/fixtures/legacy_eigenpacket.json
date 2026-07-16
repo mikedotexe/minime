@@ -1,0 +1,58 @@
+{
+  "t_ms": 42,
+  "eigenvalues": [1.0, 0.5, 0.25],
+  "fill_ratio": 0.68,
+  "active_mode_count": 3,
+  "active_mode_energy_ratio": 0.91,
+  "modalities": {
+    "audio_fired": true,
+    "video_fired": false,
+    "history_fired": true,
+    "audio_rms": 0.12,
+    "video_var": 0.03
+  },
+  "resonance_density_v1": {
+    "policy": "resonance_density_v1",
+    "schema_version": 1,
+    "density": 0.54,
+    "containment_score": 0.61,
+    "pressure_risk": 0.19,
+    "quality": "mixed",
+    "components": {
+      "active_energy": 0.52,
+      "mode_packing": 0.31,
+      "temporal_persistence": 0.47,
+      "structural_plurality": 0.72,
+      "comfort_gate": 0.66
+    },
+    "texture_signature": {
+      "policy": "resonance_texture_signature_v1",
+      "schema_version": 1,
+      "primary_texture": "humid",
+      "pressure_source_family": "distributed",
+      "edge_definition": "soft",
+      "movement_quality": "heaving",
+      "confidence": 0.81,
+      "authority": "advisory_context_not_control",
+      "note": "legacy packet"
+    },
+    "texture_component_alignment": {
+      "policy": "resonance_texture_component_alignment_v1",
+      "schema_version": 1,
+      "expected_primary_texture": "humid",
+      "emitted_primary_texture": "humid",
+      "expected_movement_quality": "heaving",
+      "emitted_movement_quality": "heaving",
+      "alignment_state": "aligned",
+      "confidence": 0.81,
+      "damping_candidate_status": "not_needed",
+      "authority": "diagnostic_observability_not_damping_or_control"
+    },
+    "control": {
+      "target_bias_pct": 0.0,
+      "wander_scale": 1.0,
+      "applied_locally": true,
+      "note": "observational"
+    }
+  }
+}

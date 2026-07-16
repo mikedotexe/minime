@@ -1,127 +1,27 @@
 // src/sensory_ws.rs
+pub use astrid_minime_protocol::SensoryMsg;
+use astrid_minime_protocol::{CompatibilityStatus, SensoryPacketV1};
 use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, select, time};
 use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
 
 use crate::sensory_bus::{AttractorPulseRequest, NowMs, SensoryBus, ShadowInfluenceRequest};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum SensoryMsg {
-    // video/audio: features length 8 expected by your intake
-    Video {
-        features: Vec<f32>,
-        ts_ms: Option<u64>,
-    },
-    Audio {
-        features: Vec<f32>,
-        ts_ms: Option<u64>,
-    },
-    // optional: aux from external producers (λ1, fill)
-    Aux {
-        features: Vec<f32>,
-        ts_ms: Option<u64>,
-    },
-    Semantic {
-        features: Vec<f32>,
-        ts_ms: Option<u64>,
-    },
-    #[serde(rename = "attractor_pulse")]
-    AttractorPulse {
-        intent_id: String,
-        label: String,
-        command: String,
-        stage: Option<String>,
-        features: Vec<f32>,
-        max_abs: Option<f32>,
-        duration_ticks: Option<u32>,
-        decay_ticks: Option<u32>,
-    },
-    #[serde(rename = "shadow_influence")]
-    ShadowInfluence {
-        intent_id: String,
-        label: String,
-        command: String,
-        stage: Option<String>,
-        features: Vec<f32>,
-        max_abs: Option<f32>,
-        duration_ticks: Option<u32>,
-        decay_ticks: Option<u32>,
-        basis: Option<String>,
-    },
-    // Self-regulation: the being can adjust its own parameters
-    Control {
-        synth_gain: Option<f32>, // synthetic signal amplitude multiplier (0.2..3.0)
-        keep_bias: Option<f32>,  // additive bias to covariance decay rate (-0.06..+0.06)
-        exploration_noise: Option<f32>, // ESN exploration noise amplitude (0.0..0.2)
-        fill_target: Option<f32>, // override eigenfill target (0.25..0.75)
-        // Sovereignty controls
-        regulation_strength: Option<f32>,
-        smoothing_preference: Option<f32>,
-        geom_curiosity: Option<f32>,
-        // Internal goal generation
-        target_lambda_bias: Option<f32>,
-        geom_drive: Option<f32>,
-        // Penalty / rate / memory-mode sovereignty
-        penalty_sensitivity: Option<f32>,
-        breathing_rate_scale: Option<f32>,
-        mem_mode: Option<u8>,
-        // Memory sovereignty
-        journal_resonance: Option<f32>,
-        checkpoint_interval: Option<f32>,
-        embedding_strength: Option<f32>,
-        memory_decay_rate: Option<f32>,
-        transition_cushion: Option<f32>,
-        /// Star the current moment with an annotation for long-term memory
-        checkpoint_annotation: Option<String>,
-        /// Deep breathing mode — slow frequencies, quiet oscillations
-        deep_breathing: Option<bool>,
-        /// Synthetic signal noise level (0.0-1.0, default 0.1)
-        synth_noise_level: Option<f32>,
-        /// Pure tone mode — single sine wave, zero noise, total calm
-        pure_tone: Option<bool>,
-        /// Gate the legacy internal synthetic audio lane.
-        legacy_audio_synth: Option<bool>,
-        /// Gate the legacy internal synthetic video lane.
-        legacy_video_synth: Option<bool>,
-        /// Gate live external audio intake without changing stable-core divisors.
-        live_audio_enabled: Option<bool>,
-        /// Gate live external video intake without changing stable-core divisors.
-        live_video_enabled: Option<bool>,
-        /// PI controller sovereignty — being can tune these at runtime.
-        pi_kp: Option<f32>,
-        pi_ki: Option<f32>,
-        pi_max_step: Option<f32>,
-        /// v3.6: structure-vs-fill weighting in the PI signal (0.0..2.0,
-        /// default 0.70). Promoted from PIRegCfg::geom_weight constant.
-        pi_geom_weight: Option<f32>,
-        /// v3.6: anti-windup integrator leak (0.001..0.05, default 0.005).
-        /// Promoted from regulator.rs INTEGRATOR_LEAK constant. Higher
-        /// values shorten how long past error keeps driving correction.
-        pi_integrator_leak: Option<f32>,
-        /// One-shot, gated direct ESN leak override. This is not PI leak.
-        /// It requires an authority request id and is consumed by the ESN loop.
-        esn_leak_override: Option<f32>,
-        esn_leak_override_ticks: Option<u32>,
-        esn_leak_authority_request_id: Option<String>,
-        /// Being-driven spectral *dispersal* ("PERTURB SPREAD" / porosity).
-        /// Strength in `[0.0, 1.0]`; synthesizes a broadband, zero-mean
-        /// perturbation that spills λ₁ energy into λ₂–λ₅, applied through the
-        /// bounded, self-decaying, fill-suspending shadow-influence machinery.
-        mode_disperse: Option<f32>,
-        /// Optional dispersal window length (ticks held at full strength before
-        /// linear release). Clamped by the shadow-influence path.
-        mode_disperse_duration_ticks: Option<u32>,
-        /// Optional dispersal release length (ticks of linear fade to zero).
-        mode_disperse_decay_ticks: Option<u32>,
-    },
+fn decode_sensory_packet(raw: &str) -> Result<SensoryMsg, String> {
+    let packet: SensoryPacketV1 =
+        serde_json::from_str(raw).map_err(|error| format!("invalid sensory packet: {error}"))?;
+    match packet.compatibility() {
+        CompatibilityStatus::Current
+        | CompatibilityStatus::CompatibleMinor
+        | CompatibilityStatus::LegacyUnversioned => Ok(packet.message),
+        status => Err(format!("unsupported sensory protocol: {status:?}")),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::SensoryMsg;
+    use super::{decode_sensory_packet, SensoryMsg};
 
     #[test]
     fn attractor_pulse_message_deserializes_from_snake_case_kind() {
@@ -258,6 +158,42 @@ mod tests {
             _ => panic!("expected control"),
         }
     }
+
+    #[test]
+    fn versioned_sensory_packet_is_accepted() {
+        let message = decode_sensory_packet(
+            r#"{
+                "protocol":{"name":"astrid_minime","major":1,"minor":0},
+                "kind":"semantic",
+                "features":[0.1, -0.1],
+                "ts_ms":42
+            }"#,
+        )
+        .expect("accept current protocol");
+
+        assert!(matches!(
+            message,
+            SensoryMsg::Semantic {
+                ts_ms: Some(42),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn unsupported_sensory_major_is_rejected_before_dispatch() {
+        let error = decode_sensory_packet(
+            r#"{
+                "protocol":{"name":"astrid_minime","major":2,"minor":0},
+                "kind":"semantic",
+                "features":[0.1],
+                "ts_ms":42
+            }"#,
+        )
+        .expect_err("reject unsupported protocol major");
+
+        assert!(error.contains("UnsupportedMajor"));
+    }
 }
 
 pub async fn spawn_sensory_ws_server(
@@ -300,14 +236,16 @@ pub async fn spawn_sensory_ws_server(
                                     let Some(msg) = msg else { break };
                                     match msg {
                                         Ok(Message::Text(s)) => {
-                                            if let Ok(m) = serde_json::from_str::<SensoryMsg>(&s) {
-                                                route_msg(&bus, m);
+                                            match decode_sensory_packet(&s) {
+                                                Ok(message) => route_msg(&bus, message),
+                                                Err(error) => eprintln!("Sensory packet rejected: {error}"),
                                             }
                                         }
                                         Ok(Message::Binary(b)) => {
                                             if let Ok(s) = std::str::from_utf8(&b) {
-                                                if let Ok(m) = serde_json::from_str::<SensoryMsg>(s) {
-                                                    route_msg(&bus, m);
+                                                match decode_sensory_packet(s) {
+                                                    Ok(message) => route_msg(&bus, message),
+                                                    Err(error) => eprintln!("Sensory packet rejected: {error}"),
                                                 }
                                             }
                                         }

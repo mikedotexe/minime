@@ -1,0 +1,54 @@
+{
+  "protocol": {"name": "astrid_minime", "major": 1, "minor": 0},
+  "t_ms": 84,
+  "eigenvalues": [1.1, 0.7, 0.4, 0.2],
+  "fill_ratio": 0.71,
+  "active_mode_count": 4,
+  "active_mode_energy_ratio": 0.94,
+  "lambda1_rel": 1.04,
+  "modalities": {
+    "audio_fired": true,
+    "video_fired": true,
+    "history_fired": true,
+    "audio_rms": 0.16,
+    "video_var": 0.09,
+    "audio_source": "external",
+    "video_source": "external",
+    "audio_age_ms": 25,
+    "video_age_ms": 41,
+    "audio_freshness_class": "fresh",
+    "video_freshness_class": "fresh"
+  },
+  "neural": null,
+  "pressure_source_v1": {
+    "policy": "pressure_source_v1",
+    "schema_version": 1,
+    "pressure_score": 0.37,
+    "porosity_score": 0.58,
+    "pressure_porosity_gradient": -0.21,
+    "pressure_porosity_gradient_state": "porosity_exceeds_pressure",
+    "dominant_source": "mode_packing",
+    "pressure_profile": [{
+      "source": "mode_packing",
+      "value": 0.42,
+      "pressure_weight": 0.4,
+      "weighted_pressure": 0.168,
+      "share": 0.44
+    }],
+    "quality": "distributed",
+    "components": {
+      "lambda_monopoly": 0.2,
+      "mode_packing": 0.42,
+      "controller_pressure": 0.1,
+      "semantic_trickle": 0.18,
+      "semantic_friction": 0.23,
+      "structural_plurality_loss": 0.28,
+      "distinguishability_loss": 0.31,
+      "temporal_lock_in": 0.24,
+      "sensory_scarcity": 0.08
+    },
+    "context": {"mean_orientation_delta": 0.11},
+    "control": {"applied_locally": false, "note": "advisory"}
+  },
+  "future_additive_packet": {"preserved": true}
+}

@@ -9,6 +9,7 @@ use crate::hard_reset::{
     hard_reset_fresh_build_keep_cap, hard_reset_internal_synth_enabled, hard_reset_rho_floor,
 };
 use anyhow::Result;
+use astrid_minime_protocol::{current_protocol, EigenPacketV1, ProtocolHeaderV1};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use futures_util::{SinkExt, StreamExt};
 use minime::activation_trace::ActivationTraceRecorder;
@@ -7056,9 +7057,12 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr, tx: broadcast::Sende
             }
             // Send eigenvalue packets
             Ok(packet) = rx.recv() => {
-                let json = match serde_json::to_string(&packet) {
+                let json = match encode_eigenpacket_v1(&packet) {
                     Ok(j) => j,
-                    Err(_) => continue,
+                    Err(error) => {
+                        eprintln!("Failed to encode canonical EigenPacketV1: {error}");
+                        continue;
+                    }
                 };
                 if ws_tx.send(Message::Text(json)).await.is_err() {
                     break;
@@ -7083,6 +7087,22 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr, tx: broadcast::Sende
     }
 
     println!("❌ Client disconnected: {}", peer);
+}
+
+fn encode_eigenpacket_v1(packet: &EigenPacket) -> serde_json::Result<String> {
+    #[derive(Serialize)]
+    struct VersionedEigenPacket<'a> {
+        protocol: ProtocolHeaderV1,
+        #[serde(flatten)]
+        packet: &'a EigenPacket,
+    }
+
+    let encoded = serde_json::to_string(&VersionedEigenPacket {
+        protocol: current_protocol(),
+        packet,
+    })?;
+    let _: EigenPacketV1 = serde_json::from_str(&encoded)?;
+    Ok(encoded)
 }
 
 // Helper: Rank-1 update A += z * z^T
@@ -8028,10 +8048,10 @@ mod tests {
     use super::{
         cheby_coeffs_bandstop, compute_active_mode_telemetry, compute_eigenvector_field,
         compute_pressure_source_v1, compute_resonance_density_v1, compute_structural_entropy,
-        eigenpacket_payload_budget_review_v1, hard_reset_texture_preservation_review_v1,
-        modality_freshness_class, modality_source_label, rank1_update_inplace_matrix,
-        reset_covariance_inplace, resonance_viscosity_index, semantic_admission_label,
-        sensory_scarcity_from_sources, shadow_preservation_mode_v1,
+        eigenpacket_payload_budget_review_v1, encode_eigenpacket_v1,
+        hard_reset_texture_preservation_review_v1, modality_freshness_class, modality_source_label,
+        rank1_update_inplace_matrix, reset_covariance_inplace, resonance_viscosity_index,
+        semantic_admission_label, sensory_scarcity_from_sources, shadow_preservation_mode_v1,
         should_write_phase_transition_moment_marker, stable_core_aliveness_loosen,
         stable_core_sov_loosen, update_health_transition_surface,
         viscosity_persistence_coefficient, CovarianceUpdateOutcome, EigenPacket,
@@ -8488,15 +8508,8 @@ mod tests {
         let denominator = typed
             .as_ref()
             .map(SpectralFingerprintV1::denominator_metrics);
-        let eigenvector_field = serde_json::json!({
-            "policy": "eigenvector_field_v1",
-            "direct_eigenvectors_available": true,
-            "raw_vectors_exported": false,
-            "mode_count": 2,
-            "modes": [
-                {"mode": 0, "top_components": [{"index": 1, "value": 0.7}]}
-            ],
-        });
+        let eigenvector_field =
+            compute_eigenvector_field(&[1.0, 0.5], &[0.8, 0.6, 0.6, -0.8], 2, 2, &[]);
         let eigenpacket_payload_budget_review_v1 =
             eigenpacket_payload_budget_review_v1(2, legacy.len(), &eigenvector_field);
         let resonance_density_v1 = ResonanceDensityV1::neutral();
@@ -8597,7 +8610,9 @@ mod tests {
             shadow_field_v3: Some(shadow_field_v3),
         };
 
-        let json = serde_json::to_value(&packet).unwrap();
+        let legacy_encoded = serde_json::to_string(&packet).expect("encode legacy telemetry");
+        let json: serde_json::Value =
+            serde_json::from_str(&legacy_encoded).expect("parse legacy telemetry");
 
         assert!(json.get("spectral_fingerprint").is_some());
         assert_eq!(
@@ -8699,6 +8714,17 @@ mod tests {
         assert!(json["distinguishability_loss"].as_f64().unwrap() >= 0.0);
         let lambda1_rel = json["lambda1_rel"].as_f64().expect("lambda1_rel number");
         assert!((lambda1_rel - 0.93).abs() < 1.0e-6);
+
+        let encoded = encode_eigenpacket_v1(&packet).expect("encode canonical telemetry");
+        let mut wire_json: serde_json::Value =
+            serde_json::from_str(&encoded).expect("parse canonical telemetry");
+        assert_eq!(wire_json["protocol"]["name"], "astrid_minime");
+        assert_eq!(wire_json["protocol"]["major"], 1);
+        wire_json
+            .as_object_mut()
+            .expect("packet object")
+            .remove("protocol");
+        assert_eq!(wire_json, json, "versioning must only add the header");
     }
 
     #[test]
