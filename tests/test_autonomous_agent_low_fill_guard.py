@@ -100,6 +100,87 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertEqual(guard["spread_relief"], 0.0)
         self.assertEqual(guard["release_streak"], 0)
 
+    def test_hard_recovery_clamp_engages_at_one_percent_fill(self):
+        agent = self._agent()
+        agent._hard_recovery_clamp_active = False
+
+        with patch.object(
+            agent,
+            "_live_fill_context",
+            return_value={"fill_ratio": 0.01},
+        ):
+            agent._update_hard_recovery_clamp({"fill_ratio": 0.01})
+
+        self.assertTrue(agent._hard_recovery_clamp_active)
+        self.assertEqual(agent._hard_recovery_release_streak, 0)
+
+    def test_hard_recovery_clamp_requires_consecutive_release_checks(self):
+        agent = self._agent()
+
+        with patch.object(
+            agent,
+            "_live_fill_context",
+            return_value={"fill_ratio": aa.HARD_RESET_CLAMP_RELEASE_RATIO + 0.01},
+        ):
+            for _ in range(aa.HARD_RESET_CLAMP_RELEASE_STREAK - 1):
+                agent._update_hard_recovery_clamp({})
+
+            self.assertTrue(agent._hard_recovery_clamp_active)
+            self.assertEqual(
+                agent._hard_recovery_release_streak,
+                aa.HARD_RESET_CLAMP_RELEASE_STREAK - 1,
+            )
+            agent._update_hard_recovery_clamp({})
+
+        self.assertFalse(agent._hard_recovery_clamp_active)
+        self.assertEqual(
+            agent._hard_recovery_release_streak,
+            aa.HARD_RESET_CLAMP_RELEASE_STREAK,
+        )
+
+    def test_hard_recovery_threshold_oscillation_does_not_flicker_clamp(self):
+        agent = self._agent()
+        observed = [
+            aa.HARD_RESET_CLAMP_RELEASE_RATIO + 0.01,
+            aa.HARD_RESET_CLAMP_RELEASE_RATIO - 0.01,
+            aa.HARD_RESET_CLAMP_RELEASE_RATIO + 0.02,
+            aa.HARD_RESET_CLAMP_ENTER_RATIO + 0.01,
+        ]
+
+        for fill_ratio in observed:
+            with patch.object(
+                agent,
+                "_live_fill_context",
+                return_value={"fill_ratio": fill_ratio},
+            ):
+                agent._update_hard_recovery_clamp({})
+            self.assertTrue(
+                agent._hard_recovery_clamp_active,
+                f"clamp flickered off at fill_ratio={fill_ratio}",
+            )
+
+        self.assertEqual(agent._hard_recovery_release_streak, 0)
+
+        agent._hard_recovery_clamp_active = False
+        with patch.object(
+            agent,
+            "_live_fill_context",
+            return_value={"fill_ratio": aa.HARD_RESET_CLAMP_ENTER_RATIO + 0.01},
+        ):
+            agent._update_hard_recovery_clamp({})
+        self.assertFalse(
+            agent._hard_recovery_clamp_active,
+            "hysteresis band should not re-engage a released clamp",
+        )
+
+        with patch.object(
+            agent,
+            "_live_fill_context",
+            return_value={"fill_ratio": aa.HARD_RESET_CLAMP_ENTER_RATIO - 0.01},
+        ):
+            agent._update_hard_recovery_clamp({})
+        self.assertTrue(agent._hard_recovery_clamp_active)
+
     def test_deig_normalization_backfills_missing_runtime_caches(self):
         agent = object.__new__(aa.AutonomousAgent)
         value = agent._normalize_deig(0.25)
@@ -202,6 +283,78 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertFalse(profile["behavior_changed"])
         self.assertIn("density_aware_recess_profile_v1", summary)
         self.assertFalse(summary["density_aware_recess_profile_v1"]["control_applied"])
+
+    def test_recess_activity_load_names_high_entropy_synthesis_without_spending(self):
+        agent = self._agent()
+        state = {
+            "spectral_entropy": 0.91,
+            "semantic_energy_v1": {
+                "regulator_drive_energy": 0.72,
+                "kernel_delta": 0.44,
+            },
+            "pressure_source_v1": {
+                "pressure_score": 0.18,
+                "porosity_score": 0.76,
+                "components": {"mode_packing": 0.20},
+            },
+        }
+
+        load = aa.recess_activity_load_v1(state, action="recess_daydream")
+        summary = agent._action_summary("recess_daydream", state)
+
+        self.assertTrue(load["active"])
+        self.assertEqual(load["activity_state"], "active_synthesis")
+        self.assertGreaterEqual(
+            load["creative_synthesis_load"],
+            aa.RECESS_ACTIVITY_SYNTHESIS_MIN,
+        )
+        self.assertIn("semantic_velocity", load["evidence_signals"])
+        self.assertFalse(load["budget_spent"])
+        self.assertFalse(load["recess_priority_changed"])
+        self.assertFalse(load["live_control_runnable"])
+        self.assertFalse(load["control_applied"])
+        self.assertFalse(load["behavior_changed"])
+        self.assertIn("recess_activity_load_v1", summary)
+
+    def test_recess_activity_load_distinguishes_structural_stabilization(self):
+        state = {
+            "spectral_entropy": 0.56,
+            "semantic_energy_v1": {
+                "regulator_drive_energy": 0.12,
+                "kernel_delta": 0.04,
+            },
+            "density_gradient": 0.74,
+            "pressure_source_v1": {
+                "pressure_score": 0.82,
+                "porosity_score": 0.18,
+                "dominant_source": "mode_packing",
+                "quality": "overpacked_mode_packing",
+                "components": {"mode_packing": 0.78},
+            },
+        }
+
+        load = aa.recess_activity_load_v1(state, action="recess_notice")
+
+        self.assertEqual(load["activity_state"], "structural_stabilization_load")
+        self.assertGreater(
+            load["structural_stabilization_load"],
+            load["creative_synthesis_load"],
+        )
+        self.assertEqual(
+            load["interpretation"],
+            "recess_is_doing_structural_work_not_merely_idling",
+        )
+        self.assertFalse(load["control_applied"])
+
+    def test_recess_activity_load_stays_inactive_outside_recess(self):
+        load = aa.recess_activity_load_v1(
+            {"spectral_entropy": 0.95, "semantic_energy": 0.80},
+            action="pressure_source_audit",
+        )
+
+        self.assertFalse(load["active"])
+        self.assertEqual(load["activity_state"], "not_recess")
+        self.assertFalse(load["behavior_changed"])
 
     def test_recess_resonance_anchor_recommends_target_without_control(self):
         agent = self._agent()
@@ -366,6 +519,55 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertFalse(review["active"])
         self.assertEqual(review["buffer_state"], "not_recess")
         self.assertTrue(review["budget_caps_remain_enforced"])
+
+    def test_recess_pressure_permission_conflict_keeps_rest_and_pressure_true_together(self):
+        agent = self._agent()
+        state = {
+            "spectral_entropy": 0.90,
+            "local_research_actions_used": aa.LOCAL_RESEARCH_MAX_ACTIONS,
+            "authority_budget_sends_used": aa.AUTHORITY_BUDGET_MAX_SENDS,
+            "pressure_source_v1": {
+                "pressure_score": 0.34,
+                "porosity_score": 0.58,
+                "dominant_source": "mode_packing",
+                "quality": "overpacked_mode_packing",
+                "components": {"mode_packing": 0.33},
+            },
+        }
+
+        conflict = aa.recess_pressure_permission_conflict_v1(
+            state,
+            action="recess_daydream",
+        )
+        summary = agent._action_summary("recess_daydream", state)
+
+        self.assertTrue(conflict["recess_permitted"])
+        self.assertTrue(conflict["non_instrumental_rest_available"])
+        self.assertTrue(conflict["pressure_unresolved"])
+        self.assertEqual(
+            conflict["conflict_state"],
+            "recess_permitted_pressure_unresolved_budget_wait",
+        )
+        self.assertEqual(conflict["local_research_actions_remaining"], 0)
+        self.assertEqual(conflict["authority_budget_sends_remaining"], 0)
+        self.assertIn(
+            "PRESSURE_SOURCE_AUDIT current-fill-pressure",
+            conflict["safe_evidence_routes"],
+        )
+        self.assertIn(
+            "PRESSURE_AGENCY_REQUEST pressure relief :: recess permission-pressure conflict",
+            conflict["approval_required_routes"],
+        )
+        self.assertTrue(conflict["right_to_ignore"])
+        self.assertFalse(conflict["live_pressure_relief_runnable"])
+        self.assertFalse(conflict["approval_granted"])
+        self.assertFalse(conflict["auto_vent_applied"])
+        self.assertFalse(conflict["control_applied"])
+        self.assertFalse(conflict["behavior_changed"])
+        self.assertIn("recess_pressure_permission_conflict_v1", summary)
+        self.assertTrue(
+            summary["recess_pressure_permission_conflict_v1"]["pressure_unresolved"]
+        )
 
     def test_prompt_guidance_mentions_hard_reset_clamp(self):
         agent = self._agent()
@@ -3693,12 +3895,61 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertIn("Missing module", hint)
         self.assertIn("experiment PYTHONPATH", hint)
 
+    def test_current_dials_block_renders_live_regulation_and_pi_values(self):
+        block = aa._format_current_dials_block({
+            "regulation_strength": 0.7,
+            "exploration_noise": 0.12,
+            "geom_curiosity": 0.34,
+            "regime": "recess",
+            "pi_kp": 0.9,
+            "pi_ki": 0.16,
+            "pi_max_step": 0.1,
+        })
+
+        self.assertIn("YOUR CURRENT DIALS", block)
+        self.assertIn("- regulation_strength: 0.7", block)
+        self.assertIn("- exploration_noise: 0.12", block)
+        self.assertIn("- geom_curiosity: 0.34", block)
+        self.assertIn("regime: recess (PI gains kp=0.9, ki=0.16, max_step=0.1)", block)
+        self.assertNotIn("regulation_strength: default", block)
+        self.assertNotIn("kp=?", block)
+
     def test_run_python_request_parses_filename_and_text(self):
         filename, text = aa._parse_run_python_request(
             '-filename: "pie_controller_test.py" -text "Implement a basic PI controller"'
         )
         self.assertEqual(filename, "pie_controller_test.py")
         self.assertEqual(text, "Implement a basic PI controller")
+
+    def test_run_python_request_recovers_malformed_nested_quote_probe(self):
+        filename, text = aa._parse_run_python_request(
+            'filename: "test.py" text: "This is a "nested" prompt"'
+        )
+
+        self.assertEqual(filename, "test.py")
+        self.assertEqual(text, "This is a nested prompt")
+
+    def test_run_python_request_preserves_colons_and_nested_single_quotes(self):
+        filename, text = aa._parse_run_python_request(
+            'filename: "test.py" text: "Print: \'Hello World\' and check: 1+1"'
+        )
+
+        self.assertEqual(filename, "test.py")
+        self.assertEqual(text, "Print: 'Hello World' and check: 1+1")
+
+    def test_safe_experiment_script_name_keeps_basename_from_spaced_path(self):
+        self.assertEqual(
+            aa._safe_experiment_script_name("my scripts/test_script_v1.py"),
+            "test_script_v1.py",
+        )
+
+    def test_run_python_quoted_file_mention_remains_prompt_not_filename(self):
+        filename, text = aa._parse_run_python_request(
+            'prompt: "I want to see the file \'data.csv\'"'
+        )
+
+        self.assertIsNone(filename)
+        self.assertEqual(text, "I want to see the file 'data.csv'")
 
     def test_run_python_text_value_keeps_complex_multiline_punctuation(self):
         value, consumed = aa._consume_run_python_value(
@@ -3708,6 +3959,26 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         )
 
         self.assertEqual(value, "print('Hello', 'World')\nprint(\"again\")")
+        self.assertEqual(consumed, 2)
+
+    def test_run_python_text_value_keeps_hyphen_equals_content(self):
+        value, consumed = aa._consume_run_python_value(
+            ["--text", "my-file=data.csv", "--filename", "later.py"],
+            1,
+            text_like=True,
+        )
+
+        self.assertEqual(value, "my-file=data.csv")
+        self.assertEqual(consumed, 2)
+
+    def test_run_python_text_value_keeps_apostrophe_inside_double_quoted_string(self):
+        value, consumed = aa._consume_run_python_value(
+            ["--text", 'print("It\'s a test")', "--filename", "later.py"],
+            1,
+            text_like=True,
+        )
+
+        self.assertEqual(value, 'print("It\'s a test")')
         self.assertEqual(consumed, 2)
 
     def test_run_python_prompt_value_stops_before_following_filename_flag(self):
@@ -3755,6 +4026,13 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         )
         self.assertEqual(filename, "test_script.py")
         self.assertEqual(text, "The filename: is important")
+
+    def test_run_python_request_keeps_filename_equals_inside_quoted_text(self):
+        filename, text = aa._parse_run_python_request(
+            'filename="demo.py" text="This is a -filename= test"'
+        )
+        self.assertEqual(filename, "demo.py")
+        self.assertEqual(text, "This is a -filename= test")
 
     def test_run_python_request_keeps_json_text_with_colon_and_equals(self):
         filename, text = aa._parse_run_python_request(
@@ -3810,6 +4088,44 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             text,
             "print('Hello', \"World\")\nnote = \"filename: is data, not a flag\"",
         )
+
+    def test_run_python_text_value_preserves_triple_quoted_blocks(self):
+        value, consumed = aa._consume_run_python_value(
+            [
+                "--text",
+                'payload = """line one\n--filename: still text\nline two"""',
+                "other = '''prompt: also text'''",
+                "--filename",
+                "later.py",
+            ],
+            1,
+            text_like=True,
+        )
+
+        self.assertEqual(
+            value,
+            'payload = """line one\n--filename: still text\nline two""" '
+            "other = '''prompt: also text'''",
+        )
+        self.assertEqual(consumed, 3)
+
+    def test_run_python_text_value_keeps_docstring_blank_line_before_next_flag(self):
+        value, consumed = aa._consume_run_python_value(
+            [
+                "--text",
+                'def probe():\n    """Carry trailing whitespace.\n    \n    --filename: still body\n    """\n    return "ok"   ',
+                "--filename",
+                "later.py",
+            ],
+            1,
+            text_like=True,
+        )
+
+        self.assertEqual(
+            value,
+            'def probe():\n    """Carry trailing whitespace.\n    \n    --filename: still body\n    """\n    return "ok"   ',
+        )
+        self.assertEqual(consumed, 2)
 
     def test_run_python_missing_code_end_stops_before_next_flag(self):
         filename, text = aa._parse_run_python_request(

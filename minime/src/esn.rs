@@ -2256,15 +2256,60 @@ pub fn state_fingerprint_16_from_slice(x: &[f32]) -> [f32; 16] {
 
 #[cfg(test)]
 mod attractor_fingerprint_tests {
+    use crate::gpu::Gpu;
+
     use super::{
         adaptive_pressure_noise_trial_review_v1, calculate_adaptive_introspection_pressure_high,
         calculate_dynamic_noise, calculate_viscous_rho_target,
         dynamic_noise_pressure_room_review_v1, entropy_ceiling_noise_damping_review_v1,
         exploration_noise_coherence_review_v1, settled_entropy_pressure_buffer_review_v1,
-        state_fingerprint_16_from_slice, state_rms_from_slice,
+        state_fingerprint_16_from_slice, state_rms_from_slice, SpectralSR,
         ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY, DEFAULT_EXPLORATION_NOISE,
         DYNAMIC_EXPLORATION_NOISE_MIN, VISCOUS_RHO_CEILING, VISCOUS_RHO_FLOOR,
     };
+
+    #[test]
+    fn gpu_rank1_ewma_matches_cpu_reference_across_updates() {
+        let gpu = Gpu::new().expect("Metal device and ESN shaders should be available");
+        let rho = 0.91_f32;
+        let mut spectral = SpectralSR::new(4, rho, &gpu).expect("spectral test instance");
+        let first = [0.25_f32, -0.50, 0.75, -0.10];
+        let second = [-0.40_f32, 0.20, 0.60, 0.80];
+        let mut expected = vec![0.0_f32; 16];
+
+        spectral
+            .rank1_ewma(&first)
+            .expect("first GPU rank-one update");
+        for row in 0..4 {
+            for column in 0..4 {
+                expected[row * 4 + column] = (1.0 - rho) * first[row] * first[column];
+            }
+        }
+        let first_gpu = gpu.read_f32(&spectral.cov, 16);
+        for (idx, (observed, reference)) in first_gpu.iter().zip(&expected).enumerate() {
+            assert!(
+                (observed - reference).abs() <= 1.0e-6,
+                "first rank-one update diverged at {idx}: gpu={observed} cpu={reference}"
+            );
+        }
+
+        spectral
+            .rank1_ewma(&second)
+            .expect("second GPU rank-one update");
+        for row in 0..4 {
+            for column in 0..4 {
+                let idx = row * 4 + column;
+                expected[idx] = rho * expected[idx] + (1.0 - rho) * second[row] * second[column];
+            }
+        }
+        let second_gpu = gpu.read_f32(&spectral.cov, 16);
+        for (idx, (observed, reference)) in second_gpu.iter().zip(&expected).enumerate() {
+            assert!(
+                (observed - reference).abs() <= 1.0e-6,
+                "second rank-one update diverged at {idx}: gpu={observed} cpu={reference}"
+            );
+        }
+    }
 
     #[test]
     fn dynamic_noise_allows_more_vibrancy_on_gentle_gradient_low_pressure() {

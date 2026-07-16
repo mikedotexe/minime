@@ -428,17 +428,20 @@ fn spectral_damping_warm_start_review_v1(
     } else {
         0.55
     };
-    let fill = if eigenfill_pct.is_finite() {
-        eigenfill_pct.clamp(0.0, 100.0)
-    } else {
-        eigenfill_target_pct.clamp(0.0, 100.0)
-    };
     let target = if eigenfill_target_pct.is_finite() {
         eigenfill_target_pct.clamp(0.0, 100.0)
     } else {
         68.0
     };
-    let loss = distinguishability_loss.unwrap_or(0.0).clamp(0.0, 1.0);
+    let fill = if eigenfill_pct.is_finite() {
+        eigenfill_pct.clamp(0.0, 100.0)
+    } else {
+        target
+    };
+    let loss = distinguishability_loss
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
     let semantic_drive = if regulator_drive_energy.is_finite() {
         regulator_drive_energy.max(0.0)
     } else {
@@ -8849,6 +8852,32 @@ mod tests {
             "unexpectedly large Chebyshev response: {l1_norm}"
         );
         assert!(coeffs.iter().any(|value| value.abs() > 1.0e-6));
+    }
+
+    #[test]
+    fn spectral_damping_review_sanitizes_zero_one_and_nan_boundaries() {
+        let review = super::spectral_damping_warm_start_review_v1(
+            6,
+            f32::NAN,
+            1.4,
+            f32::NAN,
+            f32::NAN,
+            f32::NAN,
+            f32::NAN,
+            Some(f32::NAN),
+            f32::NAN,
+        );
+
+        assert_eq!(review.cheby_stop_lo, 0.65);
+        assert_eq!(review.cheby_stop_hi, 1.0);
+        assert_eq!(review.cheby_soft, 0.15);
+        assert_eq!(review.warm_start_blend, 0.55);
+        assert_eq!(review.eigenfill_pct, 68.0);
+        assert_eq!(review.eigenfill_target_pct, 68.0);
+        assert!(review.coefficient_l1_norm.is_finite());
+        assert!(review.proposed_coefficient_l1_norm.is_finite());
+        assert!(review.regulator_counteraction_score.is_finite());
+        assert!(!review.runnable_without_approval);
     }
 
     #[test]

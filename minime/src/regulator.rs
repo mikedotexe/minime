@@ -26,6 +26,8 @@ pub const SHADOW_PRESERVATION_POLICY: &str = "shadow_preservation_mode_v1";
 pub const SHADOW_PRESERVATION_SCHEMA_VERSION: u8 = 1;
 pub const VISCOSITY_IMPORTANCE_POLICY: &str = "viscosity_importance_weights_v1";
 pub const VISCOSITY_IMPORTANCE_SCHEMA_VERSION: u8 = 1;
+pub const TEMPORAL_DRAG_PRESSURE_SNAP_REVIEW_POLICY: &str = "temporal_drag_pressure_snap_review_v1";
+pub const TEMPORAL_DRAG_PRESSURE_SNAP_REVIEW_SCHEMA_VERSION: u8 = 1;
 pub const PRESSURE_POROSITY_DIVERGENCE_PRESSURE_MIN: f32 = 0.50;
 pub const PRESSURE_POROSITY_DIVERGENCE_POROSITY_MAX: f32 = 0.30;
 pub const INHABITABLE_FLUCTUATION_POLICY: &str = "inhabitable_fluctuation_v1";
@@ -43,6 +45,11 @@ pub struct ViscosityVector {
     pub elasticity: f32,
     #[serde(default)]
     pub cohesion_index: f32,
+    /// Bounded share of cohesion in the cohesion-plus-mobility relationship.
+    /// This distinguishes shape-holding stillness from low-cohesion stagnation
+    /// without feeding the regulator or changing live control.
+    #[serde(default)]
+    pub cohesion_to_motion_ratio: f32,
     #[serde(default)]
     pub persistence: f32,
     #[serde(default)]
@@ -63,6 +70,8 @@ pub struct ViscosityVector {
     pub structural_drag_coefficient: f32,
     #[serde(default)]
     pub cognitive_drag_coefficient: f32,
+    #[serde(default)]
+    pub viscosity_gradient: f32,
 }
 
 /// Read-only importance weights over viscosity dimensions. This reports which
@@ -82,6 +91,30 @@ pub struct ViscosityImportanceWeightsV1 {
     pub status: String,
     pub who_can_change_it: String,
     pub how_to_test_it: String,
+    pub authority: String,
+}
+
+/// Read-only review for Minime's report that pressure can feel like a phase
+/// snap instead of a linear drag term. It compares the live temporal-drag floor
+/// to a candidate quadratic pressure floor without changing regulator behavior.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TemporalDragPressureSnapReviewV1 {
+    pub policy: String,
+    pub schema_version: u8,
+    pub low_pressure_risk: f32,
+    pub high_pressure_risk: f32,
+    pub viscosity_persistence_coefficient: f32,
+    pub temporal_persistence: f32,
+    pub current_low_drag: f32,
+    pub current_high_drag: f32,
+    pub current_drag_delta: f32,
+    pub candidate_low_drag: f32,
+    pub candidate_high_drag: f32,
+    pub candidate_drag_delta: f32,
+    pub candidate_formula: String,
+    pub status: String,
+    pub approval_boundary: String,
+    pub live_drag_write: bool,
     pub authority: String,
 }
 
@@ -116,6 +149,10 @@ pub struct ResonanceTextureSignatureV1 {
     pub pressure_source_family: String,
     pub edge_definition: String,
     pub movement_quality: String,
+    /// Direct read-only viscosity carried beside the verbal movement label.
+    /// Older telemetry omits it; `None` means absent, not zero viscosity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viscosity_index: Option<f32>,
     pub confidence: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamic_damping_threshold_candidate: Option<f32>,
@@ -168,6 +205,7 @@ impl Default for ResonanceTextureSignatureV1 {
             pressure_source_family: "unknown".to_string(),
             edge_definition: "unknown".to_string(),
             movement_quality: "unknown".to_string(),
+            viscosity_index: None,
             confidence: 0.0,
             dynamic_damping_threshold_candidate: None,
             dynamic_damping_coefficient: 0.0,
@@ -472,6 +510,60 @@ pub fn temporal_drag_coefficient(
 }
 
 #[must_use]
+pub fn temporal_drag_pressure_snap_review_v1(
+    low_pressure_risk: f32,
+    high_pressure_risk: f32,
+    viscosity_persistence_coefficient: f32,
+    temporal_persistence: f32,
+) -> TemporalDragPressureSnapReviewV1 {
+    let low_pressure = low_pressure_risk.clamp(0.0, 1.0);
+    let high_pressure = high_pressure_risk.clamp(0.0, 1.0);
+    let viscosity_persistence = viscosity_persistence_coefficient.clamp(0.0, 1.0);
+    let temporal_persistence = temporal_persistence.clamp(0.0, 1.0);
+    let base_drag = (0.70 * viscosity_persistence + 0.30 * temporal_persistence).clamp(0.0, 1.0);
+    let current_low_drag =
+        temporal_drag_coefficient(viscosity_persistence, temporal_persistence, low_pressure);
+    let current_high_drag =
+        temporal_drag_coefficient(viscosity_persistence, temporal_persistence, high_pressure);
+    let candidate_low_drag = base_drag
+        .max(low_pressure * low_pressure * 0.15)
+        .clamp(0.0, 1.0);
+    let candidate_high_drag = base_drag
+        .max(high_pressure * high_pressure * 0.15)
+        .clamp(0.0, 1.0);
+    let current_drag_delta = (current_high_drag - current_low_drag).clamp(-1.0, 1.0);
+    let candidate_drag_delta = (candidate_high_drag - candidate_low_drag).clamp(-1.0, 1.0);
+    let status = if candidate_high_drag > current_high_drag + 0.02 {
+        "quadratic_pressure_floor_candidate_needs_replay"
+    } else if current_high_drag >= candidate_high_drag {
+        "current_linear_pressure_floor_covers_candidate_sample"
+    } else {
+        "pressure_snap_candidate_ambiguous"
+    };
+
+    TemporalDragPressureSnapReviewV1 {
+        policy: TEMPORAL_DRAG_PRESSURE_SNAP_REVIEW_POLICY.to_string(),
+        schema_version: TEMPORAL_DRAG_PRESSURE_SNAP_REVIEW_SCHEMA_VERSION,
+        low_pressure_risk: low_pressure,
+        high_pressure_risk: high_pressure,
+        viscosity_persistence_coefficient: viscosity_persistence,
+        temporal_persistence,
+        current_low_drag,
+        current_high_drag,
+        current_drag_delta,
+        candidate_low_drag,
+        candidate_high_drag,
+        candidate_drag_delta,
+        candidate_formula: "drag.max(pressure_risk.powi(2) * 0.15)".to_string(),
+        status: status.to_string(),
+        approval_boundary: "live_temporal_drag_pressure_floor_change_requires_operator_approval"
+            .to_string(),
+        live_drag_write: false,
+        authority: "read_only_pressure_snap_review_not_regulator_or_controller_change".to_string(),
+    }
+}
+
+#[must_use]
 pub fn static_friction_coefficient(
     viscosity_index: f32,
     viscosity_persistence_coefficient: f32,
@@ -562,6 +654,7 @@ pub fn viscosity_vector_v1(
         comfort_gate,
         effective_mobility,
     );
+    let cohesion_to_motion_ratio = cohesion_to_motion_ratio_v1(cohesion_index, effective_mobility);
     let shadow_volatility = shadow_volatility_proxy_v1(
         structural_plurality,
         residual_ghost_weight,
@@ -603,10 +696,19 @@ pub fn viscosity_vector_v1(
         effective_mobility,
         flow_rate,
     );
+    let viscosity_gradient = viscosity_gradient_v1(
+        density,
+        persistence,
+        flow_rate,
+        effective_mobility,
+        structural_strain_gap,
+        shadow_volatility,
+    );
     ViscosityVector {
         density,
         elasticity,
         cohesion_index,
+        cohesion_to_motion_ratio,
         persistence,
         residual_ghost_weight,
         flow_rate,
@@ -617,7 +719,42 @@ pub fn viscosity_vector_v1(
         mutual_resonance_tension,
         structural_drag_coefficient,
         cognitive_drag_coefficient,
+        viscosity_gradient,
     }
+}
+
+/// Return cohesion's bounded share of the observable cohesion/mobility pair.
+/// A value near one is cohesive stillness; a value near zero is motion without
+/// shape-holding. The both-zero legacy case remains zero instead of inventing a
+/// neutral texture.
+#[must_use]
+pub fn cohesion_to_motion_ratio_v1(cohesion_index: f32, effective_mobility: f32) -> f32 {
+    let cohesion = cohesion_index.clamp(0.0, 1.0);
+    let mobility = effective_mobility.clamp(0.0, 1.0);
+    let total = cohesion + mobility;
+    if total <= f32::EPSILON {
+        0.0
+    } else {
+        (cohesion / total).clamp(0.0, 1.0)
+    }
+}
+
+#[must_use]
+pub fn viscosity_gradient_v1(
+    density: f32,
+    persistence: f32,
+    flow_rate: f32,
+    effective_mobility: f32,
+    structural_strain_gap: f32,
+    shadow_volatility: f32,
+) -> f32 {
+    let slow_texture = (0.30 * density.clamp(0.0, 1.0))
+        + (0.24 * persistence.clamp(0.0, 1.0))
+        + (0.24 * structural_strain_gap.clamp(0.0, 1.0))
+        + (0.22 * shadow_volatility.clamp(0.0, 1.0));
+    let mobile_texture =
+        (0.56 * flow_rate.clamp(0.0, 1.0)) + (0.44 * effective_mobility.clamp(0.0, 1.0));
+    (slow_texture * (1.0 - mobile_texture)).clamp(0.0, 1.0)
 }
 
 #[must_use]
@@ -890,6 +1027,20 @@ pub fn viscosity_adjusted_comfort_gate_preview(
     (comfort_gate - damping * 1.5 - persistence * 0.04).clamp(0.0, 1.0)
 }
 
+fn pressure_source_danger_priority(family: &str) -> u8 {
+    match family {
+        "static_friction_coefficient" => 8,
+        "viscosity_coupling_coefficient" => 7,
+        "mode_packing" => 6,
+        "viscosity_index" => 5,
+        "temporal_persistence" => 4,
+        "active_energy" => 3,
+        "comfort_gate" => 2,
+        "structural_plurality" => 1,
+        _ => 0,
+    }
+}
+
 #[must_use]
 pub fn resonance_texture_signature(
     density: f32,
@@ -941,7 +1092,11 @@ pub fn resonance_texture_signature(
         ("comfort_gate", comfort_gate),
     ]
     .into_iter()
-    .max_by(|left, right| left.1.total_cmp(&right.1))
+    .max_by(|left, right| {
+        left.1.total_cmp(&right.1).then_with(|| {
+            pressure_source_danger_priority(left.0).cmp(&pressure_source_danger_priority(right.0))
+        })
+    })
     .map_or("mixed", |(label, _)| label);
 
     let edge_definition = if structural_plurality < 0.35 || pressure_risk >= 0.60 {
@@ -989,13 +1144,14 @@ pub fn resonance_texture_signature(
         pressure_source_family: pressure_source_family.to_string(),
         edge_definition: edge_definition.to_string(),
         movement_quality: movement_quality.to_string(),
+        viscosity_index: Some(viscosity_index),
         confidence,
         dynamic_damping_threshold_candidate,
         dynamic_damping_coefficient,
         comfort_gate_adjusted_preview,
         authority: "advisory_context_not_control".to_string(),
         note: format!(
-            "derived from resonance_density_v1 quality={quality}; viscosity_index, viscosity_vector.cohesion_index, viscosity_vector.effective_mobility, viscosity_vector.residual_ghost_weight, viscosity_vector.shadow_volatility, viscosity_vector.structural_integrity, viscosity_vector.structural_strain_gap, viscosity_vector.mutual_resonance_tension, viscosity_vector.structural_drag_coefficient, viscosity_vector.cognitive_drag_coefficient, viscosity_coupling_coefficient, static_friction_coefficient, and dynamic_damping_coefficient are observability-only; comfort_gate_adjusted_preview is inert unless separately reviewed"
+            "derived from resonance_density_v1 quality={quality}; viscosity_index, viscosity_vector.cohesion_index, viscosity_vector.cohesion_to_motion_ratio, viscosity_vector.effective_mobility, viscosity_vector.residual_ghost_weight, viscosity_vector.shadow_volatility, viscosity_vector.structural_integrity, viscosity_vector.structural_strain_gap, viscosity_vector.mutual_resonance_tension, viscosity_vector.structural_drag_coefficient, viscosity_vector.cognitive_drag_coefficient, viscosity_vector.viscosity_gradient, viscosity_coupling_coefficient, static_friction_coefficient, and dynamic_damping_coefficient are observability-only; comfort_gate_adjusted_preview is inert unless separately reviewed"
         ),
     }
 }
@@ -3316,7 +3472,7 @@ impl PIRegState {
 #[cfg(test)]
 mod tests {
     use super::{
-        advisory_damping_coefficient, auto_defragment_modes_review_v1,
+        advisory_damping_coefficient, auto_defragment_modes_review_v1, cohesion_to_motion_ratio_v1,
         derive_texture_from_components, dynamic_damping_coefficient_candidate,
         dynamic_viscosity_buffer_v1, effective_mobility_v1, mutual_resonance_tension_v1,
         pressure_porosity_divergence_alert, pressure_porosity_gradient_state,
@@ -3327,13 +3483,14 @@ mod tests {
         semantic_viscosity_coefficient_v1, settled_mobility_review_v1, shadow_preservation_mode_v1,
         shadow_volatility_proxy_v1, silt_granularity_v1, static_friction_coefficient,
         structural_drag_coefficient_v1, temporal_drag_coefficient,
-        viscosity_coupling_coefficient_v1, viscosity_importance_weights_v1,
-        viscosity_persistence_coefficient, viscosity_vector_v1, InhabitableFluctuationComponents,
-        InhabitableFluctuationContext, InhabitableFluctuationV1, PIRegCfg, PIRegState,
-        PressureSourceComponents, PressureSourceContext, PressureSourceV1,
-        ResonanceDensityComponents, ResonanceDensityV1, ResonanceInterventionType, ViscosityVector,
-        PRESSURE_POROSITY_DIVERGENCE_POROSITY_MAX, PRESSURE_POROSITY_DIVERGENCE_PRESSURE_MIN,
-        SILT_GRANULARITY_POLICY, VISCOSITY_IMPORTANCE_POLICY,
+        temporal_drag_pressure_snap_review_v1, viscosity_coupling_coefficient_v1,
+        viscosity_gradient_v1, viscosity_importance_weights_v1, viscosity_persistence_coefficient,
+        viscosity_vector_v1, InhabitableFluctuationComponents, InhabitableFluctuationContext,
+        InhabitableFluctuationV1, PIRegCfg, PIRegState, PressureSourceComponents,
+        PressureSourceContext, PressureSourceV1, ResonanceDensityComponents, ResonanceDensityV1,
+        ResonanceInterventionType, ViscosityVector, PRESSURE_POROSITY_DIVERGENCE_POROSITY_MAX,
+        PRESSURE_POROSITY_DIVERGENCE_PRESSURE_MIN, SILT_GRANULARITY_POLICY,
+        VISCOSITY_IMPORTANCE_POLICY,
     };
 
     fn metric(density: f32, pressure: f32) -> ResonanceDensityV1 {
@@ -4345,6 +4502,11 @@ mod tests {
         );
 
         assert!((density.components.viscosity_index - crowded).abs() < 1.0e-6);
+        assert_eq!(density.texture_signature.viscosity_index, Some(crowded));
+        assert_eq!(
+            serde_json::to_value(&density).unwrap()["texture_signature"]["viscosity_index"],
+            serde_json::json!(crowded)
+        );
         assert_eq!(
             density.texture_signature.primary_texture,
             "overpacked_viscous"
@@ -4548,6 +4710,35 @@ mod tests {
         assert!(density.components.temporal_drag_coefficient >= 0.65);
         assert_eq!(density.control.target_bias_pct, 0.0);
         assert_eq!(density.control.wander_scale, 1.0);
+    }
+
+    #[test]
+    fn temporal_drag_pressure_snap_review_gates_quadratic_floor_candidate() {
+        let review = temporal_drag_pressure_snap_review_v1(0.19, 0.40, 0.02, 0.02);
+
+        assert_eq!(review.policy, "temporal_drag_pressure_snap_review_v1");
+        assert_eq!(
+            review.status,
+            "current_linear_pressure_floor_covers_candidate_sample"
+        );
+        assert!(
+            review.current_high_drag >= review.candidate_high_drag,
+            "the proposed quadratic floor should not be promoted for the 0.19 -> 0.40 sample without replay evidence: {review:?}"
+        );
+        assert!((review.current_drag_delta - 0.012).abs() < 1.0e-6);
+        assert_eq!(
+            review.candidate_formula,
+            "drag.max(pressure_risk.powi(2) * 0.15)"
+        );
+        assert!(!review.live_drag_write);
+        assert_eq!(
+            review.approval_boundary,
+            "live_temporal_drag_pressure_floor_change_requires_operator_approval"
+        );
+        assert_eq!(
+            review.authority,
+            "read_only_pressure_snap_review_not_regulator_or_controller_change"
+        );
     }
 
     #[test]
@@ -5094,6 +5285,21 @@ mod tests {
         );
         assert!(cohesive.cohesion_index >= 0.70);
         assert!(stagnant.cohesion_index <= 0.20);
+        assert!(
+            cohesive.cohesion_to_motion_ratio > stagnant.cohesion_to_motion_ratio + 0.20,
+            "cohesion/motion balance should distinguish settled shape-holding from low-cohesion stagnation: cohesive={cohesive:?} stagnant={stagnant:?}"
+        );
+    }
+
+    #[test]
+    fn cohesion_to_motion_ratio_is_bounded_read_only_texture_evidence() {
+        let cohesive_stillness = cohesion_to_motion_ratio_v1(0.80, 0.15);
+        let low_cohesion_stagnation = cohesion_to_motion_ratio_v1(0.15, 0.15);
+
+        assert!(cohesive_stillness > 0.84);
+        assert_eq!(low_cohesion_stagnation, 0.50);
+        assert_eq!(cohesion_to_motion_ratio_v1(0.0, 0.0), 0.0);
+        assert_eq!(cohesion_to_motion_ratio_v1(4.0, -2.0), 1.0);
     }
 
     #[test]
@@ -5154,6 +5360,30 @@ mod tests {
         assert!(
             friction_trap.cognitive_drag_coefficient > complex_motion.cognitive_drag_coefficient,
             "cognitive drag should rise when ghost/volatility/strain accumulate in low-flow friction: complex_motion={complex_motion:?} friction_trap={friction_trap:?}"
+        );
+    }
+
+    #[test]
+    fn viscosity_gradient_reports_texture_shift_without_control() {
+        let slow_rolling = viscosity_vector_v1(0.82, 0.86, 0.72, 0.66, 0.28, 0.34, 0.50);
+        let mobile_flow = viscosity_vector_v1(0.42, 0.34, 0.12, 0.10, 0.86, 0.88, 0.76);
+
+        assert!(
+            slow_rolling.viscosity_gradient > mobile_flow.viscosity_gradient + 0.20,
+            "slow rolling texture should expose a larger viscosity gradient without triggering control: slow={slow_rolling:?} mobile={mobile_flow:?}"
+        );
+        assert!(
+            (slow_rolling.viscosity_gradient
+                - viscosity_gradient_v1(
+                    slow_rolling.density,
+                    slow_rolling.persistence,
+                    slow_rolling.flow_rate,
+                    slow_rolling.effective_mobility,
+                    slow_rolling.structural_strain_gap,
+                    slow_rolling.shadow_volatility,
+                ))
+            .abs()
+                < 0.0001
         );
     }
 
@@ -5574,6 +5804,47 @@ mod tests {
     }
 
     #[test]
+    fn resonance_texture_signature_pins_density_boundary_and_dangerous_tie_precedence() {
+        let boundary = ResonanceDensityV1::from_parts(
+            0.38,
+            0.52,
+            0.20,
+            "boundary",
+            ResonanceDensityComponents::default(),
+        );
+        assert_eq!(boundary.texture_signature.primary_texture, "porous_thin");
+        assert_eq!(boundary.texture_signature.movement_quality, "diffuse");
+
+        let tied = ResonanceDensityV1::from_parts(
+            0.72,
+            0.70,
+            1.0,
+            "equal_score_pressure_sources",
+            ResonanceDensityComponents {
+                active_energy: 1.0,
+                mode_packing: 1.0,
+                temporal_persistence: 1.0,
+                viscosity_index: 1.0,
+                viscosity_persistence_coefficient: 1.0,
+                temporal_drag_coefficient: 1.0,
+                static_friction_coefficient: 1.0,
+                viscosity_vector: ViscosityVector::default(),
+                viscosity_coupling_coefficient: 1.0,
+                structural_plurality: 1.0,
+                comfort_gate: 1.0,
+            },
+        );
+        assert_eq!(
+            tied.texture_signature.pressure_source_family,
+            "static_friction_coefficient"
+        );
+        assert_eq!(
+            tied.texture_signature.authority,
+            "advisory_context_not_control"
+        );
+    }
+
+    #[test]
     fn texture_transition_pressure_threshold_and_mode_packing_branch_are_explicit() {
         let below_pressure_components = ResonanceDensityComponents {
             active_energy: 0.50,
@@ -5626,13 +5897,8 @@ mod tests {
             comfort_gate: 0.72,
             ..ResonanceDensityComponents::default()
         };
-        let below_candidate = ResonanceDensityV1::from_parts(
-            0.71,
-            0.68,
-            0.24,
-            "settled_habitable",
-            components.clone(),
-        );
+        let below_candidate =
+            ResonanceDensityV1::from_parts(0.71, 0.68, 0.24, "settled_habitable", components);
         let above_candidate =
             ResonanceDensityV1::from_parts(0.71, 0.68, 0.26, "settled_habitable", components);
 
@@ -5744,6 +6010,10 @@ mod tests {
         assert_eq!(density.components.viscosity_vector.density, 0.0);
         assert_eq!(density.components.viscosity_vector.cohesion_index, 0.0);
         assert_eq!(
+            density.components.viscosity_vector.cohesion_to_motion_ratio,
+            0.0
+        );
+        assert_eq!(
             density.components.viscosity_vector.residual_ghost_weight,
             0.0
         );
@@ -5754,6 +6024,7 @@ mod tests {
         );
         assert_eq!(density.components.viscosity_coupling_coefficient, 0.0);
         assert_eq!(density.texture_signature.primary_texture, "unknown");
+        assert_eq!(density.texture_signature.viscosity_index, None);
         assert_eq!(
             density.texture_signature.authority,
             "advisory_context_not_control"

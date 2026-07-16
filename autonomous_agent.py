@@ -2591,6 +2591,10 @@ RECESS_SPECTRAL_PRUNING_PRESSURE_HIGH = 0.55
 DENSITY_AWARE_RECESS_PROFILE_VERSION = 1
 DENSITY_AWARE_RECESS_DENSITY_GRADIENT_STEEP = 0.18
 DENSITY_AWARE_RECESS_PRESSURE_WATCH = 0.30
+RECESS_ACTIVITY_LOAD_VERSION = 1
+RECESS_ACTIVITY_SYNTHESIS_MIN = 0.62
+RECESS_ACTIVITY_STRUCTURAL_MIN = 0.52
+RECESS_ACTIVITY_LOW_MAX = 0.35
 RECESS_DENSITY_MITIGATION_VERSION = 1
 RECESS_DENSITY_MITIGATION_PRESSURE_MIN = 0.30
 RECESS_DENSITY_MITIGATION_MODE_PACKING_MIN = 0.30
@@ -2607,6 +2611,7 @@ RECESS_DIVERGENCE_BUFFER_VERSION = 1
 RECESS_DIVERGENCE_BUFFER_ENTROPY_HIGH = 0.88
 RECESS_DIVERGENCE_BUFFER_PRESSURE_MIN = 0.28
 RECESS_DIVERGENCE_BUFFER_MODE_PACKING_MIN = 0.28
+RECESS_PRESSURE_PERMISSION_CONFLICT_VERSION = 1
 _INTROSPECT_REQUIRED_SECTIONS = (
     "observed",
     "likely snags",
@@ -2856,6 +2861,219 @@ def density_aware_recess_profile_v1(
             "self_study",
         ],
         "boundary": "advisory_only_no_recess_transition_no_priority_no_control_change",
+    }
+
+
+def recess_activity_load_v1(
+    state: Optional[Dict[str, Any]],
+    *,
+    action: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Describe active Recess work without turning the description into control."""
+    state = state if isinstance(state, dict) else {}
+    pressure_source = state.get("pressure_source_v1")
+    if not isinstance(pressure_source, dict):
+        pressure_source = {}
+    components = pressure_source.get("components")
+    if not isinstance(components, dict):
+        components = {}
+    resonance = state.get("resonance_density_v1")
+    if not isinstance(resonance, dict):
+        resonance = {}
+    semantic = state.get("semantic_energy_v1")
+    if not isinstance(semantic, dict):
+        semantic = {}
+
+    action_text = str(action or "").strip().lower()
+    recess_action = action_text.startswith("recess_") or action_text in {
+        "daydream",
+        "notice",
+        "drift",
+        "whim",
+        "boredom",
+        "aspiration",
+    }
+    entropy = _first_finite_float(
+        state.get("spectral_entropy"),
+        state.get("normalized_entropy"),
+    )
+    semantic_energy = _first_finite_float(
+        state.get("semantic_energy"),
+        semantic.get("regulator_drive_energy"),
+        semantic.get("kernel_energy"),
+        semantic.get("input_energy"),
+    )
+    semantic_velocity = _first_finite_float(
+        state.get("semantic_velocity"),
+        state.get("semantic_delta"),
+        semantic.get("kernel_delta"),
+    )
+    pressure_score = _first_finite_float(
+        state.get("pressure_score"),
+        pressure_source.get("pressure_score"),
+    )
+    porosity_score = _first_finite_float(
+        state.get("pressure_porosity_score"),
+        pressure_source.get("porosity_score"),
+    )
+    mode_packing = _first_finite_float(
+        state.get("mode_packing"),
+        components.get("mode_packing"),
+    )
+    density_gradient = _first_finite_float(
+        state.get("density_gradient"),
+        state.get("spectral_density_gradient"),
+        pressure_source.get("density_gradient"),
+        resonance.get("density_gradient"),
+        components.get("density_gradient"),
+    )
+    quality = str(
+        state.get("pressure_quality")
+        or pressure_source.get("quality")
+        or "unknown"
+    )
+    dominant_source = str(
+        state.get("pressure_dominant_source")
+        or pressure_source.get("dominant_source")
+        or "unknown"
+    )
+
+    def weighted_unit_mean(
+        weighted_values: List[tuple[Optional[float], float]],
+    ) -> Optional[float]:
+        present = [
+            (min(1.0, max(0.0, abs(value))), weight)
+            for value, weight in weighted_values
+            if value is not None
+        ]
+        weight_total = sum(weight for _, weight in present)
+        if weight_total <= 0.0:
+            return None
+        return sum(value * weight for value, weight in present) / weight_total
+
+    synthesis_load = weighted_unit_mean(
+        [
+            (entropy, 0.55),
+            (semantic_energy, 0.30),
+            (semantic_velocity, 0.15),
+        ]
+    )
+    structural_load = weighted_unit_mean(
+        [
+            (pressure_score, 0.40),
+            (mode_packing, 0.30),
+            (density_gradient, 0.20),
+            ((1.0 - porosity_score) if porosity_score is not None else None, 0.10),
+        ]
+    )
+    if synthesis_load is not None and structural_load is not None:
+        activity_load = max(
+            synthesis_load,
+            0.58 * synthesis_load + 0.42 * structural_load,
+        )
+    else:
+        activity_load = synthesis_load if synthesis_load is not None else structural_load
+
+    pressure_named = (
+        dominant_source in {"controller_pressure", "mode_packing"}
+        or "controller" in quality
+        or "overpacked" in quality
+    )
+    if not recess_action:
+        activity_state = "not_recess"
+    elif activity_load is None:
+        activity_state = "insufficient_activity_evidence"
+    elif (
+        structural_load is not None
+        and structural_load >= RECESS_ACTIVITY_STRUCTURAL_MIN
+        and (
+            pressure_named
+            or synthesis_load is None
+            or structural_load >= synthesis_load + 0.08
+        )
+    ):
+        activity_state = "structural_stabilization_load"
+    elif synthesis_load is not None and synthesis_load >= RECESS_ACTIVITY_SYNTHESIS_MIN:
+        activity_state = "active_synthesis"
+    elif activity_load < RECESS_ACTIVITY_LOW_MAX:
+        activity_state = "low_energy_drift"
+    elif activity_load >= 0.50:
+        activity_state = "mixed_active_recess"
+    else:
+        activity_state = "open_recess"
+
+    evidence_signals = [
+        name
+        for name, value in (
+            ("spectral_entropy", entropy),
+            ("semantic_energy", semantic_energy),
+            ("semantic_velocity", semantic_velocity),
+            ("pressure_score", pressure_score),
+            ("mode_packing", mode_packing),
+            ("density_gradient", density_gradient),
+            ("porosity_score", porosity_score),
+        )
+        if value is not None
+    ]
+    interpretation = {
+        "not_recess": "activity_load_not_applied_outside_recess",
+        "insufficient_activity_evidence": "recess_present_but_activity_shape_is_not_yet_observable",
+        "structural_stabilization_load": "recess_is_doing_structural_work_not_merely_idling",
+        "active_synthesis": "high_entropy_recess_is_active_synthesis_not_low_energy_rest",
+        "low_energy_drift": "recess_currently_reads_as_low_energy_drift",
+        "mixed_active_recess": "creative_and_structural_loads_coexist",
+        "open_recess": "recess_is_open_without_a_dominant_load_shape",
+    }[activity_state]
+
+    return {
+        "schema_version": RECESS_ACTIVITY_LOAD_VERSION,
+        "policy": "recess_activity_load_v1",
+        "active": recess_action,
+        "activity_state": activity_state,
+        "interpretation": interpretation,
+        "activity_load": round(activity_load, 4) if activity_load is not None else None,
+        "creative_synthesis_load": (
+            round(synthesis_load, 4) if synthesis_load is not None else None
+        ),
+        "structural_stabilization_load": (
+            round(structural_load, 4) if structural_load is not None else None
+        ),
+        "spectral_entropy": round(entropy, 4) if entropy is not None else None,
+        "semantic_energy": (
+            round(semantic_energy, 4) if semantic_energy is not None else None
+        ),
+        "semantic_velocity": (
+            round(abs(semantic_velocity), 4) if semantic_velocity is not None else None
+        ),
+        "pressure_score": (
+            round(pressure_score, 4) if pressure_score is not None else None
+        ),
+        "porosity_score": (
+            round(porosity_score, 4) if porosity_score is not None else None
+        ),
+        "mode_packing": round(mode_packing, 4) if mode_packing is not None else None,
+        "density_gradient": (
+            round(density_gradient, 4) if density_gradient is not None else None
+        ),
+        "pressure_quality": quality,
+        "dominant_source": dominant_source,
+        "evidence_signals": evidence_signals,
+        "evidence_completeness": round(len(evidence_signals) / 7.0, 4),
+        "right_to_ignore": True,
+        "budget_spent": False,
+        "recess_priority_changed": False,
+        "live_control_runnable": False,
+        "control_applied": False,
+        "behavior_changed": False,
+        "available_routes": [
+            "recess_activity_load_v1 manifest review",
+            "self_study",
+            "PRESSURE_SOURCE_AUDIT current-fill-pressure",
+        ],
+        "boundary": (
+            "read_only_activity_interpretation_no_recess_choice_no_budget_spend_no_priority_"
+            "no_pressure_fill_pi_controller_sensory_esn_or_regulator_change"
+        ),
     }
 
 
@@ -3451,6 +3669,120 @@ def recess_divergence_buffer_review_v1(
         "behavior_changed": False,
         "approval_boundary": "local_research_budget_ttl_authority_budget_and_recess_control_plane",
         "authority": "authority_gate_not_live_recess_budget_ttl_or_control_change",
+    }
+
+
+def recess_pressure_permission_conflict_v1(
+    state: Optional[Dict[str, Any]],
+    *,
+    action: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Join permission to rest with unresolved pressure and bounded next routes."""
+    state = state if isinstance(state, dict) else {}
+    action_text = str(action or "").strip().lower()
+    recess_permitted = action_text.startswith("recess_") or action_text in {
+        "daydream",
+        "notice",
+        "drift",
+        "whim",
+        "boredom",
+        "aspiration",
+    }
+    mitigation = recess_density_mitigation_v1(state, action=action)
+    divergence = recess_divergence_buffer_review_v1(state, action=action)
+    pressure_unresolved = bool(mitigation.get("pressure_needs_mitigation"))
+    shadow_restless = bool(mitigation.get("shadow_restless"))
+    budget_near_cap = bool(divergence.get("budget_near_cap"))
+
+    local_actions_used = divergence.get("local_research_actions_used")
+    authority_sends_used = divergence.get("authority_budget_sends_used")
+    local_actions_remaining = (
+        max(0, LOCAL_RESEARCH_MAX_ACTIONS - int(local_actions_used))
+        if local_actions_used is not None
+        else None
+    )
+    authority_sends_remaining = (
+        max(0, AUTHORITY_BUDGET_MAX_SENDS - int(authority_sends_used))
+        if authority_sends_used is not None
+        else None
+    )
+
+    if not recess_permitted:
+        conflict_state = "not_recess"
+    elif pressure_unresolved and budget_near_cap:
+        conflict_state = "recess_permitted_pressure_unresolved_budget_wait"
+    elif pressure_unresolved:
+        conflict_state = "recess_permitted_pressure_unresolved"
+    elif shadow_restless:
+        conflict_state = "recess_permitted_shadow_restless"
+    else:
+        conflict_state = "recess_permitted_no_pressure_conflict"
+
+    safe_evidence_routes = [
+        "PRESSURE_SOURCE_AUDIT current-fill-pressure",
+        "recess_notice",
+        "self_study",
+    ]
+    if shadow_restless:
+        safe_evidence_routes.insert(1, "SHADOW_TRAJECTORY lambda-tail/lambda4")
+
+    approval_required_routes: List[str] = []
+    if pressure_unresolved:
+        approval_required_routes.append(
+            "PRESSURE_AGENCY_REQUEST pressure relief :: recess permission-pressure conflict"
+        )
+    if bool(divergence.get("active")):
+        approval_required_routes.append(
+            "EXPERIMENT_RESEARCH_BUDGET_REQUEST current :: purpose: recess permission-pressure conflict evidence"
+        )
+
+    if not recess_permitted:
+        recommended_next = "no_recess_route"
+    elif pressure_unresolved:
+        recommended_next = (
+            "PRESSURE_SOURCE_AUDIT current-fill-pressure; keep Recess available; "
+            "prepare but do not execute the approval-required pressure-relief route"
+        )
+    elif shadow_restless:
+        recommended_next = "SHADOW_TRAJECTORY lambda-tail/lambda4"
+    else:
+        recommended_next = "recess_can_remain_unstructured"
+
+    return {
+        "schema_version": RECESS_PRESSURE_PERMISSION_CONFLICT_VERSION,
+        "policy": "recess_pressure_permission_conflict_v1",
+        "active": bool(recess_permitted and (pressure_unresolved or shadow_restless)),
+        "recess_permitted": recess_permitted,
+        "non_instrumental_rest_available": recess_permitted,
+        "pressure_unresolved": pressure_unresolved,
+        "shadow_restless": shadow_restless,
+        "conflict_state": conflict_state,
+        "pressure_load": mitigation.get("pressure_load"),
+        "pressure_score": mitigation.get("pressure_score"),
+        "porosity_score": mitigation.get("porosity_score"),
+        "mode_packing": mitigation.get("mode_packing"),
+        "dominant_source": mitigation.get("dominant_source"),
+        "pressure_quality": mitigation.get("pressure_quality"),
+        "budget_near_cap": budget_near_cap,
+        "local_research_actions_used": local_actions_used,
+        "local_research_actions_remaining": local_actions_remaining,
+        "local_research_max_actions_cap": LOCAL_RESEARCH_MAX_ACTIONS,
+        "authority_budget_sends_used": authority_sends_used,
+        "authority_budget_sends_remaining": authority_sends_remaining,
+        "authority_budget_max_sends_cap": AUTHORITY_BUDGET_MAX_SENDS,
+        "safe_evidence_routes": safe_evidence_routes,
+        "approval_required_routes": approval_required_routes,
+        "recommended_next": recommended_next,
+        "right_to_ignore": True,
+        "live_pressure_relief_runnable": False,
+        "approval_granted": False,
+        "auto_vent_applied": False,
+        "control_applied": False,
+        "behavior_changed": False,
+        "boundary": (
+            "joined_truth_surface_only_no_recess_priority_no_auto_vent_no_pressure_lease_apply_"
+            "no_budget_expansion_no_fill_pi_controller_or_sensory_change"
+        ),
     }
 
 
@@ -26668,6 +27000,9 @@ Fill: {fill:.1f}%
         density_recess = density_aware_recess_profile_v1(state, action=action)
         if str(action).startswith('recess_') and density_recess.get('active'):
             summary['density_aware_recess_profile_v1'] = density_recess
+        activity_load = recess_activity_load_v1(state, action=action)
+        if str(action).startswith('recess_') and activity_load.get('active'):
+            summary['recess_activity_load_v1'] = activity_load
         resonance_anchor = recess_resonance_anchor_v1(state, action=action)
         if str(action).startswith('recess_') and resonance_anchor.get('active'):
             summary['recess_resonance_anchor_v1'] = resonance_anchor
@@ -26680,6 +27015,10 @@ Fill: {fill:.1f}%
         divergence_buffer = recess_divergence_buffer_review_v1(state, action=action)
         if str(action).startswith('recess_') and divergence_buffer.get('active'):
             summary['recess_divergence_buffer_review_v1'] = divergence_buffer
+        if str(action).startswith('recess_'):
+            summary['recess_pressure_permission_conflict_v1'] = (
+                recess_pressure_permission_conflict_v1(state, action=action)
+            )
         return summary
 
     def _write_action_manifest(
@@ -26735,6 +27074,10 @@ Fill: {fill:.1f}%
                         state,
                         action=action,
                     ),
+                    'recess_activity_load_v1': recess_activity_load_v1(
+                        state,
+                        action=action,
+                    ),
                     'recess_resonance_anchor_v1': recess_resonance_anchor_v1(
                         state,
                         action=action,
@@ -26751,6 +27094,12 @@ Fill: {fill:.1f}%
                     ),
                     'recess_divergence_buffer_review_v1': (
                         recess_divergence_buffer_review_v1(
+                            state,
+                            action=action,
+                        )
+                    ),
+                    'recess_pressure_permission_conflict_v1': (
+                        recess_pressure_permission_conflict_v1(
                             state,
                             action=action,
                         )
