@@ -131,7 +131,9 @@ impl Gpu {
         unsafe { slice::from_raw_parts(buf.contents() as *const f32, count) }
     }
 
-    // Borrow a shared buffer as a mutable f32 slice without cloning.
+    // Metal's unified-memory Buffer is an interior-mutable handle. Callers keep
+    // each returned slice scoped so no overlapping mutable view can exist.
+    #[allow(clippy::mut_from_ref)]
     pub fn as_f32_slice_mut<'a>(&self, buf: &'a Buffer, count: usize) -> &'a mut [f32] {
         debug_assert!(count * mem::size_of::<f32>() <= buf.length() as usize);
         unsafe { slice::from_raw_parts_mut(buf.contents() as *mut f32, count) }

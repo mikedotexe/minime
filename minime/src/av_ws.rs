@@ -64,7 +64,7 @@ impl Default for AvServerCfg {
     }
 }
 
-/// Spawns both the GPU processing task and WebSocket server
+// Spawns both the GPU processing task and WebSocket server.
 /* DEPRECATED: Use spawn_av_gpu_server_v2 instead
 pub async fn spawn_av_gpu_server(
     video_tx: mpsc::Sender<sensory_bus::VideoFeat>,
