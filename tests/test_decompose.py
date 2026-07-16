@@ -383,7 +383,7 @@ class TestDecomposeModeSections(unittest.TestCase):
         self.assertTrue(bad["counter_signals"])
 
     def test_decompose_memory_wording_avoids_aux_projection_context(self):
-        source = Path(__file__).resolve().parents[1].joinpath("autonomous_agent.py").read_text()
+        source = aa.runtime_source_path().read_text()
         helper_source = Path(__file__).resolve().parents[1].joinpath("decompose_utils.py").read_text()
 
         self.assertNotIn("aux projection context", source)

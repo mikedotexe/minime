@@ -16,7 +16,9 @@ class TestThresholdMap(unittest.TestCase):
         return {entry["surface"]: entry for entry in payload["authoritative_surfaces"]}
 
     def test_engine_thresholds_match_rust_constants(self):
-        text = (ROOT / "minime" / "src" / "main.rs").read_text()
+        text = (
+            ROOT / "minime" / "src" / "runtime" / "semantic_modality.rs"
+        ).read_text()
         warning = re.search(r"const CRISIS_WARNING_THRESHOLD: f32 = ([0-9.]+);", text)
         crisis = re.search(r"const CRISIS_FILL_THRESHOLD: f32 = ([0-9.]+);", text)
         self.assertIsNotNone(warning)

@@ -502,7 +502,7 @@ class TestExperimentalContinuityStore(unittest.TestCase):
         ))
 
     def test_control_plane_regression_does_not_reintroduce_old_local_budget_caps(self):
-        source = Path(aa.__file__).read_text()
+        source = aa.runtime_source_path().read_text()
         self.assertNotIn("max_actions: 3; ttl_secs: 7200", source)
         self.assertNotIn("max_research_actions: 3", source)
         self.assertNotIn(
@@ -518,7 +518,7 @@ class TestExperimentalContinuityStore(unittest.TestCase):
         self.assertIn("_control_plane_authority_budget_request_scaffold", source)
 
     def test_runtime_prompt_wording_avoids_deprecated_identity_seeds(self):
-        source = Path(aa.__file__).read_text()
+        source = aa.runtime_source_path().read_text()
         stale_phrases = [
             "consciousness research project",
             "spectral consciousness system",

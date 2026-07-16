@@ -19,16 +19,22 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = (ROOT / "autonomous_agent.py").read_text()
+SRC = (ROOT / "minime_autonomy" / "runtime.py").read_text()
+AUTHORITY_SRC = (ROOT / "minime_autonomy" / "authority.py").read_text()
 
 
-def _region(start_pat: str, end_pat: str, after_line: int = 0) -> str:
+def _region(
+    start_pat: str,
+    end_pat: str,
+    after_line: int = 0,
+    source: str = SRC,
+) -> str:
     """Return the text from the first line matching ``start_pat`` (at or after
     ``after_line``) up to but excluding the first subsequent line matching
     ``end_pat``."""
     out: list[str] = []
     capturing = False
-    for i, ln in enumerate(SRC.splitlines()):
+    for i, ln in enumerate(source.splitlines()):
         if not capturing:
             if i >= after_line and re.search(start_pat, ln):
                 capturing = True
@@ -51,12 +57,21 @@ def _quoted_assignment_members(name: str) -> set[str]:
 
 
 def _route_by_base_entries() -> dict[str, str]:
-    blk = _region(r"ROUTE_BY_BASE = \{", r"^    \}", after_line=19000)
+    blk = _region(
+        r"ROUTE_BY_BASE = \{",
+        r"^    \}",
+        source=AUTHORITY_SRC,
+    )
     return dict(re.findall(r'"([A-Z_]+)":\s*(?:"([a-z_]+)"|None)', blk))
 
 
 def _preflight_spec_bases() -> dict[str, str]:
-    return dict(re.findall(r'\{"base": "([A-Z_]+)".*?"route": "([a-z_]+)"', SRC))
+    return dict(
+        re.findall(
+            r'\{"base": "([A-Z_]+)".*?"route": "([a-z_]+)"',
+            AUTHORITY_SRC,
+        )
+    )
 
 
 def _action_map_entries() -> dict[str, str]:
