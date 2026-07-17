@@ -1268,6 +1268,14 @@ mod tests {
             review.authority,
             "read_only_pressure_snap_review_not_regulator_or_controller_change"
         );
+
+        let steep_review = temporal_drag_pressure_snap_review_v1(0.10, 0.90, 0.02, 0.02);
+        assert_eq!(
+            steep_review.status,
+            "quadratic_pressure_floor_candidate_needs_replay"
+        );
+        assert!(steep_review.candidate_high_drag > steep_review.current_high_drag + 0.02);
+        assert!(!steep_review.live_drag_write);
     }
 
     #[test]
@@ -1827,6 +1835,7 @@ mod tests {
 
         assert!(cohesive_stillness > 0.84);
         assert_eq!(low_cohesion_stagnation, 0.50);
+        assert_eq!(cohesion_to_motion_ratio_v1(0.000_000_1, 0.000_000_1), 0.50);
         assert_eq!(cohesion_to_motion_ratio_v1(0.0, 0.0), 0.0);
         assert_eq!(cohesion_to_motion_ratio_v1(4.0, -2.0), 1.0);
     }
