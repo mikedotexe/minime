@@ -1,27 +1,46 @@
 // src/sensory_ws.rs
+use astrid_minime_protocol::SensoryDeliveryStatusV1;
 pub use astrid_minime_protocol::SensoryMsg;
-use astrid_minime_protocol::{CompatibilityStatus, SensoryPacketV1};
 use futures_util::{SinkExt, StreamExt};
+use parking_lot::Mutex;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, select, time};
 use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
 
-use crate::sensory_bus::{AttractorPulseRequest, NowMs, SensoryBus, ShadowInfluenceRequest};
+use crate::{
+    sensory_bus::{
+        AttractorPulseRequest, LaneIngressOutcome, NowMs, SensoryBus, ShadowInfluenceRequest,
+        LLAVA_DIM,
+    },
+    sensory_protocol::{
+        prepare_sensory_packet, DeliveryDedupCache, PreparedSensoryPacket, SensoryServerIdentity,
+    },
+};
 
+#[cfg(test)]
 fn decode_sensory_packet(raw: &str) -> Result<SensoryMsg, String> {
-    let packet: SensoryPacketV1 =
+    let packet: astrid_minime_protocol::SensoryPacketV1 =
         serde_json::from_str(raw).map_err(|error| format!("invalid sensory packet: {error}"))?;
-    match packet.compatibility() {
-        CompatibilityStatus::Current
-        | CompatibilityStatus::CompatibleMinor
-        | CompatibilityStatus::LegacyUnversioned => Ok(packet.message),
-        status => Err(format!("unsupported sensory protocol: {status:?}")),
+    let status = packet.compatibility();
+    if status.is_compatible() {
+        Ok(packet.message)
+    } else {
+        Err(format!("unsupported sensory protocol: {status:?}"))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_sensory_packet, SensoryMsg};
+    use astrid_minime_protocol::{
+        DeliveryEnvelopeV1, SensoryDeliveryReceiptV1, SensoryDeliveryStatusV1, SensoryPacketV1,
+    };
+    use parking_lot::Mutex;
+
+    use super::{decode_sensory_packet, process_sensory_packet, SensoryMsg};
+    use crate::{
+        sensory_bus::SensoryBus,
+        sensory_protocol::{DeliveryDedupCache, SensoryServerIdentity},
+    };
 
     #[test]
     fn attractor_pulse_message_deserializes_from_snake_case_kind() {
@@ -194,7 +213,82 @@ mod tests {
 
         assert!(error.contains("UnsupportedMajor"));
     }
+
+    #[test]
+    fn routed_delivery_is_receipted_once_and_duplicate_is_not_rerouted() {
+        let bus = SensoryBus::new(8, 2, 7);
+        let dedup = Mutex::new(DeliveryDedupCache::default());
+        let identity = SensoryServerIdentity {
+            process_identity: "pid:10".to_string(),
+            deployment_identity: "source:abc".to_string(),
+        };
+        let message = SensoryMsg::Semantic {
+            features: vec![0.1; 48],
+            ts_ms: Some(42),
+        };
+        let delivery = DeliveryEnvelopeV1::new(
+            "delivery-test".to_string(),
+            &message,
+            10,
+            "pid:9".to_string(),
+            "source:def".to_string(),
+        );
+        let raw = serde_json::to_string(&SensoryPacketV1::with_envelopes(message, delivery, None))
+            .unwrap();
+
+        let first: SensoryDeliveryReceiptV1 = serde_json::from_str(
+            &process_sensory_packet(&bus, &dedup, &identity, &raw)
+                .unwrap()
+                .expect("first receipt"),
+        )
+        .unwrap();
+        assert_eq!(first.status, SensoryDeliveryStatusV1::Accepted);
+
+        let duplicate: SensoryDeliveryReceiptV1 = serde_json::from_str(
+            &process_sensory_packet(&bus, &dedup, &identity, &raw)
+                .unwrap()
+                .expect("duplicate receipt"),
+        )
+        .unwrap();
+        assert_eq!(duplicate.status, SensoryDeliveryStatusV1::Duplicate);
+    }
+
+    #[test]
+    fn semantic_dimension_normalization_is_explicitly_partial() {
+        let bus = SensoryBus::new(8, 2, 7);
+        let dedup = Mutex::new(DeliveryDedupCache::default());
+        let identity = SensoryServerIdentity {
+            process_identity: "pid:10".to_string(),
+            deployment_identity: "source:abc".to_string(),
+        };
+        let message = SensoryMsg::Semantic {
+            features: vec![0.1; 12],
+            ts_ms: Some(42),
+        };
+        let delivery = DeliveryEnvelopeV1::new(
+            "delivery-partial".to_string(),
+            &message,
+            10,
+            "pid:9".to_string(),
+            "source:def".to_string(),
+        );
+        let raw = serde_json::to_string(&SensoryPacketV1::with_envelopes(message, delivery, None))
+            .unwrap();
+
+        let receipt: SensoryDeliveryReceiptV1 = serde_json::from_str(
+            &process_sensory_packet(&bus, &dedup, &identity, &raw)
+                .unwrap()
+                .expect("partial receipt"),
+        )
+        .unwrap();
+        assert_eq!(receipt.status, SensoryDeliveryStatusV1::PartiallyApplied);
+        assert_eq!(receipt.reason.as_deref(), Some("dimension_normalized"));
+    }
 }
+
+#[cfg(test)]
+#[path = "sensory_ws/socket_tests.rs"]
+mod socket_tests;
 
 pub async fn spawn_sensory_ws_server(
     bus: Arc<SensoryBus>,
@@ -205,6 +299,9 @@ pub async fn spawn_sensory_ws_server(
             .await
             .expect("bind ws sensory server");
         println!("🎥 Sensory input server listening on ws://{}", addr);
+        let process_started_at_ms = NowMs::now();
+        let identity = SensoryServerIdentity::current(process_started_at_ms);
+        let dedup = Arc::new(Mutex::new(DeliveryDedupCache::default()));
 
         loop {
             let (stream, peer) = match listener.accept().await {
@@ -215,12 +312,20 @@ pub async fn spawn_sensory_ws_server(
                 }
             };
             let bus = bus.clone();
+            let identity = identity.clone();
+            let dedup = dedup.clone();
 
             tokio::spawn(async move {
                 match accept_async(stream).await {
                     Ok(mut ws) => {
                         println!("🔗 Sensory client connected: {}", peer);
                         let mut ping_int = time::interval(Duration::from_secs(10));
+                        let hello = serde_json::to_string(&identity.hello())
+                            .expect("sensory server hello serializes");
+                        if let Err(error) = ws.send(Message::Text(hello)).await {
+                            eprintln!("Sensory hello send failed: {error}");
+                            return;
+                        }
 
                         loop {
                             select! {
@@ -236,15 +341,27 @@ pub async fn spawn_sensory_ws_server(
                                     let Some(msg) = msg else { break };
                                     match msg {
                                         Ok(Message::Text(s)) => {
-                                            match decode_sensory_packet(&s) {
-                                                Ok(message) => route_msg(&bus, message),
+                                            match process_sensory_packet(&bus, &dedup, &identity, &s) {
+                                                Ok(Some(receipt)) => {
+                                                    if let Err(error) = ws.send(Message::Text(receipt)).await {
+                                                        eprintln!("Sensory receipt send failed: {error}");
+                                                        break;
+                                                    }
+                                                }
+                                                Ok(None) => {}
                                                 Err(error) => eprintln!("Sensory packet rejected: {error}"),
                                             }
                                         }
                                         Ok(Message::Binary(b)) => {
                                             if let Ok(s) = std::str::from_utf8(&b) {
-                                                match decode_sensory_packet(s) {
-                                                    Ok(message) => route_msg(&bus, message),
+                                                match process_sensory_packet(&bus, &dedup, &identity, s) {
+                                                    Ok(Some(receipt)) => {
+                                                        if let Err(error) = ws.send(Message::Text(receipt)).await {
+                                                            eprintln!("Sensory receipt send failed: {error}");
+                                                            break;
+                                                        }
+                                                    }
+                                                    Ok(None) => {}
                                                     Err(error) => eprintln!("Sensory packet rejected: {error}"),
                                                 }
                                             }
@@ -275,22 +392,110 @@ pub async fn spawn_sensory_ws_server(
     })
 }
 
-fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
+fn process_sensory_packet(
+    bus: &SensoryBus,
+    dedup: &Mutex<DeliveryDedupCache>,
+    identity: &SensoryServerIdentity,
+    raw: &str,
+) -> Result<Option<String>, String> {
+    let now_ms = NowMs::now();
+    let prepared = prepare_sensory_packet(raw, &mut dedup.lock(), identity, now_ms)?;
+    let receipt = match prepared {
+        PreparedSensoryPacket::Route { message, receipt } => {
+            let outcome = route_msg(bus, *message);
+            receipt.map(|receipt| {
+                receipt.finish(
+                    outcome.status,
+                    outcome.reason.map(str::to_string),
+                    Some(NowMs::now()),
+                )
+            })
+        }
+        PreparedSensoryPacket::Reply(receipt) => Some(receipt),
+    };
+    receipt
+        .map(|receipt| {
+            serde_json::to_string(&receipt)
+                .map_err(|error| format!("sensory receipt serialization failed: {error}"))
+        })
+        .transpose()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RouteOutcome {
+    status: SensoryDeliveryStatusV1,
+    reason: Option<&'static str>,
+}
+
+impl RouteOutcome {
+    const ACCEPTED: Self = Self {
+        status: SensoryDeliveryStatusV1::Accepted,
+        reason: None,
+    };
+    const PARTIAL_DIMENSION: Self = Self {
+        status: SensoryDeliveryStatusV1::PartiallyApplied,
+        reason: Some("dimension_normalized"),
+    };
+
+    const fn rejected(reason: &'static str) -> Self {
+        Self {
+            status: SensoryDeliveryStatusV1::Rejected,
+            reason: Some(reason),
+        }
+    }
+
+    const fn policy_blocked(reason: &'static str) -> Self {
+        Self {
+            status: SensoryDeliveryStatusV1::PolicyBlocked,
+            reason: Some(reason),
+        }
+    }
+
+    const fn partially_applied(reason: &'static str) -> Self {
+        Self {
+            status: SensoryDeliveryStatusV1::PartiallyApplied,
+            reason: Some(reason),
+        }
+    }
+}
+
+fn lane_route_outcome(outcome: LaneIngressOutcome) -> RouteOutcome {
+    match outcome {
+        LaneIngressOutcome::Accepted => RouteOutcome::ACCEPTED,
+        LaneIngressOutcome::InvalidShape => RouteOutcome::rejected("invalid_lane_dimensions"),
+        LaneIngressOutcome::PolicyBlocked => RouteOutcome::policy_blocked("sensory_admission_gate"),
+    }
+}
+
+fn route_msg(bus: &SensoryBus, m: SensoryMsg) -> RouteOutcome {
     match m {
-        SensoryMsg::Video { features, ts_ms } => {
-            bus.push_video(features, ts_ms.unwrap_or_else(NowMs::now));
-        }
-        SensoryMsg::Audio { features, ts_ms } => {
-            bus.push_audio(features, ts_ms.unwrap_or_else(NowMs::now));
-        }
+        SensoryMsg::Video { features, ts_ms } => lane_route_outcome(
+            bus.push_video_with_receipt(features, ts_ms.unwrap_or_else(NowMs::now)),
+        ),
+        SensoryMsg::Audio { features, ts_ms } => lane_route_outcome(
+            bus.push_audio_with_receipt(features, ts_ms.unwrap_or_else(NowMs::now)),
+        ),
         SensoryMsg::Aux { features, ts_ms: _ } => {
             // Allows external aux but normally aux is fed internally
             if features.len() >= 2 {
                 bus.set_aux([features[0], features[1]]);
+                if features.len() == 2 {
+                    RouteOutcome::ACCEPTED
+                } else {
+                    RouteOutcome::PARTIAL_DIMENSION
+                }
+            } else {
+                RouteOutcome::rejected("invalid_lane_dimensions")
             }
         }
         SensoryMsg::Semantic { features, ts_ms: _ } => {
+            let exact_dimensions = features.len() == LLAVA_DIM;
             bus.set_llava_embedding(&features);
+            if exact_dimensions {
+                RouteOutcome::ACCEPTED
+            } else {
+                RouteOutcome::PARTIAL_DIMENSION
+            }
         }
         SensoryMsg::AttractorPulse {
             intent_id,
@@ -322,6 +527,11 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
                 status.last_event.as_deref().unwrap_or("none"),
                 status.last_block_reason.as_deref().unwrap_or("none")
             );
+            if status.last_block_reason.is_some() {
+                RouteOutcome::policy_blocked("attractor_pulse_policy")
+            } else {
+                RouteOutcome::ACCEPTED
+            }
         }
         SensoryMsg::ShadowInfluence {
             intent_id,
@@ -356,6 +566,11 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
                 status.last_event.as_deref().unwrap_or("none"),
                 status.last_block_reason.as_deref().unwrap_or("none")
             );
+            if status.last_block_reason.is_some() {
+                RouteOutcome::policy_blocked("shadow_influence_policy")
+            } else {
+                RouteOutcome::ACCEPTED
+            }
         }
         SensoryMsg::Control {
             synth_gain,
@@ -418,6 +633,47 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
                 || pi_geom_weight.is_some()
                 || pi_integrator_leak.is_some()
                 || esn_leak_override.is_some();
+            let other_homeostatic_controls_present = synth_gain.is_some()
+                || keep_bias.is_some()
+                || exploration_noise.is_some()
+                || fill_target.is_some()
+                || regulation_strength.is_some()
+                || smoothing_preference.is_some()
+                || geom_curiosity.is_some()
+                || target_lambda_bias.is_some()
+                || geom_drive.is_some()
+                || penalty_sensitivity.is_some()
+                || breathing_rate_scale.is_some()
+                || deep_breathing.is_some()
+                || synth_noise_level.is_some()
+                || pure_tone.is_some()
+                || legacy_audio_synth.is_some()
+                || legacy_video_synth.is_some()
+                || pi_kp.is_some()
+                || pi_ki.is_some()
+                || pi_max_step.is_some()
+                || pi_geom_weight.is_some()
+                || pi_integrator_leak.is_some();
+            let always_applied_controls_present = mem_mode.is_some()
+                || journal_resonance.is_some()
+                || checkpoint_interval.is_some()
+                || embedding_strength.is_some()
+                || memory_decay_rate.is_some()
+                || transition_cushion.is_some()
+                || checkpoint_annotation.is_some()
+                || live_audio_enabled.is_some()
+                || live_video_enabled.is_some();
+            let mut receipt_outcome = if hard_recovery_reset
+                && (homeostatic_controls_present || mode_disperse.is_some())
+            {
+                if always_applied_controls_present {
+                    RouteOutcome::partially_applied("hard_recovery_reset_partial")
+                } else {
+                    RouteOutcome::policy_blocked("hard_recovery_reset")
+                }
+            } else {
+                RouteOutcome::ACCEPTED
+            };
             if hard_recovery_reset && homeostatic_controls_present {
                 println!("🛟 Hard recovery reset ignored homeostatic control message fields");
             }
@@ -642,7 +898,13 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
                         .filter(|value| !value.is_empty())
                     else {
                         println!("🛡️  Ignored ESN leak override without authority request id");
-                        return;
+                        return if other_homeostatic_controls_present
+                            || always_applied_controls_present
+                        {
+                            RouteOutcome::partially_applied("esn_leak_override_missing_authority")
+                        } else {
+                            RouteOutcome::rejected("esn_leak_override_missing_authority")
+                        };
                     };
                     let ticks = esn_leak_override_ticks.unwrap_or(1).clamp(1, 12);
                     bus.request_esn_leak_override(request_id.to_string(), v, ticks);
@@ -675,8 +937,18 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) {
                         status.last_event.as_deref().unwrap_or("none"),
                         status.last_block_reason.as_deref().unwrap_or("none"),
                     );
+                    if status.last_block_reason.is_some() {
+                        receipt_outcome = if other_homeostatic_controls_present
+                            || always_applied_controls_present
+                        {
+                            RouteOutcome::partially_applied("mode_disperse_policy")
+                        } else {
+                            RouteOutcome::policy_blocked("mode_disperse_policy")
+                        };
+                    }
                 }
             }
+            receipt_outcome
         }
     }
 }

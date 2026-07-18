@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-astrid-minime-protocol = { git = "https://github.com/mikedotexe/astrid.git", rev = "c6ecb853d1a9bc7a7479d37d8366553a0bae0bc5" }
+astrid-minime-protocol = { git = "https://github.com/mikedotexe/astrid.git", rev = "e837d43afa5b72132c19d86dcf3552433ce46f45" }
 metal = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

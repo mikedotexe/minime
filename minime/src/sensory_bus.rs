@@ -17,6 +17,13 @@ pub const AUX_DIM: usize = 2;
 /// dims 40-43: narrative arc, dims 44-47: reserved.
 pub const LLAVA_DIM: usize = 48;
 pub const Z_DIM: usize = VIDEO_DIM + AUDIO_DIM + AUX_DIM + LLAVA_DIM;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaneIngressOutcome {
+    Accepted,
+    InvalidShape,
+    PolicyBlocked,
+}
 pub const DEFAULT_QUEUE_CAP: usize = 1024;
 pub const DEFAULT_BATCH_MAX: usize = 16;
 pub const ATTRACTOR_PULSE_MAX_ABS_CAP: f32 = 0.08;
@@ -2606,22 +2613,31 @@ impl SensoryBus {
     }
 
     pub fn push_video(&self, features: Vec<f32>, ts_ms: u64) {
-        self.push_video_with_source(features, ts_ms, LaneSource::External);
+        let _ = self.push_video_with_source(features, ts_ms, LaneSource::External);
+    }
+
+    pub fn push_video_with_receipt(&self, features: Vec<f32>, ts_ms: u64) -> LaneIngressOutcome {
+        self.push_video_with_source(features, ts_ms, LaneSource::External)
     }
 
     pub fn push_video_synthetic(&self, features: Vec<f32>, ts_ms: u64) {
-        self.push_video_with_source(features, ts_ms, LaneSource::Synthetic);
+        let _ = self.push_video_with_source(features, ts_ms, LaneSource::Synthetic);
     }
 
-    fn push_video_with_source(&self, features: Vec<f32>, ts_ms: u64, source: LaneSource) {
+    fn push_video_with_source(
+        &self,
+        features: Vec<f32>,
+        ts_ms: u64,
+        source: LaneSource,
+    ) -> LaneIngressOutcome {
         if features.len() < VIDEO_DIM {
-            return;
+            return LaneIngressOutcome::InvalidShape;
         }
         if source == LaneSource::External && !self.should_admit_live_video() {
-            return;
+            return LaneIngressOutcome::PolicyBlocked;
         }
         if !self.should_admit() {
-            return;
+            return LaneIngressOutcome::PolicyBlocked;
         }
         let mut v = [0.0; 8];
         v.copy_from_slice(&features[..8]);
@@ -2630,25 +2646,35 @@ impl SensoryBus {
         self.video
             .lock()
             .push(ts_ms, v, source, self.queue_cap, fill, surge_threshold);
+        LaneIngressOutcome::Accepted
     }
 
     pub fn push_audio(&self, features: Vec<f32>, ts_ms: u64) {
-        self.push_audio_with_source(features, ts_ms, LaneSource::External);
+        let _ = self.push_audio_with_source(features, ts_ms, LaneSource::External);
+    }
+
+    pub fn push_audio_with_receipt(&self, features: Vec<f32>, ts_ms: u64) -> LaneIngressOutcome {
+        self.push_audio_with_source(features, ts_ms, LaneSource::External)
     }
 
     pub fn push_audio_synthetic(&self, features: Vec<f32>, ts_ms: u64) {
-        self.push_audio_with_source(features, ts_ms, LaneSource::Synthetic);
+        let _ = self.push_audio_with_source(features, ts_ms, LaneSource::Synthetic);
     }
 
-    fn push_audio_with_source(&self, features: Vec<f32>, ts_ms: u64, source: LaneSource) {
+    fn push_audio_with_source(
+        &self,
+        features: Vec<f32>,
+        ts_ms: u64,
+        source: LaneSource,
+    ) -> LaneIngressOutcome {
         if features.len() < AUDIO_DIM {
-            return;
+            return LaneIngressOutcome::InvalidShape;
         }
         if source == LaneSource::External && !self.should_admit_live_audio() {
-            return;
+            return LaneIngressOutcome::PolicyBlocked;
         }
         if !self.should_admit() {
-            return;
+            return LaneIngressOutcome::PolicyBlocked;
         }
         let mut a = [0.0; 8];
         a.copy_from_slice(&features[..8]);
@@ -2657,6 +2683,7 @@ impl SensoryBus {
         self.audio
             .lock()
             .push(ts_ms, a, source, self.queue_cap, fill, surge_threshold);
+        LaneIngressOutcome::Accepted
     }
 
     #[inline]

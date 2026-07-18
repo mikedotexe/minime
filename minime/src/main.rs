@@ -22,6 +22,7 @@ mod rescue_overfill;
 mod rescue_scaffold;
 mod runtime;
 mod sensory_bus;
+mod sensory_protocol;
 mod sensory_ws;
 mod spectral;
 

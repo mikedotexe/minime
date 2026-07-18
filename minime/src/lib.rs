@@ -23,6 +23,7 @@ pub mod regulator_cartography;
 pub mod rescue_overfill;
 pub mod rescue_scaffold;
 pub mod sensory_bus;
+pub mod sensory_protocol;
 pub mod sensory_ws;
 pub mod spectral;
 pub mod spectral_fingerprint;
