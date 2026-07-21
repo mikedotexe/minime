@@ -2,10 +2,12 @@
 // Robust EigenFill with scale invariance, temporal smoothing, and rank thresholding.
 #![allow(dead_code)]
 
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::time::Instant;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum ThresholdMode {
     CurrentRuntime,
     FixedSurvival,
@@ -35,6 +37,21 @@ pub struct EigenFillEstimator {
     last_update: Instant,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EigenFillEstimatorSnapshotV1 {
+    pub dim: usize,
+    pub ema_mean: f32,
+    pub ema_median: f32,
+    pub ema_fill: f32,
+    pub alpha_stats: f32,
+    pub alpha_fill: f32,
+    pub rel_thresh: f32,
+    pub min_fill: f32,
+    pub leak_rate: f32,
+    pub threshold_mode: String,
+    pub last_update_age_ms: u64,
+}
+
 impl EigenFillEstimator {
     pub fn new(dim: usize) -> Self {
         Self {
@@ -60,6 +77,32 @@ impl EigenFillEstimator {
         estimator.alpha_fill = 0.10;
         estimator.leak_rate = 0.006;
         estimator.threshold_mode = ThresholdMode::FixedSurvival;
+        estimator
+    }
+
+    /// Restore the estimator's numerical state from a division checkpoint.
+    ///
+    /// `Instant` itself is process-local, so the captured age is reconstructed
+    /// relative to the new process. All policy and EMA values remain explicit.
+    #[must_use]
+    pub fn from_snapshot_v1(snapshot: &EigenFillEstimatorSnapshotV1) -> Self {
+        let mut estimator = match snapshot.threshold_mode.as_str() {
+            "fixed_survival" => Self::fixed_survival(snapshot.dim),
+            _ => Self::new(snapshot.dim),
+        };
+        estimator.ema_mean = snapshot.ema_mean.max(1.0e-9);
+        estimator.ema_median = snapshot.ema_median.max(0.0);
+        estimator.ema_fill = snapshot.ema_fill.clamp(0.0, 1.0);
+        estimator.alpha_stats = snapshot.alpha_stats.clamp(0.01, 0.5);
+        estimator.alpha_fill = snapshot.alpha_fill.clamp(0.05, 0.8);
+        estimator.rel_thresh = snapshot.rel_thresh.clamp(0.01, 0.9);
+        estimator.min_fill = snapshot.min_fill.clamp(0.0, 0.5);
+        estimator.leak_rate = snapshot.leak_rate.clamp(0.0, 0.2);
+        estimator.last_update = Instant::now()
+            .checked_sub(std::time::Duration::from_millis(
+                snapshot.last_update_age_ms,
+            ))
+            .unwrap_or_else(Instant::now);
         estimator
     }
 
@@ -167,6 +210,31 @@ impl EigenFillEstimator {
         self.ema_median = 1.0;
         self.ema_fill = 0.0;
         self.last_update = Instant::now();
+    }
+
+    #[must_use]
+    pub fn snapshot_v1(&self) -> EigenFillEstimatorSnapshotV1 {
+        EigenFillEstimatorSnapshotV1 {
+            dim: self.dim,
+            ema_mean: self.ema_mean,
+            ema_median: self.ema_median,
+            ema_fill: self.ema_fill,
+            alpha_stats: self.alpha_stats,
+            alpha_fill: self.alpha_fill,
+            rel_thresh: self.rel_thresh,
+            min_fill: self.min_fill,
+            leak_rate: self.leak_rate,
+            threshold_mode: match self.threshold_mode {
+                ThresholdMode::CurrentRuntime => "current_runtime",
+                ThresholdMode::FixedSurvival => "fixed_survival",
+            }
+            .to_string(),
+            last_update_age_ms: self
+                .last_update
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64,
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 // src/sensory_bus.rs
 #![allow(dead_code)]
+use astrid_minime_protocol::DivisionCommandV1;
 use parking_lot::Mutex;
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
@@ -1471,6 +1472,7 @@ pub struct SensoryBus {
     esn_leak_override: Mutex<Option<EsnLeakOverrideRequest>>,
     shadow_influence: Mutex<ShadowInfluenceSlot>,
     attractor_pulse: Mutex<AttractorPulseSlot>,
+    division_commands: Mutex<VecDeque<DivisionCommandV1>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1556,7 +1558,26 @@ impl SensoryBus {
             esn_leak_override: Mutex::new(None),
             shadow_influence: Mutex::new(ShadowInfluenceSlot::default()),
             attractor_pulse: Mutex::new(AttractorPulseSlot::default()),
+            division_commands: Mutex::new(VecDeque::new()),
         })
+    }
+
+    /// Queue a versioned division command for the native tick-boundary
+    /// coordinator. A bounded queue prevents control-plane pressure from
+    /// affecting the sensory hot path; idempotency is enforced by the
+    /// coordinator after dequeue.
+    pub fn queue_division_command(&self, command: DivisionCommandV1) -> LaneIngressOutcome {
+        const DIVISION_QUEUE_CAP: usize = 64;
+        let mut queue = self.division_commands.lock();
+        if queue.len() >= DIVISION_QUEUE_CAP {
+            return LaneIngressOutcome::PolicyBlocked;
+        }
+        queue.push_back(command);
+        LaneIngressOutcome::Accepted
+    }
+
+    pub fn take_division_commands(&self) -> Vec<DivisionCommandV1> {
+        self.division_commands.lock().drain(..).collect()
     }
 
     #[inline]
@@ -2722,7 +2743,8 @@ impl SensoryBus {
         *count % u64::from(divisor) == 0
     }
 
-    /// Drain up to batch_max samples. Each output is an 18D vector: [video8 | audio8 | aux2].
+    /// Drain up to batch_max samples. Each output is the production 66D vector:
+    /// [video8 | audio8 | aux2 | semantic48].
     /// If a lane has no fresh item, we reuse the last value (zero-padded initially).
     pub fn drain_sensory_batch(&self) -> Vec<([f32; Z_DIM], SampleMeta)> {
         let mut out = Vec::with_capacity(self.batch_max);

@@ -9,6 +9,7 @@ pub mod buffer_pool;
 pub mod cheby;
 pub mod controller_recovery;
 pub mod db;
+pub mod division;
 pub mod esn;
 pub mod gpu;
 pub mod hard_reset;

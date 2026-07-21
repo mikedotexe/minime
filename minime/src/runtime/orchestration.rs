@@ -427,6 +427,24 @@ async fn run_engine(
         esn.set_introspection_power_steps(esn_introspection_power_steps);
     }
 
+    // Division control is restored before the first runtime tick. The parent
+    // generation is persistent and stale commands fail closed. Commit is a
+    // compile-time false capability in this landing.
+    let mut division_coordinator = if division_rehearsal_enabled() {
+        let division_parent_generation = load_or_create_parent_generation(&workspace_dir)?;
+        let coordinator =
+            NativeDivisionCoordinator::open(&workspace_dir, division_parent_generation)?;
+        println!(
+            "🧬 Division coordinator: lifecycle={:?}, generation={}, commit_enabled=false",
+            coordinator.lifecycle(),
+            coordinator.parent_generation()
+        );
+        Some(coordinator)
+    } else {
+        println!("🧬 Division rehearsal: feature-disabled (ordinary runtime path unchanged)");
+        None
+    };
+
     // Prime scheduler for modalities
     let primes = sensory_primes(); // [97, 101, 113]
     let mut sched = PrimeScheduler::new(&primes);
@@ -661,6 +679,7 @@ async fn run_engine(
     // change to ~8-10%/s, preventing the violent transition experience while
     // preserving the direction and eventual magnitude of fill changes.
     let mut smoothed_fill_pct: f32 = 0.0;
+    let mut sensory_fill_history: VecDeque<f32> = VecDeque::with_capacity(1024);
     let mut baseline_lambda1: f32 = 512.0; // Start with expected initial eigenvalue
     let mut baseline_ready = false;
     let mut last_lambda1_rel: f32 = 1.0;
@@ -778,6 +797,9 @@ async fn run_engine(
 
     // Previous top eigenvector for rotation rate detection in spectral fingerprint.
     let mut prev_v1: Vec<f32> = vec![0.0; n];
+    let mut last_sensory_basis: Vec<f32> = vec![0.0; n * k];
+    let mut last_sensory_eigenvalues: Vec<f32> = vec![0.0; k];
+    let mut last_sensory_field_tick: u64 = 0;
     // Previous compact top-k eigenvectors for direct field overlap telemetry.
     let mut prev_eigenvector_field_modes: Vec<Vec<f32>> = Vec::new();
 
@@ -997,6 +1019,162 @@ async fn run_engine(
         let fired = sched.tick();
         let warmup_progress = ((tick_count as f32) / 480.0).clamp(0.0, 1.0);
 
+        // Division commands cross either the shared WebSocket lane (Astrid) or
+        // the atomic workspace inbox (Minime autonomy), then execute only here
+        // on a tick boundary.
+        if let Some(division_coordinator) = division_coordinator.as_mut() {
+            let mut division_commands: Vec<_> = sensory_bus
+                .take_division_commands()
+                .into_iter()
+                .map(|command| (command, None))
+                .collect();
+            match read_division_inbox(&workspace_dir) {
+                Ok(inbox) => division_commands.extend(
+                    inbox
+                        .into_iter()
+                        .map(|item| (item.command, Some(item.source_path))),
+                ),
+                Err(error) => eprintln!("⚠️  Division inbox read failed: {error:#}"),
+            }
+            for (command, inbox_path) in division_commands {
+                let command_for_prepare = command.clone();
+                let receipt = division_coordinator.handle_command(
+                    command,
+                    rescue_scaffold::now_unix_ms(),
+                    || {
+                        let parent = esn
+                            .as_mut()
+                            .ok_or_else(|| anyhow::anyhow!("live parent ESN unavailable"))?;
+                        let stable_field = StableFieldCaptureV2 {
+                            dimension: n,
+                            covariance: gpu.read_f32(&a_buf, n * n),
+                            top_k_basis: last_sensory_basis.clone(),
+                            eigenvalues: last_sensory_eigenvalues.clone(),
+                            sensory_fill_pct: last_fill_pct,
+                            estimator_state: {
+                                let mut value =
+                                    serde_json::to_value(eigenfill_estimator.snapshot_v1())?;
+                                if let serde_json::Value::Object(ref mut object) = value {
+                                    object.insert(
+                                        "history_pct".to_string(),
+                                        serde_json::to_value(&sensory_fill_history)?,
+                                    );
+                                }
+                                value
+                            },
+                            pi_state: serde_json::json!({
+                                "target_fill": pi_reg.as_ref().map(|pi| pi.cfg.target_fill),
+                                "integ_fill": pi_reg.as_ref().map(|pi| pi.integ_fill),
+                                "integ_lam": pi_reg.as_ref().map(|pi| pi.integ_lam),
+                                "integ_geom": pi_reg.as_ref().map(|pi| pi.integ_geom),
+                                "gate": gate_smooth,
+                                "filter": filt_smooth,
+                                "actuator_saturated": gate_smooth <= 0.051 && filt_smooth >= 0.99,
+                            }),
+                            projection_matrix: proj_matrix.clone(),
+                            projection_config: serde_json::json!({
+                                "input_dimension": sensory_dim,
+                                "output_dimension": n,
+                                "dimension_scales": dimension_scales,
+                                "projection_scale": proj_scale,
+                                "activation_gain": activation_gain,
+                                "semantic_energy_gain": semantic_energy_gain,
+                                "semantic_delta_gain": semantic_delta_gain,
+                                "semantic_bias_floor": semantic_bias_floor,
+                                "covariance_floor_level": cov_floor_level,
+                                "covariance_keep": cov_keep,
+                            }),
+                            backlog_state: serde_json::json!({
+                                "size": sensory_bus.backlog_size(),
+                                "fill_pct": sensory_bus.backlog_fill_pct() * 100.0,
+                                "admission_gate": sensory_bus.get_admit_fraction(),
+                                "live_audio_enabled": sensory_bus.live_audio_enabled(),
+                                "live_video_enabled": sensory_bus.live_video_enabled(),
+                            }),
+                            staleness_state: serde_json::json!({
+                                "semantic_fresh_ms": sensory_bus.semantic_fresh_ms(),
+                                "last_sensory_field_tick": last_sensory_field_tick,
+                                "capture_tick": tick_count,
+                            }),
+                            recovery_stage: if stable_core_runtime.enabled {
+                                format!("stable_core:{}", stable_core_runtime.profile)
+                            } else if hard_recovery_reset {
+                                "hard_recovery_reset".to_string()
+                            } else {
+                                "normal".to_string()
+                            },
+                        };
+                        let runtime = RuntimeCaptureV2 {
+                            input_state: serde_json::json!({
+                                "z_dim": sensory_bus::Z_DIM,
+                                "admission_gate": sensory_bus.get_admit_fraction(),
+                                "exploration_noise": sensory_bus.get_exploration_noise(),
+                                "fill_target": sensory_bus.get_fill_target(),
+                                "regulation_strength": sensory_bus.get_regulation_strength(),
+                            }),
+                            scheduler: serde_json::json!({
+                                "periods": sched.periods,
+                                "counters": sched.counters,
+                                "tick_count": tick_count,
+                            }),
+                            safety_supervisor: serde_json::json!({
+                                "hard_recovery_reset": hard_recovery_reset,
+                                "physiological_fallback": physiological_fallback,
+                                "panic_counter": panic_counter,
+                                "panic_cooldown": panic_cooldown,
+                                "crisis_triggered": crisis_triggered,
+                                "stable_core_enabled": stable_core_runtime.enabled,
+                            }),
+                            regulator: serde_json::json!({
+                                "last_fill_pct": last_fill_pct,
+                                "smoothed_fill_pct": smoothed_fill_pct,
+                                "baseline_lambda1": baseline_lambda1,
+                                "baseline_ready": baseline_ready,
+                                "lambda1_rel": last_lambda1_rel,
+                                "geom_rel": latest_geom_rel,
+                                "adaptive_target": adaptive_target,
+                                "fill_ema": fill_ema,
+                            }),
+                            source_identity: serde_json::json!({
+                                "process_id": std::process::id(),
+                                "crate_version": env!("CARGO_PKG_VERSION"),
+                                "stable_core_profile": stable_core_runtime.profile,
+                            }),
+                        };
+                        prepare_native_division(
+                            &workspace_dir,
+                            &command_for_prepare,
+                            parent,
+                            stable_field,
+                            runtime,
+                            &gpu,
+                        )
+                    },
+                );
+                println!(
+                    "🧬 Division receipt: action={:?} status={:?} lifecycle={:?} reason={}",
+                    receipt.action, receipt.status, receipt.lifecycle, receipt.reason
+                );
+                if let Some(path) = inbox_path {
+                    if let Err(error) =
+                        archive_division_inbox_command(&workspace_dir, &path, &receipt)
+                    {
+                        eprintln!("⚠️  Division inbox archive failed: {error:#}");
+                    }
+                }
+            }
+            let division_panic = panic_counter >= 3 || crisis_triggered;
+            let division_healthy = !division_panic
+                && last_fill_pct < 80.0
+                && last_sensory_field_tick > 0
+                && tick_count.saturating_sub(last_sensory_field_tick) <= 21;
+            if let Err(error) =
+                division_coordinator.safety_tick(division_healthy, division_panic, "continue")
+            {
+                eprintln!("⚠️  Division cytokinesis safety tick failed: {error:#}");
+            }
+        }
+
         // === FIX PACK: BATCH DRAIN → Chebyshev Filter → ESN ===
         // Drain batch of samples from sensory bus queue
         let batch = sensory_bus.drain_sensory_batch();
@@ -1194,6 +1372,21 @@ async fn run_engine(
                         last_esn_lambda1 = esn.get_eig();
                         last_esn_state_fingerprint_16 = esn.state_fingerprint_16();
                         last_esn_state_rms = esn.state_rms();
+                        let division_metrics_fresh = last_sensory_field_tick > 0
+                            && tick_count.saturating_sub(last_sensory_field_tick) <= 21;
+                        let division_actuator_saturated =
+                            gate_smooth <= 0.051 && filt_smooth >= 0.99;
+                        if let Some(division_coordinator) = division_coordinator.as_mut() {
+                            if let Err(error) = division_coordinator.observe_parent_tick(
+                                esn,
+                                &z,
+                                last_fill_pct,
+                                division_metrics_fresh,
+                                division_actuator_saturated,
+                            ) {
+                                eprintln!("⚠️  Division shadow tick failed: {error:#}");
+                            }
+                        }
                         // Capacity instrumentation: record the reservoir state.
                         if esn_state_ring.len() >= ESN_STATE_RING_CAP {
                             esn_state_ring.pop_front();
@@ -2226,6 +2419,11 @@ async fn run_engine(
                     .map(|i| rayleigh_quotient(a, &y[i * n..(i + 1) * n], n))
                     .collect()
             };
+            if division_coordinator.is_some() {
+                last_sensory_basis.clone_from_slice(y);
+                last_sensory_eigenvalues.clone_from(&eigenvalues);
+                last_sensory_field_tick = tick_count;
+            }
             let active_modes = compute_active_mode_telemetry(&eigenvalues, k);
 
             // Populate regulator modes with real eigenvectors.
@@ -2299,6 +2497,12 @@ async fn run_engine(
             let mut eigenfill_pct = eigenfill_ratio * 100.0;
             if !eigenfill_pct.is_finite() {
                 eigenfill_pct = eigenfill_target * 100.0;
+            }
+            if division_coordinator.is_some() {
+                if sensory_fill_history.len() >= 1024 {
+                    sensory_fill_history.pop_front();
+                }
+                sensory_fill_history.push_back(eigenfill_pct);
             }
             if !stable_core_runtime.enabled {
                 let cov_bias = if cov_rms.is_finite() {

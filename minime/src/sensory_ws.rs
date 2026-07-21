@@ -469,6 +469,14 @@ fn lane_route_outcome(outcome: LaneIngressOutcome) -> RouteOutcome {
 
 fn route_msg(bus: &SensoryBus, m: SensoryMsg) -> RouteOutcome {
     match m {
+        SensoryMsg::Division { command } => {
+            if crate::division::division_rehearsal_enabled() {
+                lane_route_outcome(bus.queue_division_command(command))
+            } else {
+                let _ = command;
+                lane_route_outcome(LaneIngressOutcome::PolicyBlocked)
+            }
+        }
         SensoryMsg::Video { features, ts_ms } => lane_route_outcome(
             bus.push_video_with_receipt(features, ts_ms.unwrap_or_else(NowMs::now)),
         ),

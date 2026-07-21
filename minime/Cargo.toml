@@ -3,12 +3,20 @@ name = "minime"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+# Source-prepared reservoir-division rehearsal. Production builds omit this
+# feature, and a separate operator environment acknowledgement is still
+# required when it is compiled in.
+division-rehearsal = []
+
 [dependencies]
 anyhow = "1"
-astrid-minime-protocol = { git = "https://github.com/mikedotexe/astrid.git", rev = "e837d43afa5b72132c19d86dcf3552433ce46f45" }
+astrid-minime-protocol = { git = "https://github.com/mikedotexe/astrid.git", rev = "9a324d16294b2318da6f476ff7f295c423a9b4b1" }
 metal = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "process", "signal"] }
 tokio-tungstenite = "0.21"
 futures = "0.3"
@@ -18,6 +26,9 @@ fastrand = "2"
 rand = { version = "0.8", features = ["small_rng"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

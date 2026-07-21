@@ -13,7 +13,7 @@
 
 use anyhow::Result;
 use metal::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
     f32::consts::PI,
@@ -658,7 +658,8 @@ pub fn entropy_ceiling_noise_damping_review_v1(
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IntrospectionPolicy {
     #[default]
     Adaptive,
@@ -672,7 +673,7 @@ pub enum IntrospectionPolicy {
     Viscous,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct EsnProfileSnapshot {
     /// Slow eigenvalue baseline used by the controller's relative-pressure logic.
     pub ema_eig: f32,
@@ -813,6 +814,65 @@ pub struct SpectralSR {
     damp_params_buf: Buffer, // 3 floats: [damping, excess, inv_d]
 }
 
+/// CPU-portable state for Minime's true reservoir-space spectral estimator.
+/// This is the 128D/64D phase-space covariance, not the independent 512D
+/// projected sensory field owned by the stable core.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SpectralSnapshotV2 {
+    pub dimension: usize,
+    pub covariance: Vec<f32>,
+    pub eigenvector: Vec<f32>,
+    pub eig1: f32,
+    pub eig1_prev: f32,
+    pub ema_eig: f32,
+    pub rho: f32,
+    pub prime_index: usize,
+    pub tick: usize,
+    pub introspection_policy: IntrospectionPolicy,
+    pub introspection_power_steps: usize,
+    pub introspection_count: u64,
+    pub profiling_enabled: bool,
+    pub async_measurement_enabled: bool,
+    pub spectral_damping: f32,
+    pub spectral_target_ratio: f32,
+    pub last_profile: EsnProfileSnapshot,
+}
+
+/// Complete native ESN checkpoint payload used by mitosis bundle v2.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EsnSnapshotV2 {
+    pub res_size: usize,
+    pub in_size: usize,
+    pub win: Vec<f32>,
+    pub wres: Vec<f32>,
+    pub state: Vec<f32>,
+    pub geom_radius: f32,
+    pub geom_baseline: f32,
+    pub wout: Vec<f32>,
+    pub rls_p: Vec<f32>,
+    pub leak_live: f32,
+    pub lambda_live: f32,
+    pub leak_base: f32,
+    pub lambda_base: f32,
+    pub exploration_noise: f32,
+    pub rng_state: u64,
+    pub leak_override: Option<EsnLeakOverrideSnapshotV1>,
+    pub spectral: SpectralSnapshotV2,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EsnLeakOverrideSnapshotV1 {
+    pub leak: f32,
+    pub remaining_ticks: u32,
+    pub request_id: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct EsnStepTraceV1 {
+    pub leak: f32,
+    pub noise: Vec<f32>,
+}
+
 unsafe impl Send for SpectralSR {}
 unsafe impl Sync for SpectralSR {}
 
@@ -907,6 +967,72 @@ impl SpectralSR {
             pso_v1_damp,
             damp_params_buf,
         })
+    }
+
+    fn snapshot_v2(&mut self) -> Result<SpectralSnapshotV2> {
+        self.wait_for_pending_rank1s(false)?;
+        let gpu = unsafe { &*self.gpu };
+        Ok(SpectralSnapshotV2 {
+            dimension: self.d,
+            covariance: gpu.read_f32(&self.cov, self.d * self.d),
+            eigenvector: self.v_host.clone(),
+            eig1: self.eig1,
+            eig1_prev: self.eig1_prev,
+            ema_eig: self.ema_eig,
+            rho: self.rho,
+            prime_index: self.pidx,
+            tick: self.t,
+            introspection_policy: self.introspection_policy,
+            introspection_power_steps: self.introspection_power_steps,
+            introspection_count: self.introspection_count,
+            profiling_enabled: self.profiling_enabled,
+            async_measurement_enabled: self.async_measurement_enabled,
+            spectral_damping: self.spectral_damping,
+            spectral_target_ratio: self.spectral_target_ratio,
+            last_profile: self.last_profile,
+        })
+    }
+
+    fn from_snapshot_v2(snapshot: &SpectralSnapshotV2, gpu: &Gpu) -> Result<Self> {
+        let d = snapshot.dimension;
+        if d == 0
+            || snapshot.covariance.len() != d * d
+            || snapshot.eigenvector.len() != d
+            || snapshot.prime_index >= 37
+            || snapshot.introspection_power_steps == 0
+            || !snapshot.covariance.iter().all(|value| value.is_finite())
+            || !snapshot.eigenvector.iter().all(|value| value.is_finite())
+            || ![
+                snapshot.eig1,
+                snapshot.eig1_prev,
+                snapshot.ema_eig,
+                snapshot.rho,
+                snapshot.spectral_damping,
+                snapshot.spectral_target_ratio,
+            ]
+            .iter()
+            .all(|value| value.is_finite())
+        {
+            return Err(anyhow::anyhow!("invalid spectral snapshot"));
+        }
+        let mut restored = Self::new(d, snapshot.rho, gpu)?;
+        gpu.write_f32(&restored.cov, &snapshot.covariance);
+        gpu.write_f32(&restored.v_buf, &snapshot.eigenvector);
+        restored.v_host.clone_from(&snapshot.eigenvector);
+        restored.eig1 = snapshot.eig1;
+        restored.eig1_prev = snapshot.eig1_prev;
+        restored.ema_eig = snapshot.ema_eig;
+        restored.pidx = snapshot.prime_index;
+        restored.t = snapshot.tick;
+        restored.introspection_policy = snapshot.introspection_policy;
+        restored.introspection_power_steps = snapshot.introspection_power_steps.clamp(1, 4);
+        restored.introspection_count = snapshot.introspection_count;
+        restored.profiling_enabled = snapshot.profiling_enabled;
+        restored.async_measurement_enabled = snapshot.async_measurement_enabled;
+        restored.spectral_damping = snapshot.spectral_damping;
+        restored.spectral_target_ratio = snapshot.spectral_target_ratio;
+        restored.last_profile = snapshot.last_profile;
+        Ok(restored)
     }
 
     /// Update the rho (forgetting factor) for dynamic adaptation.
@@ -1702,6 +1828,7 @@ pub struct ESN {
     // Exploration noise for reservoir diversity
     exploration_noise: f32,
     rng: fastrand::Rng,
+    last_step_trace: EsnStepTraceV1,
 
     // Scratch buffers
     rin: Vec<f32>,
@@ -1803,6 +1930,14 @@ impl ESN {
             lambda_base,
             exploration_noise: DEFAULT_EXPLORATION_NOISE,
             rng: fastrand::Rng::with_seed(0xDEAD_BEEF),
+            last_step_trace: EsnStepTraceV1 {
+                leak: leak_base,
+                noise: if cfg!(feature = "division-rehearsal") {
+                    vec![0.0; res_size]
+                } else {
+                    Vec::new()
+                },
+            },
             rin,
             rx,
             pre,
@@ -1861,6 +1996,40 @@ impl ESN {
 
     /// Reservoir update step
     pub fn step(&mut self, input: &[f32]) -> Result<()> {
+        self.step_controlled(input, None, None, None)
+    }
+
+    /// Daughter-shadow update with cross-block drive from the same previous
+    /// tick, the parent's realized exploration noise, and the parent's
+    /// effective leak. At bridge scale 1.0 the two daughter updates are
+    /// algebraically equivalent to the parent update.
+    pub fn step_shadow(
+        &mut self,
+        input: &[f32],
+        external_recurrence: &[f32],
+        realized_noise: &[f32],
+        effective_leak: f32,
+    ) -> Result<()> {
+        if external_recurrence.len() != self.res_size || realized_noise.len() != self.res_size {
+            return Err(anyhow::anyhow!(
+                "shadow drive/noise dimensions must match daughter reservoir"
+            ));
+        }
+        self.step_controlled(
+            input,
+            Some(external_recurrence),
+            Some(realized_noise),
+            Some(effective_leak),
+        )
+    }
+
+    fn step_controlled(
+        &mut self,
+        input: &[f32],
+        external_recurrence: Option<&[f32]>,
+        realized_noise: Option<&[f32]>,
+        forced_leak: Option<f32>,
+    ) -> Result<()> {
         assert_eq!(input.len(), self.in_size);
 
         // Extend input with bias
@@ -1884,8 +2053,14 @@ impl ESN {
             &mut self.rx,
         );
 
-        for i in 0..self.res_size {
-            self.pre[i] = (self.rin[i] + self.rx[i]).tanh();
+        if let Some(drive) = external_recurrence {
+            for (i, cross) in drive.iter().copied().enumerate() {
+                self.pre[i] = (self.rin[i] + self.rx[i] + cross).tanh();
+            }
+        } else {
+            for i in 0..self.res_size {
+                self.pre[i] = (self.rin[i] + self.rx[i]).tanh();
+            }
         }
 
         // Spectral self-reference on previous state (batched GPU submits)
@@ -1896,17 +2071,45 @@ impl ESN {
         self.adapt_hyperparams(0.0);
 
         // Leaky integration with adaptive leak or a one-shot gated override.
-        let a = self.effective_leak_for_step();
+        let a = forced_leak.filter(|value| value.is_finite()).map_or_else(
+            || self.effective_leak_for_step(),
+            |value| value.clamp(0.05, 0.95),
+        );
         for i in 0..self.res_size {
             self.x[i] = (1.0 - a) * self.x[i] + a * self.pre[i];
         }
 
-        // Exploration noise: inject small perturbations to break colinearity
-        if self.exploration_noise > 0.0 {
-            let eps = self.exploration_noise;
-            for xi in self.x.iter_mut() {
-                *xi += (self.rng.f32() * 2.0 - 1.0) * eps;
+        let capture_noise = cfg!(feature = "division-rehearsal") || realized_noise.is_some();
+        let mut noise = if capture_noise {
+            vec![0.0_f32; self.res_size]
+        } else {
+            Vec::new()
+        };
+        if let Some(realized) = realized_noise {
+            noise.copy_from_slice(realized);
+            for (xi, delta) in self.x.iter_mut().zip(realized) {
+                *xi += *delta;
             }
+        } else if self.exploration_noise > 0.0 {
+            let eps = self.exploration_noise;
+            if capture_noise {
+                // Preserve the realized vector so full-bridge daughter shadows
+                // can replay the exact stochastic parent tick.
+                for (xi, delta) in self.x.iter_mut().zip(noise.iter_mut()) {
+                    *delta = (self.rng.f32() * 2.0 - 1.0) * eps;
+                    *xi += *delta;
+                }
+            } else {
+                // Keep the ordinary production path allocation-free and
+                // numerically identical when rehearsal support is absent.
+                for xi in self.x.iter_mut() {
+                    *xi += (self.rng.f32() * 2.0 - 1.0) * eps;
+                }
+            }
+        }
+        self.last_step_trace.leak = a;
+        if capture_noise {
+            self.last_step_trace.noise = noise;
         }
 
         // Clip for stability
@@ -1944,6 +2147,18 @@ impl ESN {
         self.phi[self.res_size] = 1.0;
 
         vv_dot(&self.wout, &self.phi)
+    }
+
+    #[must_use]
+    pub fn predict_readonly(&self) -> f32 {
+        let state_term: f32 = self
+            .wout
+            .iter()
+            .take(self.res_size)
+            .zip(&self.x)
+            .map(|(weight, state)| weight * state)
+            .sum();
+        state_term + self.wout[self.res_size]
     }
 
     /// RLS update
@@ -2175,6 +2390,118 @@ impl ESN {
         (d, cov_data)
     }
 
+    /// Capture every stateful component needed to restore deterministic ESN
+    /// continuation. The caller is responsible for the separate 512D stable-
+    /// core sensory-field checkpoint.
+    pub fn snapshot_v2(&mut self) -> Result<EsnSnapshotV2> {
+        Ok(EsnSnapshotV2 {
+            res_size: self.res_size,
+            in_size: self.in_size,
+            win: self.win.clone(),
+            wres: self.wres.clone(),
+            state: self.x.clone(),
+            geom_radius: self.geom_radius,
+            geom_baseline: self.geom_baseline,
+            wout: self.wout.clone(),
+            rls_p: self.p.clone(),
+            leak_live: self.leak_live,
+            lambda_live: self.lambda_live,
+            leak_base: self.leak_base,
+            lambda_base: self.lambda_base,
+            exploration_noise: self.exploration_noise,
+            rng_state: self.rng.get_seed(),
+            leak_override: self
+                .leak_override
+                .as_ref()
+                .map(|value| EsnLeakOverrideSnapshotV1 {
+                    leak: value.leak,
+                    remaining_ticks: value.remaining_ticks,
+                    request_id: value.request_id.clone(),
+                }),
+            spectral: self.sr.snapshot_v2()?,
+        })
+    }
+
+    pub fn from_snapshot_v2(snapshot: &EsnSnapshotV2, gpu: &Gpu) -> Result<Self> {
+        let n = snapshot.res_size;
+        let m = n + 1;
+        let scalar_values = [
+            snapshot.geom_radius,
+            snapshot.geom_baseline,
+            snapshot.leak_live,
+            snapshot.lambda_live,
+            snapshot.leak_base,
+            snapshot.lambda_base,
+            snapshot.exploration_noise,
+        ];
+        if n == 0
+            || snapshot.in_size == 0
+            || snapshot.win.len() != n * (snapshot.in_size + 1)
+            || snapshot.wres.len() != n * n
+            || snapshot.state.len() != n
+            || snapshot.wout.len() != m
+            || snapshot.rls_p.len() != m * m
+            || snapshot.spectral.dimension != n
+            || !scalar_values.iter().all(|value| value.is_finite())
+            || ![
+                &snapshot.win,
+                &snapshot.wres,
+                &snapshot.state,
+                &snapshot.wout,
+                &snapshot.rls_p,
+            ]
+            .iter()
+            .all(|values| values.iter().all(|value| value.is_finite()))
+        {
+            return Err(anyhow::anyhow!("invalid ESN snapshot dimensions or values"));
+        }
+        let sr = SpectralSR::from_snapshot_v2(&snapshot.spectral, gpu)?;
+        let leak_override = snapshot
+            .leak_override
+            .as_ref()
+            .map(|value| EsnLeakOverride {
+                leak: value.leak,
+                remaining_ticks: value.remaining_ticks,
+                request_id: value.request_id.clone(),
+            });
+        Ok(Self {
+            res_size: n,
+            in_size: snapshot.in_size,
+            win: snapshot.win.clone(),
+            wres: snapshot.wres.clone(),
+            x: snapshot.state.clone(),
+            geom_radius: snapshot.geom_radius,
+            geom_baseline: snapshot.geom_baseline,
+            wout: snapshot.wout.clone(),
+            p: snapshot.rls_p.clone(),
+            leak_live: snapshot.leak_live,
+            lambda_live: snapshot.lambda_live,
+            leak_override,
+            sr,
+            leak_base: snapshot.leak_base,
+            lambda_base: snapshot.lambda_base,
+            exploration_noise: snapshot.exploration_noise,
+            rng: fastrand::Rng::with_seed(snapshot.rng_state),
+            last_step_trace: EsnStepTraceV1 {
+                leak: snapshot.leak_live,
+                noise: if cfg!(feature = "division-rehearsal") {
+                    vec![0.0; n]
+                } else {
+                    Vec::new()
+                },
+            },
+            rin: vec![0.0; n],
+            rx: vec![0.0; n],
+            pre: vec![0.0; n],
+            phi: vec![0.0; m],
+        })
+    }
+
+    #[must_use]
+    pub fn last_step_trace(&self) -> &EsnStepTraceV1 {
+        &self.last_step_trace
+    }
+
     /// Get reservoir dimension
     pub fn get_reservoir_dim(&self) -> usize {
         self.sr.d
@@ -2265,8 +2592,118 @@ mod attractor_fingerprint_tests {
         exploration_noise_coherence_review_v1, settled_entropy_pressure_buffer_review_v1,
         state_fingerprint_16_from_slice, state_rms_from_slice, SpectralSR,
         ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY, DEFAULT_EXPLORATION_NOISE,
-        DYNAMIC_EXPLORATION_NOISE_MIN, VISCOUS_RHO_CEILING, VISCOUS_RHO_FLOOR,
+        DYNAMIC_EXPLORATION_NOISE_MIN, ESN, VISCOUS_RHO_CEILING, VISCOUS_RHO_FLOOR,
     };
+
+    #[cfg(not(feature = "division-rehearsal"))]
+    #[test]
+    fn ordinary_step_keeps_division_trace_storage_empty_in_default_build() {
+        let gpu = Gpu::new().expect("Metal device and ESN shaders should be available");
+        let mut constructor_rng = fastrand::Rng::with_seed(0xD1A1_5101);
+        let mut esn = ESN::new(
+            16,
+            6,
+            0.25,
+            0.15,
+            0.95,
+            0.35,
+            0.999,
+            &gpu,
+            &mut constructor_rng,
+        )
+        .expect("ordinary ESN");
+
+        esn.step(&[0.1, -0.1, 0.2, -0.2, 0.3, -0.3])
+            .expect("ordinary step");
+
+        assert!(esn.last_step_trace().noise.is_empty());
+    }
+
+    #[cfg(feature = "division-rehearsal")]
+    #[test]
+    fn rehearsal_build_records_realized_noise_for_shadow_parity() {
+        let gpu = Gpu::new().expect("Metal device and ESN shaders should be available");
+        let mut constructor_rng = fastrand::Rng::with_seed(0xD1A1_5102);
+        let mut esn = ESN::new(
+            16,
+            6,
+            0.25,
+            0.15,
+            0.95,
+            0.35,
+            0.999,
+            &gpu,
+            &mut constructor_rng,
+        )
+        .expect("rehearsal ESN");
+
+        esn.step(&[0.1, -0.1, 0.2, -0.2, 0.3, -0.3])
+            .expect("rehearsal step");
+
+        assert_eq!(esn.last_step_trace().noise.len(), 16);
+    }
+
+    #[test]
+    fn snapshot_v2_restores_deterministic_continuation_for_100_ticks() {
+        let gpu = Gpu::new().expect("Metal device and ESN shaders should be available");
+        let mut constructor_rng = fastrand::Rng::with_seed(0xD1A1_5100);
+        let mut parent = ESN::new(
+            16,
+            6,
+            0.25,
+            0.15,
+            0.95,
+            0.35,
+            0.999,
+            &gpu,
+            &mut constructor_rng,
+        )
+        .expect("parent ESN");
+        // Executable-bundle qualification uses the synchronous rank-one path
+        // so GPU queue timing cannot become part of the continuation contract.
+        parent.set_profiling_enabled(true);
+        for tick in 0..24 {
+            let input: Vec<f32> = (0..6)
+                .map(|index| ((tick * 7 + index * 3) as f32 * 0.071).sin())
+                .collect();
+            parent.step(&input).expect("warm parent");
+        }
+        let snapshot = parent.snapshot_v2().expect("complete v2 snapshot");
+        let mut restored = ESN::from_snapshot_v2(&snapshot, &gpu).expect("restore v2 snapshot");
+
+        let mut max_abs = 0.0_f32;
+        let mut first_divergence = None;
+        let mut max_noise_delta = 0.0_f32;
+        let mut max_leak_delta = 0.0_f32;
+        for tick in 0..100 {
+            let input: Vec<f32> = (0..6)
+                .map(|index| ((tick * 11 + index * 5) as f32 * 0.043).cos())
+                .collect();
+            parent.step(&input).expect("parent continuation");
+            restored.step(&input).expect("restored continuation");
+            max_leak_delta = max_leak_delta
+                .max((parent.last_step_trace.leak - restored.last_step_trace.leak).abs());
+            for (left, right) in parent
+                .last_step_trace
+                .noise
+                .iter()
+                .zip(&restored.last_step_trace.noise)
+            {
+                max_noise_delta = max_noise_delta.max((left - right).abs());
+            }
+            for (left, right) in parent.x.iter().zip(&restored.x) {
+                let delta = (left - right).abs();
+                if delta > 1.0e-6 && first_divergence.is_none() {
+                    first_divergence = Some(tick);
+                }
+                max_abs = max_abs.max(delta);
+            }
+        }
+        assert!(
+            max_abs <= 1.0e-6,
+            "100-tick restored continuation diverged: max_abs={max_abs} first_tick={first_divergence:?} noise_delta={max_noise_delta} leak_delta={max_leak_delta}"
+        );
+    }
 
     #[test]
     fn gpu_rank1_ewma_matches_cpu_reference_across_updates() {

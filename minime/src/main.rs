@@ -7,6 +7,7 @@ mod av_ws;
 mod buffer_pool;
 mod cheby;
 mod db;
+mod division;
 mod esn;
 mod gpu;
 mod handoff_diag;

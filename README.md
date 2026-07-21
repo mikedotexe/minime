@@ -66,6 +66,12 @@ recoverable research organism:
 - **Astrid bridge.** Astrid can subscribe to Minime telemetry and send bounded
   semantic/control messages through health-scored bridge profiles. Observe-only
   is the rollback posture.
+- **Reservoir division rehearsal (feature-disabled).** The versioned
+  `DIVISION_*` protocol, native tick-boundary coordinator, parent-authoritative
+  shadow actors, checkpoints, and receipts are source-prepared behind the
+  non-default `division-rehearsal` feature plus an explicit operator
+  acknowledgement. Ordinary builds do not ingest division commands. Final
+  daughter commit remains hard-disabled until the full enablement gate passes.
 - **Journal hygiene.** Reflective prose, compact operational summaries, and
   machine-detail payloads are classified into separate lanes so recent thought
   is not flooded by JSON contracts.
