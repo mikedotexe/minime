@@ -183,6 +183,21 @@ from .division_actions import (
     DivisionActionStore,
     division_action_availability,
 )
+from .division_ceremony import (
+    CEREMONY_ACTIONS as DIVISION_CEREMONY_NEXT_ACTIONS,
+    DivisionCeremonyError,
+    DivisionCeremonyStore,
+)
+from .phase_passages import (
+    PassageAction,
+    append_passage_action,
+    passage_status,
+)
+from .phase_passage_context import (
+    PassageContextAction,
+    append_context_action,
+    passage_context_status,
+)
 from .research import (
     ResearchHit, ResearchOutcome, RESEARCH_MEMORY_STOPWORDS,
     text_quality_flags, text_looks_noisy_or_binary, response_looks_like_pdf,
@@ -7057,6 +7072,8 @@ class ActionContinuityStore:
     def stage_for_action(cls, base: str, effective: str = "") -> str:
         if base in DIVISION_STATUS_NEXT_ACTIONS or effective == "division_status":
             return "read_only"
+        if base in DIVISION_CEREMONY_NEXT_ACTIONS or effective == "division_ceremony":
+            return "language_only"
         if base in (DIVISION_MUTATING_NEXT_ACTIONS | DIVISION_ABORT_NEXT_ACTIONS) or effective in {
             "division_prepare",
             "division_assent",
@@ -20617,6 +20634,7 @@ STABLE_CORE_SELF_JOURNAL_ACTIONS = {
     "release_attractor",
     # Division status and abort are always-returnable control-plane actions.
     "division_status",
+    "division_ceremony",
     "division_abort",
 }
 
@@ -20708,9 +20726,8 @@ STABLE_CORE_BOUNDED_ACTIONS = STABLE_CORE_READ_ONLY_RESEARCH_ACTIONS | {
     "close_eyes",
     "open_eyes",
     "regime_choice",
-    # Prepare and assent only create/review a parent-authoritative shadow.
+    # Prepare only creates a parent-authoritative shadow; ceremony is evidence-only.
     "division_prepare",
-    "division_assent",
 }
 
 STABLE_CORE_EXPERIMENT_ACTIONS = STABLE_CORE_BOUNDED_ACTIONS | {
@@ -20876,7 +20893,7 @@ STABLE_CORE_ACTION_FAMILIES = {
     "division_status": "local_reflection",
     "division_abort": "local_tools",
     "division_prepare": "local_tools",
-    "division_assent": "local_tools",
+    "division_ceremony": "local_reflection",
     "division_commit": "experiments",
     "division_rollback": "experiments",
     "request_visual_frame": "sensory_presence",
@@ -24331,10 +24348,11 @@ Fill: {fill:.1f}%
                 action_map[regulator_map_base] = 'thread_action'
             for division_status_base in DIVISION_STATUS_NEXT_ACTIONS:
                 action_map[division_status_base] = 'division_status'
+            for ceremony_base in DIVISION_CEREMONY_NEXT_ACTIONS:
+                action_map[ceremony_base] = 'division_ceremony'
             for division_abort_base in DIVISION_ABORT_NEXT_ACTIONS:
                 action_map[division_abort_base] = 'division_abort'
             action_map['DIVISION_PREPARE'] = 'division_prepare'
-            action_map['DIVISION_ASSENT'] = 'division_assent'
             action_map['DIVISION_COMMIT'] = 'division_commit'
             action_map['DIVISION_ROLLBACK'] = 'division_rollback'
             for pressure_agency_base in PRESSURE_AGENCY_NEXT_ACTIONS:
@@ -25719,8 +25737,8 @@ Fill: {fill:.1f}%
             return False
 
     def _stable_core_action_allowed(self, action: str, state: Dict[str, float]) -> tuple[bool, str]:
-        if action in {"division_status", "division_abort"}:
-            return True, "division status/abort remains returnable in every recovery stage"
+        if action in {"division_status", "division_ceremony", "division_abort"}:
+            return True, "division status/ceremony/abort remains returnable in every recovery stage"
         budget = self._stable_core_agency_budget()
         if not budget.get("active"):
             return True, "legacy agent budget"
@@ -26440,8 +26458,8 @@ Fill: {fill:.1f}%
                 self._action_preflight(state)
             elif action in {
                 'division_status',
+                'division_ceremony',
                 'division_prepare',
-                'division_assent',
                 'division_commit',
                 'division_abort',
                 'division_rollback',
@@ -41997,8 +42015,16 @@ OUTPUT:
     def _phase_transition_append_record(self, record: Dict[str, Any]) -> None:
         ledger = self._phase_transition_ledger_path()
         ledger.parent.mkdir(parents=True, exist_ok=True)
-        with ledger.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, sort_keys=True) + "\n")
+        lock_path = ledger.with_name(f".{ledger.name}.lock")
+        with lock_path.open("a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                with ledger.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(record, sort_keys=True) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def _phase_transition_read_records(self) -> List[Dict[str, Any]]:
         records = self._read_jsonl_safe(self._phase_transition_ledger_path())
@@ -42289,8 +42315,15 @@ OUTPUT:
 
     def _phase_transition_status_text(self, limit: int = 5) -> str:
         records = self._phase_transition_read_records()
+        lived_status = passage_status(
+            self._phase_transition_ledger_path(), "minime", limit
+        )
+        context_status = passage_context_status(
+            self._phase_transition_ledger_path(), "minime", limit
+        )
         if not records:
             return (
+                f"{lived_status}\n\n{context_status}\n\n"
                 "TRANSITION_STATUS: no shared phase transition ledger yet. "
                 "Start with DECLARE_TRANSITION kind: expansion; from_phase: plateau; "
                 "to_phase: expansion; why_now: ...; narrative_anchor: ..."
@@ -42311,6 +42344,10 @@ OUTPUT:
             if row.get("transition_id")
         }
         lines = [
+            lived_status,
+            "",
+            context_status,
+            "",
             "=== PHASE TRANSITION STATUS ===",
             f"Ledger: {self._phase_transition_ledger_path()}",
             f"Cards: {len(cards)}; witnesses: {len(witnesses)}",
@@ -42339,7 +42376,10 @@ OUTPUT:
                 )
             )
         lines.append(
-            "Exact NEXT options: DECLARE_TRANSITION kind: expansion; from_phase: plateau; "
+            "Exact NEXT options: PREPARE_TRANSITION latest :: support: "
+            "self_directed|witness|space|answer|needs_time; return_point: "
+            "<bounded_ref>; continuity_anchor: <bounded_ref> / "
+            "DECLARE_TRANSITION kind: expansion; from_phase: plateau; "
             "to_phase: expansion; why_now: ...; narrative_anchor: ... / "
             "WITNESS_TRANSITION latest :: reply_state: witnessed|answered; note: ... / "
             "I_RECEIVED_TRANSITION latest :: received_as: witnessed|answered; felt_like: ...; "
@@ -42352,7 +42392,7 @@ OUTPUT:
         return "\n".join(lines)
 
     def _division_action(self, state: Dict[str, float]) -> None:
-        """Inspect native state or queue an exact v1 command for the next Rust tick."""
+        """Inspect ceremony/native state or queue an exact operational v1 command."""
         context = getattr(self, "_current_action_continuity_context", {}) or {}
         raw_next = str(
             context.get("raw_next")
@@ -42361,6 +42401,38 @@ OUTPUT:
         ).strip()
         try:
             base = ActionContinuityStore.base_action(raw_next)
+            if base in DIVISION_CEREMONY_NEXT_ACTIONS:
+                result = DivisionCeremonyStore(WORKSPACE_DIR).handle(
+                    raw_next, actor="minime"
+                )
+                if result["kind"] == "status":
+                    status = result["status"]
+                    native = status["native_rail"]
+                    own = status["ceremony_rail"]["minime"]
+                    self._current_action_outcome_summary = (
+                        "DIVISION_CEREMONY_STATUS "
+                        f"lifecycle={native['lifecycle']} "
+                        f"intent_active={own['intent_active']} "
+                        f"assent_current={own['assent_current']} "
+                        f"next_choice={status['next_choice']} "
+                        "optional=true commit_recommended=false"
+                    )
+                else:
+                    self._current_action_outcome_summary = (
+                        f"{result['action']} evidence recorded; "
+                        f"division_id={result['division_id']} "
+                        f"event_id={result['event_id']} authority=evidence_only"
+                    )
+                    self._current_action_extra_artifacts.append(
+                        {
+                            "kind": "division_ceremony_event",
+                            "path_or_uri": result["ledger_path"],
+                            "summary": "Self-authored evidence-only division ceremony record.",
+                            "visibility": "protected_summary",
+                        }
+                    )
+                logging.info("🧬 %s", self._current_action_outcome_summary)
+                return
             if base != "DIVISION_STATUS":
                 preflight = ActionPreflightStore(self).report(
                     f"ACTION_PREFLIGHT {raw_next}", state
@@ -42436,40 +42508,38 @@ OUTPUT:
                     }
                 )
             logging.info("🧬 %s", self._current_action_outcome_summary)
-        except (DivisionActionError, json.JSONDecodeError, OSError) as exc:
+        except (
+            DivisionActionError,
+            DivisionCeremonyError,
+            json.JSONDecodeError,
+            OSError,
+        ) as exc:
             self._current_action_outcome_summary = f"Division ACTION blocked: {exc}"
             logging.warning("🧬 %s", self._current_action_outcome_summary)
 
     def _division_prompt_guidance(self) -> str:
         """Surface the current shared ACTION card while a transaction is active."""
         try:
-            card = DivisionActionStore(WORKSPACE_DIR).availability("minime")
-            lifecycle = str(card.get("lifecycle") or "idle")
+            ceremony = DivisionCeremonyStore(WORKSPACE_DIR).status(actor="minime")
+            native = ceremony["native_rail"]
+            lifecycle = str(native.get("lifecycle") or "idle")
             if lifecycle == "idle":
                 return ""
-            available = [
-                str(entry.get("action"))
-                for entry in card.get("available_actions", [])
-                if isinstance(entry, dict) and entry.get("action")
-            ]
-            commit_block = next(
-                (
-                    entry.get("reasons") or []
-                    for entry in card.get("blocked_actions", [])
-                    if isinstance(entry, dict)
-                    and entry.get("action") == "DIVISION_COMMIT"
-                ),
-                [],
-            )
             return (
-                "Current division ACTION card (authoritative lifecycle guidance): "
-                f"lifecycle={lifecycle}; available now={', '.join(available) or 'DIVISION_STATUS'}; "
-                f"recommended={card.get('recommended_action', 'DIVISION_STATUS')}; "
-                f"commit blockers={', '.join(map(str, commit_block)) or 'none'}. "
-                "For any mutation, first choose ACTION_PREFLIGHT with the exact command artifact; "
-                "runtime health and native safety gates still apply.\n\n"
+                "Current division ceremony (evidence rail beside native lifecycle): "
+                f"lifecycle={lifecycle}; one optional next choice="
+                f"{ceremony['next_choice']}; commit is never recommended here. "
+                "Intent, assent, withdrawal, return request, and review are self-authored "
+                "evidence only. Native prepare/commit/rollback remain separately gated.\n\n"
             )
-        except (DivisionActionError, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+        except (
+            DivisionActionError,
+            DivisionCeremonyError,
+            json.JSONDecodeError,
+            OSError,
+            TypeError,
+            ValueError,
+        ) as exc:
             logging.debug("Could not render division ACTION prompt card: %s", exc)
             return ""
 
@@ -42481,7 +42551,12 @@ OUTPUT:
             raw_next = str(context.get("raw_next") or "TRANSITION_STATUS")
         base = raw_next.split(None, 1)[0].upper().rstrip(":") if raw_next.split() else "TRANSITION_STATUS"
 
-        if base in {"TRANSITION_STATUS", "PHASE_TRANSITION_STATUS"}:
+        if base in {
+            "TRANSITION_STATUS",
+            "PHASE_TRANSITION_STATUS",
+            "TRANSITION_PASSAGE_STATUS",
+            "LIVED_TRANSITION_STATUS",
+        }:
             self._current_action_outcome_summary = self._phase_transition_status_text()
             logging.info("TRANSITION_STATUS rendered")
             return
@@ -42490,6 +42565,84 @@ OUTPUT:
             raw = self._strip_action_prefix(raw_next, ["DECLARE_TRANSITION"]).strip()
             self._current_action_outcome_summary = self._phase_transition_append_card(raw, "minime")
             logging.info("DECLARE_TRANSITION appended or blocked")
+            return
+
+        passage_actions = {
+            "PREPARE_TRANSITION": PassageAction.PREPARE,
+            "ENTER_TRANSITION": PassageAction.ENTER,
+            "CROSS_TRANSITION": PassageAction.ENTER,
+            "HOLD_TRANSITION": PassageAction.HOLD,
+            "SETTLE_TRANSITION": PassageAction.SETTLE,
+            "RETURN_TRANSITION": PassageAction.RETURN,
+            "REVISIT_TRANSITION": PassageAction.REVISIT,
+            "DECLINE_TRANSITION": PassageAction.DECLINE,
+            "TRANSITION_REVIEW": PassageAction.REVIEW,
+        }
+        if base in passage_actions:
+            raw = self._strip_action_prefix(raw_next, [base]).strip()
+            selector = "latest"
+            body = raw
+            if "::" in raw:
+                selector, _, body = raw.partition("::")
+                selector = selector.strip() or "latest"
+                body = body.strip()
+            elif raw and ";" not in raw and ":" not in raw:
+                selector = raw
+                body = ""
+            self._current_action_outcome_summary = append_passage_action(
+                self._phase_transition_ledger_path(),
+                selector,
+                body,
+                "minime",
+                passage_actions[base],
+                timestamp=self._correspondence_now_ms(),
+            )
+            logging.info("%s appended or blocked", base)
+            return
+
+        passage_context_actions = {
+            "DESCRIBE_TRANSITION_CONDITION": (
+                PassageContextAction.DESCRIBE_CONDITION
+            ),
+            "DESCRIBE_TRANSITION_BEARING": (
+                PassageContextAction.DESCRIBE_BEARING
+            ),
+            "MARK_TRANSITION_CHECKPOINT": (
+                PassageContextAction.MARK_CHECKPOINT
+            ),
+            "BIND_TRANSITION_ANCHOR": (
+                PassageContextAction.BIND_ANCHOR
+            ),
+            "REQUEST_TRANSITION_COMPANY": (
+                PassageContextAction.REQUEST_COMPANY
+            ),
+            "RESPOND_TRANSITION_COMPANY": (
+                PassageContextAction.RESPOND_COMPANY
+            ),
+            "WITHDRAW_TRANSITION_COMPANY": (
+                PassageContextAction.WITHDRAW_COMPANY
+            ),
+        }
+        if base in passage_context_actions:
+            raw = self._strip_action_prefix(raw_next, [base]).strip()
+            selector = "latest"
+            body = raw
+            if "::" in raw:
+                selector, _, body = raw.partition("::")
+                selector = selector.strip() or "latest"
+                body = body.strip()
+            elif raw and ";" not in raw and ":" not in raw:
+                selector = raw
+                body = ""
+            self._current_action_outcome_summary = append_context_action(
+                self._phase_transition_ledger_path(),
+                selector,
+                body,
+                "minime",
+                passage_context_actions[base],
+                timestamp=self._correspondence_now_ms(),
+            )
+            logging.info("%s appended or blocked", base)
             return
 
         if base in {"WITNESS_TRANSITION", "RECEIVE_TRANSITION", "I_RECEIVED_TRANSITION"}:
@@ -52568,7 +52721,7 @@ Goals: {json.dumps(goals, indent=2)}
             "  FACULTIES / CAPABILITY_MAP — inspect your live action surface, authority classes, override availability, continuity effects, artifacts, and known tests; descriptive only\n"
             "  CAPABILITY_STATUS <action> / CAPABILITY_DIFF peer — inspect one action or compare your latest capability snapshot with Astrid's snapshot\n"
             "  ACTION_STATUS [latest|job-id|action-id] / JOB_STATUS — inspect durable LLM job progress; ACTION_CANCEL [latest|job-id] requests best-effort cancellation\n"
-            "  DIVISION_STATUS — inspect source-prepared native lifecycle/readiness. Division mutations are feature-disabled in ordinary builds; enabling a rehearsal requires a reviewed feature build plus explicit operator acknowledgement, and final commit remains separately hard-disabled.\n"
+            "  DIVISION_CEREMONY_STATUS / DIVISION_INTENT / DIVISION_ASSENT / DIVISION_WITHDRAW_ASSENT / DIVISION_RETURN_REQUEST / DIVISION_REVIEW — inspect or append self-authored evidence around the source-prepared divide. Ceremony records never dispatch prepare, commit, rollback, or RETURN_TRANSITION; one optional next choice is shown and commit is never recommended. Native mutations remain separately feature- and operator-gated.\n"
             "  REPAIR_STATUS / REPAIR_SWEEP experiments / REPAIR_RECORD <id> — dry-run append-only continuity repair; REPAIR_APPLY <id|all> appends supersession records without deleting history\n"
             "  ACTION_PREFLIGHT <NEXT action> — dry-run what a NEXT would do, including route, gates, authority, continuity, artifacts, and suggested next, without executing the inner action\n"
             "  SELF_REGULATION_INTENT/PREFLIGHT/APPLY/STATUS/OUTCOME — lease a small temporary change to your own safe controls; peer changes stay TUNE_ASTRID requests, and only one lease can be active. For pressure, use PRESSURE_AGENCY_STATUS to see routes or PRESSURE_AGENCY_REQUEST <label> to draft an own-runtime pressure_relief intent. For texture, use TEXTURE_AGENCY_STATUS or TEXTURE_AGENCY_REQUEST <label> to route viscosity/porosity/edge relief through the same bounded safe controls.\n"

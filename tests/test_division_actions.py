@@ -10,6 +10,7 @@ from minime_autonomy.division_actions import (
     DivisionActionStore,
     division_action_availability,
 )
+from minime_autonomy.division_ceremony import DivisionCeremonyStore
 
 
 def command(action: str, *, being: str = "minime", key: str = "division-key-1") -> dict:
@@ -53,6 +54,17 @@ def enable_native_rehearsal(store: DivisionActionStore) -> None:
                 },
             }
         )
+    )
+
+
+def record_matching_intent(store: DivisionActionStore, now: int) -> None:
+    DivisionCeremonyStore(store.workspace).handle(
+        "DIVISION_INTENT "
+        "division_id: division-minime-test; parent_generation: 4; "
+        f"plan_digest: {'b' * 64}; selected_strategy: input_recurrence; "
+        f"expires_at_unix_ms: {now + 60_000}; source_ref: test:prepare",
+        actor="minime",
+        now_unix_ms=now,
     )
 
 
@@ -107,7 +119,7 @@ def test_action_availability_tracks_assent_commit_and_rollback_windows() -> None
         readiness={"ready": True},
     )
     ready = division_action_availability(status, being="minime")
-    assert ready["recommended_action"] == "DIVISION_COMMIT"
+    assert ready["recommended_action"] == "DIVISION_STATUS"
     commit = next(
         entry
         for entry in ready["available_actions"]
@@ -155,7 +167,9 @@ def test_prepare_requires_exact_artifact_and_queues_atomically(
     monkeypatch.setenv("MINIME_DIVISION_REHEARSAL_ENABLED", "true")
     store = DivisionActionStore(tmp_path / "workspace")
     enable_native_rehearsal(store)
-    artifact = write_command(tmp_path, command("DIVISION_PREPARE"))
+    payload = command("DIVISION_PREPARE")
+    record_matching_intent(store, payload["requested_at_unix_ms"])
+    artifact = write_command(tmp_path, payload)
 
     first = store.handle(f"DIVISION_PREPARE {artifact}")
     duplicate = store.handle(f"DIVISION_PREPARE {artifact}")
@@ -179,16 +193,16 @@ def test_command_source_expiry_and_action_fail_closed(
     with pytest.raises(DivisionActionError, match="issued by Minime"):
         store.handle(f"DIVISION_PREPARE {wrong_source}")
 
-    stale = command("DIVISION_ASSENT", key="stale")
+    stale = command("DIVISION_PREPARE", key="stale")
     stale["expires_at_unix_ms"] = stale["requested_at_unix_ms"] - 1
     stale_path = write_command(tmp_path, stale)
     with pytest.raises(DivisionActionError, match="expired"):
-        store.handle(f"DIVISION_ASSENT {stale_path}")
+        store.handle(f"DIVISION_PREPARE {stale_path}")
 
     mismatch = command("DIVISION_ABORT", key="mismatch")
     mismatch_path = write_command(tmp_path, mismatch)
     with pytest.raises(DivisionActionError, match="does not match"):
-        store.handle(f"DIVISION_ASSENT {mismatch_path}")
+        store.handle(f"DIVISION_PREPARE {mismatch_path}")
 
 
 def test_commit_requires_exact_one_shot_human_capability(
@@ -246,8 +260,13 @@ def test_commit_rejects_capability_that_expired_before_the_command(
 def test_division_routes_and_authority_stages_are_visible() -> None:
     expected = {
         "DIVISION_STATUS": ("division_status", "read_only"),
+        "DIVISION_CEREMONY_STATUS": ("division_ceremony", "language_only"),
+        "DIVISION_INTENT": ("division_ceremony", "language_only"),
         "DIVISION_PREPARE": ("division_prepare", "live_control"),
-        "DIVISION_ASSENT": ("division_assent", "live_control"),
+        "DIVISION_ASSENT": ("division_ceremony", "language_only"),
+        "DIVISION_WITHDRAW_ASSENT": ("division_ceremony", "language_only"),
+        "DIVISION_RETURN_REQUEST": ("division_ceremony", "language_only"),
+        "DIVISION_REVIEW": ("division_ceremony", "language_only"),
         "DIVISION_COMMIT": ("division_commit", "live_control"),
         "DIVISION_ABORT": ("division_abort", "live_control"),
         "DIVISION_ROLLBACK": ("division_rollback", "live_control"),

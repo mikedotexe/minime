@@ -29,7 +29,6 @@ DIVISION_ACTION_ORDER = (
 DIVISION_ACTIONS = {
     "DIVISION_PREPARE",
     "DIVISION_STATUS",
-    "DIVISION_ASSENT",
     "DIVISION_COMMIT",
     "DIVISION_ABORT",
     "DIVISION_ROLLBACK",
@@ -179,8 +178,6 @@ def division_action_availability(
         recommended = "DIVISION_PREPARE"
     elif can_assent:
         recommended = "DIVISION_ASSENT"
-    elif not commit_reasons:
-        recommended = "DIVISION_COMMIT"
     else:
         recommended = "DIVISION_STATUS"
     return {
@@ -283,6 +280,16 @@ class DivisionActionStore:
         command = self._load_command(argument)
         now = int(time.time() * 1000) if now_unix_ms is None else int(now_unix_ms)
         self._validate_command(command, expected_action=base, now_unix_ms=now)
+        if base == "DIVISION_PREPARE":
+            from .division_ceremony import DivisionCeremonyStore
+
+            DivisionCeremonyStore(self.workspace).require_active_intent(
+                "minime",
+                division_id=str(command["division_id"]),
+                parent_generation=int(command["expected_parent_generation"]),
+                plan_digest=str(command["plan_digest"]),
+                now_unix_ms=now,
+            )
         queued = self._queue(command)
         return {
             "kind": "queued",
