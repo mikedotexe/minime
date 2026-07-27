@@ -21,6 +21,10 @@
 		<string>false</string>
 		<key>MINIME_SHADOW_DIAGNOSTIC</key>
 		<string>1</string>
+		<key>MINIME_DIVISION_GATEWAY_ENABLED</key>
+		<string>true</string>
+		<key>MINIME_DIVISION_RUNTIME_MANIFEST</key>
+		<string>/Users/v/other/minime/workspace/division/runtime-manifest.json</string>
 	</dict>
 	<key>WorkingDirectory</key>
 	<string>/Users/v/other/minime</string>

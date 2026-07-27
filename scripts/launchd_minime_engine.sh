@@ -34,6 +34,7 @@ MINIME_HARD_RECOVERY_RESET="${MINIME_HARD_RECOVERY_RESET:-1}"
 WARM_START_BLEND="${WARM_START_BLEND:-0.55}"
 REG_TICK_SECS="${REG_TICK_SECS:-0.5}"
 ENABLE_GPU_AV="${ENABLE_GPU_AV:-true}"
+MINIME_DIVISION_GATEWAY_ENABLED="${MINIME_DIVISION_GATEWAY_ENABLED:-false}"
 LEGACY_AUDIO_ENABLED="${LEGACY_AUDIO_ENABLED:-}"
 LEGACY_VIDEO_ENABLED="${LEGACY_VIDEO_ENABLED:-}"
 
@@ -64,6 +65,14 @@ args=(
     --legacy-audio-synth-enabled "$LEGACY_AUDIO_ENABLED"
     --legacy-video-synth-enabled "$LEGACY_VIDEO_ENABLED"
 )
+
+if [ "$MINIME_DIVISION_GATEWAY_ENABLED" = "true" ]; then
+    args+=(
+        --ws-addr 127.0.0.1:7900
+        --sensory-ws-addr 127.0.0.1:7901
+        --av-ws-addr 127.0.0.1:7902
+    )
+fi
 
 export MINIME_HARD_RECOVERY_RESET
 
