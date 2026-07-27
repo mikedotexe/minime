@@ -91,6 +91,58 @@ def test_intent_is_owner_only_evidence_and_gates_prepare(tmp_path: Path) -> None
     )
 
 
+def test_hold_and_decline_block_rehearsal_until_newer_intent(
+    tmp_path: Path,
+) -> None:
+    store = DivisionCeremonyStore(tmp_path)
+    _intent(store, "minime")
+    held = store.handle(
+        "DIVISION_HOLD "
+        f"division_id: divide-one; parent_generation: 7; plan_digest: {PLAN}; "
+        "selected_strategy: input_recurrence; source_ref: test:hold",
+        actor="minime",
+        now_unix_ms=1_100,
+    )
+    assert held["authority"] == "evidence_only"
+    with pytest.raises(DivisionCeremonyError, match="current consent posture"):
+        store.require_active_intent(
+            "minime",
+            division_id="divide-one",
+            parent_generation=7,
+            plan_digest=PLAN,
+            now_unix_ms=1_101,
+        )
+    status = store.status(actor="minime", now_unix_ms=1_101)
+    assert status["ceremony_rail"]["minime"]["current_posture"] == "hold"
+    assert status["ceremony_rail"]["minime"]["rehearsal_blocked_by_posture"] is True
+    assert status["next_choice"] == "DIVISION_CEREMONY_STATUS"
+    assert status["next_choice_is_recommendation"] is False
+
+    _intent(store, "minime", now=1_200)
+    store.require_active_intent(
+        "minime",
+        division_id="divide-one",
+        parent_generation=7,
+        plan_digest=PLAN,
+        now_unix_ms=1_201,
+    )
+    store.handle(
+        "DIVISION_DECLINE "
+        f"division_id: divide-one; parent_generation: 7; plan_digest: {PLAN}; "
+        "selected_strategy: input_recurrence; source_ref: test:decline",
+        actor="minime",
+        now_unix_ms=1_300,
+    )
+    with pytest.raises(DivisionCeremonyError, match="current consent posture"):
+        store.require_active_intent(
+            "minime",
+            division_id="divide-one",
+            parent_generation=7,
+            plan_digest=PLAN,
+            now_unix_ms=1_301,
+        )
+
+
 def test_assent_binds_exact_status_and_can_only_be_withdrawn_by_self(
     tmp_path: Path,
 ) -> None:
@@ -199,6 +251,13 @@ def test_source_ref_rejects_prose_and_status_offers_one_optional_choice(
             now_unix_ms=1_000,
         )
     status = store.status(actor="astrid", now_unix_ms=1_000)
-    assert status["next_choice"] == "DIVISION_INTENT"
+    assert status["next_choice"] == "DIVISION_CEREMONY_STATUS"
     assert status["next_choice_is_optional"] is True
+    assert status["next_choice_is_recommendation"] is False
+    assert status["pre_intent_choices"] == [
+        "DIVISION_HOLD",
+        "DIVISION_DECLINE",
+        "DIVISION_INTENT",
+        "DIVISION_CEREMONY_STATUS",
+    ]
     assert status["right_to_ignore"] is True

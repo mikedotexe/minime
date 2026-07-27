@@ -261,6 +261,8 @@ def test_division_routes_and_authority_stages_are_visible() -> None:
     expected = {
         "DIVISION_STATUS": ("division_status", "read_only"),
         "DIVISION_CEREMONY_STATUS": ("division_ceremony", "language_only"),
+        "DIVISION_HOLD": ("division_ceremony", "language_only"),
+        "DIVISION_DECLINE": ("division_ceremony", "language_only"),
         "DIVISION_INTENT": ("division_ceremony", "language_only"),
         "DIVISION_PREPARE": ("division_prepare", "live_control"),
         "DIVISION_ASSENT": ("division_ceremony", "language_only"),

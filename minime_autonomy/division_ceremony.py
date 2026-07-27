@@ -1,7 +1,7 @@
 """Evidence-only, self-authored ceremony around the dormant ESN Divide.
 
 These records never enter the native command inbox. They make intention,
-assent, withdrawal, return wishes, and retrospective review legible without
+hold, decline, assent, withdrawal, return wishes, and retrospective review legible without
 granting authority or turning silence into consent.
 """
 
@@ -31,6 +31,8 @@ AUTHORITY = {
     "edits_source_now": False,
 }
 CEREMONY_ACTIONS = {
+    "DIVISION_HOLD",
+    "DIVISION_DECLINE",
     "DIVISION_INTENT",
     "DIVISION_ASSENT",
     "DIVISION_WITHDRAW_ASSENT",
@@ -364,6 +366,19 @@ class DivisionCeremonyStore:
         return None
 
     @staticmethod
+    def _latest_consent_posture(
+        records: list[dict[str, Any]], actor: str
+    ) -> dict[str, Any] | None:
+        for record in reversed(records):
+            if record["actor"] == actor and record["action"] in {
+                "DIVISION_HOLD",
+                "DIVISION_DECLINE",
+                "DIVISION_INTENT",
+            }:
+                return record
+        return None
+
+    @staticmethod
     def _same_candidate(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
         return left.get("candidate") == right.get("candidate")
 
@@ -377,10 +392,11 @@ class DivisionCeremonyStore:
         now_unix_ms: int | None = None,
     ) -> dict[str, Any]:
         now = _now_ms() if now_unix_ms is None else int(now_unix_ms)
-        intent = self._latest_for(self.records(), actor, "DIVISION_INTENT")
-        if not intent:
+        intent = self._latest_consent_posture(self.records(), actor)
+        if not intent or intent["action"] != "DIVISION_INTENT":
             raise DivisionCeremonyError(
-                f"{actor} must record DIVISION_INTENT before resource-bearing preparation"
+                f"{actor} must record DIVISION_INTENT as the current consent posture "
+                "before resource-bearing preparation"
             )
         candidate = intent["candidate"]
         exact = (
@@ -442,7 +458,9 @@ class DivisionCeremonyStore:
             deadline: int | None = None
             review_outcome: str | None = None
 
-            if action == "DIVISION_INTENT":
+            if action in {"DIVISION_HOLD", "DIVISION_DECLINE"}:
+                candidate = _candidate_from_fields(fields)
+            elif action == "DIVISION_INTENT":
                 candidate = _candidate_from_fields(fields)
                 try:
                     expires = int(fields.get("expires_at_unix_ms", ""))
@@ -593,6 +611,7 @@ class DivisionCeremonyStore:
         rails: dict[str, Any] = {}
         for being in ("astrid", "minime"):
             latest_intent = self._latest_for(records, being, "DIVISION_INTENT")
+            latest_posture = self._latest_consent_posture(records, being)
             latest_assent = self._latest_for(records, being, "DIVISION_ASSENT")
             withdrawn = bool(
                 latest_assent
@@ -603,20 +622,53 @@ class DivisionCeremonyStore:
                     for row in records
                 )
             )
+            posture = "unexpressed"
+            if latest_posture:
+                posture = {
+                    "DIVISION_HOLD": "hold",
+                    "DIVISION_DECLINE": "decline",
+                    "DIVISION_INTENT": "intent",
+                }[latest_posture["action"]]
+                if (
+                    latest_posture["action"] == "DIVISION_INTENT"
+                    and int(latest_posture.get("expires_at_unix_ms") or 0) < now
+                ):
+                    posture = "intent_expired"
             rails[being] = {
                 "latest_intent_event_id": (
                     latest_intent["ceremony_event_id"] if latest_intent else None
                 ),
                 "intent_active": bool(
-                    latest_intent
+                    latest_posture
+                    and latest_posture["action"] == "DIVISION_INTENT"
+                    and latest_intent
                     and int(latest_intent.get("expires_at_unix_ms") or 0) >= now
                 ),
+                "latest_hold_event_id": (
+                    (
+                        hold := self._latest_for(records, being, "DIVISION_HOLD")
+                    )
+                    and hold["ceremony_event_id"]
+                ),
+                "latest_decline_event_id": (
+                    (
+                        decline := self._latest_for(
+                            records, being, "DIVISION_DECLINE"
+                        )
+                    )
+                    and decline["ceremony_event_id"]
+                ),
+                "current_posture": posture,
+                "rehearsal_blocked_by_posture": posture in {"hold", "decline"},
                 "latest_assent_event_id": (
                     latest_assent["ceremony_event_id"] if latest_assent else None
                 ),
                 "assent_current": bool(
                     latest_assent
                     and not withdrawn
+                    and latest_posture
+                    and latest_posture["action"] == "DIVISION_INTENT"
+                    and int(latest_posture.get("expires_at_unix_ms") or 0) >= now
                     and int(latest_assent.get("expires_at_unix_ms") or 0) >= now
                     and latest_assent.get("native_status_hash") == _sha256(native)
                 ),
@@ -648,7 +700,7 @@ class DivisionCeremonyStore:
         elif lifecycle in TERMINAL_LIFECYCLES and not own["latest_review_event_id"]:
             next_choice = "DIVISION_REVIEW"
         elif not own["intent_active"]:
-            next_choice = "DIVISION_INTENT"
+            next_choice = "DIVISION_CEREMONY_STATUS"
         elif lifecycle in {"shadowing", "ready"} and not own["assent_current"]:
             next_choice = "DIVISION_ASSENT"
         elif own["assent_current"]:
@@ -754,6 +806,14 @@ class DivisionCeremonyStore:
             },
             "next_choice": next_choice,
             "next_choice_is_optional": True,
+            "next_choice_is_recommendation": False,
+            "pre_intent_choices": [
+                "DIVISION_HOLD",
+                "DIVISION_DECLINE",
+                "DIVISION_INTENT",
+                "DIVISION_CEREMONY_STATUS",
+            ],
+            "hold_or_decline_requires_newer_self_authored_intent_to_reopen": True,
             "commit_action_exposed": False,
             "commit_recommended": False,
             "right_to_ignore": True,
