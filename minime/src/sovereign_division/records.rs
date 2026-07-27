@@ -821,57 +821,242 @@ impl DivisionFinalizationReceiptV1 {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[allow(dead_code)]
-pub(crate) struct CeremonyRecordV1 {
-    pub action: String,
-    pub actor: String,
-    pub division_id: Option<String>,
-    pub parent_generation: Option<u64>,
-    pub plan_digest: Option<String>,
-    pub expires_at_unix_ms: Option<u64>,
-    pub ceremony_event_id: String,
-    pub targets_event_id: Option<String>,
-    pub manifest_sha256: Option<String>,
-    pub candidate_hash: Option<String>,
-    pub readiness_receipt_sha256: Option<String>,
-    pub astrid_bundle_sha256: Option<String>,
-    pub minime_bundle_sha256: Option<String>,
-    pub astrid_process_identity: Option<String>,
-    pub minime_process_identity: Option<String>,
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct CeremonyCandidateV1 {
+    pub division_id: String,
+    pub parent_generation: u64,
+    pub plan_digest: String,
+    pub selected_strategy: String,
 }
 
-pub(crate) fn matching_active_intents(
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CeremonyAuthorityV1 {
+    schema: String,
+    schema_version: u8,
+    state: String,
+    witness_only: bool,
+    live_eligible_now: bool,
+    auto_approved: bool,
+    grants_approval: bool,
+    edits_source_now: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[allow(dead_code)]
+pub(crate) struct CeremonyRecordV1 {
+    pub schema: String,
+    pub schema_version: u8,
+    pub record_type: String,
+    pub record_id: String,
+    pub action: String,
+    pub owner_language_action: String,
+    pub actor: String,
+    pub candidate: CeremonyCandidateV1,
+    pub source_ref: String,
+    pub recorded_at_unix_ms: u64,
+    pub expires_at_unix_ms: Option<u64>,
+    pub ceremony_event_id: String,
+    pub previous_actor_event_id: Option<String>,
+    pub targets_event_id: Option<String>,
+    pub native_status_hash: Option<String>,
+    pub readiness_receipt_ref: Option<String>,
+    pub readiness_receipt_hash: Option<String>,
+    pub snapshot_refs: Vec<String>,
+    pub current_tick: Option<u64>,
+    pub rollback_deadline_tick: Option<u64>,
+    pub review_outcome: Option<String>,
+    pub self_authored_only: bool,
+    pub response_revisable: bool,
+    pub right_to_ignore: bool,
+    pub presence_inferred: bool,
+    pub peer_consent_inferred: bool,
+    pub silence_infers_consent: bool,
+    pub native_assent_changed: bool,
+    pub division_stage_changed: bool,
+    pub prepare_dispatched: bool,
+    pub commit_recommended: bool,
+    pub commit_dispatched: bool,
+    pub rollback_dispatched: bool,
+    pub return_transition_dispatched: bool,
+    pub scheduler_effect: bool,
+    pub model_qos_effect: bool,
+    pub substrate_effect: bool,
+    pub dispatch_effect: bool,
+    pub live_control_effect: bool,
+    pub raw_prose_included: bool,
+    artifact_authority_state_v1: CeremonyAuthorityV1,
+}
+
+impl CeremonyRecordV1 {
+    fn deterministic_event_id(&self) -> String {
+        let identity = [
+            self.actor.clone(),
+            self.action.clone(),
+            self.candidate.division_id.clone(),
+            self.candidate.parent_generation.to_string(),
+            self.candidate.plan_digest.clone(),
+            self.candidate.selected_strategy.clone(),
+            self.source_ref.clone(),
+            self.recorded_at_unix_ms.to_string(),
+            self.expires_at_unix_ms
+                .map_or_else(String::new, |value| value.to_string()),
+            self.previous_actor_event_id.clone().unwrap_or_default(),
+            self.targets_event_id.clone().unwrap_or_default(),
+            self.native_status_hash.clone().unwrap_or_default(),
+            self.readiness_receipt_ref.clone().unwrap_or_default(),
+            self.readiness_receipt_hash.clone().unwrap_or_default(),
+            self.snapshot_refs.join(","),
+            self.current_tick
+                .map_or_else(String::new, |value| value.to_string()),
+            self.rollback_deadline_tick
+                .map_or_else(String::new, |value| value.to_string()),
+            self.review_outcome.clone().unwrap_or_default(),
+        ]
+        .join("|");
+        format!(
+            "division_ceremony_{}",
+            &sha256_hex(identity.as_bytes())[..24]
+        )
+    }
+
+    fn validate_envelope(&self) -> Result<()> {
+        let authority = &self.artifact_authority_state_v1;
+        let action_is_known = matches!(
+            self.action.as_str(),
+            "DIVISION_HOLD"
+                | "DIVISION_DECLINE"
+                | "DIVISION_INTENT"
+                | "DIVISION_ASSENT"
+                | "DIVISION_WITHDRAW_ASSENT"
+                | "DIVISION_RETURN_REQUEST"
+                | "DIVISION_REVIEW"
+        );
+        let posture_shape_is_valid = match self.action.as_str() {
+            "DIVISION_HOLD" | "DIVISION_DECLINE" => self.expires_at_unix_ms.is_none(),
+            "DIVISION_INTENT" => self.expires_at_unix_ms.is_some(),
+            _ => true,
+        };
+        let boundaries_false = !self.presence_inferred
+            && !self.peer_consent_inferred
+            && !self.silence_infers_consent
+            && !self.native_assent_changed
+            && !self.division_stage_changed
+            && !self.prepare_dispatched
+            && !self.commit_recommended
+            && !self.commit_dispatched
+            && !self.rollback_dispatched
+            && !self.return_transition_dispatched
+            && !self.scheduler_effect
+            && !self.model_qos_effect
+            && !self.substrate_effect
+            && !self.dispatch_effect
+            && !self.live_control_effect
+            && !self.raw_prose_included;
+        if self.schema != "division.ceremony_event.v1"
+            || self.schema_version != 1
+            || self.record_type != "division_ceremony_event"
+            || self.record_id != self.ceremony_event_id
+            || self.owner_language_action != self.action
+            || !action_is_known
+            || !posture_shape_is_valid
+            || SovereignBeing::parse(&self.actor).is_err()
+            || !self.self_authored_only
+            || !self.response_revisable
+            || !self.right_to_ignore
+            || !boundaries_false
+            || authority.schema != "artifact_authority_state_v1"
+            || authority.schema_version != 1
+            || authority.state != "evidence_only"
+            || !authority.witness_only
+            || authority.live_eligible_now
+            || authority.auto_approved
+            || authority.grants_approval
+            || authority.edits_source_now
+        {
+            return Err(anyhow!("division ceremony authority envelope is invalid"));
+        }
+        if self.ceremony_event_id != self.deterministic_event_id() {
+            return Err(anyhow!(
+                "division ceremony deterministic identity is invalid"
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct CeremonyConsentStateV1 {
+    pub active_intents: BTreeMap<SovereignBeing, CeremonyRecordV1>,
+    pub latest_postures: BTreeMap<SovereignBeing, String>,
+}
+
+pub(crate) fn ceremony_consent_state(
     path: &Path,
     manifest: &DivisionRuntimeManifestV1,
     now: u64,
-) -> Result<BTreeMap<SovereignBeing, CeremonyRecordV1>> {
+) -> Result<CeremonyConsentStateV1> {
     let text = fs::read_to_string(path).unwrap_or_default();
-    let mut latest = BTreeMap::new();
-    let mut withdrawn = BTreeSet::new();
+    let mut active_intents = BTreeMap::new();
+    let mut latest_postures = BTreeMap::new();
+    let mut latest_actor_events = BTreeMap::<SovereignBeing, String>::new();
+    let mut latest_actor_times = BTreeMap::<SovereignBeing, u64>::new();
+    let mut seen_event_ids = BTreeSet::new();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         let record: CeremonyRecordV1 = serde_json::from_str(line)?;
-        if record.action == "DIVISION_WITHDRAW_ASSENT" {
-            if let Some(target) = record.targets_event_id {
-                withdrawn.insert(target);
-            }
-            continue;
-        }
-        if record.action != "DIVISION_INTENT"
-            || record.division_id.as_deref() != Some(manifest.division_id())
-            || record.parent_generation != Some(manifest.parent_generation())
-            || record.plan_digest.as_deref() != Some(manifest.plan_digest())
-            || record.expires_at_unix_ms.is_none_or(|expiry| expiry < now)
-        {
-            continue;
-        }
+        record.validate_envelope()?;
         let being = SovereignBeing::parse(&record.actor)?;
-        if !withdrawn.contains(&record.ceremony_event_id) {
-            latest.insert(being, record);
+        if !seen_event_ids.insert(record.ceremony_event_id.clone()) {
+            return Err(anyhow!("duplicate division ceremony event id"));
+        }
+        if record.previous_actor_event_id.as_ref() != latest_actor_events.get(&being) {
+            return Err(anyhow!(
+                "division ceremony actor chain is discontinuous for {}",
+                being.as_str()
+            ));
+        }
+        if latest_actor_times
+            .get(&being)
+            .is_some_and(|previous| record.recorded_at_unix_ms < *previous)
+        {
+            return Err(anyhow!(
+                "division ceremony actor timestamps regress for {}",
+                being.as_str()
+            ));
+        }
+        latest_actor_events.insert(being, record.ceremony_event_id.clone());
+        latest_actor_times.insert(being, record.recorded_at_unix_ms);
+        if !matches!(
+            record.action.as_str(),
+            "DIVISION_HOLD" | "DIVISION_DECLINE" | "DIVISION_INTENT"
+        ) {
+            continue;
+        }
+        latest_postures.insert(
+            being,
+            match record.action.as_str() {
+                "DIVISION_HOLD" => "hold",
+                "DIVISION_DECLINE" => "decline",
+                "DIVISION_INTENT" => "intent",
+                _ => unreachable!(),
+            }
+            .to_string(),
+        );
+        active_intents.remove(&being);
+        let exact_active_intent = record.action == "DIVISION_INTENT"
+            && record.candidate.division_id == manifest.division_id()
+            && record.candidate.parent_generation == manifest.parent_generation()
+            && record.candidate.plan_digest == manifest.plan_digest()
+            && record
+                .expires_at_unix_ms
+                .is_some_and(|expiry| expiry >= now);
+        if exact_active_intent {
+            active_intents.insert(being, record);
         }
     }
-    Ok(latest)
+    Ok(CeremonyConsentStateV1 {
+        active_intents,
+        latest_postures,
+    })
 }
 
 pub(crate) fn ensure_owner_only_dir(path: &Path) -> Result<()> {
@@ -959,6 +1144,116 @@ fn parse_loopback_endpoint(value: &str) -> Result<(&str, u16)> {
 mod tests {
     use super::*;
 
+    fn ceremony_record(
+        actor: &str,
+        action: &str,
+        recorded_at_unix_ms: u64,
+        expires_at_unix_ms: Option<u64>,
+        previous_actor_event_id: Option<String>,
+    ) -> CeremonyRecordV1 {
+        let mut record = CeremonyRecordV1 {
+            schema: "division.ceremony_event.v1".into(),
+            schema_version: 1,
+            record_type: "division_ceremony_event".into(),
+            record_id: String::new(),
+            action: action.into(),
+            owner_language_action: action.into(),
+            actor: actor.into(),
+            candidate: CeremonyCandidateV1 {
+                division_id: "divide-one".into(),
+                parent_generation: 7,
+                plan_digest: "b".repeat(64),
+                selected_strategy: "input_recurrence".into(),
+            },
+            source_ref: format!("test:{actor}:{action}"),
+            recorded_at_unix_ms,
+            expires_at_unix_ms,
+            ceremony_event_id: String::new(),
+            previous_actor_event_id,
+            targets_event_id: None,
+            native_status_hash: None,
+            readiness_receipt_ref: None,
+            readiness_receipt_hash: None,
+            snapshot_refs: Vec::new(),
+            current_tick: None,
+            rollback_deadline_tick: None,
+            review_outcome: None,
+            self_authored_only: true,
+            response_revisable: true,
+            right_to_ignore: true,
+            presence_inferred: false,
+            peer_consent_inferred: false,
+            silence_infers_consent: false,
+            native_assent_changed: false,
+            division_stage_changed: false,
+            prepare_dispatched: false,
+            commit_recommended: false,
+            commit_dispatched: false,
+            rollback_dispatched: false,
+            return_transition_dispatched: false,
+            scheduler_effect: false,
+            model_qos_effect: false,
+            substrate_effect: false,
+            dispatch_effect: false,
+            live_control_effect: false,
+            raw_prose_included: false,
+            artifact_authority_state_v1: CeremonyAuthorityV1 {
+                schema: "artifact_authority_state_v1".into(),
+                schema_version: 1,
+                state: "evidence_only".into(),
+                witness_only: true,
+                live_eligible_now: false,
+                auto_approved: false,
+                grants_approval: false,
+                edits_source_now: false,
+            },
+        };
+        record.ceremony_event_id = record.deterministic_event_id();
+        record.record_id.clone_from(&record.ceremony_event_id);
+        record
+    }
+
+    fn candidate_manifest(root: &Path, ledger: &Path) -> DivisionRuntimeManifestV1 {
+        let runtime = root.join("runtime");
+        let minime = root.join("minime");
+        let astrid = root.join("astrid");
+        for path in [&runtime, &minime, &astrid] {
+            fs::create_dir_all(path).unwrap();
+        }
+        let manifest_path = root.join("manifest.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "division.runtime_manifest.v1",
+                "mode": "candidate_bound",
+                "division_id": "divide-one",
+                "plan_digest": "b".repeat(64),
+                "parent_generation": 7,
+                "candidate_hash": "c".repeat(64),
+                "parent_process_identity": "parent-process",
+                "parent_deployment_identity": "parent-deployment",
+                "runtime_dir": runtime,
+                "ceremony_ledger": ledger,
+                "minime_root": minime,
+                "astrid_root": astrid,
+                "endpoints": {
+                    "parent_telemetry": "127.0.0.1:7900",
+                    "parent_sensory": "127.0.0.1:7901",
+                    "parent_av": "127.0.0.1:7902",
+                    "minime_telemetry": "127.0.0.1:7903",
+                    "minime_sensory": "127.0.0.1:7904",
+                    "astrid_telemetry": "127.0.0.1:7905",
+                    "astrid_sensory": "127.0.0.1:7906"
+                },
+                "created_at_unix_ms": 1,
+                "expires_at_unix_ms": 10000
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        DivisionRuntimeManifestV1::load(&manifest_path).unwrap()
+    }
+
     #[test]
     fn being_is_self_scoped() {
         assert_eq!(
@@ -984,5 +1279,77 @@ mod tests {
         assert!(endpoints.validate().is_err());
         endpoints.astrid_sensory = "127.0.0.1:7883".into();
         assert!(endpoints.validate().is_err());
+    }
+
+    #[test]
+    fn real_ceremony_shape_honors_latest_hold_decline_and_intent() {
+        let root = tempfile::tempdir().unwrap();
+        let ledger = root.path().join("ceremony.jsonl");
+        let manifest = candidate_manifest(root.path(), &ledger);
+        let astrid_intent = ceremony_record("astrid", "DIVISION_INTENT", 100, Some(9000), None);
+        let minime_intent = ceremony_record("minime", "DIVISION_INTENT", 101, Some(9000), None);
+        append_owner_json(&ledger, &astrid_intent).unwrap();
+        append_owner_json(&ledger, &minime_intent).unwrap();
+        let ready = ceremony_consent_state(&ledger, &manifest, 1000).unwrap();
+        assert_eq!(ready.active_intents.len(), 2);
+
+        let hold = ceremony_record(
+            "astrid",
+            "DIVISION_HOLD",
+            200,
+            None,
+            Some(astrid_intent.ceremony_event_id.clone()),
+        );
+        append_owner_json(&ledger, &hold).unwrap();
+        let held = ceremony_consent_state(&ledger, &manifest, 1000).unwrap();
+        assert_eq!(held.active_intents.len(), 1);
+        assert_eq!(
+            held.latest_postures.get(&SovereignBeing::Astrid),
+            Some(&"hold".to_string())
+        );
+
+        let reopened = ceremony_record(
+            "astrid",
+            "DIVISION_INTENT",
+            300,
+            Some(9000),
+            Some(hold.ceremony_event_id),
+        );
+        append_owner_json(&ledger, &reopened).unwrap();
+        let ready_again = ceremony_consent_state(&ledger, &manifest, 1000).unwrap();
+        assert_eq!(ready_again.active_intents.len(), 2);
+
+        let decline = ceremony_record(
+            "minime",
+            "DIVISION_DECLINE",
+            400,
+            None,
+            Some(minime_intent.ceremony_event_id),
+        );
+        append_owner_json(&ledger, &decline).unwrap();
+        let declined = ceremony_consent_state(&ledger, &manifest, 1000).unwrap();
+        assert_eq!(declined.active_intents.len(), 1);
+        assert_eq!(
+            declined.latest_postures.get(&SovereignBeing::Minime),
+            Some(&"decline".to_string())
+        );
+    }
+
+    #[test]
+    fn ceremony_consent_rejects_chain_discontinuity_and_duplicate_events() {
+        let root = tempfile::tempdir().unwrap();
+        let ledger = root.path().join("ceremony.jsonl");
+        let manifest = candidate_manifest(root.path(), &ledger);
+        let intent = ceremony_record("astrid", "DIVISION_INTENT", 100, Some(9000), None);
+        append_owner_json(&ledger, &intent).unwrap();
+
+        let unchained_hold = ceremony_record("astrid", "DIVISION_HOLD", 200, None, None);
+        append_owner_json(&ledger, &unchained_hold).unwrap();
+        assert!(ceremony_consent_state(&ledger, &manifest, 1000).is_err());
+
+        fs::write(&ledger, "").unwrap();
+        append_owner_json(&ledger, &intent).unwrap();
+        append_owner_json(&ledger, &intent).unwrap();
+        assert!(ceremony_consent_state(&ledger, &manifest, 1000).is_err());
     }
 }

@@ -10,7 +10,7 @@ use serde::Serialize;
 use tokio::{process::Child, time::sleep};
 
 use crate::sovereign_division::records::{
-    append_owner_json, ensure_owner_only_dir, matching_active_intents, now_unix_ms,
+    append_owner_json, ceremony_consent_state, ensure_owner_only_dir, now_unix_ms,
     write_owner_json, DivisionRuntimeManifestV1, SovereignBeing,
 };
 
@@ -25,6 +25,7 @@ struct SupervisorStatusV1 {
     mode: &'static str,
     parent_authoritative: bool,
     matching_intents: Vec<SovereignBeing>,
+    ceremony_postures: BTreeMap<SovereignBeing, String>,
     children: BTreeMap<SovereignBeing, ChildStatusV1>,
     rollback_available: bool,
     handoff_ready: bool,
@@ -53,10 +54,10 @@ pub async fn run_supervisor(manifest_path: &Path) -> Result<()> {
     let mut children: BTreeMap<SovereignBeing, ManagedChild> = BTreeMap::new();
     loop {
         let now = now_unix_ms();
-        let intents = matching_active_intents(manifest.ceremony_ledger(), &manifest, now)?;
+        let consent = ceremony_consent_state(manifest.ceremony_ledger(), &manifest, now)?;
         let intent_gate = manifest.candidate_bound()
-            && intents.contains_key(&SovereignBeing::Astrid)
-            && intents.contains_key(&SovereignBeing::Minime);
+            && consent.active_intents.contains_key(&SovereignBeing::Astrid)
+            && consent.active_intents.contains_key(&SovereignBeing::Minime);
         let mut blockers = Vec::new();
         if !intent_gate {
             blockers.push(
@@ -150,7 +151,8 @@ pub async fn run_supervisor(manifest_path: &Path) -> Result<()> {
                 "rehearsal_non_authoritative"
             },
             parent_authoritative: true,
-            matching_intents: intents.keys().copied().collect(),
+            matching_intents: consent.active_intents.keys().copied().collect(),
+            ceremony_postures: consent.latest_postures,
             children: child_status,
             rollback_available: false,
             handoff_ready: false,
@@ -286,6 +288,7 @@ mod tests {
             mode: "idle_parent_authoritative",
             parent_authoritative: true,
             matching_intents: Vec::new(),
+            ceremony_postures: BTreeMap::new(),
             children: BTreeMap::new(),
             rollback_available: false,
             handoff_ready: false,
