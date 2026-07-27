@@ -375,6 +375,19 @@ class PhaseTransitionAgencyTests(unittest.TestCase):
                     agent._current_action_outcome_summary,
                 )
                 agent._pending_phase_transition_next = (
+                    "DESCRIBE_TRANSITION_BEARING latest :: "
+                    "strand: continuity; "
+                    "movement_resistance: active_within_restlessness; "
+                    "persistence_tendency: dynamic_equilibrium; "
+                    "witness_fit: holding; "
+                    "source_ref: introspection:dynamic_persistence"
+                )
+                agent._phase_transition_action(dict(STATE))
+                self.assertIn(
+                    "movement_resistance=active_within_restlessness",
+                    agent._current_action_outcome_summary,
+                )
+                agent._pending_phase_transition_next = (
                     "BIND_TRANSITION_ANCHOR latest :: role: pivot; "
                     "kind: shadow_trajectory; association: temporal_context; "
                     "anchor_ref: shadow-v3:minime:fixture; "
@@ -411,7 +424,7 @@ class PhaseTransitionAgencyTests(unittest.TestCase):
                 == "phase_transition_passage_context"
             ]
             self.assertEqual(len(passage_rows), 1)
-            self.assertEqual(len(context_rows), 5)
+            self.assertEqual(len(context_rows), 6)
             request_id = context_rows[-1]["company_request_id"]
             request_timestamp = context_rows[-1]["recorded_at_unix_ms"]
             self.assertTrue(
@@ -428,13 +441,22 @@ class PhaseTransitionAgencyTests(unittest.TestCase):
                 for row in context_rows
                 if row["action"] == "describe_bearing"
             ]
-            self.assertEqual(len(bearing_rows), 1)
-            self.assertFalse(bearing_rows[0]["bearing_is_metric"])
-            self.assertFalse(
-                bearing_rows[0]["bearing_inferred_from_telemetry"]
+            self.assertEqual(len(bearing_rows), 2)
+            self.assertTrue(
+                all(row["bearing_is_metric"] is False for row in bearing_rows)
             )
-            self.assertFalse(bearing_rows[0]["bearing_changes_passage"])
-            self.assertFalse(bearing_rows[0]["bearing_closes_transition"])
+            self.assertTrue(
+                all(
+                    row["bearing_inferred_from_telemetry"] is False
+                    for row in bearing_rows
+                )
+            )
+            self.assertTrue(
+                all(row["bearing_changes_passage"] is False for row in bearing_rows)
+            )
+            self.assertTrue(
+                all(row["bearing_closes_transition"] is False for row in bearing_rows)
+            )
             anchor_rows = [
                 row for row in context_rows if row["action"] == "bind_anchor"
             ]
@@ -490,6 +512,10 @@ class PhaseTransitionAgencyTests(unittest.TestCase):
                 )
                 self.assertIn(
                     "not a viscosity metric",
+                    agent._current_action_outcome_summary,
+                )
+                self.assertIn(
+                    "owner-language alternatives to a stalled reading",
                     agent._current_action_outcome_summary,
                 )
                 self.assertIn(

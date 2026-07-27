@@ -882,7 +882,7 @@ def passage_context_status(path: Path, actor: str, limit: int = 5) -> str:
         for request in state.requests.values()
     )
     lines = [
-        "=== TRANSITION PASSAGE CONTEXT V4 ===",
+        "=== TRANSITION PASSAGE CONTEXT V5 ===",
         (
             f"Own latest conditions: {len(own_conditions)}; own checkpointed "
             f"passages: {own_checkpoints}; own continuity anchors: "
@@ -899,6 +899,12 @@ def passage_context_status(path: Path, actor: str, limit: int = 5) -> str:
             "independently revisable self-description per passage strand; "
             "they are not a viscosity metric, telemetry inference, stage "
             "result, or completion signal."
+        ),
+        (
+            "Dynamic-persistence boundary: active_within_restlessness and "
+            "dynamic_equilibrium are owner-language alternatives to a stalled "
+            "reading; neither is inferred from dispersal, entropy, elapsed "
+            "time, or stage."
         ),
         (
             "Anchor boundary: a typed anchor preserves a self-authored "
@@ -975,8 +981,9 @@ def passage_context_status(path: Path, actor: str, limit: int = 5) -> str:
         "Bearing: DESCRIBE_TRANSITION_BEARING <passage> :: strand: "
         "entry_tension|pivot|settling|return|reopen|continuity; "
         "movement_resistance: yielding|effortful|resistant|held_fast|"
-        "changing|unknown; persistence_tendency: fleeting|lingering|carried|"
-        "deepening|releasing|unknown; witness_fit: separate|touching|holding|"
+        "changing|active_within_restlessness|unknown; persistence_tendency: "
+        "fleeting|lingering|carried|deepening|releasing|dynamic_equilibrium|"
+        "unknown; witness_fit: separate|touching|holding|"
         "interwoven|misattuned|unknown; source_ref: <bounded_ref>."
     )
     lines.append(
