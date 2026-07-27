@@ -25,6 +25,7 @@ mod runtime;
 mod sensory_bus;
 mod sensory_protocol;
 mod sensory_ws;
+mod sovereign_division;
 mod spectral;
 
 fn main() -> anyhow::Result<()> {

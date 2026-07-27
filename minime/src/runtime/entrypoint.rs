@@ -26,6 +26,7 @@ pub(crate) async fn run() -> Result<()> {
             surge_threshold,
             reg_tick_secs,
             enable_gpu_av,
+            av_ws_addr,
             legacy_audio_synth_enabled,
             legacy_video_synth_enabled,
         } => {
@@ -51,11 +52,25 @@ pub(crate) async fn run() -> Result<()> {
                 surge_threshold,
                 reg_tick_secs,
                 enable_gpu_av,
+                &av_ws_addr,
                 legacy_audio_synth_enabled,
                 legacy_video_synth_enabled,
             )
             .await
-        }
+        },
+        Cmd::Division { cmd } => match cmd {
+            DivisionCmd::Supervisor { manifest } => {
+                crate::sovereign_division::run_supervisor(&manifest).await
+            },
+            DivisionCmd::Gateway { manifest } => {
+                crate::sovereign_division::run_gateway(&manifest).await
+            },
+            DivisionCmd::Child {
+                being,
+                bundle,
+                workspace,
+            } => crate::sovereign_division::run_child(&being, &bundle, &workspace).await,
+        },
     }
 }
 

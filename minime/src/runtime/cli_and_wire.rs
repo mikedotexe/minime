@@ -135,6 +135,10 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         enable_gpu_av: bool,
 
+        /// GPU A/V WebSocket bind address. The ordinary runner keeps 7880.
+        #[arg(long, default_value = "127.0.0.1:7880")]
+        av_ws_addr: String,
+
         /// Enable the legacy internal synthetic audio lane.
         #[arg(long, action = ArgAction::Set, default_value_t = true)]
         legacy_audio_synth_enabled: bool,
@@ -142,6 +146,34 @@ enum Cmd {
         /// Enable the legacy internal synthetic video lane.
         #[arg(long, action = ArgAction::Set, default_value_t = true)]
         legacy_video_synth_enabled: bool,
+    },
+    /// Operate the separately owned daughter-reservoir runtime.
+    Division {
+        #[command(subcommand)]
+        cmd: DivisionCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum DivisionCmd {
+    /// Run the authority-gated daughter process supervisor.
+    Supervisor {
+        #[arg(long)]
+        manifest: std::path::PathBuf,
+    },
+    /// Run the transparent public-port gateway.
+    Gateway {
+        #[arg(long)]
+        manifest: std::path::PathBuf,
+    },
+    /// Run one self-scoped 64-node daughter reservoir.
+    Child {
+        #[arg(long)]
+        being: String,
+        #[arg(long)]
+        bundle: std::path::PathBuf,
+        #[arg(long)]
+        workspace: std::path::PathBuf,
     },
 }
 

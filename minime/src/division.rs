@@ -24,6 +24,10 @@ use sha2::{Digest as _, Sha256};
 
 use crate::esn::{EsnSnapshotV2, SpectralSnapshotV2, ESN};
 use crate::gpu::Gpu;
+use crate::sovereign_division::records::{now_unix_ms as runtime_now_unix_ms, write_owner_json};
+use crate::sovereign_division::{
+    DaughterFrameDispatcher, DaughterReservoirBundleV1, DivisionRuntimeManifestV1, SovereignBeing,
+};
 use crate::spectral::eigenfill::{EigenFillEstimator, EigenFillEstimatorSnapshotV1};
 
 pub const MITOSIS_BUNDLE_SCHEMA_V2: &str = "division.mitosis_bundle.v2";
@@ -271,12 +275,19 @@ struct PersistedEventV1 {
 pub struct PreparedDivision {
     snapshot_ref: String,
     shadow: ShadowLab,
+    runtime_dispatch: Option<RuntimeDispatch>,
+}
+
+struct RuntimeDispatch {
+    manifest: DivisionRuntimeManifestV1,
+    dispatcher: DaughterFrameDispatcher,
 }
 
 pub struct NativeDivisionCoordinator {
     division_dir: PathBuf,
     state: PersistedCoordinatorState,
     shadow: Option<ShadowLab>,
+    runtime_dispatch: Option<RuntimeDispatch>,
 }
 
 impl NativeDivisionCoordinator {
@@ -300,6 +311,7 @@ impl NativeDivisionCoordinator {
             division_dir,
             state,
             shadow: None,
+            runtime_dispatch: None,
         };
         if matches!(
             coordinator.state.lifecycle,
@@ -458,6 +470,7 @@ impl NativeDivisionCoordinator {
                 })?;
                 self.state.snapshot_refs = vec![prepared.snapshot_ref];
                 self.shadow = Some(prepared.shadow);
+                self.runtime_dispatch = prepared.runtime_dispatch;
                 self.state.lifecycle = DivisionLifecycleV1::Shadowing;
                 self.state.parent_authoritative = true;
                 self.state.astrid_assent = false;
@@ -586,6 +599,14 @@ impl NativeDivisionCoordinator {
             self.write_status()?;
             return Ok(());
         };
+        if let Some(runtime_dispatch) = self.runtime_dispatch.as_mut() {
+            runtime_dispatch.dispatcher.emit(
+                &runtime_dispatch.manifest,
+                parent,
+                input,
+                self.state.bridge_scale as f32,
+            )?;
+        }
         shadow.step(
             parent,
             input,
@@ -772,11 +793,112 @@ pub fn prepare_native_division(
         .join("parent");
     let snapshot_ref =
         write_bundle_v2_atomic(&checkpoint_dir, command, &snapshot, &stable_field, &runtime)?;
+    let runtime_dispatch =
+        materialize_configured_daughter_bundles(command, &snapshot, &stable_field, &runtime)?;
     let shadow = ShadowLab::new(&snapshot, &stable_field, gpu)?;
     Ok(PreparedDivision {
         snapshot_ref,
         shadow,
+        runtime_dispatch,
     })
+}
+
+fn materialize_configured_daughter_bundles(
+    command: &DivisionCommandV1,
+    parent: &EsnSnapshotV2,
+    stable_field: &StableFieldCaptureV2,
+    runtime: &RuntimeCaptureV2,
+) -> Result<Option<RuntimeDispatch>> {
+    let Some(manifest_path) = std::env::var_os("MINIME_DIVISION_RUNTIME_MANIFEST") else {
+        return Ok(None);
+    };
+    let manifest = DivisionRuntimeManifestV1::load(Path::new(&manifest_path))?;
+    manifest.validate_current(runtime_now_unix_ms())?;
+    if !manifest.candidate_bound() {
+        return Err(anyhow!(
+            "runtime manifest must be candidate-bound before native preparation"
+        ));
+    }
+    if manifest.division_id() != command.division_id
+        || manifest.plan_digest() != command.plan_digest
+        || manifest.parent_generation() != command.expected_parent_generation
+    {
+        return Err(anyhow!(
+            "runtime manifest does not match prepared division transaction"
+        ));
+    }
+    let (minime_indices, astrid_indices) =
+        partition_indices(parent, PartitionStrategy::InputRecurrence);
+    let minime_snapshot = daughter_snapshot(parent, &minime_indices, 0x4d49_4e49_4d45)?;
+    let astrid_snapshot = daughter_snapshot(parent, &astrid_indices, 0x4153_5452_4944)?;
+    let minime_cross = cross_block(
+        &parent.wres,
+        parent.res_size,
+        &minime_indices,
+        &astrid_indices,
+    );
+    let astrid_cross = cross_block(
+        &parent.wres,
+        parent.res_size,
+        &astrid_indices,
+        &minime_indices,
+    );
+    let computed_candidate_hash = hex_sha256(&serde_json::to_vec(&json!({
+        "strategy": "input_recurrence",
+        "minime": &minime_snapshot,
+        "astrid": &astrid_snapshot,
+        "minime_cross": &minime_cross,
+        "astrid_cross": &astrid_cross,
+    }))?);
+    if computed_candidate_hash != manifest.candidate_hash() {
+        return Err(anyhow!(
+            "runtime manifest candidate hash does not match prepared daughter artifacts"
+        ));
+    }
+    let minime_hash = DaughterReservoirBundleV1::write_seed(
+        &manifest,
+        SovereignBeing::Minime,
+        minime_snapshot,
+        stable_field.clone(),
+        runtime.clone(),
+        minime_indices.clone(),
+        astrid_indices.clone(),
+        minime_cross,
+    )?;
+    let astrid_hash = DaughterReservoirBundleV1::write_seed(
+        &manifest,
+        SovereignBeing::Astrid,
+        astrid_snapshot,
+        stable_field.clone(),
+        runtime.clone(),
+        astrid_indices.clone(),
+        minime_indices.clone(),
+        astrid_cross,
+    )?;
+    write_owner_json(
+        &manifest.runtime_dir().join("bundle-readiness.json"),
+        &json!({
+            "schema": "division.daughter_bundle_readiness.v1",
+            "division_id": manifest.division_id(),
+            "manifest_sha256": manifest.manifest_sha256(),
+            "candidate_hash": computed_candidate_hash,
+            "minime_bundle_sha256": minime_hash,
+            "astrid_bundle_sha256": astrid_hash,
+            "created_at_unix_ms": runtime_now_unix_ms(),
+            "ready_for_process_launch": true,
+            "live_authority_granted_by_record": false,
+        }),
+    )?;
+    let dispatcher = DaughterFrameDispatcher::start(
+        &manifest,
+        parent.state.clone(),
+        minime_indices,
+        astrid_indices,
+    )?;
+    Ok(Some(RuntimeDispatch {
+        manifest,
+        dispatcher,
+    }))
 }
 
 struct ShadowLab {
@@ -2015,7 +2137,10 @@ mod tests {
         now_unix_ms, read_division_inbox, NativeDivisionCoordinator,
     };
     #[cfg(feature = "division-rehearsal")]
-    use super::{PartitionStrategy, ShadowCandidate, StableFieldCaptureV2};
+    use super::{
+        cross_block, daughter_snapshot, hex_sha256, partition_indices, reconstruct,
+        PartitionStrategy, RuntimeCaptureV2, ShadowCandidate, StableFieldCaptureV2,
+    };
     use astrid_minime_protocol::{
         DivisionActionV1, DivisionCapabilityRefV1, DivisionCommandV1, DivisionLifecycleV1,
         DivisionReceiptStatusV1, DivisionSourceIdentityV1, DIVISION_COMMAND_SCHEMA_V1,
@@ -2023,6 +2148,10 @@ mod tests {
     };
     use std::fs;
 
+    #[cfg(feature = "division-rehearsal")]
+    use crate::sovereign_division::records::{
+        DaughterReservoirBundleV1, DivisionRuntimeManifestV1, DivisionTickFrameV1, SovereignBeing,
+    };
     #[cfg(feature = "division-rehearsal")]
     use crate::{esn::ESN, gpu::Gpu};
 
@@ -2112,6 +2241,239 @@ mod tests {
             candidate.minime_sensory_field.covariance[0],
             candidate.astrid_sensory_field.covariance[0]
         );
+    }
+
+    #[cfg(feature = "division-rehearsal")]
+    #[tokio::test]
+    async fn socket_isolated_daughters_match_parent_for_six_hundred_ticks() {
+        use std::path::Path;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixStream;
+        use tokio::time::{sleep, Duration};
+
+        async fn send(path: &Path, bytes: &[u8]) {
+            let mut stream = loop {
+                match UnixStream::connect(path).await {
+                    Ok(stream) => break stream,
+                    Err(_) => sleep(Duration::from_millis(10)).await,
+                }
+            };
+            stream
+                .write_u32(u32::try_from(bytes.len()).unwrap())
+                .await
+                .unwrap();
+            stream.write_all(bytes).await.unwrap();
+            let length = usize::try_from(stream.read_u32().await.unwrap()).unwrap();
+            let mut reply = vec![0; length];
+            stream.read_exact(&mut reply).await.unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+            assert_eq!(value["healthy"], true);
+        }
+
+        let gpu = Gpu::new().expect("Metal device and shaders");
+        let mut rng = fastrand::Rng::with_seed(0x50_56_45_52_45_49_47_4e);
+        let mut parent = ESN::new(128, 512, 0.20, 0.10, 0.95, 0.35, 0.999, &gpu, &mut rng).unwrap();
+        let warm = vec![0.001_f32; 512];
+        for _ in 0..4 {
+            parent.step(&warm).unwrap();
+        }
+        let parent_seed = parent.snapshot_v2().unwrap();
+        let (minime_indices, astrid_indices) =
+            partition_indices(&parent_seed, PartitionStrategy::InputRecurrence);
+        let minime_snapshot =
+            daughter_snapshot(&parent_seed, &minime_indices, 0x4d49_4e49_4d45).unwrap();
+        let astrid_snapshot =
+            daughter_snapshot(&parent_seed, &astrid_indices, 0x4153_5452_4944).unwrap();
+        let minime_cross = cross_block(&parent_seed.wres, 128, &minime_indices, &astrid_indices);
+        let astrid_cross = cross_block(&parent_seed.wres, 128, &astrid_indices, &minime_indices);
+        let candidate_hash = hex_sha256(
+            &serde_json::to_vec(&serde_json::json!({
+                "strategy": "input_recurrence",
+                "minime": &minime_snapshot,
+                "astrid": &astrid_snapshot,
+                "minime_cross": &minime_cross,
+                "astrid_cross": &astrid_cross,
+            }))
+            .unwrap(),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("runtime");
+        let minime_root = temp.path().join("minime");
+        let astrid_root = temp.path().join("astrid");
+        let manifest_path = temp.path().join("manifest.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "division.runtime_manifest.v1",
+                "mode": "candidate_bound",
+                "division_id": "division-process-parity",
+                "plan_digest": "a".repeat(64),
+                "parent_generation": 9,
+                "candidate_hash": candidate_hash,
+                "parent_process_identity": "parent-process-test",
+                "parent_deployment_identity": "parent-deployment-test",
+                "runtime_dir": runtime,
+                "ceremony_ledger": temp.path().join("ceremony.jsonl"),
+                "minime_root": minime_root,
+                "astrid_root": astrid_root,
+                "endpoints": {
+                    "parent_telemetry": "127.0.0.1:7900",
+                    "parent_sensory": "127.0.0.1:7901",
+                    "parent_av": "127.0.0.1:7902",
+                    "minime_telemetry": "127.0.0.1:7903",
+                    "minime_sensory": "127.0.0.1:7904",
+                    "astrid_telemetry": "127.0.0.1:7905",
+                    "astrid_sensory": "127.0.0.1:7906"
+                },
+                "created_at_unix_ms": 1,
+                "expires_at_unix_ms": u64::MAX
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let manifest = DivisionRuntimeManifestV1::load(&manifest_path).unwrap();
+        let stable = StableFieldCaptureV2 {
+            dimension: 512,
+            covariance: vec![0.0; 512 * 512],
+            top_k_basis: vec![0.0; 512],
+            eigenvalues: vec![1.0],
+            sensory_fill_pct: 68.0,
+            estimator_state: serde_json::json!({}),
+            pi_state: serde_json::json!({}),
+            projection_matrix: vec![0.0; 512 * 512],
+            projection_config: serde_json::json!({}),
+            backlog_state: serde_json::json!({}),
+            staleness_state: serde_json::json!({}),
+            recovery_stage: "test".to_string(),
+        };
+        let runtime_capture = RuntimeCaptureV2 {
+            input_state: serde_json::json!({}),
+            scheduler: serde_json::json!({}),
+            safety_supervisor: serde_json::json!({}),
+            regulator: serde_json::json!({}),
+            source_identity: serde_json::json!({}),
+        };
+        DaughterReservoirBundleV1::write_seed(
+            &manifest,
+            SovereignBeing::Minime,
+            minime_snapshot,
+            stable.clone(),
+            runtime_capture.clone(),
+            minime_indices.clone(),
+            astrid_indices.clone(),
+            minime_cross,
+        )
+        .unwrap();
+        DaughterReservoirBundleV1::write_seed(
+            &manifest,
+            SovereignBeing::Astrid,
+            astrid_snapshot,
+            stable,
+            runtime_capture,
+            astrid_indices.clone(),
+            minime_indices.clone(),
+            astrid_cross,
+        )
+        .unwrap();
+        let minime_bundle = minime_root.join("seed-bundle.json");
+        let astrid_bundle = astrid_root.join("seed-bundle.json");
+        let minime_workspace = minime_root.clone();
+        let astrid_workspace = astrid_root.clone();
+        let minime_task = tokio::spawn(async move {
+            crate::sovereign_division::run_child("minime", &minime_bundle, &minime_workspace).await
+        });
+        let astrid_task = tokio::spawn(async move {
+            crate::sovereign_division::run_child("astrid", &astrid_bundle, &astrid_workspace).await
+        });
+        let mut previous_parent = parent_seed.state.clone();
+        let mut minime_previous_hash = "genesis".to_string();
+        let mut astrid_previous_hash = "genesis".to_string();
+        for tick in 1..=600 {
+            let input: Vec<f32> = (0..512)
+                .map(|index| ((index as f32 * 0.013) + tick as f32 * 0.007).sin() * 0.01)
+                .collect();
+            parent.step(&input).unwrap();
+            let trace = parent.last_step_trace();
+            let mut minime_frame = DivisionTickFrameV1::new(
+                &manifest,
+                tick,
+                &input,
+                &astrid_indices
+                    .iter()
+                    .map(|index| previous_parent[*index])
+                    .collect::<Vec<_>>(),
+                &minime_indices
+                    .iter()
+                    .map(|index| trace.noise[*index])
+                    .collect::<Vec<_>>(),
+                trace.leak,
+                1.0,
+            )
+            .unwrap();
+            let mut astrid_frame = DivisionTickFrameV1::new(
+                &manifest,
+                tick,
+                &input,
+                &minime_indices
+                    .iter()
+                    .map(|index| previous_parent[*index])
+                    .collect::<Vec<_>>(),
+                &astrid_indices
+                    .iter()
+                    .map(|index| trace.noise[*index])
+                    .collect::<Vec<_>>(),
+                trace.leak,
+                1.0,
+            )
+            .unwrap();
+            minime_frame
+                .set_previous_hash(minime_previous_hash)
+                .unwrap();
+            astrid_frame
+                .set_previous_hash(astrid_previous_hash)
+                .unwrap();
+            minime_previous_hash = minime_frame.frame_sha256().to_string();
+            astrid_previous_hash = astrid_frame.frame_sha256().to_string();
+            send(
+                &minime_root.join("runtime/control.sock"),
+                &minime_frame.to_bytes().unwrap(),
+            )
+            .await;
+            send(
+                &astrid_root.join("runtime/control.sock"),
+                &astrid_frame.to_bytes().unwrap(),
+            )
+            .await;
+            previous_parent.clone_from(&parent.x);
+        }
+        let minime_checkpoint: serde_json::Value =
+            serde_json::from_slice(&fs::read(minime_root.join("checkpoint-latest.json")).unwrap())
+                .unwrap();
+        let astrid_checkpoint: serde_json::Value =
+            serde_json::from_slice(&fs::read(astrid_root.join("checkpoint-latest.json")).unwrap())
+                .unwrap();
+        let minime_state: Vec<f32> =
+            serde_json::from_value(minime_checkpoint["esn"]["state"].clone()).unwrap();
+        let astrid_state: Vec<f32> =
+            serde_json::from_value(astrid_checkpoint["esn"]["state"].clone()).unwrap();
+        let combined = reconstruct(
+            128,
+            &minime_indices,
+            &minime_state,
+            &astrid_indices,
+            &astrid_state,
+        );
+        let max_abs = combined
+            .iter()
+            .zip(&parent.x)
+            .map(|(daughter, parent)| (daughter - parent).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_abs <= 1.0e-5,
+            "600-tick process parity max_abs={max_abs}"
+        );
+        minime_task.abort();
+        astrid_task.abort();
     }
 
     #[test]

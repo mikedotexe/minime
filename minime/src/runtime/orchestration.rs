@@ -20,6 +20,7 @@ async fn run_engine(
     surge_threshold: f32,
     reg_tick_secs: f32,
     enable_gpu_av: bool,
+    av_ws_addr: &str,
     legacy_audio_synth_enabled: bool,
     legacy_video_synth_enabled: bool,
 ) -> Result<()> {
@@ -899,9 +900,10 @@ async fn run_engine(
     // Conditionally start GPU A/V server on port 7880 (binary frames)
     if enable_gpu_av {
         let bus_for_gpu = sensory_bus.clone();
+        let av_ws_addr = av_ws_addr.to_string();
         tokio::spawn(async move {
             use crate::av_ws;
-            let addr: SocketAddr = "127.0.0.1:7880".parse().unwrap();
+            let addr: SocketAddr = av_ws_addr.parse().expect("valid av_ws_addr");
             if let Err(e) = av_ws::spawn_av_gpu_server_v2(addr, bus_for_gpu).await {
                 eprintln!(
                     "⚠️  GPU A/V server failed to start: {}. Continuing without GPU video.",
