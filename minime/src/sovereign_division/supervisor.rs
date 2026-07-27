@@ -234,7 +234,28 @@ async fn stop_children(children: &mut BTreeMap<SovereignBeing, ManagedChild>) {
 fn ensure_parent_authority(manifest: &DivisionRuntimeManifestV1) -> Result<()> {
     let path = manifest.runtime_dir().join("authority.json");
     if path.exists() {
-        return Ok(());
+        let existing: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        if existing.get("schema").and_then(serde_json::Value::as_str)
+            != Some("division.gateway_authority.v1")
+        {
+            return Err(anyhow!("unsupported existing gateway authority state"));
+        }
+        let same_manifest = existing
+            .get("division_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(manifest.division_id())
+            && existing
+                .get("manifest_sha256")
+                .and_then(serde_json::Value::as_str)
+                == Some(manifest.manifest_sha256());
+        if same_manifest {
+            return Ok(());
+        }
+        if existing.get("rail").and_then(serde_json::Value::as_str) != Some("parent") {
+            return Err(anyhow!(
+                "stale daughter authority cannot be rebound to a new manifest"
+            ));
+        }
     }
     write_owner_json(
         &path,

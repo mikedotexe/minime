@@ -22,10 +22,14 @@ enum AuthorityRail {
 #[serde(deny_unknown_fields)]
 struct AuthorityStateWireV1 {
     schema: String,
+    division_id: String,
+    manifest_sha256: String,
     rail: AuthorityRail,
     switch_receipt_sha256: Option<String>,
     #[serde(default)]
     handoff_contract_receipt_sha256: Option<String>,
+    created_at_unix_ms: u64,
+    live_authority_granted_by_record: bool,
 }
 
 pub async fn run_gateway(manifest_path: &Path) -> Result<()> {
@@ -96,6 +100,16 @@ fn selected_target(
         if wire.schema != "division.gateway_authority.v1" {
             return Err(anyhow!("unsupported gateway authority state"));
         }
+        if wire.created_at_unix_ms == 0 || wire.live_authority_granted_by_record {
+            return Err(anyhow!("gateway authority evidence boundary is invalid"));
+        }
+        if wire.division_id != manifest.division_id()
+            || wire.manifest_sha256 != manifest.manifest_sha256()
+        {
+            return Err(anyhow!(
+                "gateway authority state does not match the active manifest"
+            ));
+        }
         if matches!(wire.rail, AuthorityRail::Daughters)
             && (wire
                 .switch_receipt_sha256
@@ -142,14 +156,19 @@ mod tests {
     fn authority_state_requires_switch_hash_for_daughters() {
         let invalid: AuthorityStateWireV1 = serde_json::from_value(serde_json::json!({
             "schema": "division.gateway_authority.v1",
+            "division_id": "division-test",
+            "manifest_sha256": "a".repeat(64),
             "rail": "daughters",
             "switch_receipt_sha256": null,
-            "handoff_contract_receipt_sha256": null
+            "handoff_contract_receipt_sha256": null,
+            "created_at_unix_ms": 1,
+            "live_authority_granted_by_record": false
         }))
         .unwrap();
         assert!(matches!(invalid.rail, AuthorityRail::Daughters));
         assert!(invalid.switch_receipt_sha256.is_none());
         assert!(invalid.handoff_contract_receipt_sha256.is_none());
+        assert!(!invalid.live_authority_granted_by_record);
     }
 
     #[tokio::test]
