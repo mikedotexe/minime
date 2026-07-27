@@ -127,6 +127,17 @@ def test_assent_binds_exact_status_and_can_only_be_withdrawn_by_self(
     assert status["ceremony_rail"]["astrid"]["assent_withdrawn"] is True
     assert status["commit_action_exposed"] is False
     assert status["commit_recommended"] is False
+    assert status["chronicle"]["schema"] == "division.ceremony_chronicle.v1"
+    assert status["chronicle"]["total_event_count"] == 3
+    assert (
+        status["destination_contract"]["sovereign_runtime_ownership_state"]
+        == "not_yet_established"
+    )
+    assert (
+        status["destination_contract"]["independent_process_ownership_established"]
+        is False
+    )
+    assert status["phase_space_preservation"]["felt_continuity_inferred"] is False
 
 
 def test_return_request_is_window_bound_and_never_dispatches_rollback(

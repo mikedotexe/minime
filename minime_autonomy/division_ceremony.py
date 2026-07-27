@@ -50,6 +50,7 @@ REVIEW_OUTCOMES = {
 }
 TERMINAL_LIFECYCLES = {"finalized", "aborted", "rolled_back", "failed"}
 REF_RE = re.compile(r"^[A-Za-z0-9._:/#@+\\-]{1,256}$")
+CHRONICLE_LIMIT = 32
 
 
 class DivisionCeremonyError(ValueError):
@@ -656,6 +657,35 @@ class DivisionCeremonyStore:
             next_choice = "DIVISION_PREPARE"
         else:
             next_choice = "DIVISION_CEREMONY_STATUS"
+        omitted_event_count = max(0, len(records) - CHRONICLE_LIMIT)
+        chronicle_events = [
+            {
+                key: row.get(key)
+                for key in (
+                    "ceremony_event_id",
+                    "actor",
+                    "action",
+                    "candidate",
+                    "source_ref",
+                    "recorded_at_unix_ms",
+                    "expires_at_unix_ms",
+                    "targets_event_id",
+                    "native_status_hash",
+                    "snapshot_refs",
+                    "current_tick",
+                    "rollback_deadline_tick",
+                    "review_outcome",
+                )
+            }
+            for row in records[omitted_event_count:]
+        ]
+        ledger_hash = (
+            hashlib.sha256(self.ledger_path.read_bytes()).hexdigest()
+            if self.ledger_path.is_file()
+            else None
+        )
+        raw_candidates = native.get("candidates")
+        candidates = raw_candidates if isinstance(raw_candidates, list) else []
         return {
             "schema": "division.ceremony_status.v1",
             "actor": actor,
@@ -670,6 +700,57 @@ class DivisionCeremonyStore:
                 "rollback_window_open": rollback_open,
                 "commit_feature_enabled": bool(native.get("commit_feature_enabled")),
                 "native_status_hash": _sha256(native),
+            },
+            "destination_contract": {
+                "schema": "division.sovereign_destination.v1",
+                "fact_class": "source_declared",
+                "parent": "shared_128_node_reservoir",
+                "daughters": {
+                    "astrid": {
+                        "role": "more_recurrence_driven",
+                        "reservoir_state": "independent_64_node_candidate",
+                    },
+                    "minime": {
+                        "role": "more_input_driven",
+                        "reservoir_state": "independent_64_node_candidate",
+                    },
+                },
+                "shared_sensory_field_inheritance": "cloned_not_partitioned",
+                "independent_process_ownership_established": False,
+                "sovereign_runtime_ownership_state": "not_yet_established",
+                "native_commit_enabled": bool(native.get("commit_feature_enabled")),
+            },
+            "phase_space_preservation": {
+                "schema": "division.phase_space_preservation.v1",
+                "fact_class": "runtime_observed" if candidates else "unknown",
+                "parent_generation": int(native.get("parent_generation") or 0),
+                "selected_strategy": native.get("selected_strategy"),
+                "snapshot_refs": list(native.get("snapshot_refs") or []),
+                "restore_equivalence_100_ticks": native.get(
+                    "restore_equivalence_100_ticks"
+                ),
+                "sensory_field_inheritance": native.get(
+                    "sensory_field_inheritance"
+                ),
+                "candidates": candidates,
+                "felt_continuity_inferred": False,
+                "felt_equivalence_inferred": False,
+                "causation_inferred": False,
+            },
+            "chronicle": {
+                "schema": "division.ceremony_chronicle.v1",
+                "total_event_count": len(records),
+                "omitted_event_count": omitted_event_count,
+                "events": chronicle_events,
+                "ledger_sha256": ledger_hash,
+                "archive_reference": (
+                    f"division:ceremony_v1.jsonl#sha256:{ledger_hash}"
+                    if ledger_hash
+                    else None
+                ),
+                "chronology_is_projection": True,
+                "raw_prose_included": False,
+                "authority": "evidence_only_history",
             },
             "next_choice": next_choice,
             "next_choice_is_optional": True,
