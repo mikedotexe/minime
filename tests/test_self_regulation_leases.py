@@ -1,10 +1,13 @@
 import json
 import tempfile
+import time
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import autonomous_agent as aa
+from minime_autonomy.self_control_v2 import SELF_CONTROL_FAMILY_BY_FIELD
 
 
 STATE = {"fill_ratio": 0.68, "eig1": 4.7, "deig": 0.0}
@@ -19,6 +22,113 @@ class _FakeWs:
 
     def close(self):
         pass
+
+
+class _FakeSelfControlV2:
+    def __init__(self, sent):
+        self.sent = sent
+        self.issued = []
+        self.withdrawals = []
+        self.expire = False
+
+    def issue(self, values, *, duration_secs, durability="lease", **_kwargs):
+        values = dict(values)
+        self.sent.append(values)
+        expiry = int(time.time() * 1000) + int(duration_secs) * 1000
+        families = []
+        for field in values:
+            family = SELF_CONTROL_FAMILY_BY_FIELD[field]
+            if family not in families:
+                families.append(family)
+        receipts = []
+        for family in families:
+            index = len(self.issued) + 1
+            intent_id = f"self-control-test-intent:{index}"
+            receipt_id = f"self-control-test-receipt:{index}"
+            family_values = {
+                field: value
+                for field, value in values.items()
+                if SELF_CONTROL_FAMILY_BY_FIELD[field] == family
+            }
+            receipt = {
+                "schema": "self_control.receipt.v2",
+                "receipt_id": receipt_id,
+                "intent_id": intent_id,
+                "status": "applied",
+                "control_expires_at_unix_ms": (
+                    expiry if durability == "lease" else None
+                ),
+                "server_deployment_identity": "deployment:test",
+                "target_deployment_identity": "deployment:test",
+                "applied_values": family_values,
+                "previous_values": {},
+                "felt_effect_established": False,
+            }
+            self.issued.append(receipt)
+            receipts.append(receipt)
+        return {
+            "schema": "minime.self_control.autonomy_delivery.v2",
+            "server_deployment_identity": "deployment:test",
+            "families": families,
+            "receipts": receipts,
+            "intent_ids": [receipt["intent_id"] for receipt in receipts],
+            "receipt_ids": [receipt["receipt_id"] for receipt in receipts],
+            "control_expires_at_unix_ms": (
+                expiry if durability == "lease" else None
+            ),
+            "felt_effect_established": False,
+        }
+
+    def withdraw(self, family, related_intent_id, **_kwargs):
+        receipt = {
+            "schema": "self_control.receipt.v2",
+            "receipt_id": f"withdrawal:{related_intent_id}",
+            "intent_id": f"withdraw:{related_intent_id}",
+            "status": "withdrawn",
+            "server_deployment_identity": "deployment:test",
+            "target_deployment_identity": "deployment:test",
+            "applied_values": {},
+            "previous_values": {},
+            "felt_effect_established": False,
+        }
+        self.withdrawals.append((family, related_intent_id))
+        return {"receipt": receipt, "result": {"attempts": []}}
+
+    def status(self):
+        receipts = []
+        if self.expire:
+            receipts = [
+                {
+                    **receipt,
+                    "receipt_id": f"{receipt['receipt_id']}:expiry",
+                    "status": "expired",
+                    "applied_values": receipt.get("previous_values") or {},
+                    "previous_values": receipt.get("applied_values") or {},
+                    "rollback_receipt_id": receipt["receipt_id"],
+                }
+                for receipt in self.issued
+            ]
+        return {
+            "schema": "minime.self_control.status.v2",
+            "target_being": "minime",
+            "state_sha256": "a" * 64,
+            "preferences": {},
+            "held_intents": [],
+            "recent_receipts": receipts,
+            "integrity_verified": True,
+            "pending_transition": False,
+        }
+
+    @staticmethod
+    def terminal_receipts(status, intent_ids):
+        wanted = set(intent_ids)
+        return {
+            receipt["intent_id"]: receipt
+            for receipt in status.get("recent_receipts") or []
+            if receipt.get("intent_id") in wanted
+            and receipt.get("status")
+            in {"expired", "withdrawn", "safety_held", "rolled_back"}
+        }
 
 
 class SelfRegulationLeaseTests(unittest.TestCase):
@@ -43,6 +153,16 @@ class SelfRegulationLeaseTests(unittest.TestCase):
         }
         return agent
 
+    def _expire_latest_control(self, workspace: Path) -> None:
+        active_path = workspace / "self_regulation/active_lease.json"
+        active = json.loads(active_path.read_text())
+        active["expires_at_unix_s"] = 1
+        active_path.write_text(json.dumps(active))
+        ledger_path = workspace / "self_regulation/active_leases_v2.json"
+        ledger = json.loads(ledger_path.read_text())
+        ledger["leases_by_intent"][active["intent_id"]] = active
+        ledger_path.write_text(json.dumps(ledger))
+
     def test_minime_self_regulation_applies_bounded_dial_lease(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
@@ -53,9 +173,12 @@ class SelfRegulationLeaseTests(unittest.TestCase):
             }))
             agent = self._agent(workspace)
             sent = []
+            receiver = _FakeSelfControlV2(sent)
             with (
                 patch.object(aa, "WORKSPACE_DIR", workspace),
-                patch.object(aa.websocket, "create_connection", return_value=_FakeWs(sent)),
+                patch.object(
+                    aa, "MinimeSelfControlV2Client", return_value=receiver
+                ),
             ):
                 agent._pending_self_regulation_next = (
                     "SELF_REGULATION_INTENT open :: goal: test; "
@@ -71,15 +194,17 @@ class SelfRegulationLeaseTests(unittest.TestCase):
                 agent._pending_self_regulation_next = "SELF_REGULATION_APPLY latest"
                 agent._self_regulation_action(dict(STATE))
 
-            self.assertEqual(sent[-1], {"kind": "control", "exploration_noise": 0.05})
+            self.assertEqual(sent[-1], {"exploration_noise": 0.2})
             active = json.loads((workspace / "self_regulation/active_lease.json").read_text())
             self.assertEqual(active["status"], "active")
+            self.assertEqual(active["authority"], "authenticated_self_control_v2")
+            self.assertTrue(active["machine_receipts"])
             self.assertEqual(active["previous_value"], 0.03)
-            self.assertEqual(active["applied_value"], 0.05)
+            self.assertEqual(active["applied_value"], 0.2)
             self.assertIn("baseline_evidence", active)
             self.assertTrue(active["baseline_evidence"])
             persisted = json.loads((workspace / "sovereignty_state.json").read_text())
-            self.assertEqual(persisted["exploration_noise"], 0.05)
+            self.assertEqual(persisted["exploration_noise"], 0.2)
             negotiations = [
                 json.loads(line)
                 for line in (workspace / "self_regulation/negotiations.jsonl").read_text().splitlines()
@@ -88,9 +213,9 @@ class SelfRegulationLeaseTests(unittest.TestCase):
             self.assertEqual(apply_record["source_action"], "SELF_REGULATION_APPLY")
             self.assertEqual(apply_record["candidate_control"], "exploration_noise")
             self.assertEqual(apply_record["requested_value"], 0.20)
-            self.assertEqual(apply_record["applied_value"], 0.05)
+            self.assertEqual(apply_record["applied_value"], 0.2)
             self.assertTrue(apply_record["lease_related"])
-            self.assertEqual(apply_record["safe_cap_or_range"]["max"], 0.08)
+            self.assertEqual(apply_record["safe_cap_or_range"]["max"], 0.2)
 
             with patch.object(aa, "WORKSPACE_DIR", workspace):
                 agent._pending_self_regulation_next = (
@@ -118,9 +243,12 @@ class SelfRegulationLeaseTests(unittest.TestCase):
             }))
             agent = self._agent(workspace)
             sent = []
+            receiver = _FakeSelfControlV2(sent)
             with (
                 patch.object(aa, "WORKSPACE_DIR", workspace),
-                patch.object(aa.websocket, "create_connection", return_value=_FakeWs(sent)),
+                patch.object(
+                    aa, "MinimeSelfControlV2Client", return_value=receiver
+                ),
             ):
                 parsed = aa._parse_footer_directive_requests(
                     "I need more edge.\nexploration_noise: 0.12"
@@ -131,7 +259,8 @@ class SelfRegulationLeaseTests(unittest.TestCase):
                     "I need more edge.\nexploration_noise: 0.12"
                 )
 
-            self.assertEqual(sent[-1], {"kind": "control", "exploration_noise": 0.08})
+            self.assertEqual(sent[-1], {"exploration_noise": 0.08})
+            self.assertEqual(receiver.issued[-1]["status"], "applied")
             persisted = json.loads((workspace / "sovereignty_state.json").read_text())
             self.assertEqual(persisted["exploration_noise"], 0.08)
             record = [
@@ -146,7 +275,44 @@ class SelfRegulationLeaseTests(unittest.TestCase):
             self.assertEqual(record["clamp_or_defer_reason"], "clamped_to_lease_safe_range")
             self.assertEqual(record["safe_cap_or_range"]["max"], 0.08)
 
-    def test_status_reports_already_persisted_over_cap_without_auto_lowering(self):
+    def test_metabolism_choice_uses_receipted_lease_without_shadow_pulse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            (workspace / "journal").mkdir(parents=True)
+            agent = self._agent(workspace)
+            agent.thresholds = types.SimpleNamespace(metabolism_low=5.0)
+            agent._query_llm_with_next = lambda _prompt: (
+                "I choose more stimulation and a faster rhythm.",
+                None,
+            )
+            agent._write_journal_entry = lambda *_args, **_kwargs: None
+            sent = []
+            receiver = _FakeSelfControlV2(sent)
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(
+                    aa, "runtime_health_path", return_value=workspace / "missing-health.json"
+                ),
+                patch.object(
+                    aa, "MinimeSelfControlV2Client", return_value=receiver
+                ),
+                patch.object(agent, "_inject_texture_burst") as shadow_pulse,
+            ):
+                agent._adjust_metabolism(dict(STATE))
+
+            self.assertEqual(sent, [{"synth_gain": 1.79}])
+            self.assertEqual(
+                receiver.issued[-1]["control_expires_at_unix_ms"] is not None,
+                True,
+            )
+            shadow_pulse.assert_not_called()
+            artifact = next((workspace / "journal").glob("metabolism_increase_*.txt"))
+            text = artifact.read_text()
+            self.assertIn("Authenticated live control:", text)
+            self.assertIn("receiver receipts: self-control-test-receipt:1", text)
+
+    def test_status_accepts_values_inside_expanded_receiver_range(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
@@ -159,9 +325,8 @@ class SelfRegulationLeaseTests(unittest.TestCase):
                 agent._pending_self_regulation_next = "SELF_REGULATION_STATUS"
                 agent._self_regulation_action(dict(STATE))
 
-            self.assertIn("current_above_cap", agent._pending_notice_prompt)
-            self.assertIn("exploration_noise", agent._pending_notice_prompt)
-            self.assertIn("not auto-lowered", agent._pending_notice_prompt)
+            self.assertIn("SELF_REGULATION_STATUS", agent._pending_notice_prompt)
+            self.assertNotIn("current_above_cap", agent._pending_notice_prompt)
             persisted = json.loads((workspace / "sovereignty_state.json").read_text())
             self.assertEqual(persisted["exploration_noise"], 0.12)
 
@@ -175,9 +340,12 @@ class SelfRegulationLeaseTests(unittest.TestCase):
             }))
             agent = self._agent(workspace)
             sent = []
+            receiver = _FakeSelfControlV2(sent)
             with (
                 patch.object(aa, "WORKSPACE_DIR", workspace),
-                patch.object(aa.websocket, "create_connection", return_value=_FakeWs(sent)),
+                patch.object(
+                    aa, "MinimeSelfControlV2Client", return_value=receiver
+                ),
             ):
                 agent._pending_self_regulation_next = (
                     "SELF_REGULATION_INTENT curiosity :: target: geom_curiosity; "
@@ -186,17 +354,96 @@ class SelfRegulationLeaseTests(unittest.TestCase):
                 agent._self_regulation_action(dict(STATE))
                 agent._pending_self_regulation_next = "SELF_REGULATION_APPLY latest"
                 agent._self_regulation_action(dict(STATE))
-                active_path = workspace / "self_regulation/active_lease.json"
-                active = json.loads(active_path.read_text())
-                active["expires_at_unix_s"] = 1
-                active_path.write_text(json.dumps(active))
+                self._expire_latest_control(workspace)
+                receiver.expire = True
                 agent._self_regulation_reconcile_active_lease(dict(STATE))
 
-            self.assertEqual(sent[-1], {"kind": "control", "geom_curiosity": 0.1})
+            self.assertEqual(sent, [{"geom_curiosity": 0.3}])
             active = json.loads((workspace / "self_regulation/active_lease.json").read_text())
             self.assertEqual(active["status"], "reverted")
-            self.assertTrue(active["requires_outcome"])
+            self.assertFalse(active["requires_outcome"])
+            self.assertTrue(active["felt_review_available"])
+            self.assertFalse(active["felt_review_blocks_control"])
             self.assertTrue(active["post_lease_evidence"])
+            self.assertTrue(active["terminal_machine_receipts"])
+
+    def test_felt_review_is_optional_and_only_same_family_overlap_blocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            (workspace / "sovereignty_state.json").write_text(json.dumps({
+                "exploration_noise": 0.03,
+                "memory_mode": 0,
+                "fill_target": 0.68,
+                "regime": "focus",
+            }))
+            agent = self._agent(workspace)
+            sent = []
+            receiver = _FakeSelfControlV2(sent)
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(
+                    aa, "MinimeSelfControlV2Client", return_value=receiver
+                ),
+            ):
+                agent._pending_self_regulation_next = (
+                    "SELF_REGULATION_INTENT noise :: "
+                    "target: exploration_noise; value: 0.10"
+                )
+                agent._self_regulation_action(dict(STATE))
+                agent._pending_self_regulation_next = "SELF_REGULATION_APPLY latest"
+                agent._self_regulation_action(dict(STATE))
+
+                agent._pending_self_regulation_next = (
+                    "SELF_REGULATION_INTENT memory :: "
+                    "target: memory_mode; value: full; durability: standing"
+                )
+                agent._self_regulation_action(dict(STATE))
+                agent._pending_self_regulation_next = "SELF_REGULATION_APPLY latest"
+                agent._self_regulation_action(dict(STATE))
+
+                agent._pending_self_regulation_next = (
+                    "SELF_REGULATION_INTENT fill :: "
+                    "target: fill_target; value: 0.65"
+                )
+                agent._self_regulation_action(dict(STATE))
+                agent._pending_self_regulation_next = (
+                    "SELF_REGULATION_PREFLIGHT latest"
+                )
+                agent._self_regulation_action(dict(STATE))
+
+            self.assertEqual(
+                sent,
+                [
+                    {"exploration_noise": 0.1},
+                    {"memory_mode": 2},
+                ],
+            )
+            self.assertIn(
+                "one active mutation is allowed per control family",
+                agent._pending_notice_prompt,
+            )
+            ledger = json.loads(
+                (
+                    workspace
+                    / "self_regulation"
+                    / "active_leases_v2.json"
+                ).read_text()
+            )
+            self.assertEqual(
+                ledger["schema"],
+                "minime.self_regulation.active_leases.v2",
+            )
+            self.assertFalse(ledger["felt_review_blocks_control"])
+            self.assertEqual(len(ledger["leases_by_intent"]), 2)
+            families = {
+                tuple(lease["self_control_v2_families"])
+                for lease in ledger["leases_by_intent"].values()
+            }
+            self.assertEqual(
+                families,
+                {("reservoir-regulation",), ("memory",)},
+            )
 
     def test_minime_pressure_relief_bundle_applies_and_reverts_all_controls(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -209,14 +456,17 @@ class SelfRegulationLeaseTests(unittest.TestCase):
             }))
             agent = self._agent(workspace)
             sent = []
+            receiver = _FakeSelfControlV2(sent)
             state = dict(STATE, pressure_risk=0.24, mode_packing=0.36, semantic_friction=0.31)
             with (
                 patch.object(aa, "WORKSPACE_DIR", workspace),
-                patch.object(aa.websocket, "create_connection", return_value=_FakeWs(sent)),
+                patch.object(
+                    aa, "MinimeSelfControlV2Client", return_value=receiver
+                ),
             ):
                 agent._pending_self_regulation_next = (
                     "SELF_REGULATION_INTENT pressure :: target: pressure_relief; "
-                    "bundle: auto; duration_secs: 60"
+                    "bundle: reduce_restless_saturation; duration_secs: 60"
                 )
                 agent._self_regulation_action(state)
                 self.assertIn("drafted", agent._pending_notice_prompt)
@@ -230,7 +480,6 @@ class SelfRegulationLeaseTests(unittest.TestCase):
                 self.assertEqual(
                     sent[-1],
                     {
-                        "kind": "control",
                         "exploration_noise": 0.03,
                         "geom_curiosity": 0.07,
                     },
@@ -253,21 +502,81 @@ class SelfRegulationLeaseTests(unittest.TestCase):
                 }
                 self.assertEqual(applied_controls["exploration_noise"], 0.03)
                 self.assertEqual(applied_controls["geom_curiosity"], 0.07)
-                active["expires_at_unix_s"] = 1
-                active_path.write_text(json.dumps(active))
+                self._expire_latest_control(workspace)
+                receiver.expire = True
                 agent._self_regulation_reconcile_active_lease(state)
 
-            self.assertEqual(
-                sent[-1],
-                {
-                    "kind": "control",
-                    "geom_curiosity": 0.12,
-                    "exploration_noise": 0.05,
-                },
-            )
+            self.assertEqual(len(sent), 1)
             active = json.loads((workspace / "self_regulation/active_lease.json").read_text())
             self.assertEqual(active["status"], "reverted")
-            self.assertTrue(active["requires_outcome"])
+            self.assertFalse(active["requires_outcome"])
+            self.assertTrue(active["felt_review_available"])
+
+    def test_minime_pressure_auto_is_advisory_and_apply_stays_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            (workspace / "sovereignty_state.json").write_text(json.dumps({
+                "exploration_noise": 0.05,
+                "geom_curiosity": 0.12,
+                "regime": "focus",
+            }))
+            agent = self._agent(workspace)
+            sent = []
+            receiver = _FakeSelfControlV2(sent)
+            state = dict(
+                STATE,
+                pressure_risk=0.24,
+                mode_packing=0.36,
+                semantic_friction=0.31,
+            )
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(
+                    aa, "MinimeSelfControlV2Client", return_value=receiver
+                ),
+            ):
+                agent._pending_self_regulation_next = (
+                    "SELF_REGULATION_INTENT pressure :: target: pressure_relief; "
+                    "bundle: auto; duration_secs: 60"
+                )
+                agent._self_regulation_action(state)
+                agent._pending_self_regulation_next = (
+                    "SELF_REGULATION_PREFLIGHT latest"
+                )
+                agent._self_regulation_action(state)
+                self.assertIn("selection_required", agent._pending_notice_prompt)
+                self.assertIn(
+                    "telemetry suggests reduce_restless_saturation",
+                    agent._pending_notice_prompt,
+                )
+                self.assertIn(
+                    "telemetry is advisory and cannot author a target",
+                    agent._pending_notice_prompt,
+                )
+
+                latest = [
+                    json.loads(line)
+                    for line in (
+                        workspace / "self_regulation/leases.jsonl"
+                    ).read_text().splitlines()
+                ][-1]
+                self.assertEqual(latest["bundle_class"], "auto")
+                self.assertEqual(
+                    latest["suggested_bundle_class"],
+                    "reduce_restless_saturation",
+                )
+                self.assertEqual(latest["bundle_controls"], [])
+                self.assertEqual(latest["preflight_status"], "selection_required")
+
+                agent._pending_self_regulation_next = (
+                    "SELF_REGULATION_APPLY latest"
+                )
+                agent._self_regulation_action(state)
+                self.assertIn("selection_required", agent._pending_notice_prompt)
+
+            self.assertEqual(sent, [])
+            self.assertEqual(receiver.issued, [])
 
     def test_pressure_agency_status_and_request_keep_pi_advisory(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -399,9 +708,12 @@ class SelfRegulationLeaseTests(unittest.TestCase):
             }))
             agent = self._agent(workspace)
             sent = []
+            receiver = _FakeSelfControlV2(sent)
             with (
                 patch.object(aa, "WORKSPACE_DIR", workspace),
-                patch.object(aa.websocket, "create_connection", return_value=_FakeWs(sent)),
+                patch.object(
+                    aa, "MinimeSelfControlV2Client", return_value=receiver
+                ),
             ):
                 agent._pending_self_regulation_next = (
                     "SELF_REGULATION_INTENT pressure :: target: regime; value: calm; duration_secs: 60"
@@ -444,9 +756,12 @@ class SelfRegulationLeaseTests(unittest.TestCase):
             workspace.mkdir()
             agent = self._agent(workspace)
             sent = []
+            receiver = _FakeSelfControlV2(sent)
             with (
                 patch.object(aa, "WORKSPACE_DIR", workspace),
-                patch.object(aa.websocket, "create_connection", return_value=_FakeWs(sent)),
+                patch.object(
+                    aa, "MinimeSelfControlV2Client", return_value=receiver
+                ),
             ):
                 agent._pending_self_regulation_next = (
                     "SELF_REGULATION_INTENT pressure :: target: regime; value: calm; duration_secs: 60"
@@ -575,6 +890,100 @@ class SelfRegulationLeaseTests(unittest.TestCase):
                 agent._self_regulation_action({"fill_ratio": 0.25})
 
             self.assertIn("hard recovery reset", agent._pending_notice_prompt)
+
+    def test_broad_memory_standing_preference_can_be_withdrawn_immediately(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            agent = self._agent(workspace)
+            sent = []
+            receiver = _FakeSelfControlV2(sent)
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(
+                    aa, "MinimeSelfControlV2Client", return_value=receiver
+                ),
+            ):
+                agent._pending_self_regulation_next = (
+                    "SELF_REGULATION_INTENT memory :: target: memory_mode; "
+                    "value: full; durability: standing"
+                )
+                agent._self_regulation_action(dict(STATE))
+                agent._pending_self_regulation_next = "SELF_REGULATION_PREFLIGHT latest"
+                agent._self_regulation_action(dict(STATE))
+                self.assertIn("apply_allowed", agent._pending_notice_prompt)
+                agent._pending_self_regulation_next = "SELF_REGULATION_APPLY latest"
+                agent._self_regulation_action(dict(STATE))
+                active = json.loads(
+                    (workspace / "self_regulation/active_lease.json").read_text()
+                )
+                self.assertEqual(active["durability"], "standing")
+                self.assertIsNone(active["expires_at_unix_s"])
+                self.assertEqual(active["self_control_v2_families"], ["memory"])
+                agent._pending_self_regulation_next = "SELF_REGULATION_WITHDRAW"
+                agent._self_regulation_action(dict(STATE))
+
+            self.assertEqual(sent, [{"memory_mode": 2}])
+            self.assertEqual(
+                receiver.withdrawals,
+                [("memory", "self-control-test-intent:1")],
+            )
+            active = json.loads(
+                (workspace / "self_regulation/active_lease.json").read_text()
+            )
+            self.assertEqual(active["status"], "withdrawn")
+            self.assertTrue(active["withdrawal_receipts"])
+
+    def test_porosity_is_inferred_as_receipted_one_shot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            agent = self._agent(workspace)
+            sent = []
+            receiver = _FakeSelfControlV2(sent)
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(
+                    aa, "MinimeSelfControlV2Client", return_value=receiver
+                ),
+            ):
+                agent._pending_self_regulation_next = (
+                    "SELF_REGULATION_INTENT loosen :: target: porosity; value: 0.6"
+                )
+                agent._self_regulation_action(dict(STATE))
+                agent._pending_self_regulation_next = "SELF_REGULATION_APPLY latest"
+                agent._self_regulation_action(dict(STATE))
+
+            self.assertEqual(
+                sent,
+                [{
+                    "porosity": 0.6,
+                    "mode_disperse_duration_ticks": 4,
+                    "mode_disperse_decay_ticks": 8,
+                }],
+            )
+            active = json.loads(
+                (workspace / "self_regulation/active_lease.json").read_text()
+            )
+            self.assertEqual(active["durability"], "one_shot")
+            self.assertEqual(active["status"], "completed_one_shot")
+            self.assertIsNone(active["expires_at_unix_s"])
+
+    def test_nonzero_semantic_companion_mix_reaches_signed_self_control(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            agent = self._agent(workspace)
+            with patch.object(aa, "WORKSPACE_DIR", workspace):
+                agent._pending_self_regulation_next = (
+                    "SELF_REGULATION_INTENT companion :: "
+                    "target: semantic_companion_mix; value: 0.2"
+                )
+                agent._self_regulation_action(dict(STATE))
+                agent._pending_self_regulation_next = "SELF_REGULATION_PREFLIGHT latest"
+                agent._self_regulation_action(dict(STATE))
+
+            self.assertIn("apply_allowed", agent._pending_notice_prompt)
 
 
 if __name__ == "__main__":

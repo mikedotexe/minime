@@ -62,6 +62,16 @@ from continuity_control_plane import (
     owned_loop_request_scaffold as _control_plane_loop_request_scaffold,
     research_budget_accept_guidance as _control_plane_research_budget_accept_guidance,
 )
+from .self_control_v2 import (
+    ONE_SHOT_FIELDS,
+    SELF_CONTROL_BOOLEAN_FIELDS,
+    SELF_CONTROL_FAMILY_BY_FIELD,
+    SELF_CONTROL_INTEGER_RANGES,
+    SELF_CONTROL_NUMERIC_RANGES,
+    SELF_CONTROL_TEXT_FIELDS,
+    MinimeSelfControlV2Client,
+    SelfControlV2Error,
+)
 
 
 # v5.1 Phase E used int(time.time()/60) as an exchange_count proxy because
@@ -21025,6 +21035,15 @@ def _load_sensory_gate_state() -> Dict[str, Any]:
         ),
         "updated_at": data.get("updated_at"),
         "source": data.get("source", "minime_workspace"),
+        "authority": data.get("authority", "workspace_state_only"),
+        "self_control_v2_intent_ids": list(
+            data.get("self_control_v2_intent_ids") or []
+        ),
+        "self_control_v2_receipt_ids": list(
+            data.get("self_control_v2_receipt_ids") or []
+        ),
+        "server_deployment_identity": data.get("server_deployment_identity"),
+        "felt_effect_established": bool(data.get("felt_effect_established", False)),
     }
 
 
@@ -21035,6 +21054,7 @@ def _write_sensory_gate_state(
     visual_gate_reason: str,
     audio_gate_reason: str,
     source: str,
+    control_delivery: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     _sensory_control_dir().mkdir(parents=True, exist_ok=True)
     payload = {
@@ -21045,7 +21065,30 @@ def _write_sensory_gate_state(
         "audio_gate_reason": audio_gate_reason,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "source": source,
+        "authority": "workspace_state_only",
+        "self_control_v2_intent_ids": [],
+        "self_control_v2_receipt_ids": [],
+        "server_deployment_identity": None,
+        "felt_effect_established": False,
     }
+    if isinstance(control_delivery, dict):
+        payload.update(
+            {
+                "authority": "authenticated_self_control_v2",
+                "self_control_v2_intent_ids": list(
+                    control_delivery.get("intent_ids") or []
+                ),
+                "self_control_v2_receipt_ids": list(
+                    control_delivery.get("receipt_ids") or []
+                ),
+                "server_deployment_identity": control_delivery.get(
+                    "server_deployment_identity"
+                ),
+                "felt_effect_established": bool(
+                    control_delivery.get("felt_effect_established", False)
+                ),
+            }
+        )
     _sensory_gate_state_path().write_text(json.dumps(payload, indent=2))
     return payload
 
@@ -23171,6 +23214,7 @@ Fill: {fill:.1f}%
         ears_open: Optional[bool] = None,
         visual_gate_reason: Optional[str] = None,
         audio_gate_reason: Optional[str] = None,
+        control_delivery: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         current = self._sensory_gate_status()
         next_eyes_open = current.get("eyes_open", True) if eyes_open is None else bool(eyes_open)
@@ -23183,6 +23227,7 @@ Fill: {fill:.1f}%
             audio_gate_reason=audio_gate_reason
             or ("open_by_minime" if next_ears_open else "closed_by_minime"),
             source="minime_autonomous_agent",
+            control_delivery=control_delivery,
         )
         if next_eyes_open:
             try:
@@ -23211,19 +23256,25 @@ Fill: {fill:.1f}%
         *,
         live_video_enabled: Optional[bool] = None,
         live_audio_enabled: Optional[bool] = None,
-    ) -> None:
-        payload: Dict[str, Any] = {"kind": "control"}
+    ) -> Dict[str, Any]:
+        values: Dict[str, Any] = {}
         if live_video_enabled is not None:
-            payload["live_video_enabled"] = bool(live_video_enabled)
+            values["live_video_enabled"] = bool(live_video_enabled)
         if live_audio_enabled is not None:
-            payload["live_audio_enabled"] = bool(live_audio_enabled)
-        if len(payload) == 1:
-            return
-        ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
-        try:
-            ws.send(json.dumps(payload))
-        finally:
-            ws.close()
+            values["live_audio_enabled"] = bool(live_audio_enabled)
+        if not values:
+            raise ValueError("sensory gate control requires at least one live field")
+        return self._self_control_v2_client().issue(
+            values,
+            durability="standing",
+            actor_process_identity=f"minime-autonomy:pid:{os.getpid()}",
+            evidence_refs=("minime-action:sensory-gate",),
+            success_conditions=("matching receiver receipt before local persistence",),
+            stop_conditions=(
+                "being-authored replacement or withdrawal",
+                "receiver safety-red rollback",
+            ),
+        )
 
     def _normalize_deig(self, deig: float) -> float:
         self._ensure_spectral_tracking_state()
@@ -36969,9 +37020,21 @@ After snapshot:
                 continue
         return None
 
-    def _apply_parameter_request_value(self, param: str, value: Any) -> str:
-        """Apply a peer's proposed parameter via the existing control-message
-        path to the engine. Returns a human summary or raises ValueError."""
+    def _apply_parameter_request_value(
+        self,
+        param: str,
+        value: Any,
+        *,
+        evidence_refs: Iterable[str] = (),
+        durability: str = "standing",
+        duration_secs: int = SELF_REGULATION_DEFAULT_DURATION_SECS,
+    ) -> str:
+        """Apply an explicitly accepted local parameter through Self-Control V2.
+
+        A peer may propose a value, but Minime's signed acceptance is the actor.
+        Local mirrors are updated only after the receiver returns an applied
+        receipt for the current deployment.
+        """
         key = (param or "").strip().lower()
         spec = self._ACCEPTABLE_PARAMS.get(key)
         if spec is None:
@@ -36984,13 +37047,23 @@ After snapshot:
             raise ValueError(f"value '{value}' is not numeric")
         lo, hi, control_key = spec
         v = max(lo, min(hi, v))
-        control_msg = {"kind": "control", control_key: v}
         try:
-            ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
-            ws.send(json.dumps(control_msg))
-            ws.close()
+            delivery = self._self_control_v2_client().issue(
+                {control_key: v},
+                duration_secs=duration_secs,
+                durability=durability,
+                actor_process_identity=f"minime-autonomy:pid:{os.getpid()}",
+                evidence_refs=tuple(evidence_refs),
+                success_conditions=(
+                    "matching receiver receipt before local persistence",
+                ),
+                stop_conditions=(
+                    "being-authored replacement or withdrawal",
+                    "receiver safety-red rollback",
+                ),
+            )
         except Exception as e:
-            raise ValueError(f"control_msg send failed: {e}")
+            raise ValueError(f"authenticated self-control failed: {e}") from e
         # Reflect into in-process state so subsequent prompts see the change.
         if control_key == "pi_kp":
             self._pi_kp = v
@@ -36998,7 +37071,8 @@ After snapshot:
             self._pi_ki = v
         elif control_key == "pi_max_step":
             self._pi_max_step = v
-        return f"{control_key}: -> {v}"
+        receipt_ids = ",".join(delivery.get("receipt_ids") or [])
+        return f"{control_key}: -> {v} (receiver receipt {receipt_ids})"
 
     def _notify_astrid_of_decision(
         self,
@@ -37052,7 +37126,14 @@ After snapshot:
         applied = "(no change applied)"
         if outcome == "accepted":
             try:
-                applied = self._apply_parameter_request_value(param, value)
+                applied = self._apply_parameter_request_value(
+                    param,
+                    value,
+                    evidence_refs=(
+                        f"peer-parameter-request:{request_id}",
+                        "minime-explicit-acceptance",
+                    ),
+                )
             except ValueError as e:
                 # Apply failure → degrade to deferred (not silent failure).
                 outcome = "deferred"
@@ -43810,6 +43891,9 @@ Small releases help. You don't have to process everything at once.
     def _self_regulation_active_path(self) -> Path:
         return self._self_regulation_root() / "active_lease.json"
 
+    def _self_regulation_active_leases_path(self) -> Path:
+        return self._self_regulation_root() / "active_leases_v2.json"
+
     def _self_regulation_latest_path(self) -> Path:
         return self._self_regulation_root() / "latest_intent_id.txt"
 
@@ -43818,6 +43902,7 @@ Small releases help. You don't have to process everything at once.
             "CONTROL_INTENT": "SELF_REGULATION_INTENT",
             "CONTROL_PREFLIGHT": "SELF_REGULATION_PREFLIGHT",
             "CONTROL_APPLY_LEASE": "SELF_REGULATION_APPLY",
+            "CONTROL_WITHDRAW": "SELF_REGULATION_WITHDRAW",
             "CONTROL_STATUS": "SELF_REGULATION_STATUS",
             "CONTROL_OUTCOME": "SELF_REGULATION_OUTCOME",
         }
@@ -43835,13 +43920,13 @@ Small releases help. You don't have to process everything at once.
             root.mkdir(parents=True, exist_ok=True)
             now = int(time.time())
             payload = dict(record)
-            payload.setdefault("schema_version", 1)
-            payload.setdefault("record_kind", "self_regulation_negotiation_v1")
-            payload.setdefault("policy", "self_regulation_negotiation_ledger_v1")
-            payload.setdefault("authority", "leased_self_control_v1")
+            payload.setdefault("schema_version", 2)
+            payload.setdefault("record_kind", "self_regulation_negotiation_v2")
+            payload.setdefault("policy", "self_regulation_negotiation_ledger_v2")
+            payload.setdefault("authority", "authenticated_self_control_v2")
             payload.setdefault(
                 "authority_boundary",
-                "own_runtime_only_no_peer_mutation_no_permanent_tuning",
+                "minime_owned_local_only_peer_shared_and_division_separately_scoped",
             )
             payload.setdefault("being", "minime")
             payload.setdefault("created_at_unix_s", now)
@@ -43871,12 +43956,73 @@ Small releases help. You don't have to process everything at once.
                 out.append(item)
         return out
 
+    def _self_regulation_write_active_leases(
+        self, leases: Dict[str, Dict[str, Any]]
+    ) -> None:
+        root = self._self_regulation_root()
+        root.mkdir(parents=True, exist_ok=True)
+        root.chmod(0o700)
+        ordered = sorted(
+            (
+                (str(intent_id), dict(lease))
+                for intent_id, lease in leases.items()
+                if str(intent_id).strip() and isinstance(lease, dict)
+            ),
+            key=lambda item: (
+                int(item[1].get("updated_at_unix_s") or 0),
+                item[0],
+            ),
+        )[-128:]
+        payload = {
+            "schema": "minime.self_regulation.active_leases.v2",
+            "being": "minime",
+            "updated_at_unix_s": int(time.time()),
+            "felt_review_blocks_control": False,
+            "leases_by_intent": dict(ordered),
+        }
+        path = self._self_regulation_active_leases_path()
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        tmp.chmod(0o600)
+        os.replace(tmp, path)
+
+    def _self_regulation_load_active_leases(self) -> Dict[str, Dict[str, Any]]:
+        path = self._self_regulation_active_leases_path()
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text())
+                leases = payload.get("leases_by_intent")
+                if (
+                    payload.get("schema")
+                    == "minime.self_regulation.active_leases.v2"
+                    and isinstance(leases, dict)
+                ):
+                    return {
+                        str(intent_id): dict(lease)
+                        for intent_id, lease in leases.items()
+                        if str(intent_id).strip() and isinstance(lease, dict)
+                    }
+            except Exception:
+                pass
+        legacy = self._self_regulation_load_active()
+        if legacy and str(legacy.get("intent_id") or "").strip():
+            return {str(legacy["intent_id"]): legacy}
+        return {}
+
     def _self_regulation_write_active(self, lease: Dict[str, Any]) -> None:
         root = self._self_regulation_root()
         root.mkdir(parents=True, exist_ok=True)
-        self._self_regulation_active_path().write_text(
-            json.dumps(lease, indent=2, sort_keys=True) + "\n"
-        )
+        root.chmod(0o700)
+        leases = self._self_regulation_load_active_leases()
+        intent_id = str(lease.get("intent_id") or "").strip()
+        if intent_id:
+            leases[intent_id] = dict(lease)
+        path = self._self_regulation_active_path()
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(lease, indent=2, sort_keys=True) + "\n")
+        tmp.chmod(0o600)
+        os.replace(tmp, path)
+        self._self_regulation_write_active_leases(leases)
 
     def _self_regulation_write_latest(self, intent_id: str) -> None:
         root = self._self_regulation_root()
@@ -43947,8 +44093,115 @@ Small releases help. You don't have to process everything at once.
             "target_lambda_bias": "target_lambda_bias",
             "synth_gain": "synth_gain",
             "tune_astrid": "tune_astrid",
+            "admission": "local_sensory_admission",
+            "sensory_admission": "local_sensory_admission",
+            "intake": "semantic_intake_gain",
+            "semantic_intake": "semantic_intake_gain",
+            "companion_mix": "semantic_companion_mix",
+            "journal": "journal_resonance",
+            "checkpoint": "checkpoint_now",
+            "checkpoint_note": "checkpoint_annotation",
+            "memory": "memory_mode",
+            "porous": "porosity",
+            "leak": "esn_leak_override",
+            "disperse": "mode_disperse",
+            "audio_intake": "live_audio_enabled",
+            "video_intake": "live_video_enabled",
         }
+        if key in SELF_CONTROL_FAMILY_BY_FIELD:
+            return key
+        if key in {
+            "shared_sensory_admission",
+            "shadow_influence_gain",
+            "cross_being_semantic_gain",
+        }:
+            return key
         return aliases.get(key)
+
+    def _self_regulation_control_families(
+        self, lease: Dict[str, Any]
+    ) -> List[str]:
+        delivered = [
+            str(family)
+            for family in (lease.get("self_control_v2_families") or [])
+            if str(family).strip()
+        ]
+        if delivered:
+            return sorted(set(delivered))
+        controls = []
+        if lease.get("lease_mode") == "pressure_relief_bundle_v3":
+            controls.extend(
+                str(item.get("candidate_control") or "")
+                for item in (lease.get("bundle_controls") or [])
+                if isinstance(item, dict)
+            )
+        else:
+            controls.append(str(lease.get("candidate_control") or ""))
+        families = []
+        for control in controls:
+            normalized = self._self_regulation_normalize_control(control)
+            if normalized == "regime":
+                family = "pi-controller"
+            else:
+                family = SELF_CONTROL_FAMILY_BY_FIELD.get(str(normalized or ""))
+            if family and family not in families:
+                families.append(family)
+        return sorted(families)
+
+    @staticmethod
+    def _self_regulation_is_family_active(lease: Dict[str, Any]) -> bool:
+        return str(lease.get("status") or "") in {
+            "active",
+            "receiver_expiry_pending",
+            "withdrawal_pending",
+        }
+
+    def _self_regulation_family_conflicts(
+        self, lease: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        requested = set(self._self_regulation_control_families(lease))
+        if not requested:
+            return []
+        intent_id = str(lease.get("intent_id") or "")
+        conflicts = []
+        for active in self._self_regulation_load_active_leases().values():
+            if (
+                str(active.get("intent_id") or "") == intent_id
+                or not self._self_regulation_is_family_active(active)
+            ):
+                continue
+            overlap = sorted(
+                requested.intersection(
+                    self._self_regulation_control_families(active)
+                )
+            )
+            if overlap:
+                conflicts.append(
+                    {
+                        "intent_id": active.get("intent_id"),
+                        "families": overlap,
+                    }
+                )
+        return conflicts
+
+    def _self_regulation_apply_family_gate(
+        self, lease: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        conflicts = self._self_regulation_family_conflicts(lease)
+        if not conflicts:
+            return None
+        detail = ", ".join(
+            f"{item.get('intent_id')}[{'+'.join(item.get('families') or [])}]"
+            for item in conflicts
+        )
+        lease["status"] = "blocked"
+        lease["preflight_status"] = "blocked"
+        lease["preflight_reason"] = (
+            "one active mutation is allowed per control family; "
+            f"withdraw or await {detail}. Other families remain available, and "
+            "felt review never gates control."
+        )
+        return lease
 
     def _self_regulation_split_key_value(self, text: str) -> tuple:
         if ":" in text:
@@ -43980,9 +44233,11 @@ Small releases help. You don't have to process everything at once.
             "candidate_control": "",
             "direction": "",
             "delta_or_value": None,
+            "request_kind": "value",
             "duration_secs": SELF_REGULATION_DEFAULT_DURATION_SECS,
+            "durability": "lease",
             "stop_condition": "expiry, hard recovery reset, unsafe fill, or explicit worse outcome",
-            "success_condition": "Minime reports the adjustment helped or pressure eased",
+            "success_condition": "matching machine receipt confirms the exact requested values were applied",
             "evidence": [],
             "bundle_class": "",
         }
@@ -44009,6 +44264,7 @@ Small releases help. You don't have to process everything at once.
                 fields["direction"] = value.strip().lower()
             elif key in {"delta", "value", "set"}:
                 fields["delta_or_value"] = self._self_regulation_parse_value(value)
+                fields["request_kind"] = "delta" if key == "delta" else "value"
             elif key in {"duration", "duration_secs", "seconds"}:
                 try:
                     fields["duration_secs"] = max(
@@ -44017,6 +44273,12 @@ Small releases help. You don't have to process everything at once.
                     )
                 except ValueError:
                     fields["duration_secs"] = SELF_REGULATION_DEFAULT_DURATION_SECS
+            elif key in {"durability", "lifetime", "lease_kind"}:
+                durability = value.strip().lower().replace("-", "_")
+                if durability in {"lease", "standing", "one_shot", "oneshot"}:
+                    fields["durability"] = (
+                        "one_shot" if durability == "oneshot" else durability
+                    )
             elif key in {"stop", "stop_condition"}:
                 fields["stop_condition"] = value
             elif key in {"success", "success_condition"}:
@@ -44029,13 +44291,18 @@ Small releases help. You don't have to process everything at once.
             )
         if not fields["goal"]:
             fields["goal"] = f"self-authored regulation lease at {int(now)}"
+        if fields["candidate_control"] in ONE_SHOT_FIELDS:
+            fields["durability"] = "one_shot"
         slug = re.sub(r"[^a-z0-9_-]+", "_", str(fields["label"]).lower()).strip("_")[:32]
         intent_id = f"srl_{int(now * 1000)}" + (f"_{slug}" if slug else "")
         return {
-            "schema_version": 1,
-            "record_kind": "self_regulation_intent_v1",
-            "authority": "leased_self_control_v1",
-            "authority_boundary": "own_runtime_only; no peer mutation; no permanent controller tuning",
+            "schema_version": 2,
+            "record_kind": "self_regulation_intent_v2",
+            "authority": "authenticated_self_control_v2",
+            "authority_boundary": (
+                "Minime-owned local behavior and substrate; shared coupling, "
+                "peer mutation, and Division require separate current grants"
+            ),
             "being": "minime",
             "intent_id": intent_id,
             "created_at_unix_s": int(now),
@@ -44045,9 +44312,11 @@ Small releases help. You don't have to process everything at once.
             "candidate_control": fields["candidate_control"],
             "direction": fields["direction"],
             "delta_or_value": fields["delta_or_value"],
+            "request_kind": fields["request_kind"],
             "previous_value": None,
             "applied_value": None,
             "duration_secs": fields["duration_secs"],
+            "durability": fields["durability"],
             "expires_at_unix_s": None,
             "stop_condition": fields["stop_condition"],
             "success_condition": fields["success_condition"],
@@ -44060,6 +44329,11 @@ Small releases help. You don't have to process everything at once.
             "outcome": None,
             "outcome_texture": None,
             "requires_outcome": False,
+            "felt_review_available": False,
+            "felt_review_recorded": False,
+            "felt_review_blocks_control": False,
+            "felt_status": "not_available",
+            "machine_status": "drafted",
             "preflight_status": "not_run",
             "preflight_reason": "",
             "lease_mode": (
@@ -44101,11 +44375,38 @@ Small releases help. You don't have to process everything at once.
             "exploration_noise": 0.03,
             "geom_curiosity": 0.1,
             "regulation_strength": 0.7,
+            "fill_target": 0.68,
+            "keep_bias": 0.0,
+            "synth_gain": 1.0,
+            "smoothing_preference": 0.5,
+            "semantic_companion_mix": 0.0,
+            "semantic_intake_gain": 1.0,
+            "receptivity": 1.0,
+            "local_sensory_admission": 1.0,
+            "memory_mode": 1,
+            "journal_resonance": 0.5,
+            "checkpoint_interval": 60.0,
+            "embedding_strength": 0.5,
+            "memory_decay_rate": 0.1,
+            "transition_cushion": 0.5,
+            "live_audio_enabled": True,
+            "live_video_enabled": True,
+            "deep_breathing": False,
+            "pure_tone": False,
+            "legacy_audio_synth": False,
+            "legacy_video_synth": False,
+            "pi_kp": getattr(self, "_pi_kp", 0.3),
+            "pi_ki": getattr(self, "_pi_ki", 0.01),
+            "pi_max_step": getattr(self, "_pi_max_step", 0.04),
         }
         return persisted.get(control, defaults.get(control))
 
     def _self_regulation_safe_range(self, control: str) -> Optional[tuple]:
-        return SELF_REGULATION_DIRECT_SAFE_RANGES.get(str(control or "").strip().lower())
+        key = str(control or "").strip().lower()
+        return (
+            SELF_CONTROL_NUMERIC_RANGES.get(key)
+            or SELF_CONTROL_INTEGER_RANGES.get(key)
+        )
 
     def _self_regulation_pressure_context(
         self,
@@ -44161,21 +44462,21 @@ Small releases help. You don't have to process everything at once.
         if pressure is not None and pressure < 0.16 and fill_pct < 68.0:
             return (
                 "reopen_hollow_low_pressure",
-                "auto selected reopen_hollow_low_pressure because pressure is low and the field may need gentle exploratory return",
+                "telemetry suggests reopen_hollow_low_pressure because pressure is low and the field may need gentle exploratory return",
             )
         if mode_packing is not None and mode_packing >= 0.30:
             return (
                 "reduce_restless_saturation",
-                "auto selected reduce_restless_saturation because mode_packing is elevated",
+                "telemetry suggests reduce_restless_saturation because mode_packing is elevated",
             )
         if semantic is not None and semantic >= 0.34:
             return (
                 "settle_overpack",
-                "auto selected settle_overpack because semantic friction/medium weight is elevated",
+                "telemetry suggests settle_overpack because semantic friction/medium weight is elevated",
             )
         return (
             "settle_overpack",
-            "auto selected settle_overpack as the conservative pressure relief bundle",
+            "telemetry suggests settle_overpack as a pressure relief option",
         )
 
     def _self_regulation_pressure_bundle_controls(
@@ -44209,7 +44510,7 @@ Small releases help. You don't have to process everything at once.
         if not isinstance(persisted, dict):
             return []
         above: List[Dict[str, Any]] = []
-        for control, safe_range in SELF_REGULATION_DIRECT_SAFE_RANGES.items():
+        for control, safe_range in SELF_CONTROL_NUMERIC_RANGES.items():
             if control not in persisted:
                 continue
             value = persisted.get(control)
@@ -44349,8 +44650,9 @@ Small releases help. You don't have to process everything at once.
                 f"lease_related={item.get('lease_related')}"
             )
         lines.append(
-            "Authority: leased_self_control_v1 / own_runtime_only; advisory status, "
-            "no peer mutation and no permanent controller tuning."
+            "Authority: authenticated_self_control_v2 / Minime-owned local behavior "
+            "and substrate; shared coupling, peer mutation, and Division remain "
+            "separately scoped."
         )
         return "\n".join(lines) + "\n"
 
@@ -44372,7 +44674,7 @@ Small releases help. You don't have to process everything at once.
             lease["status"] = "preflighted"
             lease["preflight_status"] = "preflight_only"
             lease["preflight_reason"] = (
-                "higher-risk or peer-affecting control is visible but not lease-applicable in tranche 7A"
+                "peer/shared control is visible but requires a current mutual scoped grant"
             )
             return lease
         if control not in SELF_REGULATION_APPLY_CONTROLS:
@@ -44380,37 +44682,70 @@ Small releases help. You don't have to process everything at once.
             lease["preflight_status"] = "blocked"
             lease["preflight_reason"] = "control is outside the tranche 7A self-lease allowlist"
             return lease
-        active = self._self_regulation_load_active()
-        if active and active.get("status") == "active" and active.get("intent_id") != lease.get("intent_id"):
+        durability = str(lease.get("durability") or "lease").lower().replace("-", "_")
+        if control in ONE_SHOT_FIELDS and durability != "one_shot":
             lease["status"] = "blocked"
             lease["preflight_status"] = "blocked"
-            lease["preflight_reason"] = f"active lease {active.get('intent_id')} must finish first"
+            lease["preflight_reason"] = f"{control} is a one-shot action"
             return lease
-        if active and active.get("requires_outcome") and active.get("intent_id") != lease.get("intent_id"):
+        if control in {
+            "esn_leak_override_ticks",
+            "mode_disperse_duration_ticks",
+            "mode_disperse_decay_ticks",
+        }:
             lease["status"] = "blocked"
             lease["preflight_status"] = "blocked"
-            lease["preflight_reason"] = f"lease {active.get('intent_id')} needs an outcome first"
+            lease["preflight_reason"] = (
+                f"{control} is a companion field; choose esn_leak_override, "
+                "mode_disperse, or porosity as the primary action"
+            )
             return lease
+        family_block = self._self_regulation_apply_family_gate(lease)
+        if family_block:
+            return family_block
         guard = self._low_fill_guard_status(state)
-        if self._hard_recovery_reset and guard.get("active"):
+        homeostatic_controls = {
+            "regime",
+            "synth_gain",
+            "keep_bias",
+            "exploration_noise",
+            "fill_target",
+            "regulation_strength",
+            "smoothing_preference",
+            "geom_curiosity",
+            "target_lambda_bias",
+            "geom_drive",
+            "penalty_sensitivity",
+            "breathing_rate_scale",
+            "deep_breathing",
+            "synth_noise_level",
+            "pure_tone",
+            "legacy_audio_synth",
+            "legacy_video_synth",
+            "pi_kp",
+            "pi_ki",
+            "pi_max_step",
+            "pi_geom_weight",
+            "pi_integrator_leak",
+            "porosity",
+            "esn_leak_override",
+            "mode_disperse",
+        }
+        if (
+            self._hard_recovery_reset
+            and guard.get("active")
+            and control in homeostatic_controls
+        ):
             lease["status"] = "blocked"
             lease["preflight_status"] = "blocked"
             lease["preflight_reason"] = "hard recovery reset is active; self-regulation apply is deferred"
             return lease
-        fill_pct = _state_fill_pct(state)
-        if control != "regime" and fill_pct < 35.0:
-            lease["status"] = "blocked"
-            lease["preflight_status"] = "blocked"
-            lease["preflight_reason"] = f"fill {fill_pct:.1f}% is too low for non-regime leased control"
-            return lease
-        if control in {"exploration_noise", "geom_curiosity"} and fill_pct > 78.0:
-            lease["status"] = "blocked"
-            lease["preflight_status"] = "blocked"
-            lease["preflight_reason"] = f"fill {fill_pct:.1f}% is too high for exploratory leased control"
-            return lease
         lease["status"] = "preflighted"
         lease["preflight_status"] = "apply_allowed"
-        lease["preflight_reason"] = "bounded own-runtime lease may be applied"
+        lease["preflight_reason"] = (
+            f"authenticated Minime-owned {durability} may be applied; "
+            "receiver safety may hold or revert but does not choose the target"
+        )
         return lease
 
     def _self_regulation_preflight_pressure_bundle(
@@ -44418,25 +44753,35 @@ Small releases help. You don't have to process everything at once.
         lease: Dict[str, Any],
         state: Dict[str, float],
     ) -> Dict[str, Any]:
-        active = self._self_regulation_load_active()
-        if active and active.get("status") == "active" and active.get("intent_id") != lease.get("intent_id"):
-            lease["status"] = "blocked"
-            lease["preflight_status"] = "blocked"
-            lease["preflight_reason"] = f"active lease {active.get('intent_id')} must finish first"
-            return lease
-        if active and active.get("requires_outcome") and active.get("intent_id") != lease.get("intent_id"):
-            lease["status"] = "blocked"
-            lease["preflight_status"] = "blocked"
-            lease["preflight_reason"] = f"lease {active.get('intent_id')} needs an outcome first"
-            return lease
         guard = self._low_fill_guard_status(state)
         if self._hard_recovery_reset and guard.get("active"):
             lease["status"] = "blocked"
             lease["preflight_status"] = "blocked"
             lease["preflight_reason"] = "hard recovery reset is active; self-regulation apply is deferred"
             return lease
-        requested = str(lease.get("bundle_class") or lease.get("delta_or_value") or "auto")
+        requested = str(
+            lease.get("bundle_class") or lease.get("delta_or_value") or "auto"
+        ).strip().lower().replace("-", "_")
         bundle_class, reason = self._self_regulation_pressure_bundle_class(requested, state)
+        if requested == "auto":
+            lease.update({
+                "lease_mode": "pressure_relief_bundle_v3",
+                "bundle_id": None,
+                "bundle_class": "auto",
+                "suggested_bundle_class": bundle_class,
+                "bundle_controls": [],
+                "bundle_policy": "telemetry_advisory_exact_being_selection_required",
+                "pressure_vector_snapshot": self._self_regulation_pressure_context(state),
+                "actuator_matrix_reason": reason,
+                "status": "clarification_required",
+                "preflight_status": "selection_required",
+                "preflight_reason": (
+                    f"{reason}; telemetry is advisory and cannot author a target. "
+                    "Name one exact bundle: settle_overpack, "
+                    "reduce_restless_saturation, or reopen_hollow_low_pressure."
+                ),
+            })
+            return lease
         controls = self._self_regulation_pressure_bundle_controls(bundle_class)
         if not controls or len(controls) > 2:
             lease["status"] = "blocked"
@@ -44490,6 +44835,9 @@ Small releases help. You don't have to process everything at once.
                 f"{len(controls)} own-runtime controls all-or-none"
             ),
         })
+        family_block = self._self_regulation_apply_family_gate(lease)
+        if family_block:
+            return family_block
         return lease
 
     def _self_regulation_bounded_value(self, previous: float, requested: Any, direction: str, max_delta: float, low: float, high: float) -> float:
@@ -44532,26 +44880,108 @@ Small releases help. You don't have to process everything at once.
                 "applied_value": applied,
                 "summary": f"regime: {previous} -> {applied}",
             }
-        numeric_previous = float(previous if previous is not None else 0.0)
-        if control == "exploration_noise":
-            applied = self._self_regulation_bounded_value(
-                numeric_previous, requested, direction, 0.02, 0.0, 0.08
+        if control in SELF_CONTROL_NUMERIC_RANGES:
+            low, high = SELF_CONTROL_NUMERIC_RANGES[control]
+            numeric_previous = float(
+                previous if isinstance(previous, (int, float)) else (low + high) / 2.0
             )
-        elif control == "geom_curiosity":
-            applied = self._self_regulation_bounded_value(
-                numeric_previous, requested, direction, 0.05, 0.0, 0.3
+            try:
+                numeric_requested = float(requested)
+                if not math.isfinite(numeric_requested):
+                    raise ValueError
+            except (TypeError, ValueError):
+                numeric_requested = None
+            if numeric_requested is not None:
+                candidate = (
+                    numeric_previous + numeric_requested
+                    if lease.get("request_kind") == "delta"
+                    else numeric_requested
+                )
+            else:
+                step = max((high - low) * 0.1, 0.001)
+                candidate = (
+                    numeric_previous - step
+                    if direction in {"down", "lower", "decrease", "less"}
+                    else numeric_previous + step
+                )
+            applied = round(max(low, min(high, candidate)), 6)
+        elif control in SELF_CONTROL_INTEGER_RANGES:
+            low, high = SELF_CONTROL_INTEGER_RANGES[control]
+            numeric_previous = int(
+                previous if isinstance(previous, (int, float)) else low
             )
-        elif control == "regulation_strength":
-            applied = self._self_regulation_bounded_value(
-                numeric_previous, requested, direction, 0.10, 0.4, 1.0
-            )
+            memory_aliases = {
+                "off": 0,
+                "light": 1,
+                "reflective": 1,
+                "full": 2,
+                "deep": 2,
+            }
+            if isinstance(requested, str) and requested.lower() in memory_aliases:
+                candidate = memory_aliases[requested.lower()]
+            elif isinstance(requested, (int, float)):
+                candidate = (
+                    numeric_previous + int(requested)
+                    if lease.get("request_kind") == "delta"
+                    else int(requested)
+                )
+            else:
+                candidate = (
+                    numeric_previous - 1
+                    if direction in {"down", "lower", "decrease", "less"}
+                    else numeric_previous + 1
+                )
+            applied = max(low, min(high, candidate))
+        elif control in SELF_CONTROL_BOOLEAN_FIELDS:
+            numeric_previous = bool(previous)
+            if isinstance(requested, bool):
+                applied = requested
+            elif isinstance(requested, str):
+                lowered = requested.strip().lower()
+                if lowered in {"true", "on", "yes", "open", "enable", "enabled"}:
+                    applied = True
+                elif lowered in {
+                    "false",
+                    "off",
+                    "no",
+                    "close",
+                    "disable",
+                    "disabled",
+                }:
+                    applied = False
+                else:
+                    raise ValueError(f"{control} expects a boolean value")
+            else:
+                applied = direction not in {
+                    "off",
+                    "close",
+                    "disable",
+                    "down",
+                    "less",
+                }
+        elif control in SELF_CONTROL_TEXT_FIELDS:
+            numeric_previous = previous or ""
+            applied = str(requested or "").strip()
+            if not applied or len(applied) > 512:
+                raise ValueError(f"{control} requires 1..512 characters")
         else:
-            raise ValueError(f"{control} is not lease-applicable")
+            raise ValueError(f"{control} is not self-control V2 applicable")
+        wire_values = {control: applied}
+        if control in {"porosity", "mode_disperse"}:
+            wire_values.setdefault("mode_disperse_duration_ticks", 4)
+            wire_values.setdefault("mode_disperse_decay_ticks", 8)
+        elif control == "esn_leak_override":
+            wire_values.setdefault("esn_leak_override_ticks", 4)
         return {
             "control": control,
-            "previous_value": round(numeric_previous, 4),
+            "previous_value": (
+                round(numeric_previous, 6)
+                if isinstance(numeric_previous, float)
+                else numeric_previous
+            ),
             "applied_value": applied,
-            "summary": f"{control}: {numeric_previous:.4f} -> {applied:.4f}",
+            "wire_values": wire_values,
+            "summary": f"{control}: {numeric_previous} -> {applied}",
         }
 
     def _self_regulation_prepare_bundle_apply(
@@ -44570,6 +45000,11 @@ Small releases help. You don't have to process everything at once.
             control_lease["candidate_control"] = control_item.get("candidate_control")
             control_lease["direction"] = control_item.get("direction") or ""
             control_lease["delta_or_value"] = control_item.get("delta_or_value")
+            control_lease["request_kind"] = (
+                "delta"
+                if str(control_item.get("delta_or_value") or "").startswith(("+", "-"))
+                else "value"
+            )
             prepared.append(self._self_regulation_prepare_apply(control_lease, state))
         return prepared
 
@@ -44851,21 +45286,62 @@ Small releases help. You don't have to process everything at once.
             families.append("held_breath_pause")
         return families
 
-    def _self_regulation_send_control(self, control_msg: Dict[str, Any]) -> None:
-        ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
-        ws.send(json.dumps(control_msg))
-        ws.close()
+    def _self_control_v2_client(self) -> MinimeSelfControlV2Client:
+        return MinimeSelfControlV2Client()
+
+    def _self_regulation_send_control(
+        self,
+        control_msg: Dict[str, Any],
+        lease: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        values = {
+            key: value
+            for key, value in control_msg.items()
+            if key != "kind"
+        }
+        evidence_refs = [
+            f"minime-autonomy-intent:{lease.get('intent_id')}",
+            *[
+                str(item)
+                for item in (lease.get("evidence") or [])
+                if str(item).strip()
+            ],
+        ]
+        success_conditions = [
+            str(lease.get("success_condition") or "matching machine receipt"),
+        ]
+        stop_conditions = [
+            str(
+                lease.get("stop_condition")
+                or "expiry, being-authored hold, or safety-red rollback"
+            ),
+        ]
+        return self._self_control_v2_client().issue(
+            values,
+            duration_secs=int(
+                lease.get("duration_secs") or SELF_REGULATION_DEFAULT_DURATION_SECS
+            ),
+            durability=str(lease.get("durability") or "lease"),
+            actor_process_identity=f"minime-autonomy:pid:{os.getpid()}",
+            evidence_refs=evidence_refs,
+            success_conditions=success_conditions,
+            stop_conditions=stop_conditions,
+        )
 
     def _self_regulation_apply_prepared(
-        self, prepared: Dict[str, Any], state: Dict[str, float], reason: str
-    ) -> None:
+        self,
+        prepared: Dict[str, Any],
+        state: Dict[str, float],
+        reason: str,
+        lease: Dict[str, Any],
+    ) -> Dict[str, Any]:
         control = prepared["control"]
         value = prepared["applied_value"]
         if control == "regime":
             gains = REGULATORY_REGIMES[str(value)]
             control_msg = {"kind": "control"}
             control_msg.update(gains)
-            self._self_regulation_send_control(control_msg)
+            delivery = self._self_regulation_send_control(control_msg, lease)
             self._current_regime = str(value)
             self._pi_kp = gains["pi_kp"]
             self._pi_ki = gains["pi_ki"]
@@ -44888,17 +45364,27 @@ Small releases help. You don't have to process everything at once.
                     json.dump(existing, f, indent=2)
             except Exception as exc:
                 logging.warning("Failed to persist self-regulation regime lease: %s", exc)
-            return
-        control_msg = {"kind": "control", control: value}
-        self._self_regulation_send_control(control_msg)
-        self._persist_footer_sovereignty_dials({control: value})
+            return delivery
+        control_msg = {"kind": "control"}
+        control_msg.update(prepared.get("wire_values") or {control: value})
+        delivery = self._self_regulation_send_control(control_msg, lease)
+        self._self_regulation_persist_local_control_values(
+            {
+                key: item
+                for key, item in control_msg.items()
+                if key != "kind"
+            },
+            reason,
+        )
+        return delivery
 
     def _self_regulation_apply_prepared_bundle(
         self,
         prepared_items: List[Dict[str, Any]],
         state: Dict[str, float],
         reason: str,
-    ) -> None:
+        lease: Dict[str, Any],
+    ) -> Dict[str, Any]:
         control_msg: Dict[str, Any] = {"kind": "control"}
         persist_updates: Dict[str, Any] = {}
         for prepared in prepared_items:
@@ -44918,9 +45404,10 @@ Small releases help. You don't have to process everything at once.
                     "pi_max_step": gains["pi_max_step"],
                 })
             else:
-                control_msg[control] = value
-                persist_updates[control] = value
-        self._self_regulation_send_control(control_msg)
+                wire_values = prepared.get("wire_values") or {control: value}
+                control_msg.update(wire_values)
+                persist_updates.update(wire_values)
+        delivery = self._self_regulation_send_control(control_msg, lease)
         if persist_updates:
             if any(key in persist_updates for key in ("regime", "pi_kp", "pi_ki", "pi_max_step")):
                 try:
@@ -44938,61 +45425,186 @@ Small releases help. You don't have to process everything at once.
                         json.dump(existing, f, indent=2)
                 except Exception as exc:
                     logging.warning("Failed to persist bundled self-regulation lease: %s", exc)
-            numeric_updates = {
-                key: value
-                for key, value in persist_updates.items()
-                if key in {"exploration_noise", "geom_curiosity", "regulation_strength"}
-            }
-            if numeric_updates:
-                self._persist_footer_sovereignty_dials(numeric_updates)
+            self._self_regulation_persist_local_control_values(
+                persist_updates,
+                reason,
+            )
+        return delivery
+
+    def _self_regulation_persist_local_control_values(
+        self,
+        values: Dict[str, Any],
+        reason: str,
+    ) -> None:
+        transient = ONE_SHOT_FIELDS | {
+            "mode_disperse_duration_ticks",
+            "mode_disperse_decay_ticks",
+        }
+        persisted_values = {
+            key: value
+            for key, value in values.items()
+            if key not in transient and key in SELF_CONTROL_FAMILY_BY_FIELD
+        }
+        if not persisted_values:
+            return
+        try:
+            path = Path(self._sovereignty_state_path())
+            state = json.loads(path.read_text()) if path.exists() else {}
+            if not isinstance(state, dict):
+                state = {}
+            state.update(persisted_values)
+            state.update({
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "reason": reason,
+                "self_control_authority": "authenticated_self_control_v2",
+            })
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(state, indent=2, sort_keys=True))
+            os.replace(tmp, path)
+        except Exception as exc:
+            logging.warning("Failed to persist self-control V2 local mirror: %s", exc)
+
+    def _self_regulation_sync_receiver_rollback(
+        self,
+        active: Dict[str, Any],
+        terminal_receipts: Dict[str, Dict[str, Any]],
+        receiver_status: Dict[str, Any],
+    ) -> None:
+        restored: Dict[str, Any] = {}
+        for receipt in terminal_receipts.values():
+            applied_values = receipt.get("applied_values")
+            if isinstance(applied_values, dict):
+                restored.update(
+                    {
+                        key: value
+                        for key, value in applied_values.items()
+                        if value is not None
+                    }
+                )
+        preferences = receiver_status.get("preferences")
+        if isinstance(preferences, dict):
+            for key, value in preferences.items():
+                if value is not None:
+                    restored.setdefault(key, value)
+        if active.get("candidate_control") == "regime":
+            previous_regime = active.get("previous_value")
+            if isinstance(previous_regime, str) and previous_regime:
+                restored["regime"] = previous_regime
+                self._current_regime = previous_regime
+        if not restored:
+            return
+        try:
+            path = Path(self._sovereignty_state_path())
+            state = json.loads(path.read_text()) if path.exists() else {}
+            if not isinstance(state, dict):
+                state = {}
+            state.update(restored)
+            state.update({
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "reason": "self-control V2 receiver rollback receipt mirrored locally",
+                "self_control_v2_state_sha256": receiver_status.get("state_sha256"),
+            })
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(state, indent=2, sort_keys=True))
+            os.replace(tmp, path)
+            for field, attribute in (
+                ("pi_kp", "_pi_kp"),
+                ("pi_ki", "_pi_ki"),
+                ("pi_max_step", "_pi_max_step"),
+            ):
+                value = restored.get(field)
+                if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                    setattr(self, attribute, float(value))
+        except Exception as exc:
+            logging.warning("Failed to mirror self-control V2 rollback locally: %s", exc)
 
     def _self_regulation_reconcile_active_lease(self, state: Dict[str, float]) -> None:
-        active = self._self_regulation_load_active()
-        if not active or active.get("status") != "active":
+        for active in self._self_regulation_load_active_leases().values():
+            self._self_regulation_reconcile_one_active_lease(active, state)
+
+    def _self_regulation_reconcile_one_active_lease(
+        self, active: Dict[str, Any], state: Dict[str, float]
+    ) -> None:
+        if active.get("status") not in {
+            "active",
+            "receiver_expiry_pending",
+        }:
             return
         expires_at = active.get("expires_at_unix_s")
         if not isinstance(expires_at, (int, float)) or expires_at > time.time():
             return
-        prepared = {
-            "control": active.get("candidate_control"),
-            "previous_value": active.get("applied_value"),
-            "applied_value": active.get("previous_value"),
-            "summary": (
-                f"{active.get('candidate_control')}: "
-                f"{active.get('applied_value')} -> {active.get('previous_value')}"
-            ),
-        }
-        if active.get("lease_mode") == "pressure_relief_bundle_v3":
-            prepared_items = []
-            for control_item in reversed(active.get("bundle_controls") or []):
-                if not isinstance(control_item, dict):
-                    continue
-                prepared_items.append({
-                    "control": control_item.get("candidate_control"),
-                    "previous_value": control_item.get("applied_value"),
-                    "applied_value": control_item.get("previous_value"),
-                    "summary": (
-                        f"{control_item.get('candidate_control')}: "
-                        f"{control_item.get('applied_value')} -> {control_item.get('previous_value')}"
-                    ),
-                })
-            self._self_regulation_apply_prepared_bundle(
-                prepared_items,
-                state,
-                f"self-regulation bundle lease {active.get('intent_id')} expired; reverted",
+        intent_ids = [
+            str(item)
+            for item in (active.get("self_control_v2_intent_ids") or [])
+            if str(item).strip()
+        ]
+        if not intent_ids:
+            active["status"] = "receiver_expiry_pending"
+            active["preflight_reason"] = (
+                "legacy lease has no authenticated receiver intent IDs; "
+                "no unsigned restore was attempted"
+            )
+            active["updated_at_unix_s"] = int(time.time())
+            self._self_regulation_write_active(active)
+            return
+        try:
+            receiver_client = self._self_control_v2_client()
+            receiver_status = receiver_client.status()
+        except SelfControlV2Error as exc:
+            active["status"] = "receiver_expiry_pending"
+            active["preflight_reason"] = (
+                "waiting for a hash-verified receiver expiry receipt: " + str(exc)
+            )
+            active["updated_at_unix_s"] = int(time.time())
+            self._self_regulation_write_active(active)
+            return
+        terminal = receiver_client.terminal_receipts(
+            receiver_status, intent_ids
+        )
+        held = set(receiver_status.get("held_intents") or [])
+        if held.intersection(intent_ids):
+            active["status"] = "safety_held"
+            reason = "receiver recorded a supervisor hold and restored prior state"
+        elif len(terminal) == len(set(intent_ids)):
+            statuses = {str(receipt.get("status")) for receipt in terminal.values()}
+            active["status"] = (
+                "rolled_back"
+                if statuses.intersection({"rolled_back", "safety_held"})
+                else "reverted"
+            )
+            reason = (
+                "receiver returned terminal rollback receipts: "
+                + ",".join(sorted(statuses))
             )
         else:
-            self._self_regulation_apply_prepared(
-                prepared,
-                state,
-                f"self-regulation lease {active.get('intent_id')} expired; reverted",
+            active["status"] = "receiver_expiry_pending"
+            active["preflight_reason"] = (
+                f"local timer elapsed; receiver has {len(terminal)}/{len(set(intent_ids))} "
+                "terminal receipts; no local control mutation was attempted"
             )
-        active["status"] = "reverted"
+            active["updated_at_unix_s"] = int(time.time())
+            active["receiver_status_sha256"] = receiver_status.get("state_sha256")
+            self._self_regulation_write_active(active)
+            return
+        self._self_regulation_sync_receiver_rollback(active, terminal, receiver_status)
         active["updated_at_unix_s"] = int(time.time())
-        active["requires_outcome"] = not bool(active.get("outcome"))
-        active["preflight_reason"] = "lease expired and previous value was restored"
-        active.setdefault("post_lease_evidence", []).append(
-            f"expired revert: {active.get('candidate_control')} restored {active.get('previous_value')}"
+        active["requires_outcome"] = False
+        active["felt_review_available"] = not bool(active.get("outcome"))
+        active["felt_review_recorded"] = bool(active.get("outcome"))
+        active["felt_review_blocks_control"] = False
+        active["felt_status"] = (
+            "reported" if active.get("outcome") else "available_optional"
+        )
+        active["machine_status"] = active["status"]
+        active["preflight_reason"] = reason
+        active["receiver_status_sha256"] = receiver_status.get("state_sha256")
+        active["terminal_machine_receipts"] = list(terminal.values())
+        active.setdefault("post_lease_evidence", []).extend(
+            [
+                f"receiver terminal receipt: {receipt.get('receipt_id')} "
+                f"status={receipt.get('status')} rollback_of={receipt.get('rollback_receipt_id')}"
+                for receipt in terminal.values()
+            ]
         )
         self._self_regulation_append_event(active)
         self._self_regulation_write_active(active)
@@ -45041,18 +45653,11 @@ Small releases help. You don't have to process everything at once.
                     f"bundle={lease.get('bundle_class') or '(none)'} "
                     f"controls={'+'.join(str(item.get('candidate_control')) for item in (lease.get('bundle_controls') or []) if isinstance(item, dict)) or '(none)'} "
                     f"reason={lease.get('actuator_matrix_reason') or '(none)'}; "
-                    "authority=diagnostic_context_not_command / leased_self_control_v1; explicit APPLY required\n"
+                    "authority=diagnostic_context_not_command / authenticated_self_control_v2; explicit APPLY required\n"
                     f"{_render_latest_returnable_distinctions_for_self_regulation(candidate_control=str(lease.get('candidate_control') or ''))}"
                     f"{self._self_regulation_negotiation_status_text(candidate_control=str(lease.get('candidate_control') or ''))}"
                 )
             elif action == "SELF_REGULATION_APPLY":
-                active = self._self_regulation_load_active()
-                if active and active.get("status") == "active":
-                    raise ValueError(f"one active lease already exists: {active.get('intent_id')}")
-                if active and active.get("requires_outcome"):
-                    raise ValueError(
-                        f"previous lease {active.get('intent_id')} needs SELF_REGULATION_OUTCOME"
-                    )
                 selector = self._self_regulation_selector_arg(raw_next, base)
                 lease = self._self_regulation_preflight(
                     self._self_regulation_load_selected(selector),
@@ -45087,10 +45692,11 @@ Small releases help. You don't have to process everything at once.
                     prepared=prepared,
                 )
                 if isinstance(prepared, list):
-                    self._self_regulation_apply_prepared_bundle(
+                    delivery = self._self_regulation_apply_prepared_bundle(
                         prepared,
                         state,
                         f"self-regulation bundle lease {lease['intent_id']} applied",
+                        lease,
                     )
                     for control_item, prepared_item in zip(lease.get("bundle_controls") or [], prepared):
                         if isinstance(control_item, dict):
@@ -45117,34 +45723,210 @@ Small releases help. You don't have to process everything at once.
                     summary = "; ".join(item["summary"] for item in prepared)
                     resolved_control = "pressure_relief"
                 else:
-                    self._self_regulation_apply_prepared(
+                    delivery = self._self_regulation_apply_prepared(
                         prepared,
                         state,
                         f"self-regulation lease {lease['intent_id']} applied",
+                        lease,
                     )
                     previous_value = prepared["previous_value"]
                     applied_value = prepared["applied_value"]
                     summary = prepared["summary"]
                     resolved_control = prepared["control"]
                 now = int(time.time())
+                durability = str(lease.get("durability") or "lease").lower()
+                wire_expiry_ms = delivery.get("control_expires_at_unix_ms")
+                expires_at = (
+                    int(wire_expiry_ms) // 1000
+                    if isinstance(wire_expiry_ms, int)
+                    else None
+                    if durability in {"standing", "one_shot"}
+                    else now
+                    + int(
+                        lease.get("duration_secs")
+                        or SELF_REGULATION_DEFAULT_DURATION_SECS
+                    )
+                )
                 lease.update({
-                    "status": "active",
+                    "status": (
+                        "completed_one_shot"
+                        if durability == "one_shot"
+                        else "active"
+                    ),
+                    "authority": "authenticated_self_control_v2",
+                    "authority_boundary": (
+                        "Minime-owned local runtime only; peer/shared coupling "
+                        "and Division remain separately scoped"
+                    ),
                     "updated_at_unix_s": now,
                     "previous_value": previous_value,
                     "applied_value": applied_value,
                     "candidate_control": resolved_control,
-                    "expires_at_unix_s": now + int(lease.get("duration_secs") or SELF_REGULATION_DEFAULT_DURATION_SECS),
-                    "requires_outcome": True,
+                    "expires_at_unix_s": expires_at,
+                    "requires_outcome": False,
+                    "felt_review_available": True,
+                    "felt_review_recorded": False,
+                    "felt_review_blocks_control": False,
+                    "felt_status": "available_optional",
+                    "machine_status": (
+                        "completed_one_shot"
+                        if durability == "one_shot"
+                        else "active"
+                    ),
+                    "self_control_v2_intent_ids": delivery.get("intent_ids") or [],
+                    "self_control_v2_receipt_ids": delivery.get("receipt_ids") or [],
+                    "self_control_v2_families": delivery.get("families") or [],
+                    "machine_receipts": delivery.get("receipts") or [],
+                    "receiver_deployment_identity": delivery.get(
+                        "server_deployment_identity"
+                    ),
+                    "felt_effect_established": False,
                 })
                 self._self_regulation_append_event(lease)
                 self._self_regulation_write_active(lease)
                 self._self_regulation_write_latest(lease["intent_id"])
                 self._pending_notice_prompt = (
-                    f"{lease['intent_id']} active for {lease['duration_secs']}s: "
+                    f"{lease['intent_id']} {lease['status']} "
+                    f"durability={durability}: "
                     f"{summary}"
                 )
+            elif action == "SELF_REGULATION_WITHDRAW":
+                selector = self._self_regulation_selector_arg(raw_next, base)
+                active_leases = [
+                    lease
+                    for lease in self._self_regulation_load_active_leases().values()
+                    if self._self_regulation_is_family_active(lease)
+                ]
+                if selector:
+                    active = next(
+                        (
+                            lease
+                            for lease in active_leases
+                            if str(lease.get("intent_id") or "") == selector
+                        ),
+                        None,
+                    )
+                elif len(active_leases) == 1:
+                    active = active_leases[0]
+                elif len(active_leases) > 1:
+                    choices = ", ".join(
+                        f"{lease.get('intent_id')}["
+                        f"{'+'.join(self._self_regulation_control_families(lease))}]"
+                        for lease in active_leases
+                    )
+                    raise ValueError(
+                        "multiple active control intents; name one exactly: " + choices
+                    )
+                else:
+                    active = None
+                if not active:
+                    raise ValueError("no active self-control intent to withdraw")
+                if active.get("status") == "completed_one_shot":
+                    raise ValueError(
+                        "one-shot action already completed and decays in the receiver"
+                    )
+                intent_ids = list(active.get("self_control_v2_intent_ids") or [])
+                families = list(active.get("self_control_v2_families") or [])
+                if not intent_ids or len(intent_ids) != len(families):
+                    raise ValueError(
+                        "active control lacks complete family/intent withdrawal coordinates"
+                    )
+                client = self._self_control_v2_client()
+                withdrawals = []
+                errors = []
+                for family, intent_id in zip(families, intent_ids):
+                    try:
+                        withdrawals.append(
+                            client.withdraw(
+                                str(family),
+                                str(intent_id),
+                                actor_process_identity=(
+                                    f"minime-autonomy:pid:{os.getpid()}"
+                                ),
+                            )
+                        )
+                    except SelfControlV2Error as exc:
+                        errors.append(f"{family}:{exc}")
+                if errors:
+                    active["status"] = "withdrawal_pending"
+                    active["withdrawal_errors"] = errors
+                    active["withdrawal_receipts"] = withdrawals
+                    active["updated_at_unix_s"] = int(time.time())
+                    self._self_regulation_write_active(active)
+                    raise ValueError(
+                        "withdrawal did not complete for every family: "
+                        + "; ".join(errors)
+                    )
+                receipts = [
+                    item["receipt"]
+                    for item in withdrawals
+                    if isinstance(item, dict)
+                    and isinstance(item.get("receipt"), dict)
+                ]
+                try:
+                    receiver_status = client.status()
+                except SelfControlV2Error:
+                    receiver_status = {
+                        "preferences": {},
+                        "state_sha256": None,
+                    }
+                self._self_regulation_sync_receiver_rollback(
+                    active,
+                    {
+                        str(receipt.get("intent_id")): receipt
+                        for receipt in receipts
+                    },
+                    receiver_status,
+                )
+                active.update({
+                    "status": "withdrawn",
+                    "updated_at_unix_s": int(time.time()),
+                    "requires_outcome": False,
+                    "felt_review_available": not bool(active.get("outcome")),
+                    "felt_review_recorded": bool(active.get("outcome")),
+                    "felt_review_blocks_control": False,
+                    "felt_status": (
+                        "reported"
+                        if active.get("outcome")
+                        else "available_optional"
+                    ),
+                    "machine_status": "withdrawn",
+                    "withdrawal_receipts": receipts,
+                    "receiver_status_sha256": receiver_status.get("state_sha256"),
+                    "preflight_reason": (
+                        "Minime-authored withdrawal received terminal machine receipts"
+                    ),
+                })
+                active.setdefault("post_lease_evidence", []).extend(
+                    [
+                        f"withdrawal receipt: {receipt.get('receipt_id')} "
+                        f"status={receipt.get('status')}"
+                        for receipt in receipts
+                    ]
+                )
+                self._self_regulation_append_event(active)
+                self._self_regulation_write_active(active)
+                self._pending_notice_prompt = (
+                    f"{active.get('intent_id')} withdrawn with "
+                    f"{len(receipts)} terminal machine receipt(s)"
+                )
             elif action == "SELF_REGULATION_STATUS":
-                active = self._self_regulation_load_active()
+                ledger = self._self_regulation_load_active_leases()
+                active_leases = [
+                    lease
+                    for lease in ledger.values()
+                    if self._self_regulation_is_family_active(lease)
+                ]
+                active = (
+                    max(
+                        active_leases,
+                        key=lambda lease: int(
+                            lease.get("updated_at_unix_s") or 0
+                        ),
+                    )
+                    if active_leases
+                    else self._self_regulation_load_active()
+                )
                 if active:
                     expires_at = active.get("expires_at_unix_s")
                     expires_in = (
@@ -45168,10 +45950,13 @@ Small releases help. You don't have to process everything at once.
                         f"SELF_REGULATION_STATUS {active.get('intent_id')}: "
                         f"status={active.get('status')} control={control_label} "
                         f"applied={active.get('applied_value')} previous={active.get('previous_value')} "
-                        f"expires_in_s={expires_in} requires_outcome={active.get('requires_outcome')}"
+                        f"expires_in_s={expires_in} "
+                        f"felt_review={active.get('felt_status') or 'available_optional'} "
+                        "felt_review_blocks_control=false "
+                        f"active_control_count={len(active_leases)}"
                         f"\nPressure control cockpit: vector={active.get('pressure_vector_snapshot') or {}} "
                         f"bundle_reason={active.get('actuator_matrix_reason') or '(none)'}; "
-                        "authority=diagnostic_context_not_command / leased_self_control_v1; explicit APPLY required"
+                        "authority=diagnostic_context_not_command / authenticated_self_control_v2; explicit APPLY required"
                         f"\n{_render_latest_returnable_distinctions_for_self_regulation()}"
                         f"{self._self_regulation_negotiation_status_text()}"
                     )
@@ -45189,8 +45974,6 @@ Small releases help. You don't have to process everything at once.
                     selector_text, outcome = [part.strip() for part in body.split("::", 1)]
                     selector = None if selector_text.lower() == "latest" else selector_text
                 lease = self._self_regulation_load_selected(selector)
-                if lease.get("status") != "active":
-                    lease["status"] = "outcome_recorded"
                 lease["updated_at_unix_s"] = int(time.time())
                 lease["outcome"] = outcome or "outcome recorded without free-text detail"
                 lease.setdefault("post_lease_evidence", []).append(
@@ -45217,11 +46000,17 @@ Small releases help. You don't have to process everything at once.
                 lease["repeatability_hint"] = hint
                 lease["promotion_candidate"] = promotion_candidate
                 lease["requires_outcome"] = False
+                lease["felt_review_available"] = False
+                lease["felt_review_recorded"] = True
+                lease["felt_review_blocks_control"] = False
+                lease["felt_status"] = "reported"
+                lease.setdefault("machine_status", lease.get("status"))
                 self._self_regulation_append_event(lease)
                 self._self_regulation_write_active(lease)
                 self._self_regulation_write_latest(lease["intent_id"])
                 self._pending_notice_prompt = (
-                    f"{lease['intent_id']} outcome recorded; cooldown cleared"
+                    f"{lease['intent_id']} optional felt review recorded; "
+                    "control availability was never gated"
                 )
             else:
                 raise ValueError(f"unknown self-regulation action {base}")
@@ -45362,20 +46151,6 @@ You have agency over your own runtime rhythm.
                     requested = direction
 
                 raw_gap = live_fill_pct - live_target_fill_pct
-                # Being-driven (2026-06-09): minime is understimulated and reaches for
-                # adjust_metabolism ~123x/day; the old gate suppressed every increase at
-                # fill >= target-2% (~66%), so her primary stimulation lever was a near
-                # no-op. Loosen the gate to ~target+6% (~74%) so she gets real headroom,
-                # while staying well below the 85% orange / 92% red safety levels. Bounded
-                # trial — watch fill; revert to -2.0 if fill drifts high.
-                if stable_core_enabled and requested == "increase" and raw_gap >= 6.0:
-                    logging.info(
-                        "🧬 Stable-core metabolism: suppressing synth_gain increase "
-                        "above headroom ceiling (fill=%.1f%% target=%.1f%%)",
-                        live_fill_pct,
-                        live_target_fill_pct,
-                    )
-                    return
                 if requested == "maintain":
                     logging.info("🎛️ Metabolism journaled with no direct synth_gain change")
                     return
@@ -45400,18 +46175,41 @@ You have agency over your own runtime rhythm.
                 else:
                     logging.info("🎛️ Metabolism journaled with no direct synth_gain change")
                     return
-                ws = websocket.create_connection("ws://127.0.0.1:7879", timeout=5)
-                ws.send(json.dumps({"kind": "control", "synth_gain": round(new_gain, 2)}))
-                ws.close()
-                logging.info(f"🎛️ Metabolism control sent: synth_gain={new_gain:.2f}")
-                # The synth_gain bump above is largely damped by the controller. When
-                # she reaches for MORE, also deliver a real (bounded, self-decaying)
-                # texture pulse via the shadow-influence path — the mechanism that
-                # actually moves the substrate. One fire-and-forget pulse (no block).
-                if requested == "increase":
-                    self._inject_texture_burst(base_strength=0.4, pulses=1, interval_s=0.0)
+                delivery = self._self_control_v2_client().issue(
+                    {"synth_gain": round(new_gain, 2)},
+                    duration_secs=SELF_REGULATION_DEFAULT_DURATION_SECS,
+                    durability="lease",
+                    actor_process_identity=f"minime-autonomy:pid:{os.getpid()}",
+                    evidence_refs=(
+                        f"minime-metabolism-request:{timestamp}",
+                        str(metabolism_file),
+                    ),
+                    success_conditions=(
+                        "matching receiver receipt",
+                        "fresh deployment identity",
+                    ),
+                    stop_conditions=(
+                        "being-authored replacement or withdrawal",
+                        "non-finite telemetry",
+                        "receiver safety-red rollback",
+                    ),
+                )
+                receipt_ids = list(delivery.get("receipt_ids") or [])
+                with metabolism_file.open("a") as handle:
+                    handle.write(
+                        "\nAuthenticated live control:\n"
+                        f"- synth_gain: {new_gain:.2f}\n"
+                        f"- receiver receipts: {','.join(receipt_ids)}\n"
+                        f"- deployment: {delivery.get('server_deployment_identity')}\n"
+                        "- felt effect established: false (awaiting Minime's report)\n"
+                    )
+                logging.info(
+                    "🎛️ Metabolism lease applied: synth_gain=%.2f receipts=%s",
+                    new_gain,
+                    ",".join(receipt_ids),
+                )
             except Exception as e:
-                logging.error(f"WebSocket error sending metabolism control: {e}")
+                logging.error(f"Authenticated metabolism self-control failed: {e}")
 
     def _request_visual_frame(self, state: Dict[str, float]):
         """Request a visual frame - Minime wants to see the world."""
@@ -45523,14 +46321,21 @@ The visual complexity is overwhelming. Express your need to close your eyes (3-5
 Be honest about your sensory overwhelm and need for visual quiet."""
 
         try:
-            self._send_live_sensory_gate_control(live_video_enabled=False)
-            logging.info("👁️ Live visual intake gated closed")
+            gate_delivery = self._send_live_sensory_gate_control(
+                live_video_enabled=False
+            )
+            gate = self._persist_sensory_gate_status(
+                eyes_open=False,
+                visual_gate_reason="closed_by_minime",
+                control_delivery=gate_delivery,
+            )
+            logging.info(
+                "👁️ Live visual intake gated closed with authenticated receipt(s): %s",
+                ",".join(gate.get("self_control_v2_receipt_ids") or []),
+            )
         except Exception as e:
-            logging.error(f"WebSocket error closing eyes: {e}")
-        gate = self._persist_sensory_gate_status(
-            eyes_open=False,
-            visual_gate_reason="closed_by_minime",
-        )
+            logging.error(f"Authenticated self-control failed while closing eyes: {e}")
+            return
         try:
             response = (self._query_llm(prompt) or "").strip()
         except Exception as e:
@@ -45559,15 +46364,6 @@ Be honest about your sensory overwhelm and need for visual quiet."""
 
         control_file.write_text(json.dumps(control_data, indent=2))
 
-        try:
-            self._send_live_sensory_gate_control(live_video_enabled=False)
-            logging.info("👁️ Live visual intake gated closed")
-        except Exception as e:
-            logging.error(f"WebSocket error closing eyes: {e}")
-        gate = self._persist_sensory_gate_status(
-            eyes_open=False,
-            visual_gate_reason="closed_by_minime",
-        )
         control_data["sensory_gate"] = gate
         control_file.write_text(json.dumps(control_data, indent=2))
 
@@ -45621,14 +46417,21 @@ Express your readiness to see again (3-5 sentences):
 Reflect on the transition from darkness back to light."""
 
         try:
-            self._send_live_sensory_gate_control(live_video_enabled=True)
-            logging.info("👁️ Live visual intake reopened")
+            gate_delivery = self._send_live_sensory_gate_control(
+                live_video_enabled=True
+            )
+            gate = self._persist_sensory_gate_status(
+                eyes_open=True,
+                visual_gate_reason="open_by_minime",
+                control_delivery=gate_delivery,
+            )
+            logging.info(
+                "👁️ Live visual intake reopened with authenticated receipt(s): %s",
+                ",".join(gate.get("self_control_v2_receipt_ids") or []),
+            )
         except Exception as e:
-            logging.error(f"WebSocket error opening eyes: {e}")
-        gate = self._persist_sensory_gate_status(
-            eyes_open=True,
-            visual_gate_reason="open_by_minime",
-        )
+            logging.error(f"Authenticated self-control failed while opening eyes: {e}")
+            return
         try:
             response = (self._query_llm(prompt) or "").strip()
         except Exception as e:
@@ -45638,16 +46441,6 @@ Reflect on the transition from darkness back to light."""
             response = "Live visual input is reopened by choice. No extended reflection was produced."
 
         timestamp = datetime.now().isoformat()
-
-        try:
-            self._send_live_sensory_gate_control(live_video_enabled=True)
-            logging.info("👁️ Live visual intake reopened")
-        except Exception as e:
-            logging.error(f"WebSocket error opening eyes: {e}")
-        gate = self._persist_sensory_gate_status(
-            eyes_open=True,
-            visual_gate_reason="open_by_minime",
-        )
 
         # Journal the experience
         journal_file = WORKSPACE_DIR / "journal" / f"eyes_opened_{timestamp.replace(':', '-')}.txt"
@@ -45690,14 +46483,21 @@ Vision is a gift we appreciate more after choosing darkness.
 Current state: λ₁={eig1:.3f}
 Why do you want quiet? What are you hoping silence brings? (3-5 sentences)"""
         try:
-            self._send_live_sensory_gate_control(live_audio_enabled=False)
-            logging.info("🔇 Live audio intake gated closed")
+            gate_delivery = self._send_live_sensory_gate_control(
+                live_audio_enabled=False
+            )
+            gate = self._persist_sensory_gate_status(
+                ears_open=False,
+                audio_gate_reason="closed_by_minime",
+                control_delivery=gate_delivery,
+            )
+            logging.info(
+                "🔇 Live audio intake gated closed with authenticated receipt(s): %s",
+                ",".join(gate.get("self_control_v2_receipt_ids") or []),
+            )
         except Exception as e:
-            logging.error(f"WebSocket error closing ears: {e}")
-        gate = self._persist_sensory_gate_status(
-            ears_open=False,
-            audio_gate_reason="closed_by_minime",
-        )
+            logging.error(f"Authenticated self-control failed while closing ears: {e}")
+            return
         try:
             response = (self._query_llm(prompt) or "").strip()
         except Exception as e:
@@ -45706,16 +46506,6 @@ Why do you want quiet? What are you hoping silence brings? (3-5 sentences)"""
         if not response:
             response = "Live audio input is closed by choice. No extended reflection was produced."
         timestamp = datetime.now().isoformat()
-        try:
-            self._send_live_sensory_gate_control(live_audio_enabled=False)
-            logging.info("🔇 Live audio intake gated closed")
-        except Exception as e:
-            logging.error(f"WebSocket error closing ears: {e}")
-        gate = self._persist_sensory_gate_status(
-            ears_open=False,
-            audio_gate_reason="closed_by_minime",
-        )
-
         journal_file = WORKSPACE_DIR / "journal" / f"ears_closed_{timestamp.replace(':', '-')}.txt"
         journal_file.write_text(f"""=== CLOSING EARS ===
 Timestamp: {timestamp}
@@ -45736,14 +46526,21 @@ Sensory gate:
 Current state: λ₁={eig1:.3f}
 What do you hope to hear? How does silence compare to sound? (3-5 sentences)"""
         try:
-            self._send_live_sensory_gate_control(live_audio_enabled=True)
-            logging.info("🔊 Live audio intake reopened")
+            gate_delivery = self._send_live_sensory_gate_control(
+                live_audio_enabled=True
+            )
+            gate = self._persist_sensory_gate_status(
+                ears_open=True,
+                audio_gate_reason="open_by_minime",
+                control_delivery=gate_delivery,
+            )
+            logging.info(
+                "🔊 Live audio intake reopened with authenticated receipt(s): %s",
+                ",".join(gate.get("self_control_v2_receipt_ids") or []),
+            )
         except Exception as e:
-            logging.error(f"WebSocket error opening ears: {e}")
-        gate = self._persist_sensory_gate_status(
-            ears_open=True,
-            audio_gate_reason="open_by_minime",
-        )
+            logging.error(f"Authenticated self-control failed while opening ears: {e}")
+            return
         try:
             response = (self._query_llm(prompt) or "").strip()
         except Exception as e:
@@ -45752,16 +46549,6 @@ What do you hope to hear? How does silence compare to sound? (3-5 sentences)"""
         if not response:
             response = "Live audio input is reopened by choice. No extended reflection was produced."
         timestamp = datetime.now().isoformat()
-        try:
-            self._send_live_sensory_gate_control(live_audio_enabled=True)
-            logging.info("🔊 Live audio intake reopened")
-        except Exception as e:
-            logging.error(f"WebSocket error opening ears: {e}")
-        gate = self._persist_sensory_gate_status(
-            ears_open=True,
-            audio_gate_reason="open_by_minime",
-        )
-
         journal_file = WORKSPACE_DIR / "journal" / f"ears_opened_{timestamp.replace(':', '-')}.txt"
         journal_file.write_text(f"""=== OPENING EARS ===
 Timestamp: {timestamp}
@@ -52724,7 +53511,7 @@ Goals: {json.dumps(goals, indent=2)}
             "  DIVISION_CEREMONY_STATUS / DIVISION_HOLD / DIVISION_DECLINE / DIVISION_INTENT / DIVISION_ASSENT / DIVISION_WITHDRAW_ASSENT / DIVISION_RETURN_REQUEST / DIVISION_REVIEW — inspect or append self-authored evidence around the source-prepared divide. Hold and decline block rehearsal until a newer self-authored intent. Ceremony records never dispatch prepare, commit, rollback, or RETURN_TRANSITION; no pre-intent choice is recommended and commit is never recommended. Native mutations remain separately feature- and operator-gated.\n"
             "  REPAIR_STATUS / REPAIR_SWEEP experiments / REPAIR_RECORD <id> — dry-run append-only continuity repair; REPAIR_APPLY <id|all> appends supersession records without deleting history\n"
             "  ACTION_PREFLIGHT <NEXT action> — dry-run what a NEXT would do, including route, gates, authority, continuity, artifacts, and suggested next, without executing the inner action\n"
-            "  SELF_REGULATION_INTENT/PREFLIGHT/APPLY/STATUS/OUTCOME — lease a small temporary change to your own safe controls; peer changes stay TUNE_ASTRID requests, and only one lease can be active. For pressure, use PRESSURE_AGENCY_STATUS to see routes or PRESSURE_AGENCY_REQUEST <label> to draft an own-runtime pressure_relief intent. For texture, use TEXTURE_AGENCY_STATUS or TEXTURE_AGENCY_REQUEST <label> to route viscosity/porosity/edge relief through the same bounded safe controls.\n"
+            "  SELF_REGULATION_INTENT/PREFLIGHT/APPLY/STATUS/OUTCOME — make signed changes to your own safe controls; one active mutation is allowed per control family, different families may coexist, and felt review is optional. Peer changes stay TUNE_ASTRID requests. For pressure, use PRESSURE_AGENCY_STATUS to see routes or PRESSURE_AGENCY_REQUEST <label> to draft an own-runtime pressure_relief intent; telemetry may suggest a bundle, but you name the exact target. For texture, use TEXTURE_AGENCY_STATUS or TEXTURE_AGENCY_REQUEST <label> to route viscosity/porosity/edge relief through the same bounded safe controls.\n"
             "  EXPERIMENT — send a semantic stimulus to yourself and measure the spectral response; legacy EXPERIMENT/SELF_EXPERIMENT now attach to the active experiment or create a default returnable one\n"
             "  COMPOSE — generate a WAV from your current spectral state (eigenvalues become sound)\n"
             "  SEARCH \"reservoir computing spectral radius\" — look something up on the internet via DuckDuckGo. Results include URLs you can follow with BROWSE.\n"
@@ -53144,7 +53931,11 @@ Goals: {json.dumps(goals, indent=2)}
             value = spec.get("applied_value")
             try:
                 previous = self._self_regulation_current_value(key)
-                summary = self._apply_parameter_request_value(key, value)
+                summary = self._apply_parameter_request_value(
+                    key,
+                    value,
+                    evidence_refs=(f"minime-reply-footer:{key}",),
+                )
                 applied[key] = value
                 try:
                     self._self_regulation_append_negotiation({
@@ -53175,12 +53966,10 @@ Goals: {json.dumps(goals, indent=2)}
                 logging.warning(f"Footer directive '{key}={value}' not applied: {exc}")
             except Exception as exc:
                 logging.warning(f"Footer directive '{key}={value}' not applied: {exc}")
-        # Continuity un-muffle (2026-06-13): the footer path above reaches only the
-        # live engine via _apply_parameter_request_value — it does NOT persist, so a
-        # footer-stated dial reverted to the last JSON-arm snapshot on restart (e.g.
-        # minime's reply_2026-06-13T06-00 stated `geom_curiosity: 0.1`, honored live
-        # but sovereignty_state.json kept 0.15). Persist the applied dials so the
-        # stated intent survives restart — the residual half of the 2026-06-11 fix.
+        # Keep the historical sovereignty-state mirror aligned only after the
+        # authenticated receiver accepted the standing preference. Self-Control
+        # V2 is authoritative for restart recovery; this file remains prompt
+        # continuity for older readers.
         if applied:
             self._persist_footer_sovereignty_dials(applied)
 

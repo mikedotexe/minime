@@ -10,7 +10,6 @@ import sys
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .self_regulation import REGULATORY_REGIMES
-
 from .action_vocabulary import *  # noqa: F403 - compatibility surface
 
 from .research import extract_label_value, trim_chars

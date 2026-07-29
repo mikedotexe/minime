@@ -545,6 +545,13 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
             db_path = root / "minime.db"
             agent = self._agent(base_dir, workspace, db_path)
             agent._pending_next_action = "SHUT_EYES"
+            gate_delivery = {
+                "schema": "minime.self_control.autonomy_delivery.v2",
+                "server_deployment_identity": "deployment:test",
+                "intent_ids": ["intent:sensory-gate"],
+                "receipt_ids": ["receipt:sensory-gate"],
+                "felt_effect_established": False,
+            }
 
             with (
                 patch.object(agent, "_persist_pending_next_action"),
@@ -560,7 +567,11 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
             with (
                 patch.object(aa, "WORKSPACE_DIR", workspace),
                 patch.object(agent, "_query_llm", return_value="closing visual input"),
-                patch.object(agent, "_send_live_sensory_gate_control") as send_gate,
+                patch.object(
+                    agent,
+                    "_send_live_sensory_gate_control",
+                    return_value=gate_delivery,
+                ) as send_gate,
                 patch.object(agent, "_write_journal_entry"),
             ):
                 agent._close_eyes(dict(STATE))
@@ -569,6 +580,11 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
                 gate = json.loads((workspace / "sensory_control" / "sensory_gate_state.json").read_text())
                 self.assertFalse(gate["eyes_open"])
                 self.assertTrue(gate["ears_open"])
+                self.assertEqual(gate["authority"], "authenticated_self_control_v2")
+                self.assertEqual(
+                    gate["self_control_v2_receipt_ids"],
+                    ["receipt:sensory-gate"],
+                )
                 self.assertTrue((workspace / "sensory_control" / "eyes_closed_state.txt").exists())
                 self.assertFalse((workspace / "sensory_control" / "ears_closed_state.txt").exists())
 
@@ -592,6 +608,7 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
                 self.assertTrue(gate["eyes_open"])
                 self.assertTrue(gate["ears_open"])
                 self.assertFalse((workspace / "sensory_control" / "ears_closed_state.txt").exists())
+                self.assertEqual(send_gate.call_count, 4)
 
     def test_sensory_gate_actions_apply_even_with_empty_reflection(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -685,6 +702,33 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
             gate = json.loads((workspace / "sensory_control" / "sensory_gate_state.json").read_text())
             self.assertFalse(gate["eyes_open"])
 
+    def test_sensory_gate_does_not_persist_when_receiver_rejects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "minime"
+            workspace = base_dir / "workspace"
+            db_path = root / "minime.db"
+            agent = self._agent(base_dir, workspace, db_path)
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(
+                    agent,
+                    "_send_live_sensory_gate_control",
+                    side_effect=RuntimeError("receiver safety hold"),
+                ),
+                patch.object(agent, "_query_llm") as query,
+            ):
+                agent._close_eyes(dict(STATE))
+
+            self.assertFalse(
+                (workspace / "sensory_control" / "sensory_gate_state.json").exists()
+            )
+            self.assertFalse(
+                (workspace / "sensory_control" / "eyes_closed_state.txt").exists()
+            )
+            query.assert_not_called()
+
     def test_sensory_gate_control_uses_live_fields_not_legacy_gain_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -694,26 +738,36 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
             agent = self._agent(base_dir, workspace, db_path)
             sent = []
 
-            class FakeWs:
-                def send(self, payload):
-                    sent.append(json.loads(payload))
+            class FakeClient:
+                def issue(self, values, **kwargs):
+                    sent.append((dict(values), kwargs))
+                    return {
+                        "schema": "minime.self_control.autonomy_delivery.v2",
+                        "server_deployment_identity": "deployment:test",
+                        "intent_ids": ["intent:test"],
+                        "receipt_ids": ["receipt:test"],
+                        "felt_effect_established": False,
+                    }
 
-                def close(self):
-                    pass
-
-            with patch.object(aa.websocket, "create_connection", return_value=FakeWs()):
-                agent._send_live_sensory_gate_control(
+            with patch.object(
+                agent, "_self_control_v2_client", return_value=FakeClient()
+            ):
+                delivery = agent._send_live_sensory_gate_control(
                     live_video_enabled=False,
                     live_audio_enabled=True,
                 )
 
-            self.assertEqual(sent, [{
-                "kind": "control",
-                "live_video_enabled": False,
-                "live_audio_enabled": True,
-            }])
-            self.assertNotIn("synth_gain", sent[0])
-            self.assertNotIn("audio_gain", sent[0])
+            self.assertEqual(
+                sent[0][0],
+                {
+                    "live_video_enabled": False,
+                    "live_audio_enabled": True,
+                },
+            )
+            self.assertEqual(sent[0][1]["durability"], "standing")
+            self.assertNotIn("synth_gain", sent[0][0])
+            self.assertNotIn("audio_gain", sent[0][0])
+            self.assertEqual(delivery["receipt_ids"], ["receipt:test"])
 
     def test_hard_reset_allows_introspect_when_fill_is_above_release_shelf(self):
         with tempfile.TemporaryDirectory() as tmp:
