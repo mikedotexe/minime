@@ -1440,6 +1440,7 @@ pub struct SensoryBus {
     geom_drive: Mutex<f32>,         // How much geom_rel actively drives exploration (0.0..1.0)
     transition_cushion: Mutex<f32>, // Damp rapid fill transitions (0.0..1.0, default 0.5)
     pending_annotation: Mutex<Option<String>>, // Starred moment annotation for next checkpoint
+    checkpoint_now: Mutex<bool>,    // One-shot owner request consumed by orchestration
     deep_breathing: Mutex<bool>,    // Slow frequency mode
     pure_tone: Mutex<bool>,         // Simplest mode: one sine wave, zero noise, total calm
     synth_noise_level: Mutex<f32>,  // Stochastic noise in synthetic signals (0.0-1.0, default 0.1)
@@ -1535,6 +1536,7 @@ impl SensoryBus {
             geom_drive: Mutex::new(0.3),         // Moderate: geom_rel influences the gate
             transition_cushion: Mutex::new(0.5),
             pending_annotation: Mutex::new(None),
+            checkpoint_now: Mutex::new(false),
             deep_breathing: Mutex::new(false),
             pure_tone: Mutex::new(false),
             synth_noise_level: Mutex::new(0.1), // Gentle default — being can raise if it wants more
@@ -1798,6 +1800,10 @@ impl SensoryBus {
     pub fn get_fill_target(&self) -> f32 {
         *self.fill_target.lock()
     }
+    #[inline]
+    pub fn clear_fill_target(&self) {
+        *self.fill_target.lock() = f32::NAN;
+    }
 
     // --- Sovereignty controls ---
     #[inline]
@@ -1828,6 +1834,10 @@ impl SensoryBus {
     #[inline]
     pub fn get_smoothing_preference(&self) -> f32 {
         *self.smoothing_preference.lock()
+    }
+    #[inline]
+    pub fn clear_smoothing_preference(&self) {
+        *self.smoothing_preference.lock() = f32::NAN;
     }
 
     // --- Internal goal generation ---
@@ -1862,6 +1872,14 @@ impl SensoryBus {
     #[inline]
     pub fn take_pending_annotation(&self) -> Option<String> {
         self.pending_annotation.lock().take()
+    }
+
+    pub fn request_checkpoint_now(&self) {
+        *self.checkpoint_now.lock() = true;
+    }
+
+    pub fn take_checkpoint_request(&self) -> bool {
+        std::mem::take(&mut *self.checkpoint_now.lock())
     }
     #[inline]
     pub fn set_deep_breathing(&self, v: bool) {
@@ -2015,6 +2033,11 @@ impl SensoryBus {
     }
 
     #[inline]
+    pub fn clear_esn_leak_override(&self) {
+        self.esn_leak_override.lock().take();
+    }
+
+    #[inline]
     pub fn set_llava_embedding(&self, embedding: &[f32]) {
         let mut llava = self.llava.lock();
         let mut count = 0usize;
@@ -2026,6 +2049,11 @@ impl SensoryBus {
             llava.values[idx] = 0.0;
         }
         llava.updated_at_ms = NowMs::now();
+    }
+
+    #[must_use]
+    pub fn llava_embedding_snapshot(&self) -> [f32; LLAVA_DIM] {
+        self.llava.lock().values
     }
 
     #[must_use]
@@ -3546,6 +3574,39 @@ mod tests {
         assert!(
             just_after_hold > STALE_SEMANTIC_HIGH_MS,
             "near-hold recovery should stay above the ordinary high-fill stale floor: after={just_after_hold}"
+        );
+    }
+
+    #[test]
+    fn semantic_stale_low_release_request_clamps_to_one_percent_above_hold() {
+        let clamped_release = STALE_SEMANTIC_RECOVERY_HOLD_FILL + 0.01;
+        let at_release = dynamic_semantic_stale_ms_for_release_fill(
+            clamped_release,
+            SemanticStaleShape::Sigmoid,
+            0.10,
+        );
+        let shaped = semantic_stale_shaped_ms(clamped_release, SemanticStaleShape::Sigmoid) as u64;
+        let just_before_release = dynamic_semantic_stale_ms_for_release_fill(
+            clamped_release - 0.001,
+            SemanticStaleShape::Sigmoid,
+            0.10,
+        );
+
+        assert_eq!(at_release, shaped);
+        assert!(
+            just_before_release >= at_release,
+            "a low requested release should clamp to 0.26 and approach the shaped curve from above: before={just_before_release}, release={at_release}"
+        );
+    }
+
+    #[test]
+    fn semantic_stale_sigmoid_center_is_approximately_window_midpoint() {
+        let shaped = semantic_stale_shaped_ms(0.4, SemanticStaleShape::Sigmoid);
+        let expected = (STALE_SEMANTIC_LOW_MS + STALE_SEMANTIC_HIGH_MS) as f64 / 2.0;
+
+        assert!(
+            (shaped - expected).abs() <= 0.001,
+            "fill=0.4 should be the sigmoid midpoint within f32-to-f64 tolerance: shaped={shaped}, expected={expected}"
         );
     }
 

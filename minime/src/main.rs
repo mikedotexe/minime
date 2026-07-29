@@ -22,6 +22,11 @@ mod rescue_overfill;
 #[allow(dead_code)]
 mod rescue_scaffold;
 mod runtime;
+mod self_control_cli;
+mod self_control_identity;
+mod self_control_runtime;
+mod self_control_wire;
+mod semantic_body_v2;
 mod sensory_bus;
 mod sensory_protocol;
 mod sensory_ws;

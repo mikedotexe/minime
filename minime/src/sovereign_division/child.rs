@@ -15,8 +15,9 @@ use crate::{
     esn::ESN,
     gpu::Gpu,
     sovereign_division::records::{
-        append_owner_json, ensure_owner_only_dir, now_unix_ms, process_identity, write_owner_json,
-        DaughterProcessStatusV1, DaughterReservoirBundleV1, DivisionTickFrameV1, SovereignBeing,
+        append_owner_json, ensure_owner_only_dir, now_unix_ms, process_identity,
+        validate_tick_lineage, write_owner_json, DaughterProcessStatusV1,
+        DaughterReservoirBundleV1, DivisionTickFrameV1, SovereignBeing,
     },
 };
 
@@ -163,20 +164,13 @@ impl ChildRuntime {
     fn apply_frame(&mut self, bytes: &[u8]) -> Result<DaughterProcessStatusV1> {
         let frame = DivisionTickFrameV1::parse(bytes)?;
         let expected_sequence = self.last_sequence.saturating_add(1);
-        if frame.sequence() != expected_sequence {
-            return Err(anyhow!(
-                "tick ordering gap: expected {expected_sequence}, got {}",
-                frame.sequence()
-            ));
-        }
-        if frame.previous_hash() != self.last_frame_sha256
-            || frame.division_id() != self.bundle.division_id()
-            || frame.candidate_hash() != self.bundle.candidate_hash()
-            || frame.process_identity().trim().is_empty()
-            || frame.deployment_identity().trim().is_empty()
-        {
-            return Err(anyhow!("tick frame lineage or candidate mismatch"));
-        }
+        validate_tick_lineage(
+            &frame,
+            expected_sequence,
+            &self.last_frame_sha256,
+            self.bundle.division_id(),
+            self.bundle.candidate_hash(),
+        )?;
         let mut cross_drive = matvec_64(self.bundle.cross_recurrence(), frame.peer_state())?;
         for value in &mut cross_drive {
             *value *= frame.coupling_scale();

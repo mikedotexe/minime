@@ -4,16 +4,19 @@ pub use astrid_minime_protocol::SensoryMsg;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-use tokio::{net::TcpListener, select, time};
+use tokio::{net::TcpListener, select, sync::broadcast, time};
 use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
 
 use crate::{
+    self_control_runtime::SelfControlRuntime,
+    self_control_wire::{SelfControlReceiptStatusV2, SelfControlReceiptV2},
     sensory_bus::{
         AttractorPulseRequest, LaneIngressOutcome, NowMs, SensoryBus, ShadowInfluenceRequest,
         LLAVA_DIM,
     },
     sensory_protocol::{
-        prepare_sensory_packet, DeliveryDedupCache, PreparedSensoryPacket, SensoryServerIdentity,
+        prepare_sensory_packet, DeliveryDedupCache, InboundSensoryMessage, PreparedSensoryPacket,
+        SensoryServerIdentity,
     },
 };
 
@@ -38,9 +41,27 @@ mod tests {
 
     use super::{decode_sensory_packet, process_sensory_packet, SensoryMsg};
     use crate::{
+        self_control_runtime::SelfControlRuntime,
+        self_control_wire::canonical_json_value_sha256,
+        semantic_body_v2::{
+            SemanticBodyFidelityV2, SemanticBodyProvenanceV2, SemanticBodyV2, SemanticLaneRoleV2,
+            SEMANTIC_BODY_SCHEMA_V2,
+        },
         sensory_bus::SensoryBus,
         sensory_protocol::{DeliveryDedupCache, SensoryServerIdentity},
     };
+
+    fn disabled_runtime(
+        bus: std::sync::Arc<SensoryBus>,
+        identity: &SensoryServerIdentity,
+    ) -> SelfControlRuntime {
+        SelfControlRuntime::disabled(
+            identity.process_identity.clone(),
+            identity.deployment_identity.clone(),
+            bus,
+            "test_runtime_disabled".to_string(),
+        )
+    }
 
     #[test]
     fn attractor_pulse_message_deserializes_from_snake_case_kind() {
@@ -235,18 +256,21 @@ mod tests {
         );
         let raw = serde_json::to_string(&SensoryPacketV1::with_envelopes(message, delivery, None))
             .unwrap();
+        let runtime = disabled_runtime(bus.clone(), &identity);
 
         let first: SensoryDeliveryReceiptV1 = serde_json::from_str(
-            &process_sensory_packet(&bus, &dedup, &identity, &raw)
+            process_sensory_packet(&bus, &dedup, &identity, &runtime, &raw)
                 .unwrap()
+                .first()
                 .expect("first receipt"),
         )
         .unwrap();
         assert_eq!(first.status, SensoryDeliveryStatusV1::Accepted);
 
         let duplicate: SensoryDeliveryReceiptV1 = serde_json::from_str(
-            &process_sensory_packet(&bus, &dedup, &identity, &raw)
+            process_sensory_packet(&bus, &dedup, &identity, &runtime, &raw)
                 .unwrap()
+                .first()
                 .expect("duplicate receipt"),
         )
         .unwrap();
@@ -274,15 +298,156 @@ mod tests {
         );
         let raw = serde_json::to_string(&SensoryPacketV1::with_envelopes(message, delivery, None))
             .unwrap();
+        let runtime = disabled_runtime(bus.clone(), &identity);
 
         let receipt: SensoryDeliveryReceiptV1 = serde_json::from_str(
-            &process_sensory_packet(&bus, &dedup, &identity, &raw)
+            process_sensory_packet(&bus, &dedup, &identity, &runtime, &raw)
                 .unwrap()
+                .first()
                 .expect("partial receipt"),
         )
         .unwrap();
         assert_eq!(receipt.status, SensoryDeliveryStatusV1::PartiallyApplied);
         assert_eq!(receipt.reason.as_deref(), Some("dimension_normalized"));
+    }
+
+    fn semantic_body(companion_mix: f32) -> SemanticBodyV2 {
+        SemanticBodyV2 {
+            schema: SEMANTIC_BODY_SCHEMA_V2.to_string(),
+            body_id: "semantic-body-test".to_string(),
+            base_features_48: (0..48).map(|index| index as f32 / 100.0).collect(),
+            companion_features_12: vec![0.0; 12],
+            lane_role: SemanticLaneRoleV2::LegacyCompatible,
+            projection_basis_sha256: "a".repeat(64),
+            provenance: SemanticBodyProvenanceV2 {
+                source: "gateway-test".to_string(),
+                source_sha256: "b".repeat(64),
+                producer_process_identity: "test-producer".to_string(),
+                producer_deployment_identity: "test-deployment".to_string(),
+                introspection_id: None,
+            },
+            timestamp_unix_ms: 42,
+            fidelity: SemanticBodyFidelityV2 {
+                codec: "semantic-body-zero-mix".to_string(),
+                companion_mix,
+                base_transport_exact: true,
+                reconstruction_error: Some(0.0),
+                fidelity_note: None,
+            },
+        }
+    }
+
+    fn semantic_body_packet(delivery_id: &str, body: &SemanticBodyV2) -> String {
+        let payload: serde_json::Value = serde_json::from_slice(
+            &serde_json::to_vec(&serde_json::json!({
+                "kind": "semantic_body",
+                "body": body
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let payload_sha256 = canonical_json_value_sha256(&payload);
+        let mut packet = payload;
+        let packet_fields = packet.as_object_mut().unwrap();
+        packet_fields.insert(
+            "protocol".to_string(),
+            serde_json::json!({"name": "astrid_minime", "major": 1, "minor": 3}),
+        );
+        packet_fields.insert(
+            "delivery_v1".to_string(),
+            serde_json::json!({
+                "schema_version": 1,
+                "delivery_id": delivery_id,
+                "payload_sha256": payload_sha256,
+                "sent_at_unix_ms": 42,
+                "sender_process_identity": "test-producer",
+                "sender_deployment_identity": "test-deployment",
+            }),
+        );
+        let raw = packet.to_string();
+        let mut reparsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let reparsed_fields = reparsed.as_object_mut().unwrap();
+        reparsed_fields.remove("protocol");
+        reparsed_fields.remove("delivery_v1");
+        reparsed_fields.remove("mutual_address_v1");
+        assert_eq!(
+            canonical_json_value_sha256(&reparsed),
+            payload_sha256,
+            "test packet helper must hash exact transmitted extension bytes"
+        );
+        raw
+    }
+
+    #[test]
+    fn semantic_body_zero_mix_is_byte_exact_and_nonzero_or_malformed_is_blocked() {
+        let bus = SensoryBus::new(8, 2, 7);
+        let dedup = Mutex::new(DeliveryDedupCache::default());
+        let identity = SensoryServerIdentity {
+            process_identity: "pid:10".to_string(),
+            deployment_identity: "source:abc".to_string(),
+        };
+        let runtime = disabled_runtime(bus.clone(), &identity);
+        let body = semantic_body(0.0);
+        let exact: SensoryDeliveryReceiptV1 = serde_json::from_str(
+            process_sensory_packet(
+                &bus,
+                &dedup,
+                &identity,
+                &runtime,
+                &semantic_body_packet("semantic-exact", &body),
+            )
+            .unwrap()
+            .first()
+            .expect("exact receipt"),
+        )
+        .unwrap();
+        assert_eq!(
+            exact.status,
+            SensoryDeliveryStatusV1::Accepted,
+            "zero-mix SemanticBody rejected: {:?}",
+            exact.reason
+        );
+        assert_eq!(
+            bus.llava_embedding_snapshot().as_slice(),
+            body.base_features_48.as_slice()
+        );
+
+        let nonzero = semantic_body(0.1);
+        let blocked: SensoryDeliveryReceiptV1 = serde_json::from_str(
+            process_sensory_packet(
+                &bus,
+                &dedup,
+                &identity,
+                &runtime,
+                &semantic_body_packet("semantic-nonzero", &nonzero),
+            )
+            .unwrap()
+            .first()
+            .expect("nonzero receipt"),
+        )
+        .unwrap();
+        assert_eq!(blocked.status, SensoryDeliveryStatusV1::PolicyBlocked);
+
+        let mut malformed = semantic_body(0.0);
+        malformed.base_features_48.pop();
+        let rejected: SensoryDeliveryReceiptV1 = serde_json::from_str(
+            process_sensory_packet(
+                &bus,
+                &dedup,
+                &identity,
+                &runtime,
+                &semantic_body_packet("semantic-malformed", &malformed),
+            )
+            .unwrap()
+            .first()
+            .expect("malformed receipt"),
+        )
+        .unwrap();
+        assert_eq!(rejected.status, SensoryDeliveryStatusV1::Rejected);
+
+        let mut non_finite = semantic_body(0.0);
+        non_finite.base_features_48[0] = f32::INFINITY;
+        assert!(!non_finite.is_well_formed());
     }
 }
 
@@ -294,14 +459,68 @@ pub async fn spawn_sensory_ws_server(
     bus: Arc<SensoryBus>,
     addr: SocketAddr,
 ) -> tokio::task::JoinHandle<()> {
+    spawn_sensory_ws_server_with_runtime(bus, addr, None).await
+}
+
+async fn spawn_sensory_ws_server_with_runtime(
+    bus: Arc<SensoryBus>,
+    addr: SocketAddr,
+    runtime_override: Option<Arc<SelfControlRuntime>>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let listener = TcpListener::bind(addr)
             .await
             .expect("bind ws sensory server");
         println!("🎥 Sensory input server listening on ws://{}", addr);
         let process_started_at_ms = NowMs::now();
-        let identity = SensoryServerIdentity::current(process_started_at_ms);
+        let initial_identity = SensoryServerIdentity::current(process_started_at_ms);
         let dedup = Arc::new(Mutex::new(DeliveryDedupCache::default()));
+        let runtime = runtime_override.unwrap_or_else(|| {
+            Arc::new(
+                SelfControlRuntime::open_default(
+                    initial_identity.process_identity.clone(),
+                    initial_identity.deployment_identity.clone(),
+                    bus.clone(),
+                    process_started_at_ms,
+                )
+                .unwrap_or_else(|reason| {
+                    eprintln!("Self-control V2 unavailable: {reason}");
+                    SelfControlRuntime::disabled(
+                        initial_identity.process_identity.clone(),
+                        initial_identity.deployment_identity.clone(),
+                        bus.clone(),
+                        reason,
+                    )
+                }),
+            )
+        });
+        let identity = SensoryServerIdentity {
+            process_identity: runtime.process_identity().to_string(),
+            deployment_identity: runtime.deployment_identity().to_string(),
+        };
+        let (self_control_receipts, _) = broadcast::channel::<String>(256);
+        {
+            let runtime = runtime.clone();
+            let self_control_receipts = self_control_receipts.clone();
+            tokio::spawn(async move {
+                let mut sweep = time::interval(Duration::from_millis(250));
+                loop {
+                    sweep.tick().await;
+                    for receipt in runtime.sweep_expired(NowMs::now()) {
+                        match serialize_receipt(&receipt) {
+                            Ok(serialized) => {
+                                let _ = self_control_receipts.send(serialized);
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "Self-control expiry receipt serialization failed: {error}"
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         loop {
             let (stream, peer) = match listener.accept().await {
@@ -314,13 +533,15 @@ pub async fn spawn_sensory_ws_server(
             let bus = bus.clone();
             let identity = identity.clone();
             let dedup = dedup.clone();
+            let runtime = runtime.clone();
+            let mut self_control_receipts = self_control_receipts.subscribe();
 
             tokio::spawn(async move {
                 match accept_async(stream).await {
                     Ok(mut ws) => {
                         println!("🔗 Sensory client connected: {}", peer);
                         let mut ping_int = time::interval(Duration::from_secs(10));
-                        let hello = serde_json::to_string(&identity.hello())
+                        let hello = serde_json::to_string(&identity.hello_v1_3(runtime.is_ready()))
                             .expect("sensory server hello serializes");
                         if let Err(error) = ws.send(Message::Text(hello)).await {
                             eprintln!("Sensory hello send failed: {error}");
@@ -336,32 +557,44 @@ pub async fn spawn_sensory_ws_server(
                                         break;
                                     }
                                 }
+                                receipt = self_control_receipts.recv() => {
+                                    match receipt {
+                                        Ok(receipt) => {
+                                            if let Err(error) = ws.send(Message::Text(receipt)).await {
+                                                eprintln!("Self-control expiry receipt send failed: {error}");
+                                                break;
+                                            }
+                                        }
+                                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                            eprintln!("Self-control receipt client lagged by {skipped} messages");
+                                        }
+                                        Err(broadcast::error::RecvError::Closed) => break,
+                                    }
+                                }
                                 // incoming frames
                                 msg = ws.next() => {
                                     let Some(msg) = msg else { break };
                                     match msg {
                                         Ok(Message::Text(s)) => {
-                                            match process_sensory_packet(&bus, &dedup, &identity, &s) {
-                                                Ok(Some(receipt)) => {
+                                            match process_sensory_packet(&bus, &dedup, &identity, &runtime, &s) {
+                                                Ok(receipts) => for receipt in receipts {
                                                     if let Err(error) = ws.send(Message::Text(receipt)).await {
                                                         eprintln!("Sensory receipt send failed: {error}");
                                                         break;
                                                     }
-                                                }
-                                                Ok(None) => {}
+                                                },
                                                 Err(error) => eprintln!("Sensory packet rejected: {error}"),
                                             }
                                         }
                                         Ok(Message::Binary(b)) => {
                                             if let Ok(s) = std::str::from_utf8(&b) {
-                                                match process_sensory_packet(&bus, &dedup, &identity, s) {
-                                                    Ok(Some(receipt)) => {
+                                                match process_sensory_packet(&bus, &dedup, &identity, &runtime, s) {
+                                                    Ok(receipts) => for receipt in receipts {
                                                         if let Err(error) = ws.send(Message::Text(receipt)).await {
                                                             eprintln!("Sensory receipt send failed: {error}");
                                                             break;
                                                         }
-                                                    }
-                                                    Ok(None) => {}
+                                                    },
                                                     Err(error) => eprintln!("Sensory packet rejected: {error}"),
                                                 }
                                             }
@@ -396,29 +629,118 @@ fn process_sensory_packet(
     bus: &SensoryBus,
     dedup: &Mutex<DeliveryDedupCache>,
     identity: &SensoryServerIdentity,
+    runtime: &SelfControlRuntime,
     raw: &str,
-) -> Result<Option<String>, String> {
+) -> Result<Vec<String>, String> {
     let now_ms = NowMs::now();
     let prepared = prepare_sensory_packet(raw, &mut dedup.lock(), identity, now_ms)?;
-    let receipt = match prepared {
+    let mut replies = Vec::new();
+    match prepared {
         PreparedSensoryPacket::Route { message, receipt } => {
-            let outcome = route_msg(bus, *message);
-            receipt.map(|receipt| {
-                receipt.finish(
-                    outcome.status,
-                    outcome.reason.map(str::to_string),
+            let dispatch = route_inbound(bus, runtime, *message, now_ms)?;
+            if let Some(receipt) = receipt {
+                replies.push(serialize_receipt(&receipt.finish(
+                    dispatch.outcome.status,
+                    dispatch.outcome.reason.map(str::to_string),
                     Some(NowMs::now()),
-                )
+                ))?);
+            }
+            replies.extend(dispatch.additional_receipts);
+        }
+        PreparedSensoryPacket::Reply(receipt) => {
+            replies.push(serialize_receipt(&receipt)?);
+        }
+    }
+    Ok(replies)
+}
+
+fn serialize_receipt<T: serde::Serialize>(receipt: &T) -> Result<String, String> {
+    serde_json::to_string(receipt)
+        .map_err(|error| format!("sensory receipt serialization failed: {error}"))
+}
+
+struct InboundDispatch {
+    outcome: RouteOutcome,
+    additional_receipts: Vec<String>,
+}
+
+fn route_inbound(
+    bus: &SensoryBus,
+    runtime: &SelfControlRuntime,
+    message: InboundSensoryMessage,
+    now_ms: u64,
+) -> Result<InboundDispatch, String> {
+    match message {
+        InboundSensoryMessage::Legacy(message) => Ok(InboundDispatch {
+            outcome: route_msg(
+                bus,
+                *message,
+                runtime.semantic_controls().effective_base_gain(),
+            ),
+            additional_receipts: Vec::new(),
+        }),
+        InboundSensoryMessage::SemanticBody(body) => Ok(InboundDispatch {
+            outcome: route_semantic_body(bus, runtime, &body),
+            additional_receipts: Vec::new(),
+        }),
+        InboundSensoryMessage::SelfControl(command) => {
+            let receipt = runtime.process(&command, now_ms);
+            let outcome = self_control_route_outcome(&receipt);
+            Ok(InboundDispatch {
+                outcome,
+                additional_receipts: vec![serialize_receipt(&receipt)?],
             })
         }
-        PreparedSensoryPacket::Reply(receipt) => Some(receipt),
-    };
-    receipt
-        .map(|receipt| {
-            serde_json::to_string(&receipt)
-                .map_err(|error| format!("sensory receipt serialization failed: {error}"))
-        })
-        .transpose()
+    }
+}
+
+fn route_semantic_body(
+    bus: &SensoryBus,
+    runtime: &SelfControlRuntime,
+    body: &crate::semantic_body_v2::SemanticBodyV2,
+) -> RouteOutcome {
+    if !body.is_well_formed() {
+        return RouteOutcome::rejected("malformed_semantic_body_v2");
+    }
+    if !body.fidelity.base_transport_exact {
+        return RouteOutcome::policy_blocked("semantic_body_base_transport_not_exact");
+    }
+    let controls = runtime.semantic_controls();
+    if body.fidelity.companion_mix != 0.0 || controls.companion_mix != 0.0 {
+        return RouteOutcome::policy_blocked("semantic_companion_nonzero_requires_parity");
+    }
+    let gain = controls.effective_base_gain();
+    if gain == 1.0 {
+        bus.set_llava_embedding(&body.base_features_48);
+    } else {
+        let scaled = body
+            .base_features_48
+            .iter()
+            .map(|value| value * gain)
+            .collect::<Vec<_>>();
+        bus.set_llava_embedding(&scaled);
+    }
+    RouteOutcome::ACCEPTED
+}
+
+fn self_control_route_outcome(receipt: &SelfControlReceiptV2) -> RouteOutcome {
+    match receipt.status {
+        SelfControlReceiptStatusV2::Applied
+        | SelfControlReceiptStatusV2::Withdrawn
+        | SelfControlReceiptStatusV2::SafetyHeld
+        | SelfControlReceiptStatusV2::RolledBack => RouteOutcome::ACCEPTED,
+        SelfControlReceiptStatusV2::Duplicate => RouteOutcome {
+            status: SensoryDeliveryStatusV1::Duplicate,
+            reason: Some("self_control_idempotent_replay"),
+        },
+        SelfControlReceiptStatusV2::RevisionConflict => {
+            RouteOutcome::rejected("self_control_revision_conflict")
+        }
+        SelfControlReceiptStatusV2::Expired => RouteOutcome::rejected("self_control_expired"),
+        SelfControlReceiptStatusV2::Rejected => {
+            RouteOutcome::policy_blocked("self_control_rejected")
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -467,7 +789,7 @@ fn lane_route_outcome(outcome: LaneIngressOutcome) -> RouteOutcome {
     }
 }
 
-fn route_msg(bus: &SensoryBus, m: SensoryMsg) -> RouteOutcome {
+fn route_msg(bus: &SensoryBus, m: SensoryMsg, semantic_base_gain: f32) -> RouteOutcome {
     match m {
         SensoryMsg::Division { command } => {
             if crate::division::division_rehearsal_enabled() {
@@ -498,7 +820,15 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg) -> RouteOutcome {
         }
         SensoryMsg::Semantic { features, ts_ms: _ } => {
             let exact_dimensions = features.len() == LLAVA_DIM;
-            bus.set_llava_embedding(&features);
+            if semantic_base_gain == 1.0 {
+                bus.set_llava_embedding(&features);
+            } else {
+                let scaled = features
+                    .iter()
+                    .map(|value| value * semantic_base_gain)
+                    .collect::<Vec<_>>();
+                bus.set_llava_embedding(&scaled);
+            }
             if exact_dimensions {
                 RouteOutcome::ACCEPTED
             } else {

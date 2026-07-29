@@ -13,6 +13,8 @@ division-rehearsal = []
 [dependencies]
 anyhow = "1"
 astrid-minime-protocol = { git = "https://github.com/mikedotexe/astrid.git", rev = "9a324d16294b2318da6f476ff7f295c423a9b4b1" }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+hex = "0.4"
 metal = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

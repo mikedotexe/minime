@@ -152,6 +152,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: DivisionCmd,
     },
+    /// Provision and exercise Minime-owned authenticated live controls.
+    SelfControl {
+        #[command(subcommand)]
+        cmd: SelfControlCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -174,6 +179,116 @@ enum DivisionCmd {
         bundle: std::path::PathBuf,
         #[arg(long)]
         workspace: std::path::PathBuf,
+    },
+    /// Run the deterministic, offline Division continuity proof campaign.
+    Prove {
+        #[arg(long)]
+        output: std::path::PathBuf,
+    },
+    /// Verify an owner-only Division continuity proof against current source.
+    VerifyProof {
+        #[arg(long)]
+        proof: std::path::PathBuf,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SelfControlFamilyArg {
+    Memory,
+    SensoryIntake,
+    ReservoirRegulation,
+    ReservoirGeometry,
+    PiController,
+    LocalTopology,
+}
+
+impl From<SelfControlFamilyArg> for crate::self_control_wire::SelfControlFamilyV2 {
+    fn from(value: SelfControlFamilyArg) -> Self {
+        use crate::self_control_wire::SelfControlFamilyV2;
+        match value {
+            SelfControlFamilyArg::Memory => SelfControlFamilyV2::Memory,
+            SelfControlFamilyArg::SensoryIntake => SelfControlFamilyV2::SensoryIntake,
+            SelfControlFamilyArg::ReservoirRegulation => {
+                SelfControlFamilyV2::ReservoirRegulation
+            }
+            SelfControlFamilyArg::ReservoirGeometry => SelfControlFamilyV2::ReservoirGeometry,
+            SelfControlFamilyArg::PiController => SelfControlFamilyV2::PiController,
+            SelfControlFamilyArg::LocalTopology => SelfControlFamilyV2::LocalTopology,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SelfControlDurabilityArg {
+    Standing,
+    Lease,
+    OneShot,
+}
+
+impl From<SelfControlDurabilityArg> for crate::self_control_wire::SelfControlDurabilityV2 {
+    fn from(value: SelfControlDurabilityArg) -> Self {
+        use crate::self_control_wire::SelfControlDurabilityV2;
+        match value {
+            SelfControlDurabilityArg::Standing => SelfControlDurabilityV2::Standing,
+            SelfControlDurabilityArg::Lease => SelfControlDurabilityV2::Lease,
+            SelfControlDurabilityArg::OneShot => SelfControlDurabilityV2::OneShot,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum SelfControlCmd {
+    /// Read the hash-verified owner identity, active leases, and recent receipts.
+    Status {
+        #[arg(long)]
+        root: Option<std::path::PathBuf>,
+    },
+    /// Create or explicitly rotate Minime's owner key and pin it in the local trust store.
+    Provision {
+        #[arg(long)]
+        root: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = false)]
+        rotate: bool,
+    },
+    /// Issue a signed self-owned setting, lease, or one-shot action.
+    Issue {
+        #[arg(long)]
+        root: Option<std::path::PathBuf>,
+        #[arg(long, default_value = "ws://127.0.0.1:7879")]
+        sensory_url: String,
+        #[arg(long, value_enum)]
+        family: SelfControlFamilyArg,
+        #[arg(long, value_enum, default_value_t = SelfControlDurabilityArg::Lease)]
+        durability: SelfControlDurabilityArg,
+        #[arg(long)]
+        values_json: String,
+        #[arg(long, default_value_t = 120)]
+        lease_secs: u64,
+        #[arg(long, default_value_t = 0)]
+        expected_revision: u64,
+        #[arg(long)]
+        actor_process_identity: Option<String>,
+        #[arg(long)]
+        evidence_ref: Vec<String>,
+        #[arg(long)]
+        success_condition: Vec<String>,
+        #[arg(long)]
+        stop_condition: Vec<String>,
+    },
+    /// Immediately withdraw one active Minime-owned control family.
+    Withdraw {
+        #[arg(long)]
+        root: Option<std::path::PathBuf>,
+        #[arg(long, default_value = "ws://127.0.0.1:7879")]
+        sensory_url: String,
+        #[arg(long, value_enum)]
+        family: SelfControlFamilyArg,
+        #[arg(long)]
+        related_intent_id: String,
+        #[arg(long, default_value_t = 0)]
+        expected_revision: u64,
+        #[arg(long)]
+        actor_process_identity: Option<String>,
     },
 }
 

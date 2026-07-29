@@ -8,8 +8,19 @@ use tokio::{
 };
 
 use crate::sovereign_division::records::{
-    now_unix_ms, write_owner_json, DivisionRuntimeManifestV1,
+    now_unix_ms, sha256_hex, write_owner_json, DivisionRuntimeManifestV1,
 };
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct GatewayByteExactProofMetricsV1 {
+    pub payload_count: u64,
+    pub payload_bytes: u64,
+    pub source_sha256: String,
+    pub echoed_sha256: String,
+    pub byte_exact: bool,
+    pub latency_bound_micros: u64,
+    pub p95_within_bound: bool,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -146,6 +157,81 @@ async fn proxy_connection(mut inbound: TcpStream, target: SocketAddr) -> Result<
     Ok(())
 }
 
+#[cfg(feature = "division-rehearsal")]
+pub(crate) async fn run_gateway_byte_exact_proof() -> Result<GatewayByteExactProofMetricsV1> {
+    use std::time::Instant;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const PAYLOAD_COUNT: usize = 257;
+    let backend = TcpListener::bind("127.0.0.1:0").await?;
+    let backend_addr = backend.local_addr()?;
+    let backend_task = tokio::spawn(async move {
+        let (mut stream, _) = backend.accept().await?;
+        for _ in 0..PAYLOAD_COUNT {
+            let length = usize::try_from(stream.read_u32().await?)?;
+            if length == 0 || length > 8192 {
+                return Err(anyhow!("gateway proof payload exceeded bound"));
+            }
+            let mut payload = vec![0_u8; length];
+            stream.read_exact(&mut payload).await?;
+            stream.write_u32(u32::try_from(length)?).await?;
+            stream.write_all(&payload).await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    let gateway = TcpListener::bind("127.0.0.1:0").await?;
+    let gateway_addr = gateway.local_addr()?;
+    let gateway_task = tokio::spawn(async move {
+        let (stream, _) = gateway.accept().await?;
+        proxy_connection(stream, backend_addr).await
+    });
+    let mut client = TcpStream::connect(gateway_addr).await?;
+    client.set_nodelay(true)?;
+    let mut source_bytes = Vec::new();
+    let mut echoed_bytes = Vec::new();
+    let mut samples = Vec::with_capacity(PAYLOAD_COUNT);
+    for index in 0..PAYLOAD_COUNT {
+        let length = 1 + ((index * 193) % 8192);
+        let payload: Vec<u8> = (0..length)
+            .map(|offset| {
+                let value = (index as u64)
+                    .wrapping_mul(0x9e37_79b9)
+                    .wrapping_add(offset as u64)
+                    .rotate_left(u32::try_from(offset % 63).unwrap_or(0));
+                value.to_le_bytes()[offset % 8]
+            })
+            .collect();
+        let started = Instant::now();
+        client.write_u32(u32::try_from(length)?).await?;
+        client.write_all(&payload).await?;
+        let echoed_length = usize::try_from(client.read_u32().await?)?;
+        let mut echoed = vec![0_u8; echoed_length];
+        client.read_exact(&mut echoed).await?;
+        samples.push(started.elapsed());
+        source_bytes.extend_from_slice(&payload);
+        echoed_bytes.extend_from_slice(&echoed);
+        if echoed != payload {
+            return Err(anyhow!("gateway proof observed byte drift"));
+        }
+    }
+    drop(client);
+    backend_task.await??;
+    gateway_task.await??;
+    samples.sort_unstable();
+    let p95_index = PAYLOAD_COUNT.saturating_mul(95).saturating_sub(1) / 100;
+    let p95_micros = u64::try_from(samples[p95_index].as_micros()).unwrap_or(u64::MAX);
+    let latency_bound_micros = 5_000;
+    Ok(GatewayByteExactProofMetricsV1 {
+        payload_count: u64::try_from(PAYLOAD_COUNT)?,
+        payload_bytes: u64::try_from(source_bytes.len())?,
+        source_sha256: sha256_hex(&source_bytes),
+        echoed_sha256: sha256_hex(&echoed_bytes),
+        byte_exact: source_bytes == echoed_bytes,
+        latency_bound_micros,
+        p95_within_bound: p95_micros <= latency_bound_micros,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +296,16 @@ mod tests {
         drop(client);
         backend_task.await.unwrap();
         gateway_task.await.unwrap();
+    }
+
+    #[cfg(feature = "division-rehearsal")]
+    #[tokio::test]
+    async fn varied_payload_gateway_proof_is_byte_exact() {
+        let proof = run_gateway_byte_exact_proof().await.unwrap();
+        assert_eq!(proof.payload_count, 257);
+        assert!(proof.payload_bytes > 1_000_000);
+        assert_eq!(proof.source_sha256, proof.echoed_sha256);
+        assert!(proof.byte_exact);
+        assert!(proof.p95_within_bound);
     }
 }

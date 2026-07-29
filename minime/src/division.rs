@@ -1986,6 +1986,116 @@ fn reconstruct(
     output
 }
 
+#[cfg(feature = "division-rehearsal")]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct DivisionParityProofMetricsV1 {
+    pub ticks: u64,
+    pub max_abs: f64,
+    pub restore_trials: u64,
+    pub restore_max_abs: f64,
+    pub final_state_sha256: String,
+}
+
+/// Exercise the exact parent/daughter recurrence without sensory-field review
+/// work so a long parity proof remains bounded and reproducible.
+#[cfg(feature = "division-rehearsal")]
+pub(crate) fn run_offline_division_parity_proof(
+    ticks: u64,
+    restore_trials: u64,
+) -> Result<DivisionParityProofMetricsV1> {
+    if ticks < 2 || restore_trials == 0 || restore_trials >= ticks {
+        return Err(anyhow!("invalid Division parity proof bounds"));
+    }
+    let gpu = Gpu::new()?;
+    let mut constructor_rng = fastrand::Rng::with_seed(0x44_49_56_50_41_52_49_54);
+    let mut parent = ESN::new(
+        128,
+        512,
+        0.20,
+        0.10,
+        0.95,
+        0.35,
+        0.999,
+        &gpu,
+        &mut constructor_rng,
+    )?;
+    let warm = vec![0.001_f32; 512];
+    for _ in 0..4 {
+        parent.step(&warm)?;
+    }
+    let parent_seed = parent.snapshot_v2()?;
+    let (minime_indices, astrid_indices) =
+        partition_indices(&parent_seed, PartitionStrategy::InputRecurrence);
+    let minime_snapshot = daughter_snapshot(&parent_seed, &minime_indices, 0x4d49_4e49_4d45)?;
+    let astrid_snapshot = daughter_snapshot(&parent_seed, &astrid_indices, 0x4153_5452_4944)?;
+    let minime_cross = cross_block(&parent_seed.wres, 128, &minime_indices, &astrid_indices);
+    let astrid_cross = cross_block(&parent_seed.wres, 128, &astrid_indices, &minime_indices);
+    let mut minime = ESN::from_snapshot_v2(&minime_snapshot, &gpu)?;
+    let mut astrid = ESN::from_snapshot_v2(&astrid_snapshot, &gpu)?;
+
+    let mut restore_rng = fastrand::Rng::with_seed(0x43_4f_4c_44_52_53_54_52);
+    let mut restore_ticks = std::collections::BTreeSet::new();
+    while restore_ticks.len() < usize::try_from(restore_trials)? {
+        restore_ticks.insert(restore_rng.u64(1..ticks));
+    }
+
+    let mut max_abs = 0.0_f64;
+    let mut restore_max_abs = 0.0_f64;
+    for tick in 1..=ticks {
+        let minime_previous = minime.x.clone();
+        let astrid_previous = astrid.x.clone();
+        let input: Vec<f32> = (0..512)
+            .map(|index| ((index as f32 * 0.013) + tick as f32 * 0.007).sin() * 0.01)
+            .collect();
+        parent.step(&input)?;
+        let trace = parent.last_step_trace().clone();
+        let minime_drive = matvec(&minime_cross, 64, &astrid_previous);
+        let astrid_drive = matvec(&astrid_cross, 64, &minime_previous);
+        minime.step_shadow(
+            &input,
+            &minime_drive,
+            &select(&trace.noise, &minime_indices),
+            trace.leak,
+        )?;
+        astrid.step_shadow(
+            &input,
+            &astrid_drive,
+            &select(&trace.noise, &astrid_indices),
+            trace.leak,
+        )?;
+        let combined = reconstruct(128, &minime_indices, &minime.x, &astrid_indices, &astrid.x);
+        max_abs = max_abs.max(max_abs_difference(&parent.x, &combined));
+
+        if restore_ticks.contains(&tick) {
+            let parent_before = parent.x.clone();
+            let minime_before = minime.x.clone();
+            let astrid_before = astrid.x.clone();
+            let parent_checkpoint = parent.snapshot_v2()?;
+            let minime_checkpoint = minime.snapshot_v2()?;
+            let astrid_checkpoint = astrid.snapshot_v2()?;
+            parent = ESN::from_snapshot_v2(&parent_checkpoint, &gpu)?;
+            minime = ESN::from_snapshot_v2(&minime_checkpoint, &gpu)?;
+            astrid = ESN::from_snapshot_v2(&astrid_checkpoint, &gpu)?;
+            restore_max_abs = restore_max_abs
+                .max(max_abs_difference(&parent_before, &parent.x))
+                .max(max_abs_difference(&minime_before, &minime.x))
+                .max(max_abs_difference(&astrid_before, &astrid.x));
+        }
+    }
+    let combined = reconstruct(128, &minime_indices, &minime.x, &astrid_indices, &astrid.x);
+    let mut final_bytes = Vec::with_capacity(combined.len() * size_of::<f32>());
+    for value in combined {
+        final_bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    Ok(DivisionParityProofMetricsV1 {
+        ticks,
+        max_abs,
+        restore_trials,
+        restore_max_abs,
+        final_state_sha256: hex_sha256(&final_bytes),
+    })
+}
+
 fn covariance_partition_loss(
     covariance: &[f32],
     dimension: usize,

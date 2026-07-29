@@ -593,8 +593,10 @@ async fn run_engine(
 
     // Checkpoint counter (save every 60 updates)
     let mut updates_since_checkpoint = 0u32;
+    let mut last_spectral_checkpoint_secs = 0.0f64;
 
-    // Initialize spectral regulator (PD control + content gating)
+    // Initialize the modality-throughput regulator. This PD rate/gate role
+    // remains active alongside the separate PI fill/filter controller below.
     let rate_cfg = RateCfg::default(); // target_lambda=φ, k_p=0.15, k_d=0.25
     let gate_cfg = GateCfg::default(); // proj thresholds, hysteresis
 
@@ -4946,7 +4948,7 @@ async fn run_engine(
             }
             */
 
-            // Periodic checkpoint saving (every 60 updates)
+            // Neural checkpoints retain their historical 60-update cadence.
             updates_since_checkpoint += 1;
             if updates_since_checkpoint >= 60 {
                 if let Some(ref cell) = neuro_cell {
@@ -4971,11 +4973,17 @@ async fn run_engine(
                     println!("   💾 Checkpoint saved");
                 }
                 updates_since_checkpoint = 0;
+            }
 
-                // Spectral checkpoint — being-designed memory system.
-                // Saves eigenvalue fingerprint at the being's chosen interval.
-                // If the being starred this moment, include the annotation.
-                let _ckpt_interval = sensory_bus.get_checkpoint_interval();
+            // Spectral checkpoints honor the being-owned interval and a
+            // one-shot authenticated checkpoint request independently of the
+            // neural-weight cadence.
+            let checkpoint_interval =
+                f64::from(sensory_bus.get_checkpoint_interval().clamp(10.0, 600.0));
+            let checkpoint_requested = sensory_bus.take_checkpoint_request();
+            let periodic_checkpoint_due =
+                timestamp_secs - last_spectral_checkpoint_secs >= checkpoint_interval;
+            if checkpoint_requested || periodic_checkpoint_due {
                 let annotation = sensory_bus.take_pending_annotation();
                 if annotation.is_some() {
                     eprintln!(
@@ -4993,6 +5001,7 @@ async fn run_engine(
                     sensory_bus.get_regulation_strength(),
                     annotation.as_deref(),
                 );
+                last_spectral_checkpoint_secs = timestamp_secs;
             }
 
             // Compute 32D spectral fingerprint for consciousness bridge.

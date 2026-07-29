@@ -4,8 +4,14 @@ use std::{
 };
 
 use astrid_minime_protocol::{
-    DeliveryEnvelopeV1, SensoryDeliveryReceiptV1, SensoryDeliveryStatusV1, SensoryMsg,
-    SensoryPacketV1, SensoryServerHelloV1,
+    DeliveryEnvelopeV1, MutualAddressEnvelopeV1, ProtocolHeaderV1, SensoryDeliveryReceiptV1,
+    SensoryDeliveryStatusV1, SensoryMsg, SensoryPacketV1, SensoryServerHelloV1,
+};
+use serde_json::Value;
+
+use crate::{
+    self_control_wire::{canonical_json_value_sha256, SelfControlCommandV2},
+    semantic_body_v2::SemanticBodyV2,
 };
 
 pub const DELIVERY_DEDUP_CAPACITY: usize = 4_096;
@@ -38,6 +44,31 @@ impl SensoryServerIdentity {
             self.process_identity.clone(),
             self.deployment_identity.clone(),
         )
+    }
+
+    #[must_use]
+    pub fn hello_v1_3(&self, self_control_ready: bool) -> Value {
+        let mut hello = serde_json::to_value(self.hello()).unwrap_or(Value::Null);
+        if let Some(protocol) = hello.get_mut("protocol").and_then(Value::as_object_mut) {
+            protocol.insert("minor".to_string(), Value::from(3));
+        }
+        if let Some(capabilities) = hello.get_mut("capabilities").and_then(Value::as_array_mut) {
+            push_capability(capabilities, "semantic_body_v2");
+            if self_control_ready {
+                push_capability(capabilities, "self_control_command_v2");
+                push_capability(capabilities, "self_control_receipt_v2");
+            }
+        }
+        hello
+    }
+}
+
+fn push_capability(capabilities: &mut Vec<Value>, capability: &str) {
+    if !capabilities
+        .iter()
+        .any(|value| value.as_str() == Some(capability))
+    {
+        capabilities.push(Value::String(capability.to_string()));
     }
 }
 
@@ -77,7 +108,6 @@ impl DeliveryDedupCache {
         if self.ids.contains(delivery_id) {
             return true;
         }
-
         let delivery_id = delivery_id.to_string();
         self.ids.insert(delivery_id.clone());
         self.entries.push_back(DedupEntry {
@@ -134,9 +164,16 @@ impl ReceiptContext {
 }
 
 #[derive(Debug)]
+pub enum InboundSensoryMessage {
+    Legacy(Box<SensoryMsg>),
+    SemanticBody(Box<SemanticBodyV2>),
+    SelfControl(Box<SelfControlCommandV2>),
+}
+
+#[derive(Debug)]
 pub enum PreparedSensoryPacket {
     Route {
-        message: Box<SensoryMsg>,
+        message: Box<InboundSensoryMessage>,
         receipt: Option<ReceiptContext>,
     },
     Reply(SensoryDeliveryReceiptV1),
@@ -148,8 +185,18 @@ pub fn prepare_sensory_packet(
     identity: &SensoryServerIdentity,
     now_ms: u64,
 ) -> Result<PreparedSensoryPacket, String> {
-    let packet: SensoryPacketV1 =
+    let value: Value =
         serde_json::from_str(raw).map_err(|error| format!("invalid sensory packet: {error}"))?;
+    if value
+        .get("kind")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| matches!(kind, "semantic_body" | "self_control"))
+    {
+        return prepare_v1_3_extension(value, dedup, identity, now_ms);
+    }
+
+    let packet: SensoryPacketV1 = serde_json::from_value(value)
+        .map_err(|error| format!("invalid sensory packet: {error}"))?;
     let compatibility = packet.compatibility();
     if !compatibility.is_compatible() {
         return rejected_or_error(
@@ -169,7 +216,7 @@ pub fn prepare_sensory_packet(
             return Err("protocol 1.1 sensory packet omitted delivery_v1".to_string());
         }
         return Ok(PreparedSensoryPacket::Route {
-            message: Box::new(packet.message),
+            message: Box::new(InboundSensoryMessage::Legacy(Box::new(packet.message))),
             receipt: None,
         });
     };
@@ -194,7 +241,6 @@ pub fn prepare_sensory_packet(
             }),
         )));
     }
-
     if packet
         .mutual_address_v1
         .as_ref()
@@ -226,9 +272,8 @@ pub fn prepare_sensory_packet(
             Some("deduplication_window".to_string()),
         )));
     }
-
     Ok(PreparedSensoryPacket::Route {
-        message: Box::new(packet.message),
+        message: Box::new(InboundSensoryMessage::Legacy(Box::new(packet.message))),
         receipt: Some(ReceiptContext {
             delivery,
             mutual_address_id,
@@ -236,6 +281,183 @@ pub fn prepare_sensory_packet(
             identity: identity.clone(),
         }),
     })
+}
+
+fn prepare_v1_3_extension(
+    mut value: Value,
+    dedup: &mut DeliveryDedupCache,
+    identity: &SensoryServerIdentity,
+    now_ms: u64,
+) -> Result<PreparedSensoryPacket, String> {
+    let protocol = value
+        .get("protocol")
+        .cloned()
+        .map(serde_json::from_value::<ProtocolHeaderV1>)
+        .transpose()
+        .map_err(|error| format!("invalid protocol header: {error}"))?;
+    let delivery = value
+        .get("delivery_v1")
+        .cloned()
+        .map(serde_json::from_value::<DeliveryEnvelopeV1>)
+        .transpose()
+        .map_err(|error| format!("invalid delivery_v1: {error}"))?;
+    let mutual = value
+        .get("mutual_address_v1")
+        .cloned()
+        .map(serde_json::from_value::<MutualAddressEnvelopeV1>)
+        .transpose()
+        .map_err(|error| format!("invalid mutual_address_v1: {error}"))?;
+
+    let protocol_valid = protocol.as_ref().is_some_and(|protocol| {
+        protocol.name == "astrid_minime" && protocol.major == 1 && protocol.minor >= 3
+    });
+    if !protocol_valid {
+        return extension_rejected_or_error(
+            delivery,
+            mutual,
+            identity,
+            now_ms,
+            "self-control and SemanticBody require protocol 1.3".to_string(),
+        );
+    }
+    let Some(delivery) = delivery else {
+        return Err("protocol 1.3 extension omitted delivery_v1".to_string());
+    };
+    let mutual_address_id = mutual.as_ref().map(|address| address.address_id.clone());
+    if mutual
+        .as_ref()
+        .is_some_and(|address| !address.is_exact_lineage())
+    {
+        return Ok(PreparedSensoryPacket::Reply(receipt(
+            identity,
+            &delivery,
+            SensoryDeliveryStatusV1::Rejected,
+            now_ms,
+            None,
+            mutual_address_id,
+            Some("invalid_mutual_address_lineage".to_string()),
+        )));
+    }
+
+    let invalid_sender = delivery.schema_version != 1
+        || delivery.delivery_id.trim().is_empty()
+        || delivery.delivery_id.len() > 256
+        || delivery.sender_process_identity.trim().is_empty()
+        || delivery.sender_deployment_identity.trim().is_empty()
+        || !valid_sha256(&delivery.payload_sha256);
+    let Some(payload) = extension_payload(&mut value) else {
+        return Ok(PreparedSensoryPacket::Reply(receipt(
+            identity,
+            &delivery,
+            SensoryDeliveryStatusV1::Rejected,
+            now_ms,
+            None,
+            mutual_address_id,
+            Some("extension_payload_not_object".to_string()),
+        )));
+    };
+    let payload_matches =
+        delivery.payload_sha256 == canonical_json_value_sha256(&Value::Object(payload.clone()));
+    if invalid_sender || !payload_matches {
+        return Ok(PreparedSensoryPacket::Reply(receipt(
+            identity,
+            &delivery,
+            SensoryDeliveryStatusV1::Rejected,
+            now_ms,
+            None,
+            mutual_address_id,
+            Some(if invalid_sender {
+                "invalid_sender_identity".to_string()
+            } else {
+                "payload_sha256_mismatch".to_string()
+            }),
+        )));
+    }
+
+    let parsed = match payload.get("kind").and_then(Value::as_str) {
+        Some("semantic_body") => payload
+            .get("body")
+            .cloned()
+            .ok_or_else(|| "semantic_body omitted body".to_string())
+            .and_then(|body| {
+                serde_json::from_value::<SemanticBodyV2>(body)
+                    .map(|body| InboundSensoryMessage::SemanticBody(Box::new(body)))
+                    .map_err(|error| format!("invalid SemanticBodyV2: {error}"))
+            }),
+        Some("self_control") => payload
+            .get("command")
+            .cloned()
+            .ok_or_else(|| "self_control omitted command".to_string())
+            .and_then(|command| {
+                serde_json::from_value::<SelfControlCommandV2>(command)
+                    .map(|command| InboundSensoryMessage::SelfControl(Box::new(command)))
+                    .map_err(|error| format!("invalid SelfControlCommandV2: {error}"))
+            }),
+        _ => Err("unsupported protocol 1.3 extension kind".to_string()),
+    };
+    let message = match parsed {
+        Ok(message) => message,
+        Err(reason) => {
+            return Ok(PreparedSensoryPacket::Reply(receipt(
+                identity,
+                &delivery,
+                SensoryDeliveryStatusV1::Rejected,
+                now_ms,
+                None,
+                mutual_address_id,
+                Some(reason),
+            )));
+        }
+    };
+    if dedup.observe(&delivery.delivery_id, now_ms) {
+        return Ok(PreparedSensoryPacket::Reply(receipt(
+            identity,
+            &delivery,
+            SensoryDeliveryStatusV1::Duplicate,
+            now_ms,
+            None,
+            mutual_address_id,
+            Some("deduplication_window".to_string()),
+        )));
+    }
+    Ok(PreparedSensoryPacket::Route {
+        message: Box::new(message),
+        receipt: Some(ReceiptContext {
+            delivery,
+            mutual_address_id,
+            received_at_ms: now_ms,
+            identity: identity.clone(),
+        }),
+    })
+}
+
+fn extension_payload(value: &mut Value) -> Option<&mut serde_json::Map<String, Value>> {
+    let payload = value.as_object_mut()?;
+    payload.remove("protocol");
+    payload.remove("delivery_v1");
+    payload.remove("mutual_address_v1");
+    Some(payload)
+}
+
+fn extension_rejected_or_error(
+    delivery: Option<DeliveryEnvelopeV1>,
+    mutual: Option<MutualAddressEnvelopeV1>,
+    identity: &SensoryServerIdentity,
+    now_ms: u64,
+    reason: String,
+) -> Result<PreparedSensoryPacket, String> {
+    let Some(delivery) = delivery else {
+        return Err(reason);
+    };
+    Ok(PreparedSensoryPacket::Reply(receipt(
+        identity,
+        &delivery,
+        SensoryDeliveryStatusV1::Rejected,
+        now_ms,
+        None,
+        mutual.map(|address| address.address_id),
+        Some(reason),
+    )))
 }
 
 fn rejected_or_error(
@@ -282,14 +504,23 @@ fn receipt(
     )
 }
 
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 #[cfg(test)]
 mod tests {
     use astrid_minime_protocol::{
         DeliveryEnvelopeV1, SensoryDeliveryStatusV1, SensoryMsg, SensoryPacketV1,
     };
+    use serde_json::Value;
 
     use super::{
-        prepare_sensory_packet, DeliveryDedupCache, PreparedSensoryPacket, SensoryServerIdentity,
+        prepare_sensory_packet, DeliveryDedupCache, InboundSensoryMessage, PreparedSensoryPacket,
+        SensoryServerIdentity,
     };
 
     fn identity() -> SensoryServerIdentity {
@@ -331,7 +562,8 @@ mod tests {
         let mut dedup = DeliveryDedupCache::default();
         assert!(matches!(
             prepare_sensory_packet(&raw, &mut dedup, &identity(), 100).unwrap(),
-            PreparedSensoryPacket::Route { .. }
+            PreparedSensoryPacket::Route { message, .. }
+                if matches!(*message, InboundSensoryMessage::Legacy(_))
         ));
         let PreparedSensoryPacket::Reply(receipt) =
             prepare_sensory_packet(&raw, &mut dedup, &identity(), 101).unwrap()
@@ -344,8 +576,7 @@ mod tests {
 
     #[test]
     fn hash_mismatch_is_rejected_without_route() {
-        let mut value: serde_json::Value =
-            serde_json::from_str(&packet("delivery-2", vec![0.1; 48])).unwrap();
+        let mut value: Value = serde_json::from_str(&packet("delivery-2", vec![0.1; 48])).unwrap();
         value["features"][0] = serde_json::json!(0.2);
         let raw = serde_json::to_string(&value).unwrap();
         let PreparedSensoryPacket::Reply(receipt) =
@@ -382,5 +613,27 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("omitted delivery_v1"));
+    }
+
+    #[test]
+    fn hello_discloses_extensions_only_when_control_is_ready() {
+        let not_ready = identity().hello_v1_3(false);
+        let ready = identity().hello_v1_3(true);
+        assert_eq!(not_ready["protocol"]["minor"], 3);
+        assert!(not_ready["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "semantic_body_v2"));
+        assert!(!not_ready["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "self_control_command_v2"));
+        assert!(ready["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "self_control_receipt_v2"));
     }
 }

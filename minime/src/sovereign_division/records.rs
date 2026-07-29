@@ -160,16 +160,7 @@ impl DivisionRuntimeManifestV1 {
         {
             return Err(anyhow!("invalid division runtime manifest identity"));
         }
-        if wire.minime_root == wire.astrid_root
-            || path_is_within(&wire.minime_root, &wire.runtime_dir)
-            || path_is_within(&wire.astrid_root, &wire.runtime_dir)
-            || path_is_within(&wire.runtime_dir, &wire.minime_root)
-            || path_is_within(&wire.runtime_dir, &wire.astrid_root)
-        {
-            return Err(anyhow!(
-                "daughter roots and supervisor runtime must be disjoint"
-            ));
-        }
+        validate_runtime_roots(&wire.runtime_dir, &wire.minime_root, &wire.astrid_root)?;
         wire.endpoints.validate()?;
         Ok(Self {
             wire,
@@ -553,6 +544,30 @@ impl DivisionTickFrameV1 {
     }
 }
 
+pub(crate) fn validate_tick_lineage(
+    frame: &DivisionTickFrameV1,
+    expected_sequence: u64,
+    expected_previous_hash: &str,
+    division_id: &str,
+    candidate_hash: &str,
+) -> Result<()> {
+    if frame.sequence() != expected_sequence {
+        return Err(anyhow!(
+            "tick ordering gap: expected {expected_sequence}, got {}",
+            frame.sequence()
+        ));
+    }
+    if frame.previous_hash() != expected_previous_hash
+        || frame.division_id() != division_id
+        || frame.candidate_hash() != candidate_hash
+        || frame.process_identity().trim().is_empty()
+        || frame.deployment_identity().trim().is_empty()
+    {
+        return Err(anyhow!("tick frame lineage or candidate mismatch"));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct DaughterProcessStatusV1 {
     schema: &'static str,
@@ -776,6 +791,52 @@ impl DivisionRollbackReceiptV1 {
     pub(crate) fn receipt_id(&self) -> &str {
         &self.receipt_id
     }
+}
+
+#[cfg(feature = "division-rehearsal")]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct RollbackReceiptProofMetricsV1 {
+    pub schema: String,
+    pub receipt_id_bound: bool,
+    pub parent_identity_bound: bool,
+    pub reason_bound: bool,
+    pub owner_only: bool,
+    pub live_authority_granted_by_record: bool,
+}
+
+#[cfg(feature = "division-rehearsal")]
+pub(crate) fn run_rollback_receipt_contract_proof(
+    root: &Path,
+) -> Result<RollbackReceiptProofMetricsV1> {
+    let receipt = DivisionRollbackReceiptV1::new(
+        "division-continuity-proof",
+        &"a".repeat(64),
+        SovereignBeing::Astrid,
+        "parent-process-proof".to_string(),
+        "parent-deployment-proof".to_string(),
+        10_000,
+        "offline_failure_injection".to_string(),
+    )?;
+    let path = root.join("rollback-receipt-proof.json");
+    write_owner_json(&path, &receipt)?;
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+    let mode = path.metadata()?.permissions().mode();
+    Ok(RollbackReceiptProofMetricsV1 {
+        schema: ROLLBACK_SCHEMA_V1.to_string(),
+        receipt_id_bound: receipt.receipt_id().len() == 64,
+        parent_identity_bound: value
+            .get("restored_parent_process_identity")
+            .and_then(serde_json::Value::as_str)
+            == Some("parent-process-proof")
+            && value
+                .get("restored_parent_deployment_identity")
+                .and_then(serde_json::Value::as_str)
+                == Some("parent-deployment-proof"),
+        reason_bound: value.get("reason_code").and_then(serde_json::Value::as_str)
+            == Some("offline_failure_injection"),
+        owner_only: mode & 0o077 == 0,
+        live_authority_granted_by_record: false,
+    })
 }
 
 #[allow(dead_code)]
@@ -1127,6 +1188,25 @@ pub(crate) fn process_identity(started_at_unix_ms: u64) -> String {
         )
         .as_bytes(),
     )
+}
+
+pub(crate) fn validate_runtime_roots(runtime: &Path, minime: &Path, astrid: &Path) -> Result<()> {
+    if !runtime.is_absolute()
+        || !minime.is_absolute()
+        || !astrid.is_absolute()
+        || runtime == minime
+        || runtime == astrid
+        || minime == astrid
+        || path_is_within(minime, runtime)
+        || path_is_within(astrid, runtime)
+        || path_is_within(runtime, minime)
+        || path_is_within(runtime, astrid)
+    {
+        return Err(anyhow!(
+            "daughter roots and supervisor runtime must be disjoint"
+        ));
+    }
+    Ok(())
 }
 
 fn path_is_within(path: &Path, parent: &Path) -> bool {

@@ -70,7 +70,115 @@ pub(crate) async fn run() -> Result<()> {
                 bundle,
                 workspace,
             } => crate::sovereign_division::run_child(&being, &bundle, &workspace).await,
+            DivisionCmd::Prove { output } => {
+                #[cfg(feature = "division-rehearsal")]
+                {
+                    let proof =
+                        crate::sovereign_division::run_continuity_proof(&output).await?;
+                    println!("{}", serde_json::to_string_pretty(&proof)?);
+                    Ok(())
+                }
+                #[cfg(not(feature = "division-rehearsal"))]
+                {
+                    let _ = output;
+                    Err(anyhow::anyhow!(
+                        "Division continuity proof requires --features division-rehearsal"
+                    ))
+                }
+            }
+            DivisionCmd::VerifyProof { proof } => {
+                #[cfg(feature = "division-rehearsal")]
+                {
+                    let proof =
+                        crate::sovereign_division::verify_continuity_proof(&proof)?;
+                    println!("{}", serde_json::to_string_pretty(&proof)?);
+                    Ok(())
+                }
+                #[cfg(not(feature = "division-rehearsal"))]
+                {
+                    let _ = proof;
+                    Err(anyhow::anyhow!(
+                        "Division continuity proof verification requires --features division-rehearsal"
+                    ))
+                }
+            }
         },
+        Cmd::SelfControl { cmd } => {
+            use crate::{
+                self_control_cli::{
+                    SelfControlIssueOptions, issue, parse_values_json, provision, status,
+                },
+                self_control_wire::{
+                    SelfControlActionV2, SelfControlDurabilityV2, SelfControlValuesV2,
+                },
+            };
+            let result = match cmd {
+                SelfControlCmd::Status { root } => {
+                    status(root.as_deref()).map_err(anyhow::Error::msg)?
+                }
+                SelfControlCmd::Provision { root, rotate } => {
+                    serde_json::to_value(
+                        provision(root.as_deref(), rotate)
+                            .map_err(anyhow::Error::msg)?,
+                    )?
+                }
+                SelfControlCmd::Issue {
+                    root,
+                    sensory_url,
+                    family,
+                    durability,
+                    values_json,
+                    lease_secs,
+                    expected_revision,
+                    actor_process_identity,
+                    evidence_ref,
+                    success_condition,
+                    stop_condition,
+                } => {
+                    let mut options = SelfControlIssueOptions::set(
+                        family.into(),
+                        durability.into(),
+                        parse_values_json(&values_json).map_err(anyhow::Error::msg)?,
+                    );
+                    options.root = root;
+                    options.sensory_url = sensory_url;
+                    options.lease_secs = lease_secs;
+                    options.expected_revision = expected_revision;
+                    options.actor_process_identity = actor_process_identity;
+                    options.evidence_refs = evidence_ref;
+                    if !success_condition.is_empty() {
+                        options.success_conditions = success_condition;
+                    }
+                    if !stop_condition.is_empty() {
+                        options.stop_conditions = stop_condition;
+                    }
+                    issue(options).await.map_err(anyhow::Error::msg)?
+                }
+                SelfControlCmd::Withdraw {
+                    root,
+                    sensory_url,
+                    family,
+                    related_intent_id,
+                    expected_revision,
+                    actor_process_identity,
+                } => {
+                    let mut options = SelfControlIssueOptions::set(
+                        family.into(),
+                        SelfControlDurabilityV2::OneShot,
+                        SelfControlValuesV2::default(),
+                    );
+                    options.root = root;
+                    options.sensory_url = sensory_url;
+                    options.actor_process_identity = actor_process_identity;
+                    options.action = SelfControlActionV2::Withdraw;
+                    options.expected_revision = expected_revision;
+                    options.related_intent_id = Some(related_intent_id);
+                    issue(options).await.map_err(anyhow::Error::msg)?
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
     }
 }
 

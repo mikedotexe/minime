@@ -1,13 +1,15 @@
 // Spectral regulator: token-bucket rate governor + content-aware gate + band-stop filter.
 // Based on PE's principled control design.
 //
-// The PD-mode types (GateCfg, Modality, ItemMeta, Decision) are retained for API
-// completeness even though the engine currently runs in PI mode exclusively.
+// The legacy PD rate governor and content gate remain active for modality
+// throughput. PI separately regulates EigenFill and the band-stop filter.
+// Their types therefore describe distinct concurrent roles, not an inactive
+// PD architecture embedded in a PI-only runtime.
 #![allow(dead_code)]
 //
-// Two modes:
-// - PD mode: Original token-bucket rate control targeting lambda1
-// - PI mode: Dual control (gate + filter) targeting EigenFill% and lambda1_rel
+// Two control roles:
+// - PD rate/gate: token-bucket modality throughput targeting lambda1
+// - PI homeostasis: gate/filter control targeting EigenFill% and lambda1_rel
 
 use serde::{Deserialize, Serialize};
 
