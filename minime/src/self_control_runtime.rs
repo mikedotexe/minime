@@ -592,16 +592,6 @@ impl SelfControlRuntime {
             return self.cache_authenticated(inner, command, command_sha256, receipt, now_unix_ms);
         }
         let clamped = clamp_values(&command.intent.values);
-        if clamped.semantic_companion_mix.is_some_and(|mix| mix > 0.0) {
-            let receipt = self.rejected(
-                command,
-                current_revision(&inner.state, family),
-                now_unix_ms,
-                "semantic_companion_nonzero_requires_reservoir_migration",
-            );
-            return self.cache_authenticated(inner, command, command_sha256, receipt, now_unix_ms);
-        }
-
         let was_clamped = clamped != command.intent.values;
         let saturation = inner
             .state

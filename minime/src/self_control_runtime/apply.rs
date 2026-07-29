@@ -319,6 +319,7 @@ pub(super) fn apply_values(
             }
         };
     }
+    apply!(semantic_companion_mix, set_semantic_companion_mix);
     apply!(local_sensory_admission, set_admit_fraction);
     apply!(synth_gain, set_synth_gain);
     apply!(keep_bias, set_keep_bias);

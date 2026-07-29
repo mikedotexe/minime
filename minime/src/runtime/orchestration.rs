@@ -403,7 +403,7 @@ async fn run_engine(
     // Initialize ESN (Self-Referential Echo State Network)
     let mut esn = match ESN::new(
         128,                // reservoir size
-        sensory_bus::Z_DIM, // input size (video + audio + aux + semantic LLaVA)
+        sensory_bus::Z_DIM, // byte-compatible legacy input
         0.5,                // input scale
         0.1,                // reservoir density
         0.9,                // target spectral radius
@@ -411,7 +411,14 @@ async fn run_engine(
         0.995,              // base RLS forgetting factor
         &gpu,
         &mut rng,
-    ) {
+    )
+    .and_then(|mut esn| {
+        esn.expand_input_zero_compatible(
+            crate::semantic_body_v2::RESERVOIR_INPUT_DIMENSIONS_V2,
+            0.5,
+        )?;
+        Ok(esn)
+    }) {
         Ok(esn) => {
             println!("✅ ESN initialized (self-referential spectral breathing)");
             Some(esn)
@@ -486,9 +493,10 @@ async fn run_engine(
     let mut esn_state_ring: std::collections::VecDeque<Vec<f32>> =
         std::collections::VecDeque::with_capacity(ESN_STATE_RING_CAP);
     let mut last_cov_vec = vec![0.0f32; n];
-    let sensory_dim = sensory_bus::Z_DIM;
+    let legacy_sensory_dim = sensory_bus::Z_DIM;
+    let sensory_dim = crate::semantic_body_v2::RESERVOIR_INPUT_DIMENSIONS_V2;
     let semantic_offset = sensory_bus::VIDEO_DIM + sensory_bus::AUDIO_DIM + sensory_bus::AUX_DIM;
-    let proj_scale = (1.0 / sensory_dim as f32).sqrt();
+    let proj_scale = (1.0 / legacy_sensory_dim as f32).sqrt();
     let mut dimension_scales = vec![1.0f32; sensory_dim];
     for i in 0..sensory_bus::VIDEO_DIM {
         dimension_scales[i] = 0.75;
@@ -499,8 +507,11 @@ async fn run_engine(
     for i in (sensory_bus::VIDEO_DIM + sensory_bus::AUDIO_DIM)..semantic_offset {
         dimension_scales[i] = 1.12; // Aux introspection gets moderate boost
     }
-    for i in semantic_offset..sensory_dim {
+    for i in semantic_offset..legacy_sensory_dim {
         dimension_scales[i] = 0.42; // Semantic lanes mostly neutral during warmup
+    }
+    for scale in &mut dimension_scales[legacy_sensory_dim..sensory_dim] {
+        *scale = 0.42;
     }
     let activation_gain = 0.58f32;
     let semantic_energy_gain = 0.028f32;
@@ -508,9 +519,12 @@ async fn run_engine(
     let semantic_bias_floor = 0.010f32;
     let cov_floor_level = 0.14f32;
     let mut cov_floor_vec: Vec<f32> = (0..n).map(|_| rng.f32() * 0.7 - 0.35).collect();
-    let proj_matrix: Vec<f32> = (0..(n * sensory_dim))
+    let legacy_proj_matrix: Vec<f32> = (0..(n * legacy_sensory_dim))
         .map(|_| rng.f32() * 2.0 - 1.0)
         .collect();
+    let proj_matrix =
+        crate::semantic_body_v2::projection_matrix_v2(&legacy_proj_matrix, n, 0.42)
+            .map_err(anyhow::Error::msg)?;
     let mut csv_header_written = false; // Track if CSV header has been written (used in regulation tick)
     let mut esn_profile_file = if log_esn_profile {
         fs::create_dir_all("workspace/logs")?;
@@ -1369,8 +1383,18 @@ async fn run_engine(
                     esn.set_rho_direct(rho_floor);
                 }
 
-                // Feed filtered sensory vector (Z_DIM) to ESN
-                match esn.step(&z) {
+                let reservoir_input = match sensory_bus
+                    .reservoir_input_v2(&z, !stable_core_runtime.enabled)
+                {
+                    Ok(input) => input,
+                    Err(reason) => {
+                        eprintln!("⚠️  SemanticBody V2 input rejected: {reason}");
+                        continue;
+                    }
+                };
+                // The first 66 values remain exact legacy bytes. The appended
+                // lane is zero unless Minime has an authenticated owner setting.
+                match esn.step(&reservoir_input) {
                     Ok(_) => {
                         last_esn_profile = esn.profile_snapshot();
                         last_esn_lambda1 = esn.get_eig();
@@ -1383,7 +1407,7 @@ async fn run_engine(
                         if let Some(division_coordinator) = division_coordinator.as_mut() {
                             if let Err(error) = division_coordinator.observe_parent_tick(
                                 esn,
-                                &z,
+                                &reservoir_input,
                                 last_fill_pct,
                                 division_metrics_fresh,
                                 division_actuator_saturated,
@@ -1621,11 +1645,14 @@ async fn run_engine(
                 activation_gain,
                 warmup_progress,
             );
-            proj_input.copy_from_slice(&projection.proj_input);
-            activated_features.copy_from_slice(&projection.activated_features);
+            proj_input.fill(0.0);
+            activated_features.fill(0.0);
+            proj_input[..legacy_sensory_dim].copy_from_slice(&projection.proj_input);
+            activated_features[..legacy_sensory_dim]
+                .copy_from_slice(&projection.activated_features);
             semantic_energy = projection.semantic_energy;
             if semantic_energy > f32::EPSILON {
-                let sem_slice = &z[semantic_offset..sensory_dim];
+                let sem_slice = &z[semantic_offset..legacy_sensory_dim];
                 semantic_delta = sem_slice
                     .iter()
                     .zip(prev_semantic.iter())
@@ -1728,7 +1755,7 @@ async fn run_engine(
                     *dst = *src * aux_scale;
                 }
 
-                let sem_slice = &z[semantic_offset..sensory_dim];
+                let sem_slice = &z[semantic_offset..legacy_sensory_dim];
                 if semantic_lane_active && !sem_slice.is_empty() {
                     let sem_mean = sem_slice.iter().sum::<f32>() / sensory_bus::LLAVA_DIM as f32;
                     let sem_var = sem_slice
@@ -1741,7 +1768,7 @@ async fn run_engine(
                         / sensory_bus::LLAVA_DIM as f32;
                     let sem_std = sem_var.sqrt();
                     let sem_scale = if sem_std > 1e-3 { 1.0 / sem_std } else { 1.0 };
-                    for (dst, src) in proj_input[semantic_offset..sensory_dim]
+                    for (dst, src) in proj_input[semantic_offset..legacy_sensory_dim]
                         .iter_mut()
                         .zip(sem_slice.iter())
                     {
@@ -1808,13 +1835,24 @@ async fn run_engine(
                 av_features.fill(0.0);
             }
 
+            if !stable_core_runtime.enabled {
+                let companion = sensory_bus.effective_semantic_companion(true);
+                let mix = sensory_bus.get_semantic_companion_mix();
+                for (target, source) in proj_input[legacy_sensory_dim..sensory_dim]
+                    .iter_mut()
+                    .zip(companion)
+                {
+                    *target = source * mix;
+                }
+            }
+
             for (idx, activated) in activated_features.iter_mut().enumerate() {
                 let mut raw = proj_input[idx]
                     * dimension_scales[idx]
                     * activation_gain
                     * recovery_activation_gain
                     * warmup_progress.max(0.2);
-                if idx >= semantic_offset {
+                if idx >= semantic_offset && idx < legacy_sensory_dim {
                     let bias = semantic_projection_bias(
                         semantic_bias_floor,
                         semantic_energy_gain,

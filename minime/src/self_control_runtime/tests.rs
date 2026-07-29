@@ -682,7 +682,7 @@ fn one_shot_checkpoint_request_is_consumed_without_becoming_a_preference() {
 }
 
 #[test]
-fn shared_coupling_and_nonzero_companion_remain_proof_gated() {
+fn companion_mix_is_owner_controlled_and_shared_coupling_remains_proof_gated() {
     let fixture = fixture();
     let companion = self_command(
         &fixture.minime_key,
@@ -699,13 +699,10 @@ fn shared_coupling_and_nonzero_companion_remain_proof_gated() {
         None,
     );
     assert_eq!(
-        fixture
-            .runtime
-            .process(&companion, NOW + 1)
-            .reason
-            .as_deref(),
-        Some("semantic_companion_nonzero_requires_reservoir_migration")
+        fixture.runtime.process(&companion, NOW + 1).status,
+        SelfControlReceiptStatusV2::Applied
     );
+    assert_eq!(fixture.bus.get_semantic_companion_mix(), 0.2);
 
     let intent = SelfControlIntentV2 {
         schema: SELF_CONTROL_INTENT_SCHEMA_V2.to_string(),

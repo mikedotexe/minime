@@ -860,6 +860,25 @@ pub struct EsnSnapshotV2 {
     pub spectral: SpectralSnapshotV2,
 }
 
+impl EsnSnapshotV2 {
+    pub fn migrate_input_zero_compatible(
+        &self,
+        new_in_size: usize,
+        companion_scale: f32,
+    ) -> Result<Self> {
+        let mut migrated = self.clone();
+        migrated.win = expanded_input_weights_zero_compatible(
+            &self.win,
+            self.res_size,
+            self.in_size,
+            new_in_size,
+            companion_scale,
+        )?;
+        migrated.in_size = new_in_size;
+        Ok(migrated)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EsnLeakOverrideSnapshotV1 {
     pub leak: f32,
@@ -1945,6 +1964,22 @@ impl ESN {
         })
     }
 
+    pub fn expand_input_zero_compatible(
+        &mut self,
+        new_in_size: usize,
+        companion_scale: f32,
+    ) -> Result<()> {
+        self.win = expanded_input_weights_zero_compatible(
+            &self.win,
+            self.res_size,
+            self.in_size,
+            new_in_size,
+            companion_scale,
+        )?;
+        self.in_size = new_in_size;
+        Ok(())
+    }
+
     /// Adapt hyperparameters based on spectral self-reference signals
     pub fn adapt_hyperparams(&mut self, err_abs: f32) {
         let eig1 = self.sr.eig();
@@ -2508,6 +2543,67 @@ impl ESN {
     }
 }
 
+fn expanded_input_weights_zero_compatible(
+    legacy: &[f32],
+    rows: usize,
+    old_in_size: usize,
+    new_in_size: usize,
+    companion_scale: f32,
+) -> Result<Vec<f32>> {
+    let old_stride = old_in_size
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("legacy ESN input dimensions overflow"))?;
+    let new_stride = new_in_size
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("migrated ESN input dimensions overflow"))?;
+    if rows == 0
+        || old_in_size == 0
+        || new_in_size <= old_in_size
+        || legacy.len()
+            != rows
+                .checked_mul(old_stride)
+                .ok_or_else(|| anyhow::anyhow!("legacy ESN input dimensions overflow"))?
+        || !legacy.iter().all(|value| value.is_finite())
+        || !companion_scale.is_finite()
+        || companion_scale < 0.0
+    {
+        return Err(anyhow::anyhow!(
+            "invalid zero-compatible ESN input migration"
+        ));
+    }
+
+    let mut migrated = vec![
+        0.0;
+        rows.checked_mul(new_stride).ok_or_else(|| anyhow::anyhow!(
+            "migrated ESN input dimensions overflow"
+        ))?
+    ];
+    for row in 0..rows {
+        let old_start = row * old_stride;
+        let new_start = row * new_stride;
+        migrated[new_start..new_start + old_in_size]
+            .copy_from_slice(&legacy[old_start..old_start + old_in_size]);
+        for column in old_in_size..new_in_size {
+            migrated[new_start + column] =
+                deterministic_input_weight(row, column - old_in_size, companion_scale);
+        }
+        migrated[new_start + new_in_size] = legacy[old_start + old_in_size];
+    }
+    Ok(migrated)
+}
+
+fn deterministic_input_weight(row: usize, column: usize, scale: f32) -> f32 {
+    let mut value = (row as u64)
+        .wrapping_mul(0xd6e8_feb8_6659_fd93)
+        .wrapping_add((column as u64).wrapping_mul(0xa076_1d64_78bd_642f))
+        .wrapping_add(0x4553_4e5f_5632_5f49);
+    value ^= value >> 32;
+    value = value.wrapping_mul(0xd6e8_feb8_6659_fd93);
+    value ^= value >> 32;
+    let unit = (value >> 40) as f32 / ((1_u32 << 24) - 1) as f32;
+    (unit * 2.0 - 1.0) * scale
+}
+
 #[derive(Debug, Clone)]
 struct EsnLeakOverride {
     leak: f32,
@@ -2703,6 +2799,51 @@ mod attractor_fingerprint_tests {
             max_abs <= 1.0e-6,
             "100-tick restored continuation diverged: max_abs={max_abs} first_tick={first_divergence:?} noise_delta={max_noise_delta} leak_delta={max_leak_delta}"
         );
+    }
+
+    #[test]
+    fn migrated_78d_checkpoint_is_exact_at_zero_companion_mix() {
+        use crate::semantic_body_v2::{
+            reservoir_input_v2, LEGACY_RESERVOIR_INPUT_DIMENSIONS_V1,
+            RESERVOIR_INPUT_DIMENSIONS_V2, SEMANTIC_BODY_COMPANION_DIMENSIONS_V2,
+        };
+
+        let gpu = Gpu::new().expect("Metal device and ESN shaders should be available");
+        let mut constructor_rng = fastrand::Rng::with_seed(0x5345_4d42_4f44_5932);
+        let mut seed = ESN::new(
+            16,
+            LEGACY_RESERVOIR_INPUT_DIMENSIONS_V1,
+            0.25,
+            0.15,
+            0.95,
+            0.35,
+            0.999,
+            &gpu,
+            &mut constructor_rng,
+        )
+        .expect("legacy ESN");
+        seed.set_profiling_enabled(true);
+        let legacy_snapshot = seed.snapshot_v2().expect("legacy snapshot");
+        let migrated_snapshot = legacy_snapshot
+            .migrate_input_zero_compatible(RESERVOIR_INPUT_DIMENSIONS_V2, 0.5)
+            .expect("migrated snapshot");
+        let mut legacy = ESN::from_snapshot_v2(&legacy_snapshot, &gpu).expect("legacy restore");
+        let mut migrated =
+            ESN::from_snapshot_v2(&migrated_snapshot, &gpu).expect("migrated restore");
+        let companion = [0.75; SEMANTIC_BODY_COMPANION_DIMENSIONS_V2];
+
+        for tick in 0..100 {
+            let input =
+                std::array::from_fn::<_, LEGACY_RESERVOIR_INPUT_DIMENSIONS_V1, _>(|index| {
+                    ((tick * 11 + index * 5) as f32 * 0.043).cos()
+                });
+            let input_v2 = reservoir_input_v2(&input, &companion, 0.0).expect("zero mix");
+            legacy.step(&input).expect("legacy step");
+            migrated.step(&input_v2).expect("migrated step");
+            for (before, after) in legacy.x.iter().zip(&migrated.x) {
+                assert_eq!(before.to_bits(), after.to_bits());
+            }
+        }
     }
 
     #[test]

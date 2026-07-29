@@ -379,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_body_zero_mix_is_byte_exact_and_nonzero_or_malformed_is_blocked() {
+    fn semantic_body_transport_is_exact_and_sender_mix_cannot_author_effect() {
         let bus = SensoryBus::new(8, 2, 7);
         let dedup = Mutex::new(DeliveryDedupCache::default());
         let identity = SensoryServerIdentity {
@@ -412,8 +412,9 @@ mod tests {
             body.base_features_48.as_slice()
         );
 
-        let nonzero = semantic_body(0.1);
-        let blocked: SensoryDeliveryReceiptV1 = serde_json::from_str(
+        let mut nonzero = semantic_body(0.1);
+        nonzero.companion_features_12.fill(0.5);
+        let accepted: SensoryDeliveryReceiptV1 = serde_json::from_str(
             process_sensory_packet(
                 &bus,
                 &dedup,
@@ -426,7 +427,18 @@ mod tests {
             .expect("nonzero receipt"),
         )
         .unwrap();
-        assert_eq!(blocked.status, SensoryDeliveryStatusV1::PolicyBlocked);
+        assert_eq!(accepted.status, SensoryDeliveryStatusV1::Accepted);
+        let reservoir = bus
+            .reservoir_input_v2(
+                &[0.0; crate::semantic_body_v2::LEGACY_RESERVOIR_INPUT_DIMENSIONS_V1],
+                true,
+            )
+            .expect("reservoir input");
+        assert_eq!(
+            reservoir[crate::semantic_body_v2::LEGACY_RESERVOIR_INPUT_DIMENSIONS_V1..],
+            [0.0; crate::semantic_body_v2::SEMANTIC_BODY_COMPANION_DIMENSIONS_V2],
+            "producer-declared mix is metadata; only owner self-control may author effect"
+        );
 
         let mut malformed = semantic_body(0.0);
         malformed.base_features_48.pop();
@@ -706,21 +718,24 @@ fn route_semantic_body(
         return RouteOutcome::policy_blocked("semantic_body_base_transport_not_exact");
     }
     let controls = runtime.semantic_controls();
-    if body.fidelity.companion_mix != 0.0 || controls.companion_mix != 0.0 {
-        return RouteOutcome::policy_blocked("semantic_companion_nonzero_requires_parity");
-    }
     let gain = controls.effective_base_gain();
-    if gain == 1.0 {
-        bus.set_llava_embedding(&body.base_features_48);
+    let outcome = if gain == 1.0 {
+        bus.set_semantic_body(&body.base_features_48, &body.companion_features_12)
     } else {
-        let scaled = body
+        let scaled_base = body
             .base_features_48
             .iter()
             .map(|value| value * gain)
             .collect::<Vec<_>>();
-        bus.set_llava_embedding(&scaled);
-    }
-    RouteOutcome::ACCEPTED
+        let scaled_companion = body
+            .companion_features_12
+            .iter()
+            .map(|value| value * gain)
+            .collect::<Vec<_>>();
+        bus.set_semantic_body(&scaled_base, &scaled_companion)
+    };
+    bus.set_semantic_companion_mix(controls.companion_mix);
+    lane_route_outcome(outcome)
 }
 
 fn self_control_route_outcome(receipt: &SelfControlReceiptV2) -> RouteOutcome {

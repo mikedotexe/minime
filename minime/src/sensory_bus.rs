@@ -10,6 +10,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::semantic_body_v2::{
+    reservoir_input_v2, LEGACY_RESERVOIR_INPUT_DIMENSIONS_V1, RESERVOIR_INPUT_DIMENSIONS_V2,
+    SEMANTIC_BODY_COMPANION_DIMENSIONS_V2,
+};
+
 pub const VIDEO_DIM: usize = 8;
 pub const AUDIO_DIM: usize = 8;
 pub const AUX_DIM: usize = 2;
@@ -1305,6 +1310,21 @@ impl SemanticLane {
     }
 }
 
+#[derive(Debug)]
+struct SemanticCompanionLane {
+    values: [f32; SEMANTIC_BODY_COMPANION_DIMENSIONS_V2],
+    updated_at_ms: u64,
+}
+
+impl SemanticCompanionLane {
+    fn new() -> Self {
+        Self {
+            values: [0.0; SEMANTIC_BODY_COMPANION_DIMENSIONS_V2],
+            updated_at_ms: 0,
+        }
+    }
+}
+
 const GLIMPSE_12D_DIM: usize = 12;
 
 #[inline]
@@ -1412,6 +1432,8 @@ pub struct SensoryBus {
     lambda1_rel_for_stale: Mutex<f32>,
     surge_threshold: Mutex<f32>,
     llava: Mutex<SemanticLane>,
+    semantic_companion: Mutex<SemanticCompanionLane>,
+    semantic_companion_mix: Mutex<f32>,
     // probabilistic gate (set by PI)
     gate: Mutex<f32>,
     rng: Mutex<SmallRng>,
@@ -1515,6 +1537,8 @@ impl SensoryBus {
             lambda1_rel_for_stale: Mutex::new(1.0),
             surge_threshold: Mutex::new(config.surge_threshold.clamp(0.05, 0.95)),
             llava: Mutex::new(SemanticLane::new()),
+            semantic_companion: Mutex::new(SemanticCompanionLane::new()),
+            semantic_companion_mix: Mutex::new(0.0),
             gate: Mutex::new(1.0),
             rng: Mutex::new(SmallRng::seed_from_u64(seed)),
             live_audio_divisor: Mutex::new(1),
@@ -2039,6 +2063,7 @@ impl SensoryBus {
 
     #[inline]
     pub fn set_llava_embedding(&self, embedding: &[f32]) {
+        let updated_at_ms = NowMs::now();
         let mut llava = self.llava.lock();
         let mut count = 0usize;
         for (idx, value) in embedding.iter().take(LLAVA_DIM).enumerate() {
@@ -2048,7 +2073,85 @@ impl SensoryBus {
         for idx in count..LLAVA_DIM {
             llava.values[idx] = 0.0;
         }
-        llava.updated_at_ms = NowMs::now();
+        llava.updated_at_ms = updated_at_ms;
+        let mut companion = self.semantic_companion.lock();
+        companion.values.fill(0.0);
+        companion.updated_at_ms = updated_at_ms;
+    }
+
+    pub fn set_semantic_body(
+        &self,
+        base: &[f32],
+        companion_features: &[f32],
+    ) -> LaneIngressOutcome {
+        if base.len() != LLAVA_DIM
+            || companion_features.len() != SEMANTIC_BODY_COMPANION_DIMENSIONS_V2
+            || !base
+                .iter()
+                .chain(companion_features)
+                .all(|value| value.is_finite())
+        {
+            return LaneIngressOutcome::InvalidShape;
+        }
+        let updated_at_ms = NowMs::now();
+        let mut llava = self.llava.lock();
+        llava.values.copy_from_slice(base);
+        llava.updated_at_ms = updated_at_ms;
+        let mut companion = self.semantic_companion.lock();
+        companion.values.copy_from_slice(companion_features);
+        companion.updated_at_ms = updated_at_ms;
+        LaneIngressOutcome::Accepted
+    }
+
+    pub fn set_semantic_companion_mix(&self, value: f32) {
+        *self.semantic_companion_mix.lock() = if value.is_finite() {
+            value.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+    }
+
+    #[must_use]
+    pub fn get_semantic_companion_mix(&self) -> f32 {
+        *self.semantic_companion_mix.lock()
+    }
+
+    #[must_use]
+    pub fn effective_semantic_companion(
+        &self,
+        allow_companion: bool,
+    ) -> [f32; SEMANTIC_BODY_COMPANION_DIMENSIONS_V2] {
+        let mut output = [0.0; SEMANTIC_BODY_COMPANION_DIMENSIONS_V2];
+        if !allow_companion {
+            return output;
+        }
+        let companion = self.semantic_companion.lock();
+        if companion.updated_at_ms == 0 {
+            return output;
+        }
+        let age_ms = NowMs::now().saturating_sub(companion.updated_at_ms);
+        let stale = stale_scale(age_ms, self.semantic_stale_ms());
+        let semantic_gain =
+            stale * *self.embedding_strength.lock() * (1.0 + *self.journal_resonance.lock() * 0.5);
+        for (target, source) in output.iter_mut().zip(companion.values) {
+            *target = source * semantic_gain;
+        }
+        output
+    }
+
+    pub fn reservoir_input_v2(
+        &self,
+        legacy: &[f32; Z_DIM],
+        allow_companion: bool,
+    ) -> Result<[f32; RESERVOIR_INPUT_DIMENSIONS_V2], &'static str> {
+        const _: () = assert!(Z_DIM == LEGACY_RESERVOIR_INPUT_DIMENSIONS_V1);
+        let companion = self.effective_semantic_companion(allow_companion);
+        let mix = if allow_companion {
+            self.get_semantic_companion_mix()
+        } else {
+            0.0
+        };
+        reservoir_input_v2(legacy, &companion, mix)
     }
 
     #[must_use]
