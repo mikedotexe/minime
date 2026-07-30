@@ -988,6 +988,72 @@ class CorrespondenceV1Tests(unittest.TestCase):
             records = [json.loads(line) for line in ledger.read_text().splitlines()]
             self.assertFalse(any(row.get("record_type") == "attention_canary_activation" for row in records))
 
+    def test_handshake_summarizes_distinct_ack_waits_and_thread_states(self):
+        agent = self._agent()
+        records = [
+            {
+                "record_type": "message",
+                "recorded_at_unix_ms": 1,
+                "message_id": "message_one",
+                "thread_id": "thread_one",
+                "from_being": "minime",
+                "to_being": "astrid",
+            },
+            {
+                "record_type": "message",
+                "recorded_at_unix_ms": 2,
+                "message_id": "message_two",
+                "thread_id": "thread_two",
+                "from_being": "astrid",
+                "to_being": "minime",
+            },
+            {
+                "record_type": "message",
+                "recorded_at_unix_ms": 3,
+                "message_id": "message_three",
+                "thread_id": "thread_three",
+                "from_being": "astrid",
+                "to_being": "minime",
+            },
+            {
+                "record_type": "ack_receipt",
+                "recorded_at_unix_ms": 4,
+                "message_id": "message_three",
+                "thread_id": "thread_three",
+                "from_being": "minime",
+                "to_being": "astrid",
+                "ack_kind": "seen",
+            },
+        ]
+
+        handshake = agent._correspondence_handshake_state(records)
+
+        self.assertEqual(handshake["active_threads_total"], 3)
+        self.assertEqual(handshake["pending_ack_threads_total"], 2)
+        self.assertEqual(
+            handshake["pending_ack_counts_by_being"],
+            {"astrid": 1, "minime": 1},
+        )
+        self.assertEqual(
+            handshake["thread_status_counts"],
+            {"acknowledged": 1, "unaddressed": 2},
+        )
+        self.assertEqual(handshake["native_threads_total"], 3)
+        self.assertEqual(handshake["legacy_threads_total"], 0)
+        self.assertEqual(
+            agent._correspondence_pending_ack_summary(handshake),
+            "astrid:1,minime:1",
+        )
+
+    def test_pending_ack_summary_preserves_v1_compatibility_list(self):
+        agent = self._agent()
+        self.assertEqual(
+            agent._correspondence_pending_ack_summary(
+                {"pending_ack_by_being": ["astrid", "astrid", "minime"]}
+            ),
+            "astrid:2,minime:1",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

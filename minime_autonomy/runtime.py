@@ -40078,16 +40078,58 @@ OUTPUT:
             for item in active_threads
             if item.get("pending_ack_by")
         ]
+        pending_counts: Dict[str, int] = {}
+        thread_status_counts: Dict[str, int] = {}
+        legacy_threads_total = 0
+        for item in active_threads:
+            pending_by = str(item.get("pending_ack_by") or "").strip()
+            if pending_by:
+                pending_counts[pending_by] = pending_counts.get(pending_by, 0) + 1
+            status = str(item.get("status") or "unknown")
+            thread_status_counts[status] = thread_status_counts.get(status, 0) + 1
+            if bool(item.get("legacy_bridge")):
+                legacy_threads_total += 1
         return {
             "schema_version": 1,
             "policy": "correspondence_handshake_state_v1",
             "active_threads_total": len(active_threads),
             "active_threads": list(reversed(active_threads))[:3],
             "pending_ack_by_being": pending,
+            "pending_ack_threads_total": len(pending),
+            "pending_ack_counts_by_being": dict(sorted(pending_counts.items())),
+            "thread_status_counts": dict(sorted(thread_status_counts.items())),
+            "legacy_threads_total": legacy_threads_total,
+            "native_threads_total": len(active_threads) - legacy_threads_total,
             "last_acknowledged_reflection": latest_ack_any,
             "latest_heartbeat": latest_heartbeat_any,
             "authority": "language_only_context_not_control",
         }
+
+    @staticmethod
+    def _correspondence_count_summary(counts: Any) -> str:
+        if not isinstance(counts, dict):
+            return "none"
+        parts = []
+        for label, raw_count in sorted(counts.items()):
+            try:
+                count = int(raw_count)
+            except (TypeError, ValueError):
+                continue
+            if count > 0:
+                parts.append(f"{label}:{count}")
+        return ",".join(parts) if parts else "none"
+
+    def _correspondence_pending_ack_summary(self, handshake: Dict[str, Any]) -> str:
+        counts = handshake.get("pending_ack_counts_by_being")
+        if not isinstance(counts, dict):
+            counts = {}
+            pending_values = handshake.get("pending_ack_by_being") or []
+            if isinstance(pending_values, list):
+                for value in pending_values:
+                    label = str(value or "").strip()
+                    if label:
+                        counts[label] = counts.get(label, 0) + 1
+        return self._correspondence_count_summary(counts)
 
     def _correspondence_direct_contact_fidelity(
         self,
@@ -41710,10 +41752,12 @@ OUTPUT:
         handshake = latest.get("correspondence_handshake_state_v1") or {}
         pending = "none"
         latest_ack = "none"
+        thread_states = "none"
         if isinstance(handshake, dict):
-            pending_values = handshake.get("pending_ack_by_being") or []
-            if isinstance(pending_values, list) and pending_values:
-                pending = ",".join(str(value) for value in pending_values[:3])
+            pending = self._correspondence_pending_ack_summary(handshake)
+            thread_states = self._correspondence_count_summary(
+                handshake.get("thread_status_counts")
+            )
             ack = handshake.get("last_acknowledged_reflection") or {}
             if isinstance(ack, dict):
                 latest_ack = str(ack.get("ack_kind") or "none")
@@ -41749,7 +41793,8 @@ OUTPUT:
             "Chamber correspondence state: "
             f"anchor={latest.get('shared_lexicon_anchor') or 'none'}; "
             f"thread={latest.get('active_thread_id') or 'none'}; "
-            f"survival={status}; contact={contact_status}; pending_ack_by={pending}; "
+            f"survival={status}; contact={contact_status}; explicit_ack_waits={pending}; "
+            f"thread_states={thread_states}; "
             f"latest_ack={latest_ack}; attention_canary={attention_text}; "
             f"legacy_visibility={legacy_text}; microdose={microdose}; "
             f"buffer={latest.get('buffer_path') or '(none)'}; "
@@ -41886,8 +41931,10 @@ OUTPUT:
             )
         else:
             attention_line = f"attention_canary: blocked ({attention.get('block_reason') or 'unknown'})"
-        pending_values = handshake.get("pending_ack_by_being") or []
-        pending = ",".join(str(value) for value in pending_values[:3]) if pending_values else "none"
+        pending = self._correspondence_pending_ack_summary(handshake)
+        thread_states = self._correspondence_count_summary(
+            handshake.get("thread_status_counts")
+        )
         latest_ack = handshake.get("last_acknowledged_reflection") or {}
         latest_ack_kind = latest_ack.get("ack_kind") if isinstance(latest_ack, dict) else None
         latest_heartbeat = handshake.get("latest_heartbeat") or {}
@@ -41915,7 +41962,10 @@ OUTPUT:
             (
                 "Handshake: "
                 f"active_threads={handshake.get('active_threads_total', 0)}; "
-                f"pending_ack_by={pending}; latest_ack={latest_ack_kind or 'none'}; "
+                f"native_threads={handshake.get('native_threads_total', 0)}; "
+                f"legacy_threads={handshake.get('legacy_threads_total', 0)}; "
+                f"explicit_ack_waits={pending}; thread_states={thread_states}; "
+                f"latest_ack={latest_ack_kind or 'none'}; "
                 f"latest_heartbeat={latest_heartbeat_kind or 'none'}; "
                 "read_receipt=file_system_seen_not_mutual_address"
             ),
