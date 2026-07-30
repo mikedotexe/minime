@@ -29,6 +29,7 @@ pub mod self_control_runtime;
 pub mod self_control_wire;
 pub mod semantic_body_v2;
 pub mod sensory_bus;
+pub mod sensory_interference;
 pub mod sensory_protocol;
 pub mod sensory_ws;
 pub mod sovereign_division;
