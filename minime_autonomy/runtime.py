@@ -72,6 +72,8 @@ from .self_control_v2 import (
     MinimeSelfControlV2Client,
     SelfControlV2Error,
 )
+from .owner_inquiry import OwnerInquiryError, OwnerInquiryManager
+from .correspondence_axes import correspondence_relation_axes_v4
 
 
 # v5.1 Phase E used int(time.time()/60) as an exchange_count proxy because
@@ -2683,6 +2685,7 @@ class ActionContinuityStore:
         *TEXTURE_AGENCY_STATUS_NEXT_ACTIONS,
         *REPAIR_READ_ONLY_NEXT_ACTIONS,
         *DIVISION_NEXT_ACTIONS,
+        *OWNER_INQUIRY_NEXT_ACTIONS,
         "recess_notice",
         "space_hold",
         "action_preflight",
@@ -2697,6 +2700,7 @@ class ActionContinuityStore:
         *TEXTURE_AGENCY_STATUS_NEXT_ACTIONS,
         *REPAIR_READ_ONLY_NEXT_ACTIONS,
         *DIVISION_STATUS_NEXT_ACTIONS,
+        "INQUIRY_STATUS",
         "SEARCH",
         "RESEARCH",
         "BROWSE",
@@ -7080,6 +7084,12 @@ class ActionContinuityStore:
 
     @classmethod
     def stage_for_action(cls, base: str, effective: str = "") -> str:
+        if base == "INQUIRY_STATUS":
+            return "read_only"
+        if base in {"INQUIRY_START", "INQUIRY_CANCEL"}:
+            return "live_write"
+        if base in {"INQUIRY_CANARY", "INQUIRY_WITHDRAW", "INQUIRY_PROMOTE"}:
+            return "live_control"
         if base in DIVISION_STATUS_NEXT_ACTIONS or effective == "division_status":
             return "read_only"
         if base in DIVISION_CEREMONY_NEXT_ACTIONS or effective == "division_ceremony":
@@ -21720,6 +21730,13 @@ class AutonomousAgent:
         self._source_reload_notice_written = False
         self._pending_next_override_token: Optional[str] = None
         self._pending_next_action = None
+        self._pending_owner_inquiry_next: Optional[str] = None
+        self._pending_owner_inquiry_response: Optional[str] = None
+        self._pending_owner_inquiry_model: Optional[str] = None
+        self._pending_owner_inquiry_provider: Optional[str] = None
+        self._owner_inquiry_manager_v1: Optional[OwnerInquiryManager] = None
+        self._last_llm_model: Optional[str] = None
+        self._last_llm_provider: Optional[str] = None
         self._pending_choice_envelope_v1: Optional[Dict[str, Any]] = None
         self._recent_next_actions = deque(maxlen=8)  # Track NEXT: choices for diversity awareness
         self._pending_autoresearch_action = None
@@ -21811,6 +21828,94 @@ class AutonomousAgent:
         store.session_id = getattr(self, "session_id", None)
         store.ensure_dirs()
         return store
+
+    def _owner_inquiry_manager(self) -> OwnerInquiryManager:
+        manager = getattr(self, "_owner_inquiry_manager_v1", None)
+        if manager is None:
+            manager = OwnerInquiryManager(
+                root=WORKSPACE_DIR / "owner-inquiries-v1",
+            )
+            self._owner_inquiry_manager_v1 = manager
+        return manager
+
+    def _owner_inquiry_prompt_summary(self) -> str:
+        try:
+            return self._owner_inquiry_manager().prompt_summary(
+                turn_index=int(getattr(self, "cycle_count", 0) or 0)
+            )
+        except Exception as exc:
+            logging.debug("Could not render owner inquiry summary: %s", exc)
+            return (
+                "Owner inquiry status is temporarily unavailable. No inquiry or "
+                "control was inferred from that failure."
+            )
+
+    def _owner_inquiry_action(self, state: Dict[str, float]) -> None:
+        action_text = (
+            getattr(self, "_pending_owner_inquiry_next", None)
+            or (
+                getattr(self, "_current_action_continuity_context", {}) or {}
+            ).get("raw_next")
+            or "INQUIRY_STATUS"
+        )
+        base = ActionContinuityStore.base_action(action_text)
+        response = (
+            getattr(self, "_pending_owner_inquiry_response", None)
+            if base == "INQUIRY_START"
+            else None
+        )
+        try:
+            result = self._owner_inquiry_manager().handle(
+                action_text,
+                response=response,
+                model=(
+                    getattr(self, "_pending_owner_inquiry_model", None)
+                    or getattr(self, "_last_llm_model", None)
+                    or MODEL
+                ),
+                provider=(
+                    getattr(self, "_pending_owner_inquiry_provider", None)
+                    or getattr(self, "_last_llm_provider", None)
+                    or LLM_BACKEND
+                ),
+                projection_fn=self._text_to_features,
+                state=state,
+                turn_index=int(getattr(self, "cycle_count", 0) or 0),
+            )
+            summary = str(result.get("summary") or "Owner inquiry action completed.")
+            self._pending_notice_prompt = summary
+            self._current_action_outcome_summary = summary
+            for path in result.get("paths") or []:
+                artifact_path = Path(path)
+                if artifact_path.exists():
+                    self._record_current_action_artifact(
+                        "owner_inquiry",
+                        artifact_path,
+                        (
+                            f"Owner-only inquiry evidence for "
+                            f"`{result.get('inquiry_id') or result.get('canary_id') or 'current'}`"
+                        ),
+                        "protected_summary",
+                    )
+        except OwnerInquiryError as exc:
+            clarification = exc.clarification or str(exc)
+            self._pending_notice_prompt = clarification
+            self._current_action_outcome_summary = (
+                f"Owner inquiry action was rejected without substitution: {exc}"
+            )
+        except SelfControlV2Error as exc:
+            self._pending_notice_prompt = (
+                f"The exact canary choice was not applied: {exc}. "
+                "No alternate value was selected."
+            )
+            self._current_action_outcome_summary = (
+                f"Owner canary failed closed without substitution: {exc}"
+            )
+        finally:
+            self._pending_owner_inquiry_next = None
+            self._pending_owner_inquiry_response = None
+            self._pending_owner_inquiry_model = None
+            self._pending_owner_inquiry_provider = None
 
     def _research_budget_priority_route_for_current_thread(self) -> Optional[Dict[str, Any]]:
         try:
@@ -24042,6 +24147,13 @@ Fill: {fill:.1f}%
             self._self_regulation_reconcile_active_lease(state)
         except Exception as exc:
             logging.debug("Could not reconcile self-regulation lease: %s", exc)
+        try:
+            inquiry_manager = getattr(self, "_owner_inquiry_manager_v1", None)
+            inquiry_root = WORKSPACE_DIR / "owner-inquiries-v1"
+            if inquiry_manager is not None or (inquiry_root / "queue.json").exists():
+                self._owner_inquiry_manager().tick(state)
+        except Exception as exc:
+            logging.debug("Could not reconcile owner inquiry work: %s", exc)
         # Co-regulation: publish minime's current need each cycle so Astrid can
         # see what she is reaching for (density/aperture/steady).
         self._publish_self_need(state)
@@ -24111,6 +24223,12 @@ Fill: {fill:.1f}%
                 'CONTROL_APPLY_LEASE': 'self_regulation',
                 'CONTROL_STATUS': 'self_regulation',
                 'CONTROL_OUTCOME': 'self_regulation',
+                'INQUIRY_START': 'owner_inquiry',
+                'INQUIRY_STATUS': 'owner_inquiry',
+                'INQUIRY_CANCEL': 'owner_inquiry',
+                'INQUIRY_CANARY': 'owner_inquiry',
+                'INQUIRY_WITHDRAW': 'owner_inquiry',
+                'INQUIRY_PROMOTE': 'owner_inquiry',
                 'JOURNAL': 'journal_pressure',
                 'BOREDOM': 'recess_boredom',
                 'WHIM': 'recess_whim',
@@ -24425,6 +24543,13 @@ Fill: {fill:.1f}%
 
             base = chosen.split()[0].upper().rstrip(':')
             self._set_action_continuity_context(chosen, base)
+            if base in OWNER_INQUIRY_NEXT_ACTIONS:
+                self._pending_owner_inquiry_next = chosen
+                logging.info(
+                    "Honoring being's NEXT: %s -> owner_inquiry without action substitution",
+                    base,
+                )
+                return "owner_inquiry"
             charter_guard = self._continuity_store().charter_required_guard_assessment(chosen)
             if charter_guard:
                 try:
@@ -26280,7 +26405,11 @@ Fill: {fill:.1f}%
                 or str(action).upper()
             )
             live_guard_fn = getattr(self._continuity_store(), "live_control_guard_assessment", None)
-            live_guard = live_guard_fn(raw_guard_action) if callable(live_guard_fn) else None
+            live_guard = (
+                None
+                if action == "owner_inquiry"
+                else live_guard_fn(raw_guard_action) if callable(live_guard_fn) else None
+            )
             if live_guard:
                 logging.info(
                     "🧪 Live-control continuity guard blocked action: %s (%s)",
@@ -26358,7 +26487,12 @@ Fill: {fill:.1f}%
             if action == "thread_action"
             else (False, "")
         )
-        if action in {"attractor_intent", "attractor_suggestions", "shadow_autonomy"}:
+        if action in {
+            "attractor_intent",
+            "attractor_suggestions",
+            "shadow_autonomy",
+            "owner_inquiry",
+        }:
             allowed, reason = True, "typed autonomy stages self-gate live writes"
         elif conservative_thread_allowed:
             allowed, reason = True, conservative_thread_reason
@@ -26672,6 +26806,8 @@ Fill: {fill:.1f}%
                 self._texture_agency_action(state)
             elif action == 'self_regulation':
                 self._self_regulation_action(state)
+            elif action == 'owner_inquiry':
+                self._owner_inquiry_action(state)
 
             # Visual frame request
             elif action == 'request_visual_frame':
@@ -40445,18 +40581,19 @@ OUTPUT:
         peer = str(from_being or "peer").upper()
         if role == "recipient":
             prompt = (
-                "Choose one language-only first action: I_RECEIVED_THIS if the address landed, "
-                "ACK if only heard/held, TRACE if something distinct survived, or REPLY if answering now."
+                "Replying already continues the thread. If stronger mutual-address evidence "
+                "feels useful, optionally choose I_RECEIVED_THIS, ACK, or TRACE; no receipt "
+                "is required to keep the reply chain alive."
             )
         elif role == "sender":
             prompt = (
-                "No self-action can complete mutual address; wait for the peer's ACK/TRACE "
-                "or later ask in language."
+                "The reply chain remains continuous. Only the peer can optionally add their "
+                "ACK/TRACE as distinct mutual-address evidence; no self-action can substitute."
             )
         else:
             prompt = (
-                "Observer context only; only a participant-authored ACK/REPLY/TRACE can move "
-                "the thread."
+                "Observer context only; participant-authored language supplies continuity or "
+                "mutual-address evidence, and observers cannot substitute either."
             )
         return {
             "schema_version": 35,
@@ -40531,14 +40668,20 @@ OUTPUT:
             for row in records
         )
         attention_outcome = self._correspondence_thread_has_attention_outcome(records, thread_id, message_t)
+        ack_is_address_evidence = bool(
+            latest_ack
+            and ack_kind in {"held", "unclear", "cannot_answer", "needs_time"}
+        )
         if trace_observed:
             state = "trace_observed"
         elif attention_outcome:
             state = "attention_outcome_recorded"
         elif latest_ack and ack_kind in {"held", "needs_time"}:
             state = "held_ack"
-        elif latest_ack:
+        elif ack_is_address_evidence:
             state = "acknowledged"
+        elif latest_ack:
+            state = "seen_ack_only"
         elif reply_linked:
             state = "reply_linked_needs_ack_or_trace"
         elif read:
@@ -40555,7 +40698,19 @@ OUTPUT:
         }.get(state, "none")
         current = "minime"
         role = "recipient" if current == to_being.lower() else ("sender" if current == from_being.lower() else "observer")
-        eligible = bool(latest_ack or trace_observed or attention_outcome)
+        eligible = bool(
+            ack_is_address_evidence or trace_observed or attention_outcome
+        )
+        relation_axes = correspondence_relation_axes_v4(
+            role=role,
+            reply_linked=reply_linked,
+            ack_present=bool(latest_ack),
+            ack_is_address_evidence=ack_is_address_evidence,
+            trace_observed=trace_observed,
+            attention_outcome_present=attention_outcome,
+            read=read,
+            delivered=delivered,
+        )
         return {
             "schema_version": 3,
             "policy": "native_thread_continuity_v3",
@@ -40574,6 +40729,7 @@ OUTPUT:
             "trace_observed": trace_observed,
             "attention_outcome_present": attention_outcome,
             "attention_or_microdose_eligible": eligible,
+            "correspondence_relation_axes_v4": relation_axes,
             "exact_next_commands": self._correspondence_native_next_commands(
                 from_being,
                 to_being,
@@ -40596,6 +40752,7 @@ OUTPUT:
         state = str(continuity.get("continuity_state") or "unknown")
         if state not in {
             "reply_linked_needs_ack_or_trace",
+            "seen_ack_only",
             "read_not_acknowledged",
             "delivered_unread",
             "unaddressed",
@@ -40611,6 +40768,23 @@ OUTPUT:
             helper.get("latest_resolution")
             or "latest resolves to the latest native peer message"
         )
+        if state == "reply_linked_needs_ack_or_trace":
+            axes = continuity.get("correspondence_relation_axes_v4") or {}
+            continuity_axis = axes.get("continuity_axis") or {}
+            mutual_axis = axes.get("mutual_address_axis") or {}
+            authority_axis = axes.get("authority_axis") or {}
+            return (
+                "NATIVE THREAD CONTINUITY ACTIVE: "
+                f"thread={continuity.get('thread_id') or '(unknown)'}; "
+                f"role={continuity.get('current_being_role') or 'observer'}; "
+                f"continuity={continuity_axis.get('state') or 'active'}/"
+                f"{continuity_axis.get('basis') or 'reply_chain'}; "
+                f"mutual_address={mutual_axis.get('state') or 'not_confirmed'}; "
+                f"attention={authority_axis.get('attention') or 'blocked_no_being_authored_address_evidence'}; "
+                f"{latest_resolution}; optional mutual-address evidence: {commands}; "
+                "no action needed; may ignore without penalty; receipt is not required "
+                "to keep the reply chain alive; pressure effect is not measured."
+            )
         return (
             f"NATIVE THREAD WAITING: thread={continuity.get('thread_id') or '(unknown)'}; "
             f"role={continuity.get('current_being_role') or 'observer'}; state={state}; "
@@ -41876,11 +42050,20 @@ OUTPUT:
         fidelity = self._correspondence_direct_contact_fidelity(records, "latest")
         native_continuity = self._correspondence_native_thread_continuity_v3(records, "latest")
         native_waiting = self._correspondence_native_waiting_line(native_continuity) is not None
+        native_reply_active = bool(
+            isinstance(native_continuity, dict)
+            and native_continuity.get("continuity_state")
+            == "reply_linked_needs_ack_or_trace"
+        )
         handshake = self._correspondence_handshake_state(records)
         waiting_reason = (
             "claimed thread is waiting for ACK/REPLY/TRACE native evidence"
             if ghost_claim_waiting
-            else "native thread is waiting for ACK/TRACE or attention outcome evidence"
+            else (
+                "reply continuity is active while optional mutual-address evidence is absent"
+                if native_reply_active
+                else "native thread is waiting for ACK/TRACE or attention outcome evidence"
+            )
         )
         v5_attention_state = str(receipt_to_attention.get("state") or "blocked_no_receipt")
         if v5_attention_state in {
@@ -53704,6 +53887,10 @@ Goals: {json.dumps(goals, indent=2)}
             "  CODEX_NEW scratch-pad \"create a small runnable experiment\" — create a fresh workspace/experiments/scratch-pad/ folder and ask Codex to work there from the start.\n"
             "  WRITE_FILE scratch-pad/main.py FROM_CODEX — save the last Codex response into a concrete file under workspace/experiments/.\n"
             "  EXPERIMENT_RUN system-resources-demo python3 system_resources.py — run a concrete command inside an experiments workspace after the workspace contains the files needed by that command.\n"
+            "  INQUIRY_START compare \"exact first passage\" and \"exact second passage\" — preserve two to eight strands and queue the fixed offline analysis without admitting them to live lanes.\n"
+            "  INQUIRY_STATUS [id] / INQUIRY_CANCEL [id] — inspect or cancel owner inquiry work.\n"
+            "  INQUIRY_CANARY {\"inquiry_id\":\"...\",\"values\":{\"smoothing_preference\":0.5},\"duration_secs\":600} — apply only exact self-owned values with signed rollback receipts.\n"
+            "  INQUIRY_WITHDRAW [canary-or-inquiry-id] / INQUIRY_PROMOTE [canary-or-inquiry-id] — return now or explicitly make a standing-eligible choice persistent.\n"
             "  PASS — decline to choose; the system will pick for you\n\n"
             "These are YOUR choices about YOUR experience. You do not need to justify them."
         )
@@ -53772,6 +53959,14 @@ Goals: {json.dumps(goals, indent=2)}
             llm_job_ctx = self._llm_job_prompt_summary()
             if llm_job_ctx:
                 augmented_prompt = augmented_prompt + "\n\n[LLM job status]\n" + llm_job_ctx + "\n"
+            inquiry_ctx = self._owner_inquiry_prompt_summary()
+            if inquiry_ctx:
+                augmented_prompt = (
+                    augmented_prompt
+                    + "\n\n[Owner distinct-strand inquiry]\n"
+                    + inquiry_ctx
+                    + "\n"
+                )
 
         # Research continuity: inject relevant past search results unless stable-core is
         # proving the self-journal lane without research pressure.
@@ -53944,6 +54139,16 @@ Goals: {json.dumps(goals, indent=2)}
             next_action = "ATTRACTOR_SUGGESTIONS"
         else:
             self._notice_attractor_body_consent(next_action, base_action, cleaned)
+        if ActionContinuityStore.base_action(next_action) in OWNER_INQUIRY_NEXT_ACTIONS:
+            self._pending_owner_inquiry_response = getattr(
+                self, "_last_llm_response", None
+            )
+            self._pending_owner_inquiry_model = getattr(
+                self, "_last_llm_model", None
+            )
+            self._pending_owner_inquiry_provider = getattr(
+                self, "_last_llm_provider", None
+            )
         self._pending_next_action = next_action
         base_action = next_action.split()[0].upper()
         signal = globals().get("_LAST_NEXT_NORMALIZATION_SIGNAL_V1")
@@ -54329,6 +54534,9 @@ Goals: {json.dumps(goals, indent=2)}
         )
         if response.status_code == 200:
             content = response.json().get('choices', [{}])[0].get('message', {}).get('content', '').strip()
+            if content:
+                self._last_llm_model = MLX_MODEL or "default"
+                self._last_llm_provider = "mlx"
             return self._clean_llm_content(content)
         else:
             raise Exception(f"MLX server returned {response.status_code}: {response.text[:200]}")
@@ -54457,6 +54665,9 @@ Goals: {json.dumps(goals, indent=2)}
                     "eval_count": parsed.get("eval_count"),
                     "eval_duration": parsed.get("eval_duration"),
                 })
+                if content:
+                    self._last_llm_model = model
+                    self._last_llm_provider = backend_name
                 return self._clean_llm_content(content)
             timing["status"] = "http_error"
             raise Exception(f"Ollama {model} returned {response.status_code}")
@@ -54499,6 +54710,9 @@ Goals: {json.dumps(goals, indent=2)}
         )
         if response.status_code == 200:
             content = response.json().get('choices', [{}])[0].get('message', {}).get('content', '').strip()
+            if content:
+                self._last_llm_model = MLX_MODEL or "default"
+                self._last_llm_provider = "mlx"
             return self._clean_llm_content(content)
         raise Exception(f"MLX server returned {response.status_code}: {response.text[:200]}")
 
@@ -54616,6 +54830,9 @@ Goals: {json.dumps(goals, indent=2)}
                     "eval_count": parsed.get("eval_count"),
                     "eval_duration": parsed.get("eval_duration"),
                 })
+                if content:
+                    self._last_llm_model = model
+                    self._last_llm_provider = backend_name
                 return self._clean_llm_content(content)
             timing["status"] = "http_error"
             raise Exception(f"Ollama {model} returned {response.status_code}")

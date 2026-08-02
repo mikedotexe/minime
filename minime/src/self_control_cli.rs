@@ -36,6 +36,7 @@ pub struct SelfControlIssueOptions {
     pub values: SelfControlValuesV2,
     pub lease_secs: u64,
     pub expected_revision: u64,
+    pub retry_revision_conflict: bool,
     pub related_intent_id: Option<String>,
     pub related_receipt_id: Option<String>,
     pub evidence_refs: Vec<String>,
@@ -60,6 +61,7 @@ impl SelfControlIssueOptions {
             values,
             lease_secs: 120,
             expected_revision: 0,
+            retry_revision_conflict: true,
             related_intent_id: None,
             related_receipt_id: None,
             evidence_refs: Vec::new(),
@@ -147,7 +149,8 @@ pub async fn issue(options: SelfControlIssueOptions) -> Result<Value, String> {
         let command = build_command(&signer, &options, &hello, expected_revision, now_unix_ms())?;
         let result = deliver_command(&mut socket, &signer, &hello, command).await?;
         let retry_revision = result.self_control_receipt.resulting_revision;
-        let should_retry = attempt == 0
+        let should_retry = options.retry_revision_conflict
+            && attempt == 0
             && result.self_control_receipt.status == SelfControlReceiptStatusV2::RevisionConflict;
         attempts.push(json!({
             "command": result.command,
@@ -399,6 +402,7 @@ fn wire_stable_json(value: &Value) -> Result<Value, String> {
 const fn family_name(family: SelfControlFamilyV2) -> &'static str {
     match family {
         SelfControlFamilyV2::Conversation => "conversation",
+        SelfControlFamilyV2::SemanticContinuity => "semantic_continuity",
         SelfControlFamilyV2::SemanticEmission => "semantic_emission",
         SelfControlFamilyV2::Memory => "memory",
         SelfControlFamilyV2::SensoryIntake => "sensory_intake",

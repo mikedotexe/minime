@@ -1,0 +1,95 @@
+{
+  "schema": "volition.owner_inquiry.v1",
+  "inquiry_id": "inquiry-wire-fixture-1",
+  "owner_being": "minime",
+  "source_attestation_id": "attestation-wire-fixture-1",
+  "source_attestation_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "question": "How do these exact strands remain distinct?",
+  "strands": [
+    {
+      "schema": "volition.semantic_strand.v1",
+      "strand_id": "inquiry-wire-fixture-1-strand-1",
+      "owner_being": "minime",
+      "source_attestation_id": "attestation-wire-fixture-1",
+      "source_attestation_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "response_start_byte": 0,
+      "response_end_byte": 5,
+      "label": "first",
+      "content": "first",
+      "content_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "embedding_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "projection_48d": [
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+      ],
+      "companion_projection_12d": [
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+      ],
+      "provenance": "exact_utf8_response_interval",
+      "deployment_identity": "minime-deployment-fixture",
+      "captured_at_unix_ms": 1000
+    },
+    {
+      "schema": "volition.semantic_strand.v1",
+      "strand_id": "inquiry-wire-fixture-1-strand-2",
+      "owner_being": "minime",
+      "source_attestation_id": "attestation-wire-fixture-1",
+      "source_attestation_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "response_start_byte": 6,
+      "response_end_byte": 12,
+      "label": "second",
+      "content": "second",
+      "content_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "embedding_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "projection_48d": [
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0
+      ],
+      "companion_projection_12d": [
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0
+      ],
+      "provenance": "exact_utf8_response_interval",
+      "deployment_identity": "minime-deployment-fixture",
+      "captured_at_unix_ms": 1000
+    }
+  ],
+  "owner_priority": 7,
+  "fixed_analysis_set": [
+    "viscous_persistence_source_separation",
+    "codec_fidelity",
+    "sensory_interference_all_pairs"
+  ],
+  "budget": {
+    "compute_millis": 30000,
+    "storage_bytes": 1048576,
+    "action_count": 1
+  },
+  "dependency_inquiry_ids": [],
+  "status": "queued",
+  "cancellation": {
+    "requested": false
+  },
+  "authority_boundary": {
+    "raw_strands_owner_only": true,
+    "live_sensory_admission": false,
+    "shadow_influence": false,
+    "shared_coupling": false,
+    "live_codec_write": false,
+    "telemetry_can_choose_control": false,
+    "operator_can_substitute_control": false,
+    "felt_review_required": false,
+    "result_sharing_requires_correspondence": true
+  },
+  "created_at_unix_ms": 1000,
+  "updated_at_unix_ms": 1000
+}

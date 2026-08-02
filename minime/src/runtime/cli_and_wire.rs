@@ -157,6 +157,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SelfControlCmd,
     },
+    /// Capture exact owner expression bytes or run the fixed offline inquiry.
+    Inquiry {
+        #[command(subcommand)]
+        cmd: InquiryCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -194,6 +199,7 @@ enum DivisionCmd {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum SelfControlFamilyArg {
+    SemanticContinuity,
     Memory,
     SensoryIntake,
     ReservoirRegulation,
@@ -206,11 +212,10 @@ impl From<SelfControlFamilyArg> for crate::self_control_wire::SelfControlFamilyV
     fn from(value: SelfControlFamilyArg) -> Self {
         use crate::self_control_wire::SelfControlFamilyV2;
         match value {
+            SelfControlFamilyArg::SemanticContinuity => SelfControlFamilyV2::SemanticContinuity,
             SelfControlFamilyArg::Memory => SelfControlFamilyV2::Memory,
             SelfControlFamilyArg::SensoryIntake => SelfControlFamilyV2::SensoryIntake,
-            SelfControlFamilyArg::ReservoirRegulation => {
-                SelfControlFamilyV2::ReservoirRegulation
-            }
+            SelfControlFamilyArg::ReservoirRegulation => SelfControlFamilyV2::ReservoirRegulation,
             SelfControlFamilyArg::ReservoirGeometry => SelfControlFamilyV2::ReservoirGeometry,
             SelfControlFamilyArg::PiController => SelfControlFamilyV2::PiController,
             SelfControlFamilyArg::LocalTopology => SelfControlFamilyV2::LocalTopology,
@@ -266,6 +271,9 @@ enum SelfControlCmd {
         lease_secs: u64,
         #[arg(long, default_value_t = 0)]
         expected_revision: u64,
+        /// Retry once at the receiver's current revision after a conflict.
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        retry_revision_conflict: bool,
         #[arg(long)]
         actor_process_identity: Option<String>,
         #[arg(long)]
@@ -289,6 +297,83 @@ enum SelfControlCmd {
         expected_revision: u64,
         #[arg(long)]
         actor_process_identity: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum InquiryCmd {
+    /// Print the exact V2 analyzer source, artifact, deployment, and sandbox identity.
+    Identity,
+    /// Sign exact UTF-8 response bytes with Minime's Rust-owned owner identity.
+    Attest {
+        #[arg(long)]
+        root: Option<std::path::PathBuf>,
+        #[arg(long)]
+        response: std::path::PathBuf,
+        #[arg(long)]
+        exchange_id: String,
+        #[arg(long)]
+        model: String,
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        deployment_identity: String,
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Verify an attestation and build the canonical owner-only inquiry manifest.
+    Prepare {
+        #[arg(long)]
+        root: Option<std::path::PathBuf>,
+        #[arg(long)]
+        response: std::path::PathBuf,
+        #[arg(long)]
+        attestation: std::path::PathBuf,
+        #[arg(long)]
+        recipe: std::path::PathBuf,
+        #[arg(long)]
+        deployment_identity: String,
+        #[arg(long, default_value_t = 3_600)]
+        max_attestation_age_secs: u64,
+        #[arg(long)]
+        output: std::path::PathBuf,
+        /// Also emit the source-bound V2 manifest used by the research console.
+        #[arg(long)]
+        v2_output: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = 3_600)]
+        expires_after_secs: u64,
+    },
+    /// Run the fixed deterministic inquiry twice with no live-runtime handles.
+    Analyze {
+        #[arg(long)]
+        request: std::path::PathBuf,
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+        #[arg(long)]
+        compatibility_output: Option<std::path::PathBuf>,
+    },
+    /// Sign one canonical Owner Research payload with Minime's owner key.
+    SignResearch {
+        #[arg(long)]
+        root: Option<std::path::PathBuf>,
+        #[arg(long)]
+        payload: std::path::PathBuf,
+        #[arg(long)]
+        payload_kind: String,
+        #[arg(long)]
+        payload_schema: String,
+        #[arg(long)]
+        receipt_id: String,
+        #[arg(long)]
+        process_identity: String,
+        #[arg(long)]
+        deployment_identity: String,
+        #[arg(long)]
+        previous_receipt_sha256: Option<String>,
+        #[arg(long)]
+        emitted_at_unix_ms: Option<u64>,
+        #[arg(long)]
+        output: std::path::PathBuf,
     },
 }
 

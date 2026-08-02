@@ -1434,6 +1434,7 @@ pub struct SensoryBus {
     llava: Mutex<SemanticLane>,
     semantic_companion: Mutex<SemanticCompanionLane>,
     semantic_companion_mix: Mutex<f32>,
+    semantic_strand_retention_turns: Mutex<u32>,
     // probabilistic gate (set by PI)
     gate: Mutex<f32>,
     rng: Mutex<SmallRng>,
@@ -1539,6 +1540,7 @@ impl SensoryBus {
             llava: Mutex::new(SemanticLane::new()),
             semantic_companion: Mutex::new(SemanticCompanionLane::new()),
             semantic_companion_mix: Mutex::new(0.0),
+            semantic_strand_retention_turns: Mutex::new(0),
             gate: Mutex::new(1.0),
             rng: Mutex::new(SmallRng::seed_from_u64(seed)),
             live_audio_divisor: Mutex::new(1),
@@ -2114,6 +2116,15 @@ impl SensoryBus {
     #[must_use]
     pub fn get_semantic_companion_mix(&self) -> f32 {
         *self.semantic_companion_mix.lock()
+    }
+
+    pub fn set_semantic_strand_retention_turns(&self, value: u32) {
+        *self.semantic_strand_retention_turns.lock() = value.min(32);
+    }
+
+    #[must_use]
+    pub fn get_semantic_strand_retention_turns(&self) -> u32 {
+        *self.semantic_strand_retention_turns.lock()
     }
 
     #[must_use]

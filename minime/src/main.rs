@@ -15,6 +15,11 @@ mod hard_reset;
 mod ising_shadow;
 mod memory_bank;
 mod nn;
+mod owner_inquiry;
+mod owner_inquiry_wire;
+#[allow(dead_code, unused_imports)]
+mod owner_inquiry_wire_v2;
+mod owner_research;
 mod prime;
 mod regulator;
 #[allow(dead_code)]
@@ -28,6 +33,7 @@ mod self_control_runtime;
 mod self_control_wire;
 mod semantic_body_v2;
 mod sensory_bus;
+mod sensory_interference;
 mod sensory_protocol;
 mod sensory_ws;
 mod sovereign_division;

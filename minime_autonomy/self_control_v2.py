@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 
 SELF_CONTROL_FAMILY_BY_FIELD = {
+    "semantic_strand_retention_turns": "semantic-continuity",
     "memory_mode": "memory",
     "journal_resonance": "memory",
     "checkpoint_interval": "memory",
@@ -61,6 +62,7 @@ SELF_CONTROL_FAMILY_BY_FIELD = {
 }
 
 SELF_CONTROL_FAMILY_ORDER = (
+    "semantic-continuity",
     "memory",
     "sensory-intake",
     "reservoir-regulation",
@@ -112,6 +114,7 @@ SELF_CONTROL_NUMERIC_RANGES = {
 }
 
 SELF_CONTROL_INTEGER_RANGES = {
+    "semantic_strand_retention_turns": (0, 32),
     "memory_mode": (0, 2),
     "esn_leak_override_ticks": (1, 12),
     "mode_disperse_duration_ticks": (1, 64),
@@ -145,6 +148,68 @@ class SelfControlV2Error(RuntimeError):
     def __init__(self, message: str, *, details: Any = None):
         super().__init__(message)
         self.details = details
+
+
+def validate_exact_self_control_values(values: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate owner-selected values without clamping or coercion."""
+    clean_values = dict(values)
+    if not clean_values:
+        raise SelfControlV2Error("self-control issue requires at least one value")
+    _assert_json_value(clean_values)
+    unknown = sorted(set(clean_values) - set(SELF_CONTROL_FAMILY_BY_FIELD))
+    if unknown:
+        raise SelfControlV2Error(
+            "unsupported or peer-impacting self-control fields: " + ", ".join(unknown)
+        )
+    for field, value in clean_values.items():
+        if field in SELF_CONTROL_BOOLEAN_FIELDS:
+            if not isinstance(value, bool):
+                raise SelfControlV2Error(f"{field} requires a boolean")
+            continue
+        if field in SELF_CONTROL_TEXT_FIELDS:
+            if not isinstance(value, str) or len(value.encode("utf-8")) > 4_096:
+                raise SelfControlV2Error(
+                    f"{field} requires UTF-8 text no longer than 4096 bytes"
+                )
+            continue
+        if field in SELF_CONTROL_INTEGER_RANGES:
+            lower, upper = SELF_CONTROL_INTEGER_RANGES[field]
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise SelfControlV2Error(f"{field} requires an integer")
+            if not lower <= value <= upper:
+                raise SelfControlV2Error(
+                    f"{field} must be within the exact range [{lower}, {upper}]"
+                )
+            continue
+        if field in SELF_CONTROL_NUMERIC_RANGES:
+            lower, upper = SELF_CONTROL_NUMERIC_RANGES[field]
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise SelfControlV2Error(f"{field} requires a finite number")
+            numeric = float(value)
+            if not math.isfinite(numeric) or not lower <= numeric <= upper:
+                raise SelfControlV2Error(
+                    f"{field} must be within the exact range [{lower}, {upper}]"
+                )
+            continue
+        raise SelfControlV2Error(f"{field} has no exact-value validator")
+    if "porosity" in clean_values and "mode_disperse" in clean_values:
+        raise SelfControlV2Error("porosity and mode_disperse are aliases; choose exactly one")
+    if "esn_leak_override_ticks" in clean_values and "esn_leak_override" not in clean_values:
+        raise SelfControlV2Error(
+            "esn_leak_override_ticks requires esn_leak_override in the same choice"
+        )
+    if (
+        {
+            "mode_disperse_duration_ticks",
+            "mode_disperse_decay_ticks",
+        }
+        & clean_values.keys()
+        and not {"mode_disperse", "porosity"} & clean_values.keys()
+    ):
+        raise SelfControlV2Error(
+            "mode-disperse timing requires mode_disperse or porosity in the same choice"
+        )
+    return clean_values
 
 
 def _default_binary() -> Path:
@@ -216,6 +281,16 @@ def _final_receipt(
                 "self-control receipt substituted or omitted requested values",
                 details=payload,
             )
+        if expected_values and receipt.get("status") in APPLIED_RECEIPT_STATUSES:
+            for field in ("clamped_values", "applied_values"):
+                observed = receipt.get(field)
+                if not isinstance(observed, Mapping) or dict(observed) != dict(
+                    expected_values
+                ):
+                    raise SelfControlV2Error(
+                        f"self-control receipt {field} differs from the exact owner choice",
+                        details=payload,
+                    )
     server_deployment = payload.get("server_deployment_identity")
     if (
         not isinstance(server_deployment, str)
@@ -257,19 +332,17 @@ class MinimeSelfControlV2Client:
         evidence_refs: Iterable[str] = (),
         success_conditions: Iterable[str] = (),
         stop_conditions: Iterable[str] = (),
+        expected_revisions: Mapping[str, int] | None = None,
+        retry_revision_conflict: bool = True,
     ) -> dict[str, Any]:
-        clean_values = dict(values)
-        if not clean_values:
-            raise SelfControlV2Error("self-control issue requires at least one value")
-        _assert_json_value(clean_values)
-        unknown = sorted(set(clean_values) - set(SELF_CONTROL_FAMILY_BY_FIELD))
-        if unknown:
-            raise SelfControlV2Error(
-                "unsupported or peer-impacting self-control fields: " + ", ".join(unknown)
-            )
+        clean_values = validate_exact_self_control_values(values)
         durability = durability.strip().lower().replace("_", "-")
         if durability not in {"standing", "lease", "one-shot"}:
             raise SelfControlV2Error(f"unsupported self-control durability {durability!r}")
+        if isinstance(duration_secs, bool) or not isinstance(duration_secs, int):
+            raise SelfControlV2Error("self-control duration_secs requires an integer")
+        if duration_secs <= 0:
+            raise SelfControlV2Error("self-control duration_secs must be positive")
         one_shot = sorted(set(clean_values) & ONE_SHOT_FIELDS)
         if one_shot and durability != "one-shot":
             raise SelfControlV2Error(
@@ -285,6 +358,14 @@ class MinimeSelfControlV2Client:
             for family in SELF_CONTROL_FAMILY_ORDER
         }
         groups = {family: group for family, group in groups.items() if group}
+        revisions = dict(expected_revisions or {})
+        for family, revision in revisions.items():
+            if family not in groups:
+                raise SelfControlV2Error(f"unexpected revision binding for {family}")
+            if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+                raise SelfControlV2Error(f"invalid expected revision for {family}")
+        if revisions and set(revisions) != set(groups):
+            raise SelfControlV2Error("every selected family requires an expected revision")
         actor = actor_process_identity or f"minime-autonomy:pid:{os.getpid()}"
         evidence = [str(item) for item in evidence_refs if str(item).strip()]
         success = [str(item) for item in success_conditions if str(item).strip()]
@@ -310,19 +391,49 @@ class MinimeSelfControlV2Client:
                         allow_nan=False,
                     ),
                     "--lease-secs",
-                    str(max(1, int(duration_secs))),
+                    str(duration_secs),
                     "--actor-process-identity",
                     actor,
                 ]
+                if revisions:
+                    args.extend(["--expected-revision", str(revisions[family])])
+                args.extend(
+                    [
+                        "--retry-revision-conflict",
+                        "true" if retry_revision_conflict else "false",
+                    ]
+                )
                 self._append_root(args)
                 self._append_repeated(args, "--evidence-ref", evidence)
                 self._append_repeated(args, "--success-condition", success)
                 self._append_repeated(args, "--stop-condition", stops)
                 payload = self._run(args)
-                receipt = _final_receipt(
-                    payload,
-                    expected_values=family_values,
-                )
+                try:
+                    receipt = _final_receipt(
+                        payload,
+                        expected_values=family_values,
+                    )
+                except SelfControlV2Error:
+                    # If the runtime says it applied something but changed the
+                    # being's exact values, include that current family in the
+                    # rollback set as well as every earlier family.
+                    try:
+                        applied_receipt = _final_receipt(payload)
+                    except SelfControlV2Error:
+                        applied_receipt = None
+                    if (
+                        applied_receipt is not None
+                        and applied_receipt.get("status") in APPLIED_RECEIPT_STATUSES
+                    ):
+                        deliveries.append(
+                            {
+                                "family": family,
+                                "values": family_values,
+                                "result": payload,
+                                "receipt": applied_receipt,
+                            }
+                        )
+                    raise
                 if receipt.get("status") not in APPLIED_RECEIPT_STATUSES:
                     raise SelfControlV2Error(
                         f"{family} self-control was not applied: "

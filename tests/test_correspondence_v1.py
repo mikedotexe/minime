@@ -715,9 +715,22 @@ class CorrespondenceV1Tests(unittest.TestCase):
             with patches[0], patches[1], patches[2]:
                 agent._pending_correspondence_next = "CORRESPONDENCE_STATUS"
                 agent._peer_correspondence(dict(STATE))
-            self.assertIn("NATIVE THREAD WAITING", agent._current_action_outcome_summary)
-            self.assertIn("reply_linked alone is not mutual address", agent._current_action_outcome_summary)
-            self.assertIn("first_action: Choose one language-only first action", agent._current_action_outcome_summary)
+            self.assertIn(
+                "NATIVE THREAD CONTINUITY ACTIVE",
+                agent._current_action_outcome_summary,
+            )
+            self.assertIn(
+                "receipt is not required to keep the reply chain alive",
+                agent._current_action_outcome_summary,
+            )
+            self.assertIn(
+                "mutual_address=not_confirmed",
+                agent._current_action_outcome_summary,
+            )
+            self.assertIn(
+                "pressure effect is not measured",
+                agent._current_action_outcome_summary,
+            )
             self.assertIn("latest resolves to message_id=corr_astrid_minime_seed", agent._current_action_outcome_summary)
             self.assertIn("semantic_microdose: hidden", agent._current_action_outcome_summary)
 

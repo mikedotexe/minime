@@ -28,6 +28,7 @@ pub(super) fn unsupported_fields(
 
 fn field_allowed(family: SelfControlFamilyV2, field: &str) -> bool {
     match family {
+        SelfControlFamilyV2::SemanticContinuity => field == "semantic_strand_retention_turns",
         SelfControlFamilyV2::Memory => matches!(
             field,
             "memory_mode"
@@ -89,6 +90,9 @@ fn field_allowed(family: SelfControlFamilyV2, field: &str) -> bool {
 
 pub(super) fn clamp_values(values: &SelfControlValuesV2) -> SelfControlValuesV2 {
     SelfControlValuesV2 {
+        semantic_strand_retention_turns: values
+            .semantic_strand_retention_turns
+            .map(|value| value.min(32)),
         semantic_companion_mix: values
             .semantic_companion_mix
             .map(|value| value.clamp(0.0, 1.0)),
@@ -173,6 +177,9 @@ pub(super) fn snapshot_values(
         };
     }
     copy_preference!(semantic_companion_mix);
+    if requested.semantic_strand_retention_turns.is_some() {
+        values.semantic_strand_retention_turns = Some(bus.get_semantic_strand_retention_turns());
+    }
     copy_preference!(semantic_intake_gain);
     copy_preference!(receptivity);
 
@@ -320,6 +327,10 @@ pub(super) fn apply_values(
         };
     }
     apply!(semantic_companion_mix, set_semantic_companion_mix);
+    apply!(
+        semantic_strand_retention_turns,
+        set_semantic_strand_retention_turns
+    );
     apply!(local_sensory_admission, set_admit_fraction);
     apply!(synth_gain, set_synth_gain);
     apply!(keep_bias, set_keep_bias);

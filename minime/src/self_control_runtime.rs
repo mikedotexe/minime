@@ -1253,6 +1253,7 @@ fn current_revision(state: &RuntimeStateV2, family: &str) -> u64 {
 fn family_key(family: SelfControlFamilyV2) -> &'static str {
     match family {
         SelfControlFamilyV2::Conversation => "conversation",
+        SelfControlFamilyV2::SemanticContinuity => "semantic_continuity",
         SelfControlFamilyV2::SemanticEmission => "semantic_emission",
         SelfControlFamilyV2::Memory => "memory",
         SelfControlFamilyV2::SensoryIntake => "sensory_intake",

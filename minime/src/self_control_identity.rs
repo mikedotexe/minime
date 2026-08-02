@@ -71,6 +71,11 @@ impl SelfControlOwnerSigner {
         &self.public_key_hex
     }
 
+    #[must_use]
+    pub fn sign_hex(&self, bytes: &[u8]) -> String {
+        hex::encode(self.signing_key.sign(bytes).to_bytes())
+    }
+
     pub fn sign_command(
         &self,
         intent: SelfControlIntentV2,

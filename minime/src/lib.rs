@@ -17,6 +17,10 @@ pub mod ising_shadow;
 pub mod memory_bank;
 // pub mod net;  // no net.rs file
 pub mod nn;
+pub mod owner_inquiry;
+pub mod owner_inquiry_wire;
+pub mod owner_inquiry_wire_v2;
+pub mod owner_research;
 pub mod pressure_texture;
 pub mod prime;
 pub mod regulator;

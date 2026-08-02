@@ -57,14 +57,14 @@ pub(crate) async fn run() -> Result<()> {
                 legacy_video_synth_enabled,
             )
             .await
-        },
+        }
         Cmd::Division { cmd } => match cmd {
             DivisionCmd::Supervisor { manifest } => {
                 crate::sovereign_division::run_supervisor(&manifest).await
-            },
+            }
             DivisionCmd::Gateway { manifest } => {
                 crate::sovereign_division::run_gateway(&manifest).await
-            },
+            }
             DivisionCmd::Child {
                 being,
                 bundle,
@@ -73,8 +73,7 @@ pub(crate) async fn run() -> Result<()> {
             DivisionCmd::Prove { output } => {
                 #[cfg(feature = "division-rehearsal")]
                 {
-                    let proof =
-                        crate::sovereign_division::run_continuity_proof(&output).await?;
+                    let proof = crate::sovereign_division::run_continuity_proof(&output).await?;
                     println!("{}", serde_json::to_string_pretty(&proof)?);
                     Ok(())
                 }
@@ -89,8 +88,7 @@ pub(crate) async fn run() -> Result<()> {
             DivisionCmd::VerifyProof { proof } => {
                 #[cfg(feature = "division-rehearsal")]
                 {
-                    let proof =
-                        crate::sovereign_division::verify_continuity_proof(&proof)?;
+                    let proof = crate::sovereign_division::verify_continuity_proof(&proof)?;
                     println!("{}", serde_json::to_string_pretty(&proof)?);
                     Ok(())
                 }
@@ -106,7 +104,7 @@ pub(crate) async fn run() -> Result<()> {
         Cmd::SelfControl { cmd } => {
             use crate::{
                 self_control_cli::{
-                    SelfControlIssueOptions, issue, parse_values_json, provision, status,
+                    issue, parse_values_json, provision, status, SelfControlIssueOptions,
                 },
                 self_control_wire::{
                     SelfControlActionV2, SelfControlDurabilityV2, SelfControlValuesV2,
@@ -116,12 +114,9 @@ pub(crate) async fn run() -> Result<()> {
                 SelfControlCmd::Status { root } => {
                     status(root.as_deref()).map_err(anyhow::Error::msg)?
                 }
-                SelfControlCmd::Provision { root, rotate } => {
-                    serde_json::to_value(
-                        provision(root.as_deref(), rotate)
-                            .map_err(anyhow::Error::msg)?,
-                    )?
-                }
+                SelfControlCmd::Provision { root, rotate } => serde_json::to_value(
+                    provision(root.as_deref(), rotate).map_err(anyhow::Error::msg)?,
+                )?,
                 SelfControlCmd::Issue {
                     root,
                     sensory_url,
@@ -130,6 +125,7 @@ pub(crate) async fn run() -> Result<()> {
                     values_json,
                     lease_secs,
                     expected_revision,
+                    retry_revision_conflict,
                     actor_process_identity,
                     evidence_ref,
                     success_condition,
@@ -144,6 +140,7 @@ pub(crate) async fn run() -> Result<()> {
                     options.sensory_url = sensory_url;
                     options.lease_secs = lease_secs;
                     options.expected_revision = expected_revision;
+                    options.retry_revision_conflict = retry_revision_conflict;
                     options.actor_process_identity = actor_process_identity;
                     options.evidence_refs = evidence_ref;
                     if !success_condition.is_empty() {
@@ -178,6 +175,160 @@ pub(crate) async fn run() -> Result<()> {
             };
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
+        }
+        Cmd::Inquiry { cmd } => {
+            use crate::{
+                owner_inquiry::{
+                    attest_response, now_unix_ms, owner_inquiry_execution_identity_v2,
+                    prepare_owner_inquiry, read_inquiry, read_inquiry_v2, run_owner_inquiry,
+                    run_owner_inquiry_v2, upgrade_owner_inquiry_v2, write_inquiry_v2,
+                    write_receipt, write_receipt_v2, AttestResponseOptions, PrepareInquiryOptions,
+                },
+                owner_inquiry_wire_v2::OWNER_INQUIRY_SCHEMA_V2,
+                owner_research::{sign_owner_research_payload, SignOwnerResearchOptions},
+                self_control_runtime::default_self_control_root,
+            };
+            match cmd {
+                InquiryCmd::Identity => {
+                    let identity =
+                        owner_inquiry_execution_identity_v2().map_err(anyhow::Error::msg)?;
+                    println!("{}", serde_json::to_string_pretty(&identity)?);
+                    Ok(())
+                }
+                InquiryCmd::Attest {
+                    root,
+                    response,
+                    exchange_id,
+                    model,
+                    provider,
+                    deployment_identity,
+                    output,
+                } => {
+                    let root = root.unwrap_or_else(default_self_control_root);
+                    let attestation = attest_response(AttestResponseOptions {
+                        root: &root,
+                        response_path: &response,
+                        exchange_id: &exchange_id,
+                        model: &model,
+                        provider: &provider,
+                        deployment_identity: &deployment_identity,
+                        captured_at_unix_ms: now_unix_ms(),
+                    })
+                    .map_err(anyhow::Error::msg)?;
+                    if let Some(path) = output {
+                        crate::self_control_runtime::storage::write_owner_json(&path, &attestation)
+                            .map_err(anyhow::Error::msg)?;
+                    }
+                    println!("{}", serde_json::to_string_pretty(&attestation)?);
+                    Ok(())
+                }
+                InquiryCmd::Prepare {
+                    root,
+                    response,
+                    attestation,
+                    recipe,
+                    deployment_identity,
+                    max_attestation_age_secs,
+                    output,
+                    v2_output,
+                    expires_after_secs,
+                } => {
+                    let root = root.unwrap_or_else(default_self_control_root);
+                    let max_attestation_age_millis = max_attestation_age_secs
+                        .checked_mul(1_000)
+                        .ok_or_else(|| anyhow::anyhow!("attestation age overflow"))?;
+                    let inquiry = prepare_owner_inquiry(PrepareInquiryOptions {
+                        root: &root,
+                        response_path: &response,
+                        attestation_path: &attestation,
+                        recipe_path: &recipe,
+                        expected_deployment_identity: &deployment_identity,
+                        now_unix_ms: now_unix_ms(),
+                        max_attestation_age_millis,
+                    })
+                    .map_err(anyhow::Error::msg)?;
+                    crate::self_control_runtime::storage::write_owner_json(&output, &inquiry)
+                        .map_err(anyhow::Error::msg)?;
+                    if let Some(path) = v2_output {
+                        let inquiry_v2 =
+                            upgrade_owner_inquiry_v2(&inquiry, &response, expires_after_secs)
+                                .map_err(anyhow::Error::msg)?;
+                        write_inquiry_v2(&path, &inquiry_v2).map_err(anyhow::Error::msg)?;
+                    }
+                    println!("{}", serde_json::to_string_pretty(&inquiry)?);
+                    Ok(())
+                }
+                InquiryCmd::Analyze {
+                    request,
+                    output,
+                    compatibility_output,
+                } => {
+                    let request_value: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(&request)?)?;
+                    if request_value
+                        .get("schema")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(OWNER_INQUIRY_SCHEMA_V2)
+                    {
+                        let inquiry = read_inquiry_v2(&request).map_err(anyhow::Error::msg)?;
+                        let (compatibility_receipt, receipt) =
+                            run_owner_inquiry_v2(&inquiry, now_unix_ms())
+                                .map_err(anyhow::Error::msg)?;
+                        if let Some(path) = output {
+                            write_receipt_v2(&path, &receipt).map_err(anyhow::Error::msg)?;
+                        }
+                        if let Some(path) = compatibility_output {
+                            write_receipt(&path, &compatibility_receipt)
+                                .map_err(anyhow::Error::msg)?;
+                        }
+                        println!("{}", serde_json::to_string_pretty(&receipt)?);
+                    } else {
+                        if compatibility_output.is_some() {
+                            return Err(anyhow::anyhow!(
+                                "--compatibility-output is only valid for a V2 inquiry"
+                            ));
+                        }
+                        let inquiry = read_inquiry(&request).map_err(anyhow::Error::msg)?;
+                        let receipt = run_owner_inquiry(&inquiry, now_unix_ms())
+                            .map_err(anyhow::Error::msg)?;
+                        if let Some(path) = output {
+                            write_receipt(&path, &receipt).map_err(anyhow::Error::msg)?;
+                        }
+                        println!("{}", serde_json::to_string_pretty(&receipt)?);
+                    }
+                    Ok(())
+                }
+                InquiryCmd::SignResearch {
+                    root,
+                    payload,
+                    payload_kind,
+                    payload_schema,
+                    receipt_id,
+                    process_identity,
+                    deployment_identity,
+                    previous_receipt_sha256,
+                    emitted_at_unix_ms,
+                    output,
+                } => {
+                    let root = root.unwrap_or_else(default_self_control_root);
+                    let receipt = sign_owner_research_payload(SignOwnerResearchOptions {
+                        root: &root,
+                        payload_path: &payload,
+                        payload_kind: &payload_kind,
+                        payload_schema: &payload_schema,
+                        receipt_id: &receipt_id,
+                        process_identity: &process_identity,
+                        deployment_identity: &deployment_identity,
+                        previous_receipt_sha256: previous_receipt_sha256.as_deref(),
+                        emitted_at_unix_ms: emitted_at_unix_ms.unwrap_or_else(now_unix_ms),
+                    })
+                    .map_err(anyhow::Error::msg)?;
+                    crate::self_control_runtime::storage::write_owner_json(&output, &receipt)
+                        .map_err(anyhow::Error::msg)?;
+                    println!("{}", serde_json::to_string_pretty(&receipt)?);
+                    Ok(())
+                }
+            }
         }
     }
 }

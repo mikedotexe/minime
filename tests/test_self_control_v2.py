@@ -5,6 +5,7 @@ import unittest
 from minime_autonomy.self_control_v2 import (
     MinimeSelfControlV2Client,
     SelfControlV2Error,
+    validate_exact_self_control_values,
 )
 
 
@@ -155,11 +156,40 @@ class SelfControlV2ClientTests(unittest.TestCase):
         with self.assertRaises(SelfControlV2Error):
             client.issue({"fill_target": float("nan")})
         with self.assertRaises(SelfControlV2Error):
+            client.issue({"fill_target": 0.9})
+        with self.assertRaises(SelfControlV2Error):
+            client.issue({"semantic_strand_retention_turns": 2.5})
+        with self.assertRaises(SelfControlV2Error):
             client.issue({"porosity": 0.2}, durability="lease")
 
+    def test_exact_validator_rejects_aliases_and_orphan_timing(self):
+        with self.assertRaisesRegex(SelfControlV2Error, "aliases"):
+            validate_exact_self_control_values(
+                {"porosity": 0.2, "mode_disperse": 0.2}
+            )
+        with self.assertRaisesRegex(SelfControlV2Error, "requires esn_leak_override"):
+            validate_exact_self_control_values({"esn_leak_override_ticks": 2})
+
     def test_rejects_receipt_that_substitutes_requested_values(self):
+        calls = []
+
         def runner(command, **_kwargs):
+            calls.append(command)
             family = command[command.index("--family") + 1]
+            if "withdraw" in command:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps(
+                        _result(
+                            family,
+                            values={},
+                            status="withdrawn",
+                            intent_suffix="rollback",
+                        )
+                    ),
+                    stderr="",
+                )
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -171,6 +201,30 @@ class SelfControlV2ClientTests(unittest.TestCase):
 
         client = MinimeSelfControlV2Client(binary="/tmp/minime", runner=runner)
         with self.assertRaisesRegex(SelfControlV2Error, "substituted"):
+            client.issue({"fill_target": 0.68})
+        withdrawals = [call for call in calls if "withdraw" in call]
+        self.assertEqual(len(withdrawals), 1)
+        self.assertIn("intent:reservoir-regulation:1", withdrawals[0])
+
+    def test_rejects_receipt_that_clamps_or_changes_effective_values(self):
+        def runner(command, **_kwargs):
+            family = command[command.index("--family") + 1]
+            payload = _result(family, values={"fill_target": 0.68})
+            payload["attempts"][-1]["self_control_receipt"]["clamped_values"] = {
+                "fill_target": 0.55
+            }
+            payload["attempts"][-1]["self_control_receipt"]["applied_values"] = {
+                "fill_target": 0.55
+            }
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(payload),
+                stderr="",
+            )
+
+        client = MinimeSelfControlV2Client(binary="/tmp/minime", runner=runner)
+        with self.assertRaisesRegex(SelfControlV2Error, "exact owner choice"):
             client.issue({"fill_target": 0.68})
 
     def test_rejects_machine_receipt_that_asserts_felt_effect(self):
