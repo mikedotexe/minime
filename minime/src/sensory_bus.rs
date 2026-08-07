@@ -151,7 +151,7 @@ impl Default for SensoryBusConfig {
 ///
 /// Sigmoid curve: gradual change at extremes, steepest in the middle.
 /// A low-fill recovery handover keeps fill <=25% at 45s and blends into the
-/// selected fill curve by 35%, avoiding a 30% cliff.
+/// selected fill curve by 40%, avoiding a 30% cliff.
 #[inline]
 fn semantic_stale_shaped_ms(fill: f32, shape: SemanticStaleShape) -> f64 {
     let lo = STALE_SEMANTIC_LOW_MS as f64;
@@ -3722,6 +3722,30 @@ mod tests {
             (shaped - expected).abs() <= 0.001,
             "fill=0.4 should be the sigmoid midpoint within f32-to-f64 tolerance: shaped={shaped}, expected={expected}"
         );
+    }
+
+    #[test]
+    fn semantic_stale_out_of_range_fill_is_sanitized_before_sigmoid() {
+        let at_one = dynamic_semantic_stale_ms_for(1.0, SemanticStaleShape::Sigmoid);
+
+        for fill in [f32::MAX, f32::INFINITY] {
+            assert_eq!(
+                dynamic_semantic_stale_ms_for(fill, SemanticStaleShape::Sigmoid),
+                at_one,
+                "positive out-of-range fill should clamp to one: fill={fill}"
+            );
+        }
+
+        for fill in [f32::MIN, f32::NEG_INFINITY, f32::NAN] {
+            assert_eq!(
+                dynamic_semantic_stale_ms_for(fill, SemanticStaleShape::Sigmoid),
+                STALE_SEMANTIC_BASE_MS,
+                "negative or NaN fill should use the conservative fallback: fill={fill}"
+            );
+        }
+
+        assert!(semantic_stale_shaped_ms(f32::MAX, SemanticStaleShape::Sigmoid).is_finite());
+        assert!(semantic_stale_shaped_ms(f32::MIN, SemanticStaleShape::Sigmoid).is_finite());
     }
 
     #[test]
