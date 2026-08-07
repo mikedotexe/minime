@@ -693,6 +693,33 @@ mod tests {
     }
 
     #[test]
+    fn mode_packing_pressure_is_linear_while_overpacked_quality_is_thresholded() {
+        let below = PressureSourceV1::from_parts(
+            PressureSourceComponents {
+                mode_packing: 0.54,
+                ..PressureSourceComponents::default()
+            },
+            PressureSourceContext::default(),
+        );
+        let threshold = PressureSourceV1::from_parts(
+            PressureSourceComponents {
+                mode_packing: 0.55,
+                ..PressureSourceComponents::default()
+            },
+            PressureSourceContext::default(),
+        );
+
+        assert!((below.pressure_score - 0.88 * 0.13 * 0.54).abs() < 1.0e-6);
+        assert!((threshold.pressure_score - 0.88 * 0.13 * 0.55).abs() < 1.0e-6);
+        assert!((threshold.porosity_score - (1.0 - 0.15 * 0.55)).abs() < 1.0e-6);
+        assert_eq!(below.dominant_source, "mode_packing");
+        assert_eq!(below.quality, "mixed_pressure");
+        assert_eq!(threshold.dominant_source, "mode_packing");
+        assert_eq!(threshold.quality, "overpacked_mode_packing");
+        assert!(!threshold.control.applied_locally);
+    }
+
+    #[test]
     fn pressure_source_deserializes_legacy_records_without_profile() {
         let pressure = PressureSourceV1::from_parts(
             PressureSourceComponents {
@@ -1047,6 +1074,37 @@ mod tests {
             .texture_component_alignment
             .authority
             .contains("not_damping_or_control"));
+    }
+
+    #[test]
+    fn resonance_density_carries_viscosity_without_multiplying_density() {
+        let low_viscosity = ResonanceDensityV1::from_parts(
+            0.83,
+            0.52,
+            0.19,
+            "forming_containment",
+            ResonanceDensityComponents {
+                viscosity_index: 0.20,
+                ..ResonanceDensityComponents::default()
+            },
+        );
+        let high_viscosity = ResonanceDensityV1::from_parts(
+            0.83,
+            0.52,
+            0.19,
+            "forming_containment",
+            ResonanceDensityComponents {
+                viscosity_index: 0.90,
+                ..ResonanceDensityComponents::default()
+            },
+        );
+
+        assert!((low_viscosity.density - 0.83).abs() < 1.0e-6);
+        assert!((high_viscosity.density - 0.83).abs() < 1.0e-6);
+        assert!(
+            high_viscosity.components.viscosity_index
+                > low_viscosity.components.viscosity_index
+        );
     }
 
     #[test]
