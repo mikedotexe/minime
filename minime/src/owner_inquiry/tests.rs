@@ -90,6 +90,157 @@ fn runner_is_deterministic_all_pairs_and_non_mutating() {
 }
 
 #[test]
+fn texture_dynamics_is_typed_complete_finite_and_source_exact() {
+    let mut inquiry = inquiry();
+    let mut third = inquiry.strands[0].clone();
+    third.strand_id = "middle".to_string();
+    third.label = "middle".to_string();
+    third.content = "middle".to_string();
+    third.content_sha256 = canonical_semantic_strand_content_sha256(&third.content);
+    third.response_start_byte = 10;
+    third.response_end_byte = 16;
+    third.projection_48d = (0..48)
+        .map(|index| ((index as f32 + 1.0) / 31.0).sin() * 0.5)
+        .collect();
+    third.companion_projection_12d = Some(derive_companion_12d(&third.projection_48d).unwrap());
+    third.embedding_sha256 = canonical_semantic_strand_embedding_sha256(
+        &third.projection_48d,
+        third.companion_projection_12d.as_deref(),
+    );
+    inquiry.strands.push(third);
+
+    let typed = texture_dynamics::texture_dynamics_snapshot_v1(&inquiry).unwrap();
+    let typed_json = serde_json::to_value(&typed).unwrap();
+    ensure_finite_json(&typed_json).unwrap();
+    assert_eq!(typed_json["strand_count"], 3);
+    assert_eq!(typed_json["unordered_pair_count"], 3);
+    assert_eq!(typed_json["strands"].as_array().unwrap().len(), 3);
+    assert_eq!(typed_json["pairs"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        typed_json["felt_status"]["author_domain"],
+        "owner_authored_only"
+    );
+    assert_eq!(
+        typed_json["felt_status"]["machine_may_set_felt_status"],
+        false
+    );
+
+    let expected_metrics = [
+        "projected_density_gradient",
+        "projected_packing",
+        "distinguishability",
+        "pressure_proxy",
+        "semantic_viscosity",
+        "temporal_drag",
+        "persistence",
+        "structural_stagnation_proxy",
+        "raw_reservoir_mode_packing",
+        "shadow_dispersal",
+    ];
+    for strand in typed_json["strands"].as_array().unwrap() {
+        let source = &strand["source"];
+        assert_eq!(source["deployment_identity"], "deploy-1");
+        assert_eq!(source["sampled_at_unix_ms"], 10);
+        assert_eq!(source["source_attestation_id"], "attestation-1");
+        assert_eq!(source["source_attestation_sha256"], "a".repeat(64));
+        assert!(source["source_response_interval_sha256"].as_str().is_some());
+        assert!(source["source_evidence_sha256"].as_str().is_some());
+        let metrics = strand["metrics"].as_object().unwrap();
+        assert_eq!(metrics.len(), expected_metrics.len());
+        for metric_name in expected_metrics {
+            let metric = &metrics[metric_name];
+            assert_eq!(metric["metric"], metric_name);
+            assert_eq!(
+                metric["producer"],
+                "minime.owner_inquiry.texture_dynamics_v1"
+            );
+            assert_eq!(metric["sampled_at_unix_ms"], 10);
+            assert_eq!(metric["raw_spectral_telemetry_used"], false);
+            assert_eq!(metric["source_evidence_ids"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                metric["source_evidence_sha256s"].as_array().unwrap().len(),
+                1
+            );
+        }
+        assert_eq!(
+            metrics["raw_reservoir_mode_packing"]["availability"]["state"],
+            "missing"
+        );
+        assert!(metrics["raw_reservoir_mode_packing"]["value"].is_null());
+        assert_eq!(
+            metrics["shadow_dispersal"]["availability"]["state"],
+            "missing"
+        );
+        assert!(metrics["shadow_dispersal"]["value"].is_null());
+    }
+    for pair in typed_json["pairs"].as_array().unwrap() {
+        assert_eq!(pair["source_evidence_ids"].as_array().unwrap().len(), 2);
+        assert_eq!(pair["pair_averaged"], false);
+        assert_eq!(pair["pair_ranked"], false);
+        assert_eq!(pair["preferred_strand_selected"], false);
+        assert_eq!(pair["candidate_merge_performed"], false);
+        assert_eq!(
+            pair["codec_fidelity_evidence_ref"]["analysis"],
+            "codec_fidelity"
+        );
+        assert_eq!(
+            pair["sensory_interference_evidence_ref"]["analysis"],
+            "sensory_interference_all_pairs"
+        );
+        assert_eq!(
+            pair["codec_fidelity_evidence_ref"]["timestamp_proximity_match_allowed"],
+            false
+        );
+        for metric_name in &expected_metrics[..8] {
+            let value = pair["absolute_metric_deltas"][metric_name]["value"]
+                .as_f64()
+                .unwrap();
+            assert!(value.is_finite() && value >= 0.0);
+        }
+    }
+
+    let source_separation = source_separation::source_separation_result(&inquiry).unwrap();
+    assert_eq!(
+        source_separation["texture_dynamics_snapshot_v1"],
+        typed_json
+    );
+    assert_eq!(owner_inquiry_fixed_analysis_set_v1().len(), 3);
+}
+
+#[test]
+fn texture_dynamics_contract_matches_astrid_protocol_fixture() {
+    const FIXTURE_SHA256: &str = "00048207c164c07aa2ccf67cfa7119dca2246c87d4495118703fe7061d6815f9";
+    let fixture_bytes = include_bytes!("../../tests/fixtures/texture_dynamics_contract_v1.json");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(fixture_bytes)),
+        FIXTURE_SHA256
+    );
+    let fixture: Value = serde_json::from_slice(fixture_bytes).unwrap();
+    let snapshot =
+        serde_json::to_value(texture_dynamics::texture_dynamics_snapshot_v1(&inquiry()).unwrap())
+            .unwrap();
+    let metric_keys = fixture["strand_metric_keys"].as_array().unwrap();
+    let actual_metrics = snapshot["strands"][0]["metrics"].as_object().unwrap();
+    assert!(metric_keys
+        .iter()
+        .all(|metric| actual_metrics.contains_key(metric.as_str().unwrap())));
+    let actual_contract = json!({
+        "schema": "texture_dynamics_contract_fixture_v1",
+        "nested_in_analysis": "viscous_persistence_source_separation",
+        "fixed_analysis_set": owner_inquiry_fixed_analysis_set_v1(),
+        "strand_metric_keys": metric_keys,
+        "pair_metric_semantics": "absolute_deltas_without_average_rank_merge_or_selection",
+        "required_pair_evidence_refs": ["codec_fidelity", "sensory_interference_all_pairs"],
+        "raw_reservoir_mode_packing": snapshot["raw_reservoir_mode_packing_state"],
+        "shadow_dispersal": snapshot["shadow_dispersal_state"],
+        "felt_status_author_domain": snapshot["felt_status"]["author_domain"],
+        "semantic_projection_not_raw_spectral_telemetry": snapshot["semantic_projection_not_raw_spectral_telemetry"],
+        "live_control_authority": snapshot["live_control_authority"],
+    });
+    assert_eq!(actual_contract, fixture);
+}
+
+#[test]
 fn malformed_vectors_fail_closed() {
     let mut inquiry = inquiry();
     inquiry.strands[0].projection_48d[3] = f32::NAN;

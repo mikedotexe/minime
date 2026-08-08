@@ -1,0 +1,31 @@
+{
+  "schema": "texture_dynamics_contract_fixture_v1",
+  "nested_in_analysis": "viscous_persistence_source_separation",
+  "fixed_analysis_set": [
+    "viscous_persistence_source_separation",
+    "codec_fidelity",
+    "sensory_interference_all_pairs"
+  ],
+  "strand_metric_keys": [
+    "projected_density_gradient",
+    "projected_packing",
+    "distinguishability",
+    "pressure_proxy",
+    "semantic_viscosity",
+    "temporal_drag",
+    "persistence",
+    "structural_stagnation_proxy",
+    "raw_reservoir_mode_packing",
+    "shadow_dispersal"
+  ],
+  "pair_metric_semantics": "absolute_deltas_without_average_rank_merge_or_selection",
+  "required_pair_evidence_refs": [
+    "codec_fidelity",
+    "sensory_interference_all_pairs"
+  ],
+  "raw_reservoir_mode_packing": "missing_no_exact_raw_reservoir_source",
+  "shadow_dispersal": "missing_no_exact_shadow_history_source",
+  "felt_status_author_domain": "owner_authored_only",
+  "semantic_projection_not_raw_spectral_telemetry": true,
+  "live_control_authority": false
+}
