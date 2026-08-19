@@ -32,6 +32,11 @@ CAPTURES_DIR = WORKSPACE_DIR / "visual_captures"
 RUNTIME_DIR = WORKSPACE_DIR / "runtime"
 HOST_FRAME_PATH = RUNTIME_DIR / "host_frame.jpg"
 HOST_TELEMETRY_PATH = RUNTIME_DIR / "host_telemetry.json"
+# Per-tick heartbeat (same tmp+replace idiom as camera_client.py's
+# camera_status.json): the service is request-driven and legitimately idle
+# for months, so without this a wedged poll loop is indistinguishable from
+# an empty queue (2026-08-19 zero-output-service finding).
+VISUAL_STATUS_PATH = RUNTIME_DIR / "visual_status.json"
 SENSORY_SOURCE_PATH = RUNTIME_DIR / "sensory_source.json"
 RESCUE_PROFILE_PATH = WORKSPACE_DIR / "rescue_profile.json"
 
@@ -300,6 +305,34 @@ class VisualFrameService:
         for f in sorted(REQUESTS_DIR.glob("*.json")):
             self.process_request(f)
 
+    def _write_status(self):
+        try:
+            pending = len(list(REQUESTS_DIR.glob("*.json")))
+            processed_dir = REQUESTS_DIR / "processed"
+            processed_files = list(processed_dir.glob("*.json"))
+            last_request_at = None
+            if processed_files:
+                newest = max(processed_files, key=lambda p: p.stat().st_mtime)
+                last_request_at = datetime.fromtimestamp(
+                    newest.stat().st_mtime
+                ).isoformat()
+            payload = {
+                "ts_ms": int(time.time() * 1000),
+                "state": "polling",
+                "healthy": True,
+                "pending_requests": pending,
+                "processed_count": len(processed_files),
+                "last_request_at": last_request_at,
+                "source": self.source,
+                "poll_interval_s": self.poll_interval,
+                "request_health_grace_secs": 15.0,
+            }
+            temp = VISUAL_STATUS_PATH.with_suffix(".json.tmp")
+            temp.write_text(json.dumps(payload))
+            temp.replace(VISUAL_STATUS_PATH)
+        except Exception:
+            pass
+
     def start(self):
         self.running = True
         logging.info(f"Visual Frame Service started (camera {self.camera_index}, poll {self.poll_interval}s)")
@@ -307,6 +340,7 @@ class VisualFrameService:
         while self.running:
             try:
                 self.process_pending()
+                self._write_status()
                 time.sleep(self.poll_interval)
             except KeyboardInterrupt:
                 break
