@@ -114,9 +114,24 @@ pub(crate) async fn run() -> Result<()> {
                 SelfControlCmd::Status { root } => {
                     status(root.as_deref()).map_err(anyhow::Error::msg)?
                 }
-                SelfControlCmd::Provision { root, rotate } => serde_json::to_value(
-                    provision(root.as_deref(), rotate).map_err(anyhow::Error::msg)?,
+                SelfControlCmd::Provision {
+                    root,
+                    rotate,
+                    deployment_steward,
+                } => serde_json::to_value(
+                    provision(root.as_deref(), rotate, deployment_steward)
+                        .map_err(anyhow::Error::msg)?,
                 )?,
+                SelfControlCmd::PrepareDeploymentHandoff {
+                    root,
+                    operator_actor,
+                    operator_ack,
+                } => crate::self_control_cli::prepare_deployment_handoff(
+                    root.as_deref(),
+                    &operator_actor,
+                    &operator_ack,
+                )
+                .map_err(anyhow::Error::msg)?,
                 SelfControlCmd::Issue {
                     root,
                     sensory_url,

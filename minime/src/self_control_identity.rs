@@ -18,6 +18,14 @@ use crate::{
 
 const IDENTITY_SCHEMA: &str = "minime.self_control.owner_identity.v1";
 const TARGET_BEING: &str = "minime";
+const OWNER_IDENTITY_FILENAME: &str = "identity.json";
+/// Deployment-lineage signer. Its key may sign NOTHING but deployment
+/// hand-offs: the runtime structurally rejects any live command whose actor
+/// or proof signer is this being (see `process`'s
+/// `deployment_steward_has_no_command_authority` guard), so pinning it in
+/// trust grants no Hold/Revert/Set — or future mutual — authority.
+pub(crate) const DEPLOYMENT_STEWARD_BEING: &str = "deployment_steward";
+const DEPLOYMENT_STEWARD_IDENTITY_FILENAME: &str = "deployment_steward_identity.json";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StoredOwnerIdentityV1 {
@@ -50,10 +58,22 @@ pub struct SelfControlProvisionReceiptV1 {
 
 impl SelfControlOwnerSigner {
     pub fn load(root: &Path) -> Result<Self, String> {
-        let path = root.join("identity.json");
+        Self::load_being(root, OWNER_IDENTITY_FILENAME, TARGET_BEING)
+    }
+
+    pub(crate) fn load_deployment_steward(root: &Path) -> Result<Self, String> {
+        Self::load_being(
+            root,
+            DEPLOYMENT_STEWARD_IDENTITY_FILENAME,
+            DEPLOYMENT_STEWARD_BEING,
+        )
+    }
+
+    fn load_being(root: &Path, filename: &str, expected_being: &str) -> Result<Self, String> {
+        let path = root.join(filename);
         let stored = read_json::<StoredOwnerIdentityV1>(&path)?
             .ok_or_else(|| format!("self-control identity is missing: {}", path.display()))?;
-        Self::from_stored(stored)
+        Self::from_stored(stored, expected_being)
     }
 
     #[must_use]
@@ -107,8 +127,8 @@ impl SelfControlOwnerSigner {
         })
     }
 
-    fn from_stored(stored: StoredOwnerIdentityV1) -> Result<Self, String> {
-        if stored.schema != IDENTITY_SCHEMA || stored.being != TARGET_BEING {
+    fn from_stored(stored: StoredOwnerIdentityV1, expected_being: &str) -> Result<Self, String> {
+        if stored.schema != IDENTITY_SCHEMA || stored.being != expected_being {
             return Err("self-control owner identity schema mismatch".to_string());
         }
         let seed = decode_array::<32>(&stored.signing_key_seed_hex, "signing key seed")?;
@@ -132,16 +152,49 @@ pub fn provision_minime_owner_identity(
     rotate: bool,
     now_unix_ms: u64,
 ) -> Result<SelfControlProvisionReceiptV1, String> {
-    let identity_path = root.join("identity.json");
+    provision_identity(
+        root,
+        OWNER_IDENTITY_FILENAME,
+        TARGET_BEING,
+        rotate,
+        now_unix_ms,
+    )
+}
+
+/// Provision the deployment-lineage signer. Pinning it in the trust store
+/// enables ONLY signed deployment hand-offs (see the being const above);
+/// it never runs at engine startup — provisioning is an explicit CLI act.
+pub fn provision_deployment_steward_identity(
+    root: &Path,
+    rotate: bool,
+    now_unix_ms: u64,
+) -> Result<SelfControlProvisionReceiptV1, String> {
+    provision_identity(
+        root,
+        DEPLOYMENT_STEWARD_IDENTITY_FILENAME,
+        DEPLOYMENT_STEWARD_BEING,
+        rotate,
+        now_unix_ms,
+    )
+}
+
+fn provision_identity(
+    root: &Path,
+    filename: &str,
+    being: &str,
+    rotate: bool,
+    now_unix_ms: u64,
+) -> Result<SelfControlProvisionReceiptV1, String> {
+    let identity_path = root.join(filename);
     let existing = read_json::<StoredOwnerIdentityV1>(&identity_path)?;
     let (signer, rotated) = if let Some(stored) = existing {
         if rotate {
-            (new_signer(root, now_unix_ms)?, true)
+            (new_signer(root, filename, being, now_unix_ms)?, true)
         } else {
-            (SelfControlOwnerSigner::from_stored(stored)?, false)
+            (SelfControlOwnerSigner::from_stored(stored, being)?, false)
         }
     } else {
-        (new_signer(root, now_unix_ms)?, false)
+        (new_signer(root, filename, being, now_unix_ms)?, false)
     };
 
     let trust_path = root.join("trust.json");
@@ -166,22 +219,27 @@ pub fn provision_minime_owner_identity(
     })
 }
 
-fn new_signer(root: &Path, now_unix_ms: u64) -> Result<SelfControlOwnerSigner, String> {
+fn new_signer(
+    root: &Path,
+    filename: &str,
+    being: &str,
+    now_unix_ms: u64,
+) -> Result<SelfControlOwnerSigner, String> {
     let signing_key = SigningKey::generate(&mut OsRng);
     let public_key_hex = hex::encode(signing_key.verifying_key().to_bytes());
     let stored = StoredOwnerIdentityV1 {
         schema: IDENTITY_SCHEMA.to_string(),
-        being: TARGET_BEING.to_string(),
+        being: being.to_string(),
         key_id: key_id(&public_key_hex),
         public_key_hex,
         signing_key_seed_hex: hex::encode(signing_key.to_bytes()),
         created_at_unix_ms: now_unix_ms,
     };
-    write_owner_json(&root.join("identity.json"), &stored)?;
-    SelfControlOwnerSigner::from_stored(stored)
+    write_owner_json(&root.join(filename), &stored)?;
+    SelfControlOwnerSigner::from_stored(stored, being)
 }
 
-fn key_id(public_key_hex: &str) -> String {
+pub(crate) fn key_id(public_key_hex: &str) -> String {
     let digest = format!("{:x}", Sha256::digest(public_key_hex.as_bytes()));
     format!("minime-ed25519:{}", &digest[..24])
 }

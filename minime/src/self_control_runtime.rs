@@ -18,6 +18,7 @@ use crate::{
 };
 
 mod apply;
+mod deployment_handoff;
 pub(crate) mod storage;
 
 use apply::{
@@ -224,7 +225,48 @@ impl SelfControlRuntime {
 
         let state_path = root.join("state.json");
         let state = match storage::read_json::<RuntimeStateEnvelopeV1>(&state_path)? {
-            Some(envelope) => validate_state_envelope(envelope, &deployment_identity)?,
+            Some(envelope) => {
+                let mut state = verify_state_envelope_integrity(envelope)?;
+                if state.deployment_identity == deployment_identity {
+                    // A crash between consume-persist and receipt-write leaves a
+                    // pending hand-off behind on the now-current deployment;
+                    // finalize turns it into an applied receipt (or reports
+                    // tampering). A mis-bound pending is non-fatal here.
+                    deployment_handoff::finalize_completed_for_current(
+                        &root,
+                        &state,
+                        &deployment_identity,
+                        now_unix_ms,
+                    )?;
+                    state
+                } else {
+                    let binding =
+                        deployment_handoff::DeploymentBinding::current(&deployment_identity)?;
+                    match deployment_handoff::consume_pending_at(
+                        &root,
+                        &binding,
+                        &mut state,
+                        now_unix_ms,
+                    ) {
+                        Ok(true) => state,
+                        Ok(false) => {
+                            return Err(format!(
+                                "self-control state belongs to a stale deployment ({}); \
+                                 no deployment hand-off is pending — prepare one with \
+                                 `minime self-control prepare-deployment-handoff`",
+                                state.deployment_identity
+                            ));
+                        }
+                        Err(reason) => {
+                            return Err(format!(
+                                "self-control state belongs to a stale deployment ({}); \
+                                 deployment hand-off refused: {reason}",
+                                state.deployment_identity
+                            ));
+                        }
+                    }
+                }
+            }
             None => RuntimeStateV2::new(deployment_identity.clone()),
         };
         let runtime = Self {
@@ -300,10 +342,22 @@ impl SelfControlRuntime {
             })
             .collect::<serde_json::Map<_, _>>();
         let receipt_start = state.receipts.len().saturating_sub(64);
+        // Lineage view: what THIS binary would call itself, whether the
+        // persisted state targets it, and any pending deployment hand-off.
+        let cli_deployment_identity =
+            crate::sensory_protocol::SensoryServerIdentity::current(0).deployment_identity;
+        let binary_sha256 =
+            deployment_handoff::DeploymentBinding::current(&cli_deployment_identity)
+                .map(|binding| serde_json::Value::String(binding.binary_sha256))
+                .unwrap_or(serde_json::Value::Null);
         Ok(serde_json::json!({
             "schema": "minime.self_control.status.v2",
             "target_being": state.target_being,
             "deployment_identity": state.deployment_identity,
+            "cli_deployment_identity": cli_deployment_identity,
+            "state_targets_this_binary": state.deployment_identity == cli_deployment_identity,
+            "binary_sha256": binary_sha256,
+            "pending_deployment_handoff": deployment_handoff::pending_summary(root),
             "state_sha256": state_sha256,
             "revision_by_family": state.revision_by_family,
             "preferences": state.preferences,
@@ -381,6 +435,22 @@ impl SelfControlRuntime {
                 ControlSnapshot::default(),
                 Some(format!("self_control_integrity_block:{reason}")),
                 None,
+            );
+        }
+        // Structural: the deployment-lineage signer has NO live command
+        // authority — not as an actor, not as a co-signer. Without this, its
+        // trust pin would make it an eligible Mutual co-signer the day a
+        // SharedCoupling adapter is implemented.
+        if command.intent.actor.being == crate::self_control_identity::DEPLOYMENT_STEWARD_BEING
+            || command.authority_proofs.iter().any(|proof| {
+                proof.signer_being == crate::self_control_identity::DEPLOYMENT_STEWARD_BEING
+            })
+        {
+            return self.rejected(
+                command,
+                current_revision,
+                now_unix_ms,
+                "deployment_steward_has_no_command_authority",
             );
         }
         if command.intent.target_being != TARGET_BEING {
@@ -919,12 +989,7 @@ impl SelfControlRuntime {
             .root
             .as_deref()
             .ok_or_else(|| "self-control runtime has no persistence root".to_string())?;
-        let trust = storage::read_json::<SelfControlTrustStoreV1>(&root.join("trust.json"))?
-            .ok_or_else(|| "self-control trust store is missing".to_string())?;
-        if !trust.is_well_formed() {
-            return Err("self-control trust store is malformed".to_string());
-        }
-        Ok(trust)
+        load_trust_at(root)
     }
 
     fn recover_at_startup(&self, now_unix_ms: u64) -> Result<(), String> {
@@ -1112,14 +1177,7 @@ impl SelfControlRuntime {
         let Some(root) = self.root.as_deref() else {
             return Err("self-control runtime has no persistence root".to_string());
         };
-        let state_value = serde_json::to_value(state)
-            .map_err(|error| format!("encode runtime state: {error}"))?;
-        let envelope = RuntimeStateEnvelopeV1 {
-            schema: STATE_ENVELOPE_SCHEMA.to_string(),
-            state_sha256: canonical_json_value_sha256(&state_value),
-            state: state.clone(),
-        };
-        storage::write_owner_json(&root.join("state.json"), &envelope)
+        persist_state_at(root, state)
     }
 
     fn rejected(
@@ -1194,21 +1252,68 @@ fn validate_state_envelope(
     envelope: RuntimeStateEnvelopeV1,
     deployment_identity: &str,
 ) -> Result<RuntimeStateV2, String> {
+    let state = verify_state_envelope_integrity(envelope)?;
+    if state.deployment_identity != deployment_identity {
+        return Err("self-control state belongs to a stale deployment".to_string());
+    }
+    Ok(state)
+}
+
+/// Schema + canonical-hash verification only; the caller decides what a
+/// deployment-identity mismatch means (fail closed vs. hand-off consumption).
+fn verify_state_envelope_integrity(
+    envelope: RuntimeStateEnvelopeV1,
+) -> Result<RuntimeStateV2, String> {
     if envelope.schema != STATE_ENVELOPE_SCHEMA
         || envelope.state.schema != STATE_SCHEMA
         || envelope.state.target_being != TARGET_BEING
     {
         return Err("self-control state schema mismatch".to_string());
     }
-    let value = serde_json::to_value(&envelope.state)
-        .map_err(|error| format!("encode self-control state: {error}"))?;
-    if envelope.state_sha256 != canonical_json_value_sha256(&value) {
+    if envelope.state_sha256 != state_sha256(&envelope.state)? {
         return Err("self-control state integrity mismatch".to_string());
     }
-    if envelope.state.deployment_identity != deployment_identity {
-        return Err("self-control state belongs to a stale deployment".to_string());
-    }
     Ok(envelope.state)
+}
+
+/// The ONE state hash used by persist, envelope verification, and the
+/// deployment hand-off (prepare, consume, finalize). Canonical JSON keeps it
+/// stable across struct field order.
+fn state_sha256(state: &RuntimeStateV2) -> Result<String, String> {
+    let value =
+        serde_json::to_value(state).map_err(|error| format!("encode runtime state: {error}"))?;
+    Ok(canonical_json_value_sha256(&value))
+}
+
+fn persist_state_at(root: &Path, state: &RuntimeStateV2) -> Result<(), String> {
+    let envelope = RuntimeStateEnvelopeV1 {
+        schema: STATE_ENVELOPE_SCHEMA.to_string(),
+        state_sha256: state_sha256(state)?,
+        state: state.clone(),
+    };
+    storage::write_owner_json(&root.join("state.json"), &envelope)
+}
+
+fn load_trust_at(root: &Path) -> Result<SelfControlTrustStoreV1, String> {
+    let trust = storage::read_json::<SelfControlTrustStoreV1>(&root.join("trust.json"))?
+        .ok_or_else(|| "self-control trust store is missing".to_string())?;
+    if !trust.is_well_formed() {
+        return Err("self-control trust store is malformed".to_string());
+    }
+    Ok(trust)
+}
+
+/// Prepare a signed deployment hand-off carrying the persisted self-control
+/// state to THIS binary's deployment identity. Explicit CLI/operator act only.
+pub fn prepare_deployment_handoff(
+    root: &Path,
+    operator_actor: &str,
+    operator_ack: &str,
+    now_unix_ms: u64,
+) -> Result<serde_json::Value, String> {
+    let identity = crate::sensory_protocol::SensoryServerIdentity::current(0).deployment_identity;
+    let binding = deployment_handoff::DeploymentBinding::current(&identity)?;
+    deployment_handoff::prepare_at(root, &binding, operator_actor, operator_ack, now_unix_ms)
 }
 
 fn expired_receipt(

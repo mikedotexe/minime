@@ -254,6 +254,21 @@ enum SelfControlCmd {
         root: Option<std::path::PathBuf>,
         #[arg(long, default_value_t = false)]
         rotate: bool,
+        /// Provision the deployment-lineage signer instead of the owner key.
+        /// Its pinned key can sign nothing but deployment hand-offs.
+        #[arg(long, default_value_t = false)]
+        deployment_steward: bool,
+    },
+    /// Prepare a signed deployment hand-off carrying self-control state to THIS
+    /// binary's deployment identity. Run from the freshly built binary before
+    /// restarting the engine on it.
+    PrepareDeploymentHandoff {
+        #[arg(long)]
+        root: Option<std::path::PathBuf>,
+        #[arg(long)]
+        operator_actor: String,
+        #[arg(long)]
+        operator_ack: String,
     },
     /// Issue a signed self-owned setting, lease, or one-shot action.
     Issue {

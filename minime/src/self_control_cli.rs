@@ -11,7 +11,8 @@ use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, Web
 
 use crate::{
     self_control_identity::{
-        provision_minime_owner_identity, SelfControlOwnerSigner, SelfControlProvisionReceiptV1,
+        provision_deployment_steward_identity, provision_minime_owner_identity,
+        SelfControlOwnerSigner, SelfControlProvisionReceiptV1,
     },
     self_control_runtime::default_self_control_root,
     self_control_wire::{
@@ -91,9 +92,31 @@ struct DeliveryResultV1 {
 pub fn provision(
     root: Option<&Path>,
     rotate: bool,
+    deployment_steward: bool,
 ) -> Result<SelfControlProvisionReceiptV1, String> {
     let root = root.map_or_else(default_self_control_root, Path::to_path_buf);
-    provision_minime_owner_identity(&root, rotate, now_unix_ms())
+    if deployment_steward {
+        provision_deployment_steward_identity(&root, rotate, now_unix_ms())
+    } else {
+        provision_minime_owner_identity(&root, rotate, now_unix_ms())
+    }
+}
+
+/// Prepare a signed deployment hand-off carrying the persisted self-control
+/// state to THIS binary's deployment identity (run from the NEW binary,
+/// before restarting the engine on it).
+pub fn prepare_deployment_handoff(
+    root: Option<&Path>,
+    operator_actor: &str,
+    operator_ack: &str,
+) -> Result<Value, String> {
+    let root = root.map_or_else(default_self_control_root, Path::to_path_buf);
+    crate::self_control_runtime::prepare_deployment_handoff(
+        &root,
+        operator_actor,
+        operator_ack,
+        now_unix_ms(),
+    )
 }
 
 pub fn status(root: Option<&Path>) -> Result<Value, String> {
@@ -438,7 +461,7 @@ mod tests {
     #[test]
     fn provisioned_owner_builds_a_verifiable_lease_command() {
         let root = TempDir::new().unwrap();
-        provision(Some(root.path()), false).unwrap();
+        provision(Some(root.path()), false, false).unwrap();
         let signer = SelfControlOwnerSigner::load(root.path()).unwrap();
         let options = SelfControlIssueOptions::set(
             SelfControlFamilyV2::ReservoirRegulation,

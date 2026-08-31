@@ -105,7 +105,7 @@ async fn provisioned_owner_issues_a_live_receipted_lease_over_the_gateway() {
     let addr = probe.local_addr().unwrap();
     drop(probe);
     let root = tempfile::tempdir().unwrap();
-    provision(Some(root.path()), false).unwrap();
+    provision(Some(root.path()), false, false).unwrap();
     let bus = SensoryBus::new(32, 4, 7);
     let previous_regulation_strength = bus.get_regulation_strength();
     let runtime = SelfControlRuntime::open_with_safety_probe(

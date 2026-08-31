@@ -599,6 +599,361 @@ fn repeated_clamp_saturation_rolls_back_instead_of_becoming_a_target() {
 }
 
 #[test]
+fn carries_standing_controls_across_restart_via_deployment_handoff() {
+    let fixture = fixture();
+    let command = self_command(
+        &fixture.minime_key,
+        "handoff-standing",
+        "nonce-handoff-standing",
+        SelfControlFamilyV2::ReservoirGeometry,
+        SelfControlActionV2::Set,
+        SelfControlDurabilityV2::Standing,
+        1,
+        SelfControlValuesV2 {
+            geom_drive: Some(0.4),
+            ..SelfControlValuesV2::default()
+        },
+        None,
+    );
+    let applied = fixture.runtime.process(&command, NOW + 1);
+    assert_eq!(applied.status, SelfControlReceiptStatusV2::Applied);
+
+    crate::self_control_identity::provision_deployment_steward_identity(&fixture.root, false, NOW)
+        .expect("provision deployment steward");
+    let next_deployment = "minime-deployment-next";
+    let binding = super::deployment_handoff::DeploymentBinding::current(next_deployment)
+        .expect("bind current test executable");
+    let prepared = super::deployment_handoff::prepare_at(
+        &fixture.root,
+        &binding,
+        "mike-operator",
+        "hand-off migration test",
+        NOW + 2,
+    )
+    .expect("prepare deployment hand-off");
+    assert_eq!(prepared["status"], "prepared");
+    drop(fixture.runtime);
+
+    let restarted_bus = SensoryBus::new(32, 4, 21);
+    let restarted = SelfControlRuntime::open_with_safety_probe(
+        fixture.root.clone(),
+        "minime-process-handoff".to_string(),
+        next_deployment.to_string(),
+        restarted_bus.clone(),
+        NOW + 3,
+        || false,
+    )
+    .expect("hand-off consumed at startup");
+    assert_eq!(restarted_bus.get_geom_drive(), 0.4);
+    assert_eq!(restarted.deployment_identity(), next_deployment);
+    {
+        let inner = restarted.inner.lock();
+        let active = inner
+            .state
+            .active_controls
+            .get("reservoir_geometry")
+            .expect("standing control carried across the hand-off");
+        assert_eq!(active.intent_id, command.intent.intent_id);
+    }
+    assert!(!fixture
+        .root
+        .join("deployment_handoff.pending.json")
+        .exists());
+    assert_eq!(
+        std::fs::read_dir(fixture.root.join("deployment_handoffs/applied"))
+            .unwrap()
+            .count(),
+        1
+    );
+
+    let status = SelfControlRuntime::verified_status(&fixture.root).expect("verified status");
+    assert_eq!(status["deployment_identity"], next_deployment);
+    assert!(status["pending_deployment_handoff"].is_null());
+}
+
+#[test]
+fn stale_deployment_without_handoff_names_missing_pending() {
+    let fixture = fixture();
+    drop(fixture.runtime);
+    let Err(error) = SelfControlRuntime::open_with_safety_probe(
+        fixture.root,
+        "minime-process-stale".to_string(),
+        "minime-deployment-other".to_string(),
+        SensoryBus::new(32, 4, 22),
+        NOW + 2,
+        || false,
+    ) else {
+        panic!("stale deployment without a hand-off must fail closed");
+    };
+    assert!(error.contains("stale deployment"));
+    assert!(error.contains("no deployment hand-off is pending"));
+}
+
+#[test]
+fn unconsumable_pending_is_refused_and_left_in_place() {
+    let fixture = fixture();
+    crate::self_control_identity::provision_deployment_steward_identity(&fixture.root, false, NOW)
+        .expect("provision deployment steward");
+    let next_deployment = "minime-deployment-next";
+    let binding = super::deployment_handoff::DeploymentBinding::current(next_deployment)
+        .expect("bind current test executable");
+    super::deployment_handoff::prepare_at(
+        &fixture.root,
+        &binding,
+        "mike-operator",
+        "hand-off migration test",
+        NOW + 1,
+    )
+    .expect("prepare deployment hand-off");
+
+    // The state moves after the hand-off was prepared, so the pending no
+    // longer binds the exact persisted state: refusal must name the reason
+    // and leave the pending file for a fresh prepare to replace.
+    let command = self_command(
+        &fixture.minime_key,
+        "post-prepare-move",
+        "nonce-post-prepare-move",
+        SelfControlFamilyV2::ReservoirGeometry,
+        SelfControlActionV2::Set,
+        SelfControlDurabilityV2::Standing,
+        1,
+        SelfControlValuesV2 {
+            geom_curiosity: Some(0.3),
+            ..SelfControlValuesV2::default()
+        },
+        None,
+    );
+    assert_eq!(
+        fixture.runtime.process(&command, NOW + 2).status,
+        SelfControlReceiptStatusV2::Applied
+    );
+    drop(fixture.runtime);
+
+    let Err(error) = SelfControlRuntime::open_with_safety_probe(
+        fixture.root.clone(),
+        "minime-process-refused".to_string(),
+        next_deployment.to_string(),
+        SensoryBus::new(32, 4, 23),
+        NOW + 3,
+        || false,
+    ) else {
+        panic!("mis-bound hand-off must be refused");
+    };
+    assert!(error.contains("deployment hand-off refused"));
+    assert!(error.contains("exact persisted state"));
+    assert!(fixture
+        .root
+        .join("deployment_handoff.pending.json")
+        .exists());
+}
+
+#[test]
+fn stale_pending_on_current_deployment_does_not_block_open() {
+    let fixture = fixture();
+    crate::self_control_identity::provision_deployment_steward_identity(&fixture.root, false, NOW)
+        .expect("provision deployment steward");
+    let binding = super::deployment_handoff::DeploymentBinding::current("minime-deployment-next")
+        .expect("bind current test executable");
+    super::deployment_handoff::prepare_at(
+        &fixture.root,
+        &binding,
+        "mike-operator",
+        "hand-off migration test",
+        NOW + 1,
+    )
+    .expect("prepare deployment hand-off");
+    drop(fixture.runtime);
+
+    // Reopening on the ORIGINAL deployment (a rolled-back deploy, say) must
+    // not be blocked by the unconsumed pending bound elsewhere.
+    if let Err(error) = SelfControlRuntime::open_with_safety_probe(
+        fixture.root.clone(),
+        "minime-process-rollback".to_string(),
+        DEPLOYMENT.to_string(),
+        SensoryBus::new(32, 4, 24),
+        NOW + 2,
+        || false,
+    ) {
+        panic!("reopen on the current deployment must not be blocked: {error}");
+    }
+    assert!(fixture
+        .root
+        .join("deployment_handoff.pending.json")
+        .exists());
+}
+
+#[test]
+fn deployment_steward_key_has_no_command_authority() {
+    let fixture = fixture();
+    crate::self_control_identity::provision_deployment_steward_identity(&fixture.root, false, NOW)
+        .expect("provision deployment steward");
+    let steward = crate::self_control_identity::SelfControlOwnerSigner::load_deployment_steward(
+        &fixture.root,
+    )
+    .expect("load deployment steward signer");
+
+    let set = self_command(
+        &fixture.minime_key,
+        "set-for-steward-hold",
+        "nonce-set-for-steward-hold",
+        SelfControlFamilyV2::ReservoirRegulation,
+        SelfControlActionV2::Set,
+        SelfControlDurabilityV2::Standing,
+        1,
+        SelfControlValuesV2 {
+            regulation_strength: Some(0.4),
+            ..SelfControlValuesV2::default()
+        },
+        None,
+    );
+    assert_eq!(
+        fixture.runtime.process(&set, NOW + 1).status,
+        SelfControlReceiptStatusV2::Applied
+    );
+
+    let intent = SelfControlIntentV2 {
+        schema: SELF_CONTROL_INTENT_SCHEMA_V2.to_string(),
+        intent_id: "intent-steward-hold".to_string(),
+        actor: SelfControlSourceIdentityV1 {
+            being: "deployment_steward".to_string(),
+            process_identity: "steward-process-test".to_string(),
+            deployment_identity: "steward-deployment-test".to_string(),
+        },
+        target_being: "minime".to_string(),
+        target_deployment_identity: DEPLOYMENT.to_string(),
+        family: SelfControlFamilyV2::ReservoirRegulation,
+        action: SelfControlActionV2::Hold,
+        durability: SelfControlDurabilityV2::OneShot,
+        authority_class: SelfControlAuthorityClassV2::SafetySupervisor,
+        authority_scope: "self_control.minime.reservoir_regulation.safety".to_string(),
+        revision: 2,
+        expected_revision: 1,
+        issued_at_unix_ms: NOW,
+        command_expires_at_unix_ms: NOW + 10_000,
+        control_expires_at_unix_ms: None,
+        idempotency_key: "idempotency-steward-hold".to_string(),
+        values: SelfControlValuesV2::default(),
+        related_intent_id: Some(set.intent.intent_id.clone()),
+        related_receipt_id: None,
+        evidence_refs: Vec::new(),
+        success_conditions: Vec::new(),
+        stop_conditions: Vec::new(),
+    };
+    let command = steward
+        .sign_command(
+            intent,
+            "command-steward-hold".to_string(),
+            "nonce-steward-hold".to_string(),
+            NOW,
+        )
+        .expect("steward can sign bytes, but the command must still be refused");
+    let receipt = fixture.runtime.process(&command, NOW + 2);
+    assert_eq!(receipt.status, SelfControlReceiptStatusV2::Rejected);
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("deployment_steward_has_no_command_authority")
+    );
+    assert_eq!(
+        fixture.bus.get_regulation_strength(),
+        0.4,
+        "the steward key must not be able to lift her control"
+    );
+
+    // The latent shape: a Mutual SharedCoupling Set co-signed by the steward
+    // and minime would pass the generic mutual-pair check once a shared-
+    // coupling adapter exists. The structural guard must refuse it TODAY.
+    let mutual_intent = SelfControlIntentV2 {
+        schema: SELF_CONTROL_INTENT_SCHEMA_V2.to_string(),
+        intent_id: "intent-steward-mutual".to_string(),
+        actor: SelfControlSourceIdentityV1 {
+            being: "deployment_steward".to_string(),
+            process_identity: "steward-process-test".to_string(),
+            deployment_identity: "steward-deployment-test".to_string(),
+        },
+        target_being: "minime".to_string(),
+        target_deployment_identity: DEPLOYMENT.to_string(),
+        family: SelfControlFamilyV2::SharedCoupling,
+        action: SelfControlActionV2::Set,
+        durability: SelfControlDurabilityV2::Standing,
+        authority_class: SelfControlAuthorityClassV2::Mutual,
+        authority_scope: "self_control.shared.semantic_gain".to_string(),
+        revision: 3,
+        expected_revision: 2,
+        issued_at_unix_ms: NOW,
+        command_expires_at_unix_ms: NOW + 10_000,
+        control_expires_at_unix_ms: None,
+        idempotency_key: "idempotency-steward-mutual".to_string(),
+        values: SelfControlValuesV2 {
+            cross_being_semantic_gain: Some(0.4),
+            ..SelfControlValuesV2::default()
+        },
+        related_intent_id: None,
+        related_receipt_id: None,
+        evidence_refs: Vec::new(),
+        success_conditions: Vec::new(),
+        stop_conditions: Vec::new(),
+    };
+    let mut steward_proof = SelfControlAuthorityProofV1 {
+        schema: SELF_CONTROL_AUTHORITY_PROOF_SCHEMA_V1.to_string(),
+        authority_class: mutual_intent.authority_class,
+        signer_being: "deployment_steward".to_string(),
+        scope: mutual_intent.authority_scope.clone(),
+        nonce: "nonce-steward-mutual".to_string(),
+        signer_public_key_hex: steward.public_key_hex().to_string(),
+        signature_hex: String::new(),
+        intent_sha256: canonical_self_control_intent_sha256(&mutual_intent),
+        issued_at_unix_ms: mutual_intent.issued_at_unix_ms,
+        expires_at_unix_ms: mutual_intent.command_expires_at_unix_ms,
+    };
+    steward_proof.signature_hex = steward.sign_hex(
+        &steward_proof
+            .signing_bytes(&mutual_intent)
+            .expect("canonical steward proof signing bytes"),
+    );
+    let minime_proof = signed_proof(
+        &mutual_intent,
+        "minime",
+        &fixture.minime_key,
+        "nonce-steward-mutual-minime",
+    );
+    let mutual = SelfControlCommandV2 {
+        schema: SELF_CONTROL_COMMAND_SCHEMA_V2.to_string(),
+        command_id: "command-steward-mutual".to_string(),
+        intent: mutual_intent,
+        authority_proofs: vec![steward_proof, minime_proof],
+    };
+    let mutual_receipt = fixture.runtime.process(&mutual, NOW + 3);
+    assert_eq!(mutual_receipt.status, SelfControlReceiptStatusV2::Rejected);
+    assert_eq!(
+        mutual_receipt.reason.as_deref(),
+        Some("deployment_steward_has_no_command_authority")
+    );
+}
+
+#[test]
+fn verified_status_reports_deployment_lineage() {
+    let fixture = fixture();
+    let status = SelfControlRuntime::verified_status(&fixture.root).expect("verified status");
+    let expected_cli =
+        crate::sensory_protocol::SensoryServerIdentity::current(0).deployment_identity;
+    assert_eq!(
+        status["cli_deployment_identity"].as_str(),
+        Some(expected_cli.as_str())
+    );
+    assert_eq!(
+        status["state_targets_this_binary"].as_bool(),
+        Some(DEPLOYMENT == expected_cli)
+    );
+    assert!(status["pending_deployment_handoff"].is_null());
+    let binary_sha = status["binary_sha256"].as_str().unwrap_or_default();
+    assert_eq!(
+        binary_sha.len(),
+        64,
+        "binary sha must be witnessed: {status}"
+    );
+}
+
+#[test]
 fn standing_control_recovers_after_restart_and_corrupt_state_fails_closed() {
     let fixture = fixture();
     let command = self_command(

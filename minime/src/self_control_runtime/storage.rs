@@ -60,7 +60,18 @@ pub(crate) fn write_owner_json<T: Serialize>(path: &Path, value: &T) -> Result<(
     sync_parent(parent)
 }
 
-fn sync_parent(parent: &Path) -> Result<(), String> {
+pub(crate) fn remove_owner_file(path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("owner file path has no parent: {}", path.display()))?;
+    match fs::remove_file(path) {
+        Ok(()) => sync_parent(parent),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("remove {}: {error}", path.display())),
+    }
+}
+
+pub(crate) fn sync_parent(parent: &Path) -> Result<(), String> {
     File::open(parent)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| format!("sync {}: {error}", parent.display()))
