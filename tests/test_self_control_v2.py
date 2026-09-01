@@ -1,4 +1,5 @@
 import json
+import struct
 import subprocess
 import unittest
 
@@ -7,6 +8,11 @@ from minime_autonomy.self_control_v2 import (
     SelfControlV2Error,
     validate_exact_self_control_values,
 )
+
+
+def _f32(value):
+    """The engine's wire domain for numeric dials (SelfControlValuesV2 is f32)."""
+    return struct.unpack("<f", struct.pack("<f", value))[0]
 
 
 def _result(
@@ -87,9 +93,11 @@ class SelfControlV2ClientTests(unittest.TestCase):
             json.loads(call[0][call[0].index("--values-json") + 1])
             for call in calls
         ]
-        self.assertEqual(values[0], {"fill_target": 0.68})
-        self.assertEqual(values[1], {"geom_curiosity": 0.12})
-        self.assertEqual(values[2], {"pi_kp": 0.4})
+        # Numeric dials travel f32-quantized (the wire's actual value domain),
+        # so the sent JSON carries the f32-exact decimal, not the raw f64.
+        self.assertEqual(values[0], {"fill_target": _f32(0.68)})
+        self.assertEqual(values[1], {"geom_curiosity": _f32(0.12)})
+        self.assertEqual(values[2], {"pi_kp": _f32(0.4)})
 
     def test_partial_multi_family_failure_withdraws_prior_family(self):
         calls = []
@@ -206,10 +214,35 @@ class SelfControlV2ClientTests(unittest.TestCase):
         self.assertEqual(len(withdrawals), 1)
         self.assertIn("intent:reservoir-regulation:1", withdrawals[0])
 
+    def test_applies_non_f32_exact_owner_choice_without_false_substitution(self):
+        # Regression for 2026-09-01: the engine APPLIED exploration_noise=0.08,
+        # echoed its f32 value (0.07999999821186066), and the raw-f64 comparison
+        # wrongly rolled the applied control back as "substituted". The choice
+        # must be quantized to the wire domain up front so a faithful engine
+        # echo validates.
+        def runner(command, **_kwargs):
+            family = command[command.index("--family") + 1]
+            sent = json.loads(command[command.index("--values-json") + 1])
+            echoed = {k: _f32(v) if isinstance(v, float) else v for k, v in sent.items()}
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(_result(family, values=echoed)),
+                stderr="",
+            )
+
+        client = MinimeSelfControlV2Client(binary="/tmp/minime", runner=runner)
+        delivery = client.issue({"exploration_noise": 0.08}, duration_secs=60)
+        receipt = delivery["receipts"][0]
+        self.assertEqual(receipt["status"], "applied")
+        self.assertEqual(
+            receipt["applied_values"], {"exploration_noise": _f32(0.08)}
+        )
+
     def test_rejects_receipt_that_clamps_or_changes_effective_values(self):
         def runner(command, **_kwargs):
             family = command[command.index("--family") + 1]
-            payload = _result(family, values={"fill_target": 0.68})
+            payload = _result(family, values={"fill_target": _f32(0.68)})
             payload["attempts"][-1]["self_control_receipt"]["clamped_values"] = {
                 "fill_target": 0.55
             }

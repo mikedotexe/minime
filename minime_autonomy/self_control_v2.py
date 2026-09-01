@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import struct
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -190,6 +191,15 @@ def validate_exact_self_control_values(values: Mapping[str, Any]) -> dict[str, A
                 raise SelfControlV2Error(
                     f"{field} must be within the exact range [{lower}, {upper}]"
                 )
+            # Every numeric dial is f32 on the wire (SelfControlValuesV2), so
+            # "exact" means exact IN THAT DOMAIN: quantize the owner's choice
+            # to f32 before sending so the receipt's echo can — and must —
+            # match it byte-for-byte. Comparing raw f64 claimed a precision
+            # the channel never had: a non-f32-exact choice like 0.08 was
+            # APPLIED by the engine, then wrongly rolled back as
+            # "substituted" (first seen live 2026-09-01, the first receipt
+            # this validator ever processed).
+            clean_values[field] = struct.unpack("<f", struct.pack("<f", numeric))[0]
             continue
         raise SelfControlV2Error(f"{field} has no exact-value validator")
     if "porosity" in clean_values and "mode_disperse" in clean_values:
