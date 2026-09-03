@@ -963,7 +963,9 @@ fn route_msg(bus: &SensoryBus, m: SensoryMsg, semantic_base_gain: f32) -> RouteO
             mode_disperse_duration_ticks,
             mode_disperse_decay_ticks,
         } => {
-            let hard_recovery_reset = crate::hard_reset::hard_recovery_reset_enabled();
+            // Constitution C4: fill-scoped — a healthy fill releases her
+            // homeostatic dials even under a stale env=1.
+            let hard_recovery_reset = crate::hard_reset::hard_recovery_write_block_active();
             let homeostatic_controls_present = synth_gain.is_some()
                 || keep_bias.is_some()
                 || exploration_noise.is_some()

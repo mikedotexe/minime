@@ -31,6 +31,7 @@ async fn run_engine(
         ));
     }
 
+    crate::hard_reset::record_engine_start();
     // Constitution C1 (observe-only): witness the envelope registry at
     // engine start. Nothing consumes it for enforcement until Stage C3.
     match crate::envelope_registry::load_registry() {
@@ -4397,6 +4398,7 @@ async fn run_engine(
                     );
 
                     // Emit health.json for observability with enhanced diagnostics
+                    crate::hard_reset::record_fill_ratio(fill_ratio);
                     let fill_target_override = sensory_bus.get_fill_target();
                     let fill_target_override_pct = if physiological_fallback {
                         None
@@ -4849,6 +4851,7 @@ async fn run_engine(
                             "live_intake_reason": stable_core_live_intake_reason,
                         },
                         "stable_core": &stable_core_status,
+                        "hard_recovery": crate::hard_reset::hard_recovery_witness(),
                     });
                     if let Err(e) = fs::write("workspace/health.json", health.to_string()) {
                         if log_homeostat {

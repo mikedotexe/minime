@@ -197,7 +197,7 @@ impl SelfControlRuntime {
             deployment_identity,
             bus,
             now_unix_ms,
-            crate::hard_reset::hard_recovery_reset_enabled,
+            crate::hard_reset::hard_recovery_write_block_active,
         )
     }
 

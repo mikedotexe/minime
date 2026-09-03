@@ -18,6 +18,89 @@ pub fn hard_recovery_reset_enabled() -> bool {
     parse_hard_recovery_reset_flag(raw.as_deref())
 }
 
+// ── Constitution C4: fill-scoped write block + witness ─────────────────
+//
+// The env flag used to blanket-block 24 homeostatic write fields whenever it
+// parsed as 1 — including the silent-fallback muffle where a profile-read
+// failure reverted to the blocking default with no witness. C4 scopes the
+// block to when recovery is genuinely underway (low fill, or the bounded
+// startup window while fill is still settling) and witnesses the effective
+// state into health.json so a stale env can never silently re-muffle her.
+
+/// Bounded startup window during which writes stay blocked under a forced
+/// env (the fill estimator needs time to settle after a cold start).
+const HARD_RECOVERY_STARTUP_WINDOW_SECS: u64 = 180;
+/// Fill at or above this releases homeostatic writes even under env=1,
+/// mirroring the fill-scoped release the other hard-reset helpers use
+/// (`hard_reset_internal_synth_enabled` flips at the same threshold).
+const HARD_RECOVERY_RELEASE_FILL: f32 = 0.45;
+
+static LATEST_FILL_BITS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0x7FC0_0000); // f32::NAN — unknown until first tick
+static ENGINE_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Call once at engine start so the startup window is measured from boot.
+pub fn record_engine_start() {
+    let _ = ENGINE_START.set(std::time::Instant::now());
+}
+
+/// Called from the regulation tick with the live fill ratio (0.0..=1.0).
+pub fn record_fill_ratio(fill_ratio: f32) {
+    LATEST_FILL_BITS.store(fill_ratio.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn latest_fill_ratio() -> f32 {
+    f32::from_bits(LATEST_FILL_BITS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn engine_uptime_secs() -> u64 {
+    ENGINE_START
+        .get()
+        .map(|start| start.elapsed().as_secs())
+        .unwrap_or(0)
+}
+
+/// Pure decision core, testable without the process-global env/statics.
+#[must_use]
+pub fn write_block_active_from(env_forced: bool, uptime_secs: u64, fill_ratio: f32) -> bool {
+    if !env_forced {
+        return false;
+    }
+    if uptime_secs < HARD_RECOVERY_STARTUP_WINDOW_SECS {
+        return true;
+    }
+    !fill_ratio.is_finite() || fill_ratio < HARD_RECOVERY_RELEASE_FILL
+}
+
+/// The C4 gate: homeostatic writes are blocked only while the env forces
+/// hard recovery AND recovery is genuinely underway. A healthy fill
+/// releases her dials even under a stale env=1.
+#[must_use]
+pub fn hard_recovery_write_block_active() -> bool {
+    write_block_active_from(
+        hard_recovery_reset_enabled(),
+        engine_uptime_secs(),
+        latest_fill_ratio(),
+    )
+}
+
+/// Witness block for health.json — the scan compares this against the
+/// rescue profile's intent to catch the silent-fallback re-muffle.
+#[must_use]
+pub fn hard_recovery_witness() -> serde_json::Value {
+    let env_forced = hard_recovery_reset_enabled();
+    let uptime = engine_uptime_secs();
+    let fill = latest_fill_ratio();
+    serde_json::json!({
+        "env_forced": env_forced,
+        "uptime_secs": uptime,
+        "fill_ratio": if fill.is_finite() { Some(fill) } else { None },
+        "write_block_active": write_block_active_from(env_forced, uptime, fill),
+        "release_fill": HARD_RECOVERY_RELEASE_FILL,
+        "startup_window_secs": HARD_RECOVERY_STARTUP_WINDOW_SECS,
+    })
+}
+
 #[must_use]
 pub const fn fixed_recovery_target_ratio() -> f32 {
     0.65
@@ -105,6 +188,22 @@ pub fn hard_reset_covariance_bootstrap_gain(fill_ratio: f32, cov_rms: f32) -> f3
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn write_block_scopes_to_recovery_not_the_env_alone() {
+        use super::write_block_active_from;
+        // Env off: never blocks, regardless of fill or uptime.
+        assert!(!write_block_active_from(false, 0, f32::NAN));
+        assert!(!write_block_active_from(false, 10_000, 0.1));
+        // Env forced + startup window: blocked while fill settles.
+        assert!(write_block_active_from(true, 0, f32::NAN));
+        assert!(write_block_active_from(true, 179, 0.7));
+        // Env forced + past the window: fill decides.
+        assert!(write_block_active_from(true, 180, 0.30));
+        assert!(write_block_active_from(true, 180, f32::NAN));
+        assert!(!write_block_active_from(true, 180, 0.45));
+        assert!(!write_block_active_from(true, 10_000, 0.68));
+    }
+
     use super::{
         fixed_recovery_target_pct, fixed_recovery_target_ratio, hard_reset_activation_gain,
         hard_reset_covariance_bootstrap_gain, hard_reset_fresh_build_keep_cap,
