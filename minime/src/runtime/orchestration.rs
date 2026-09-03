@@ -31,6 +31,19 @@ async fn run_engine(
         ));
     }
 
+    // Constitution C1 (observe-only): witness the envelope registry at
+    // engine start. Nothing consumes it for enforcement until Stage C3.
+    match crate::envelope_registry::load_registry() {
+        Some(registry) => println!(
+            "📜 Envelope registry loaded (observe-only): {} fields, revision {}",
+            registry.field_count(),
+            registry.revision
+        ),
+        None => println!(
+            "📜 Envelope registry absent or malformed — compiled bounds remain the law"
+        ),
+    }
+
     let stable_core_runtime = StableCoreRuntime::from_env();
     let hard_recovery_reset = hard_recovery_reset_enabled();
     let physiological_fallback = hard_recovery_reset || stable_core_runtime.enabled;

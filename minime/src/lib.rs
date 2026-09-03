@@ -10,6 +10,7 @@ pub mod cheby;
 pub mod controller_recovery;
 pub mod db;
 pub mod division;
+pub mod envelope_registry;
 pub mod esn;
 pub mod gpu;
 pub mod hard_reset;

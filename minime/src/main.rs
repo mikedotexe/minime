@@ -8,6 +8,7 @@ mod buffer_pool;
 mod cheby;
 mod db;
 mod division;
+mod envelope_registry;
 mod esn;
 mod gpu;
 mod handoff_diag;

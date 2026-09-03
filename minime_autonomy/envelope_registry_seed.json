@@ -1,0 +1,774 @@
+{
+ "authority_boundary": "read-only wiring guard + seed generator: parses bound tables and registries, reports drift, generates verbatim-capture seeds; it grants, widens, applies, and deploys nothing",
+ "being": "minime",
+ "derivation_notes": "First edition of the envelope registry: a verbatim, f32-exact capture of every live compiled bound, generated from the parsed source tables by check_envelope_wiring.py --emit-seed (never hand-transcribed). Red lines unchanged: SafetyLevel Red >=92% suspension-only; supervisor Hold/Revert-only; grants need Green|Yellow + fresh fill; one dial one writer. Widening beyond the engine backstop requires a deliberate compiled-backstop bump through the gated deploy.",
+ "fields": {
+  "breathing_rate_scale": {
+   "ceiling": 2.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 2.0,
+    "floor": 0.5
+   },
+   "evidence_refs": [],
+   "family": "reservoir-regulation",
+   "floor": 0.5,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "checkpoint_interval": {
+   "ceiling": 600.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 600.0,
+    "floor": 10.0
+   },
+   "evidence_refs": [],
+   "family": "memory",
+   "floor": 10.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "embedding_strength": {
+   "ceiling": 1.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 1.0,
+    "floor": 0.0
+   },
+   "evidence_refs": [],
+   "family": "memory",
+   "floor": 0.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "esn_leak_override": {
+   "ceiling": 0.8999999761581421,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 0.8999999761581421,
+    "floor": 0.20000000298023224
+   },
+   "evidence_refs": [],
+   "family": "local-topology",
+   "floor": 0.20000000298023224,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "esn_leak_override_ticks": {
+   "ceiling": 12.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 12.0,
+    "floor": 1.0
+   },
+   "evidence_refs": [],
+   "family": "local-topology",
+   "floor": 1.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "integer"
+  },
+  "exploration_noise": {
+   "ceiling": 0.20000000298023224,
+   "channel_ranges": {
+    "footer": {
+     "ceiling": 0.07999999821186066,
+     "floor": 0.0
+    },
+    "sovereignty": {
+     "ceiling": 0.15000000596046448,
+     "floor": 0.0
+    }
+   },
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 0.20000000298023224,
+    "floor": 0.0
+   },
+   "evidence_refs": [],
+   "family": "reservoir-regulation",
+   "floor": 0.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "fill_target": {
+   "ceiling": 0.75,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 0.75,
+    "floor": 0.25
+   },
+   "evidence_refs": [],
+   "family": "reservoir-regulation",
+   "floor": 0.25,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "geom_curiosity": {
+   "ceiling": 0.30000001192092896,
+   "channel_ranges": {
+    "footer": {
+     "ceiling": 0.30000001192092896,
+     "floor": 0.0
+    },
+    "sovereignty": {
+     "ceiling": 0.30000001192092896,
+     "floor": 0.0
+    }
+   },
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 0.30000001192092896,
+    "floor": 0.0
+   },
+   "evidence_refs": [],
+   "family": "reservoir-geometry",
+   "floor": 0.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "geom_drive": {
+   "ceiling": 1.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 1.0,
+    "floor": 0.0
+   },
+   "evidence_refs": [],
+   "family": "reservoir-geometry",
+   "floor": 0.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "journal_resonance": {
+   "ceiling": 1.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 1.0,
+    "floor": 0.0
+   },
+   "evidence_refs": [],
+   "family": "memory",
+   "floor": 0.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "keep_bias": {
+   "ceiling": 0.10000000149011612,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 0.10000000149011612,
+    "floor": -0.07999999821186066
+   },
+   "evidence_refs": [],
+   "family": "reservoir-regulation",
+   "floor": -0.07999999821186066,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "local_sensory_admission": {
+   "ceiling": 1.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 1.0,
+    "floor": 0.05000000074505806
+   },
+   "evidence_refs": [],
+   "family": "sensory-intake",
+   "floor": 0.05000000074505806,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "memory_decay_rate": {
+   "ceiling": 0.5,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 0.5,
+    "floor": 0.009999999776482582
+   },
+   "evidence_refs": [],
+   "family": "memory",
+   "floor": 0.009999999776482582,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "memory_mode": {
+   "ceiling": 2.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 2.0,
+    "floor": 0.0
+   },
+   "evidence_refs": [],
+   "family": "memory",
+   "floor": 0.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "integer"
+  },
+  "mode_disperse": {
+   "ceiling": 1.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 1.0,
+    "floor": 0.0
+   },
+   "evidence_refs": [],
+   "family": "local-topology",
+   "floor": 0.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "mode_disperse_decay_ticks": {
+   "ceiling": 256.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "passthrough_unclamped": true
+   },
+   "evidence_refs": [],
+   "family": "local-topology",
+   "floor": 1.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "integer"
+  },
+  "mode_disperse_duration_ticks": {
+   "ceiling": 64.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "passthrough_unclamped": true
+   },
+   "evidence_refs": [],
+   "family": "local-topology",
+   "floor": 1.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "integer"
+  },
+  "penalty_sensitivity": {
+   "ceiling": 2.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 2.0,
+    "floor": 0.0
+   },
+   "evidence_refs": [],
+   "family": "reservoir-regulation",
+   "floor": 0.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "pi_geom_weight": {
+   "ceiling": 2.0,
+   "channel_ranges": {
+    "sovereignty": {
+     "ceiling": 2.0,
+     "floor": 0.0
+    }
+   },
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 2.0,
+    "floor": 0.0
+   },
+   "evidence_refs": [],
+   "family": "pi-controller",
+   "floor": 0.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "pi_integrator_leak": {
+   "ceiling": 0.05000000074505806,
+   "channel_ranges": {
+    "sovereignty": {
+     "ceiling": 0.05000000074505806,
+     "floor": 0.0010000000474974513
+    }
+   },
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 0.05000000074505806,
+    "floor": 0.0010000000474974513
+   },
+   "evidence_refs": [],
+   "family": "pi-controller",
+   "floor": 0.0010000000474974513,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "pi_ki": {
+   "ceiling": 0.5,
+   "channel_ranges": {
+    "sovereignty": {
+     "ceiling": 0.5,
+     "floor": 0.004999999888241291
+    }
+   },
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 0.5,
+    "floor": 0.004999999888241291
+   },
+   "evidence_refs": [],
+   "family": "pi-controller",
+   "floor": 0.004999999888241291,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "pi_kp": {
+   "ceiling": 2.0,
+   "channel_ranges": {
+    "sovereignty": {
+     "ceiling": 2.0,
+     "floor": 0.10000000149011612
+    }
+   },
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 2.0,
+    "floor": 0.10000000149011612
+   },
+   "evidence_refs": [],
+   "family": "pi-controller",
+   "floor": 0.10000000149011612,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "pi_max_step": {
+   "ceiling": 0.20000000298023224,
+   "channel_ranges": {
+    "sovereignty": {
+     "ceiling": 0.30000001192092896,
+     "floor": 0.009999999776482582
+    }
+   },
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 0.20000000298023224,
+    "floor": 0.009999999776482582
+   },
+   "evidence_refs": [],
+   "family": "pi-controller",
+   "floor": 0.009999999776482582,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "porosity": {
+   "ceiling": 1.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 1.0,
+    "floor": 0.0
+   },
+   "evidence_refs": [],
+   "family": "local-topology",
+   "floor": 0.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "receptivity": {
+   "ceiling": 1.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 1.0,
+    "floor": 0.0
+   },
+   "evidence_refs": [],
+   "family": "sensory-intake",
+   "floor": 0.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "regulation_strength": {
+   "ceiling": 1.0,
+   "channel_ranges": {
+    "footer": {
+     "ceiling": 1.0,
+     "floor": 0.4000000059604645
+    },
+    "sovereignty": {
+     "ceiling": 1.0,
+     "floor": 0.0
+    }
+   },
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 1.0,
+    "floor": 0.0
+   },
+   "evidence_refs": [],
+   "family": "reservoir-regulation",
+   "floor": 0.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "semantic_companion_mix": {
+   "ceiling": 1.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 1.0,
+    "floor": 0.0
+   },
+   "evidence_refs": [],
+   "family": "sensory-intake",
+   "floor": 0.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "semantic_intake_gain": {
+   "ceiling": 2.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 2.0,
+    "floor": 0.0
+   },
+   "evidence_refs": [],
+   "family": "sensory-intake",
+   "floor": 0.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "semantic_strand_retention_turns": {
+   "ceiling": 32.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 32.0,
+    "floor": 0.0
+   },
+   "evidence_refs": [],
+   "family": "semantic-continuity",
+   "floor": 0.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "integer"
+  },
+  "smoothing_preference": {
+   "ceiling": 0.8999999761581421,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 0.8999999761581421,
+    "floor": 0.10000000149011612
+   },
+   "evidence_refs": [],
+   "family": "reservoir-regulation",
+   "floor": 0.10000000149011612,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "synth_gain": {
+   "ceiling": 3.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 3.0,
+    "floor": 0.20000000298023224
+   },
+   "evidence_refs": [],
+   "family": "reservoir-regulation",
+   "floor": 0.20000000298023224,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "synth_noise_level": {
+   "ceiling": 1.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 1.0,
+    "floor": 0.0
+   },
+   "evidence_refs": [],
+   "family": "reservoir-regulation",
+   "floor": 0.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "target_lambda_bias": {
+   "ceiling": 0.5,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 0.5,
+    "floor": -0.5
+   },
+   "evidence_refs": [],
+   "family": "reservoir-geometry",
+   "floor": -0.5,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  },
+  "transition_cushion": {
+   "ceiling": 1.0,
+   "channel_ranges": {},
+   "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
+   "durability_policy": {
+    "lease_max_secs": 900,
+    "standing": "allowed"
+   },
+   "engine_backstop": {
+    "ceiling": 1.0,
+    "floor": 0.0
+   },
+   "evidence_refs": [],
+   "family": "memory",
+   "floor": 0.0,
+   "granted_at": null,
+   "granted_by": null,
+   "ratchet_history": [],
+   "status": "evidence_needed",
+   "type": "numeric"
+  }
+ },
+ "revision": 1,
+ "schema": "being_envelope_registry_v1",
+ "updated_at": "2026-09-02"
+}
