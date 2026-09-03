@@ -518,7 +518,16 @@ async fn spawn_sensory_ws_server_with_runtime(
                 let mut sweep = time::interval(Duration::from_millis(250));
                 loop {
                     sweep.tick().await;
-                    for receipt in runtime.sweep_expired(NowMs::now()) {
+                    let now_unix_ms = NowMs::now();
+                    // Constitution C6: after the expiry sweep, active controls
+                    // must remain fixed-points of the envelope clamp — a
+                    // legitimate registry narrow rolls back (with receipt)
+                    // instead of letting the saturation breaker strike.
+                    let receipts = runtime
+                        .sweep_expired(now_unix_ms)
+                        .into_iter()
+                        .chain(runtime.reconcile_envelope_conformance(now_unix_ms));
+                    for receipt in receipts {
                         match serialize_receipt(&receipt) {
                             Ok(serialized) => {
                                 let _ = self_control_receipts.send(serialized);

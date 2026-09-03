@@ -174,7 +174,10 @@ mod tests {
              \"engine_backstop\":{\"floor\":0.2,\"ceiling\":3.0}}",
         ))
         .expect("valid registry parses");
-        assert_eq!(registry.envelope_for("exploration_noise"), Some((0.0, 0.15)));
+        assert_eq!(
+            registry.envelope_for("exploration_noise"),
+            Some((0.0, 0.15))
+        );
         assert_eq!(registry.envelope_for("synth_gain"), None);
         assert_eq!(registry.envelope_for("uncovered"), None);
     }
@@ -182,15 +185,14 @@ mod tests {
     #[test]
     fn fails_closed_on_malformation_wrong_being_and_inverted_bounds() {
         assert!(parse_registry("{ not json").is_none());
-        assert!(
-            parse_registry(
-                "{\"schema\":\"being_envelope_registry_v1\",\"being\":\"astrid\",\"fields\":{}}"
-            )
-            .is_none()
-        );
-        let inverted =
-            parse_registry(&fixture("\"fill_target\":{\"floor\":0.75,\"ceiling\":0.25}"))
-                .expect("parses");
+        assert!(parse_registry(
+            "{\"schema\":\"being_envelope_registry_v1\",\"being\":\"astrid\",\"fields\":{}}"
+        )
+        .is_none());
+        let inverted = parse_registry(&fixture(
+            "\"fill_target\":{\"floor\":0.75,\"ceiling\":0.25}",
+        ))
+        .expect("parses");
         assert_eq!(inverted.envelope_for("fill_target"), None);
     }
 
@@ -211,7 +213,10 @@ mod tests {
             registry.strictest_lease_max_secs(["exploration_noise", "synth_gain"]),
             Some(600)
         );
-        assert_eq!(registry.strictest_lease_max_secs(Vec::<String>::new()), None);
+        assert_eq!(
+            registry.strictest_lease_max_secs(Vec::<String>::new()),
+            None
+        );
     }
 
     #[test]

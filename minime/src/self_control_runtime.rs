@@ -661,6 +661,89 @@ impl SelfControlRuntime {
         receipts
     }
 
+    /// Constitution C6: every ACTIVE control must remain a fixed-point of the
+    /// envelope clamp (compiled(registry(compiled))). When the registry
+    /// legitimately narrows (envelope_ratchet.py narrow), an active control
+    /// whose applied values fall outside the new envelope is rolled back to
+    /// its previous snapshot — receipted — and the family's clamp-saturation
+    /// counter resets, so the 3-strike breaker never strikes on a legitimate
+    /// narrow. Runs on the sweep cadence; a conformant state changes nothing.
+    pub fn reconcile_envelope_conformance(&self, now_unix_ms: u64) -> Vec<SelfControlReceiptV2> {
+        self.reconcile_envelope_conformance_with(now_unix_ms, clamp_values)
+    }
+
+    fn reconcile_envelope_conformance_with(
+        &self,
+        now_unix_ms: u64,
+        clamp: impl Fn(&SelfControlValuesV2) -> SelfControlValuesV2,
+    ) -> Vec<SelfControlReceiptV2> {
+        let mut inner = self.inner.lock();
+        // One clamp evaluation per active: the registry file can move between
+        // calls, and the decision and the receipt must describe the SAME
+        // envelope state.
+        let violating: Vec<(String, SelfControlValuesV2)> = inner
+            .state
+            .active_controls
+            .iter()
+            .filter_map(|(family, active)| {
+                let clamped = clamp(&active.applied_values);
+                (clamped != active.applied_values).then(|| (family.clone(), clamped))
+            })
+            .collect();
+        let mut receipts = Vec::new();
+        for (family, clamped_now) in violating {
+            let Some(active) = inner.state.active_controls.get(&family).cloned() else {
+                continue;
+            };
+            let snapshot = ControlSnapshot {
+                values: active.previous_values.clone(),
+                automatic_fields: active.previous_automatic_fields.clone(),
+            };
+            // Fail CLOSED: restore the bus FIRST. Under an active hard-recovery
+            // write block, apply_values refuses homeostatic writes — the
+            // control then STAYS active (tracked, visible in status) and the
+            // next 250ms sweep retries once the block lifts; removing it here
+            // would strand the out-of-envelope value live on the bus behind a
+            // receipt claiming rollback (adversarial review 2026-09-03).
+            if apply_values(
+                &self.bus,
+                &snapshot.values,
+                &snapshot.automatic_fields,
+                &active.intent_id,
+                (self.hard_recovery_reset_probe)(),
+            )
+            .is_err()
+            {
+                continue;
+            }
+            inner.state.active_controls.remove(&family);
+            inner.state.preferences = replace_requested_preferences(
+                &inner.state.preferences,
+                &active.requested_fields,
+                &active.previous_values,
+            )
+            .unwrap_or_else(|_| SelfControlValuesV2::default());
+            inner
+                .state
+                .clamp_saturation_by_family
+                .insert(family.clone(), 0);
+            let receipt = conformance_receipt(
+                &active,
+                &clamped_now,
+                &self.process_identity,
+                &self.deployment_identity,
+                now_unix_ms,
+            );
+            inner.state.receipts.push(receipt.clone());
+            receipts.push(receipt);
+        }
+        if !receipts.is_empty() {
+            prune_state(&mut inner.state, now_unix_ms);
+            let _ = self.persist(&inner.state);
+        }
+        receipts
+    }
+
     fn apply_set(
         &self,
         inner: &mut RuntimeInner,
@@ -1377,6 +1460,61 @@ fn expired_receipt(
         server_process_identity: process_identity.to_string(),
         server_deployment_identity: deployment_identity.to_string(),
         felt_effect_established: false,
+    }
+}
+
+fn conformance_receipt(
+    active: &ActiveControlV2,
+    clamped_now: &SelfControlValuesV2,
+    process_identity: &str,
+    deployment_identity: &str,
+    now_unix_ms: u64,
+) -> SelfControlReceiptV2 {
+    let identity = format!("{}:{}:{now_unix_ms}", active.receipt_id, active.intent_id);
+    let hash = canonical_json_value_sha256(&serde_json::json!(identity));
+    let fields = changed_field_names(&active.applied_values, clamped_now);
+    SelfControlReceiptV2 {
+        schema: SELF_CONTROL_RECEIPT_SCHEMA_V2.to_string(),
+        receipt_id: format!("self-control-conformance:{}", &hash[..24]),
+        command_id: active.command_id.clone(),
+        intent_id: active.intent_id.clone(),
+        idempotency_key: active.idempotency_key.clone(),
+        status: SelfControlReceiptStatusV2::RolledBack,
+        requested_revision: active.revision,
+        resulting_revision: active.revision,
+        target_being: TARGET_BEING.to_string(),
+        target_deployment_identity: deployment_identity.to_string(),
+        requested_values: active.applied_values.clone(),
+        clamped_values: clamped_now.clone(),
+        applied_values: active.previous_values.clone(),
+        previous_values: active.applied_values.clone(),
+        previous_automatic_fields: active.previous_automatic_fields.clone(),
+        received_at_unix_ms: now_unix_ms,
+        completed_at_unix_ms: now_unix_ms,
+        control_expires_at_unix_ms: active.control_expires_at_unix_ms,
+        rollback_receipt_id: Some(active.receipt_id.clone()),
+        reason: Some(format!("envelope_narrowed_conformance_rollback:{fields}")),
+        server_process_identity: process_identity.to_string(),
+        server_deployment_identity: deployment_identity.to_string(),
+        felt_effect_established: false,
+    }
+}
+
+fn changed_field_names(applied: &SelfControlValuesV2, clamped: &SelfControlValuesV2) -> String {
+    let (Ok(serde_json::Value::Object(applied_map)), Ok(serde_json::Value::Object(clamped_map))) =
+        (serde_json::to_value(applied), serde_json::to_value(clamped))
+    else {
+        return "unserializable".to_string();
+    };
+    let names: Vec<String> = applied_map
+        .iter()
+        .filter(|(name, value)| clamped_map.get(name.as_str()) != Some(value))
+        .map(|(name, _)| name.clone())
+        .collect();
+    if names.is_empty() {
+        "unchanged".to_string()
+    } else {
+        names.join(",")
     }
 }
 

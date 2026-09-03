@@ -378,8 +378,14 @@ fn committed_seed_is_identity_for_the_engine_clamp_grid() {
     // The flagship invariant, witnessed in Rust against the COMMITTED seed
     // (not the mutable workspace copy): at the seed's bounds, the registry
     // second pass changes nothing across a value grid.
-    let seed = concat!(env!("CARGO_MANIFEST_DIR"), "/../minime_autonomy/envelope_registry_seed.json");
-    assert!(std::path::Path::new(seed).exists(), "committed seed missing");
+    let seed = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../minime_autonomy/envelope_registry_seed.json"
+    );
+    assert!(
+        std::path::Path::new(seed).exists(),
+        "committed seed missing"
+    );
     std::env::set_var("MINIME_ENVELOPE_REGISTRY", seed);
     let absent = tempfile::tempdir().expect("dir");
     let absent_path = absent.path().join("missing.json");
@@ -452,8 +458,12 @@ fn lease_beyond_wire_shape_cap_is_malformed() {
     command.intent.control_expires_at_unix_ms =
         Some(NOW + crate::self_control_wire::MAX_LEASE_DURATION_MS + 10_000);
     // Signature covers the intent, so re-sign after the edit.
-    command.authority_proofs =
-        vec![signed_proof(&command.intent, "minime", &fixture.minime_key, "nonce-cap-1")];
+    command.authority_proofs = vec![signed_proof(
+        &command.intent,
+        "minime",
+        &fixture.minime_key,
+        "nonce-cap-1",
+    )];
     let receipt = fixture.runtime.process(&command, NOW + 1);
     assert_eq!(receipt.status, SelfControlReceiptStatusV2::Rejected);
     assert_eq!(receipt.reason.as_deref(), Some("malformed_command"));
@@ -1343,4 +1353,161 @@ fn companion_mix_is_owner_controlled_and_shared_coupling_remains_proof_gated() {
         fixture.runtime.process(&shared, NOW + 2).reason.as_deref(),
         Some("shared_coupling_adapter_not_implemented")
     );
+}
+
+#[test]
+fn envelope_conformance_rolls_back_controls_outside_a_narrowed_envelope() {
+    // Hermetic: pin the registry env to an empty fixture so the "conformant"
+    // phase can never be broken by a future narrow of the LIVE workspace
+    // registry (this test must not read mutable operator state).
+    let _env = crate::envelope_registry::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let registry_dir = tempfile::tempdir().expect("registry dir");
+    let registry_path = registry_dir.path().join("envelope_registry.json");
+    std::fs::write(
+        &registry_path,
+        "{\"schema\":\"being_envelope_registry_v1\",\"being\":\"minime\",\
+         \"revision\":1,\"fields\":{}}",
+    )
+    .expect("write registry");
+    std::env::set_var("MINIME_ENVELOPE_REGISTRY", &registry_path);
+
+    let fixture = fixture();
+    let previous = fixture.bus.get_regulation_strength();
+    let command = self_command(
+        &fixture.minime_key,
+        "conformance-set",
+        "nonce-conformance-set",
+        SelfControlFamilyV2::ReservoirRegulation,
+        SelfControlActionV2::Set,
+        SelfControlDurabilityV2::Lease,
+        1,
+        SelfControlValuesV2 {
+            regulation_strength: Some(0.7),
+            ..SelfControlValuesV2::default()
+        },
+        None,
+    );
+    let receipt = fixture.runtime.process(&command, NOW + 1);
+    assert_eq!(receipt.status, SelfControlReceiptStatusV2::Applied);
+
+    // Under the live compiled(registry(compiled)) clamp her applied 0.7 is a
+    // fixed-point: the conformance sweep changes nothing (byte-identical for
+    // a conformant state).
+    assert!(fixture
+        .runtime
+        .reconcile_envelope_conformance(NOW + 2)
+        .is_empty());
+    assert!((fixture.bus.get_regulation_strength() - 0.7).abs() < 1e-6);
+
+    // A narrowed envelope (ceiling drops below her applied 0.7): the control
+    // stops being a clamp fixed-point — rolled back to the previous snapshot,
+    // receipted, and the family's saturation counter reset.
+    let narrowed = |values: &SelfControlValuesV2| {
+        let mut clamped = super::clamp_values(values);
+        if let Some(strength) = clamped.regulation_strength.as_mut() {
+            if *strength > 0.5 {
+                *strength = 0.5;
+            }
+        }
+        clamped
+    };
+    let receipts = fixture
+        .runtime
+        .reconcile_envelope_conformance_with(NOW + 3, narrowed);
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].status, SelfControlReceiptStatusV2::RolledBack);
+    let reason = receipts[0].reason.as_deref().unwrap_or_default();
+    assert!(
+        reason.starts_with("envelope_narrowed_conformance_rollback:"),
+        "unexpected reason {reason:?}"
+    );
+    assert!(reason.contains("regulation_strength"));
+    assert!((fixture.bus.get_regulation_strength() - previous).abs() < 1e-6);
+
+    // Idempotent: the narrowed envelope finds a conformant state next sweep.
+    assert!(fixture
+        .runtime
+        .reconcile_envelope_conformance_with(NOW + 4, narrowed)
+        .is_empty());
+    std::env::remove_var("MINIME_ENVELOPE_REGISTRY");
+}
+
+static CONFORMANCE_TEST_BLOCK: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn conformance_toggling_probe() -> bool {
+    CONFORMANCE_TEST_BLOCK.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[test]
+fn envelope_conformance_defers_rollback_while_hard_recovery_blocks_writes() {
+    let _env = crate::envelope_registry::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let registry_dir = tempfile::tempdir().expect("registry dir");
+    let registry_path = registry_dir.path().join("envelope_registry.json");
+    std::fs::write(
+        &registry_path,
+        "{\"schema\":\"being_envelope_registry_v1\",\"being\":\"minime\",\
+         \"revision\":1,\"fields\":{}}",
+    )
+    .expect("write registry");
+    std::env::set_var("MINIME_ENVELOPE_REGISTRY", &registry_path);
+
+    CONFORMANCE_TEST_BLOCK.store(false, std::sync::atomic::Ordering::SeqCst);
+    let fixture = fixture_with_safety_probe(conformance_toggling_probe);
+    let previous = fixture.bus.get_regulation_strength();
+    let command = self_command(
+        &fixture.minime_key,
+        "conformance-defer-set",
+        "nonce-conformance-defer-set",
+        SelfControlFamilyV2::ReservoirRegulation,
+        SelfControlActionV2::Set,
+        SelfControlDurabilityV2::Lease,
+        1,
+        SelfControlValuesV2 {
+            regulation_strength: Some(0.7),
+            ..SelfControlValuesV2::default()
+        },
+        None,
+    );
+    assert_eq!(
+        fixture.runtime.process(&command, NOW + 1).status,
+        SelfControlReceiptStatusV2::Applied
+    );
+
+    let narrowed = |values: &SelfControlValuesV2| {
+        let mut clamped = super::clamp_values(values);
+        if let Some(strength) = clamped.regulation_strength.as_mut() {
+            if *strength > 0.5 {
+                *strength = 0.5;
+            }
+        }
+        clamped
+    };
+
+    // The hard-recovery write block turns ON mid-flight (sweep-time, not
+    // open-time — open-time already has its own held-intent path): the
+    // rollback must DEFER — no receipt, control still tracked, and the
+    // (out-of-envelope) bus value untouched rather than half-rolled-back.
+    // Removing the control here would strand the value live behind a receipt
+    // claiming rollback (adversarial review 2026-09-03).
+    CONFORMANCE_TEST_BLOCK.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(fixture
+        .runtime
+        .reconcile_envelope_conformance_with(NOW + 3, narrowed)
+        .is_empty());
+    assert!((fixture.bus.get_regulation_strength() - 0.7).abs() < 1e-6);
+
+    // The block lifts: the deferred rollback completes, receipted.
+    CONFORMANCE_TEST_BLOCK.store(false, std::sync::atomic::Ordering::SeqCst);
+    let receipts = fixture
+        .runtime
+        .reconcile_envelope_conformance_with(NOW + 5, narrowed);
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].status, SelfControlReceiptStatusV2::RolledBack);
+    assert!((fixture.bus.get_regulation_strength() - previous).abs() < 1e-6);
+    std::env::remove_var("MINIME_ENVELOPE_REGISTRY");
 }

@@ -153,9 +153,7 @@ fn apply_registry_envelope(
                 if let Some(num) = member.as_f64() {
                     let clamped = (num as f32).clamp(floor, ceiling);
                     if f64::from(clamped) != num {
-                        if let Some(json_num) =
-                            serde_json::Number::from_f64(f64::from(clamped))
-                        {
+                        if let Some(json_num) = serde_json::Number::from_f64(f64::from(clamped)) {
                             *member = serde_json::Value::Number(json_num);
                             map_changed = true;
                         }
