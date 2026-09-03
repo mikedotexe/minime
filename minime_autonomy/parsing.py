@@ -6,6 +6,7 @@ requests and evidence envelopes without touching runtime state or live control.
 
 import re
 import shlex
+import struct
 import sys
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -267,6 +268,35 @@ SELF_REGULATION_DIRECT_SAFE_RANGES = {
     "geom_curiosity": (0.0, 0.3),
 }
 _FOOTER_DIRECTIVE_BOUNDS = dict(SELF_REGULATION_DIRECT_SAFE_RANGES)
+
+
+def _footer_bounds(key: str) -> tuple:
+    """Constitution C3a: footer clamp bounds come from the envelope
+    registry's per-field `channel_ranges.footer` (intersected with the
+    field's own envelope, so a channel can never reach past the envelope),
+    with the compiled table as the fail-closed fallback. Today's registry
+    records the compiled values verbatim, so behavior is byte-identical —
+    but a future consent-backed grant (C6) widens her footer channel by
+    editing the DOCUMENT, not this code. Clamp-with-negotiation-record
+    semantics are unchanged: the ledger stays the ratchet's pressure signal.
+    """
+    try:
+        from .envelope_registry import channel_range_for, envelope_for, load_registry
+
+        registry = load_registry()
+        if registry is not None:
+            channel = channel_range_for(key, "footer", registry)
+            if channel is not None:
+                envelope = envelope_for(key, registry)
+                if envelope is not None:
+                    lo = max(channel[0], envelope[0])
+                    hi = min(channel[1], envelope[1])
+                    if lo <= hi:
+                        return (lo, hi)
+                return channel
+    except Exception:  # noqa: BLE001 - any registry fault falls closed
+        pass
+    return _FOOTER_DIRECTIVE_BOUNDS[key]
 # Whole-line anchored: optional leading bullet/whitespace, KEY, ':' or '=', a
 # numeric value, optional trailing punctuation — and NOTHING ELSE on the line.
 # That bare `KEY=value` isolation is exactly what separates an intentional footer
@@ -311,13 +341,18 @@ def _parse_footer_directive_requests(text: str) -> dict:
             requested = float(m.group(2))
         except (TypeError, ValueError):
             continue
-        lo, hi = _FOOTER_DIRECTIVE_BOUNDS[key]
-        applied = max(lo, min(hi, requested))
+        lo, hi = _footer_bounds(key)
+        # Compare in the wire's f32 domain (bounds from the envelope registry
+        # are f32-quantized): an exact-at-f32 request like 0.08 must still
+        # read as within_safe_range, not spuriously clamped (the 2026-09-01
+        # receipt-substitution scar, generalized to the footer ledger).
+        requested_f32 = struct.unpack("<f", struct.pack("<f", requested))[0]
+        applied = max(lo, min(hi, requested_f32))
         out[key] = {
             "candidate_control": key,
             "requested_value": round(requested, 4),
             "applied_value": round(applied, 4),
-            "safe_cap_or_range": {"min": lo, "max": hi},
+            "safe_cap_or_range": {"min": round(lo, 6), "max": round(hi, 6)},
             "clamp_or_defer_reason": (
                 "clamped_to_lease_safe_range"
                 if applied != requested

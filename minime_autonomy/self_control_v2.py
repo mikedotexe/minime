@@ -151,6 +151,43 @@ class SelfControlV2Error(RuntimeError):
         self.details = details
 
 
+def _effective_numeric_bounds(
+    field: str, compiled_lower: float, compiled_upper: float, registry: Any
+) -> tuple[float, float]:
+    """Constitution C3a: the envelope registry is consulted first, with the
+    compiled table as the outermost python-side backstop (effective =
+    intersection, so a registry edit can NARROW here but never widen past
+    compiled; widening past compiled remains a deliberate code change until
+    the engine-side backstops close in C3c). Registry absent, field
+    uncovered, or a degenerate intersection -> compiled bounds exactly, so
+    today's behavior is byte-identical (the seeds record compiled values).
+    """
+    if registry is None:
+        return compiled_lower, compiled_upper
+    try:
+        from .envelope_registry import envelope_for
+
+        envelope = envelope_for(field, registry)
+    except Exception:  # noqa: BLE001 - any registry fault falls closed
+        return compiled_lower, compiled_upper
+    if envelope is None:
+        return compiled_lower, compiled_upper
+    lower = max(compiled_lower, envelope[0])
+    upper = min(compiled_upper, envelope[1])
+    if lower > upper:
+        return compiled_lower, compiled_upper
+    return lower, upper
+
+
+def _load_envelope_registry() -> Any:
+    try:
+        from .envelope_registry import load_registry
+
+        return load_registry()
+    except Exception:  # noqa: BLE001 - any registry fault falls closed
+        return None
+
+
 def validate_exact_self_control_values(values: Mapping[str, Any]) -> dict[str, Any]:
     """Validate owner-selected values without clamping or coercion."""
     clean_values = dict(values)
@@ -162,6 +199,7 @@ def validate_exact_self_control_values(values: Mapping[str, Any]) -> dict[str, A
         raise SelfControlV2Error(
             "unsupported or peer-impacting self-control fields: " + ", ".join(unknown)
         )
+    registry = _load_envelope_registry()
     for field, value in clean_values.items():
         if field in SELF_CONTROL_BOOLEAN_FIELDS:
             if not isinstance(value, bool):
@@ -174,7 +212,11 @@ def validate_exact_self_control_values(values: Mapping[str, Any]) -> dict[str, A
                 )
             continue
         if field in SELF_CONTROL_INTEGER_RANGES:
-            lower, upper = SELF_CONTROL_INTEGER_RANGES[field]
+            compiled_lower, compiled_upper = SELF_CONTROL_INTEGER_RANGES[field]
+            bounds = _effective_numeric_bounds(
+                field, float(compiled_lower), float(compiled_upper), registry
+            )
+            lower, upper = int(bounds[0]), int(bounds[1])
             if isinstance(value, bool) or not isinstance(value, int):
                 raise SelfControlV2Error(f"{field} requires an integer")
             if not lower <= value <= upper:
@@ -183,7 +225,10 @@ def validate_exact_self_control_values(values: Mapping[str, Any]) -> dict[str, A
                 )
             continue
         if field in SELF_CONTROL_NUMERIC_RANGES:
-            lower, upper = SELF_CONTROL_NUMERIC_RANGES[field]
+            compiled_lower, compiled_upper = SELF_CONTROL_NUMERIC_RANGES[field]
+            lower, upper = _effective_numeric_bounds(
+                field, compiled_lower, compiled_upper, registry
+            )
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise SelfControlV2Error(f"{field} requires a finite number")
             numeric = float(value)
