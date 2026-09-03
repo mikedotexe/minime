@@ -8,7 +8,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -29,7 +29,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -50,7 +50,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -71,7 +71,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -92,7 +92,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -122,7 +122,7 @@
    },
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -143,7 +143,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -173,7 +173,7 @@
    },
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -194,7 +194,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -215,7 +215,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -236,7 +236,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -257,7 +257,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -278,7 +278,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -299,7 +299,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -320,7 +320,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -341,7 +341,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -361,7 +361,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -381,7 +381,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -407,7 +407,7 @@
    },
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -433,7 +433,7 @@
    },
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -459,7 +459,7 @@
    },
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -485,7 +485,7 @@
    },
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -511,7 +511,7 @@
    },
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -532,7 +532,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -553,7 +553,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -583,7 +583,7 @@
    },
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -604,7 +604,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -625,7 +625,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -646,7 +646,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -667,7 +667,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -688,7 +688,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -709,7 +709,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -730,7 +730,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {
@@ -751,7 +751,7 @@
    "channel_ranges": {},
    "derivation": "C1 verbatim capture of the live compiled bounds (2026-09-02); finality within this bound is granted by conversion, widening awaits evidence via envelope_ratchet",
    "durability_policy": {
-    "lease_max_secs": 900,
+    "lease_max_secs": 1200,
     "standing": "allowed"
    },
    "engine_backstop": {

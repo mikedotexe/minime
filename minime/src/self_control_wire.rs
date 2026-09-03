@@ -6,6 +6,11 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 pub const SELF_CONTROL_INTENT_SCHEMA_V2: &str = "self_control.intent.v2";
+/// Wire-shape sanity cap on lease durations (Constitution C2). Real policy
+/// lives in the per-field envelope registry `durability_policy`; this cap
+/// only refuses shapes no legitimate sender produces (current leases run
+/// 120..=1200 seconds).
+pub const MAX_LEASE_DURATION_MS: u64 = 86_400_000;
 pub const SELF_CONTROL_COMMAND_SCHEMA_V2: &str = "self_control.command.v2";
 pub const SELF_CONTROL_AUTHORITY_PROOF_SCHEMA_V1: &str = "self_control.authority_proof.v1";
 pub const SELF_CONTROL_RECEIPT_SCHEMA_V2: &str = "self_control.receipt.v2";
@@ -314,9 +319,12 @@ impl SelfControlIntentV2 {
             SelfControlDurabilityV2::Standing | SelfControlDurabilityV2::OneShot => {
                 self.control_expires_at_unix_ms.is_none()
             }
-            SelfControlDurabilityV2::Lease => self
-                .control_expires_at_unix_ms
-                .is_some_and(|expiry| expiry > now_unix_ms),
+            SelfControlDurabilityV2::Lease => {
+                self.control_expires_at_unix_ms.is_some_and(|expiry| {
+                    expiry > now_unix_ms
+                        && expiry.saturating_sub(now_unix_ms) <= MAX_LEASE_DURATION_MS
+                })
+            }
         };
         self.schema == SELF_CONTROL_INTENT_SCHEMA_V2
             && self.actor.is_complete()

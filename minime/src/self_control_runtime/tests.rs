@@ -302,6 +302,103 @@ fn lease_applies_idempotently_and_expiry_restores_automatic_state() {
 }
 
 #[test]
+fn lease_beyond_wire_shape_cap_is_malformed() {
+    // Constitution C2: the 24h wire cap refuses shapes no legitimate sender
+    // produces (current traffic runs 120..=1200 second leases).
+    let fixture = fixture();
+    let mut command = self_command(
+        &fixture.minime_key,
+        "lease-cap-1",
+        "nonce-cap-1",
+        SelfControlFamilyV2::ReservoirRegulation,
+        SelfControlActionV2::Set,
+        SelfControlDurabilityV2::Lease,
+        1,
+        SelfControlValuesV2 {
+            fill_target: Some(0.68),
+            ..SelfControlValuesV2::default()
+        },
+        None,
+    );
+    command.intent.control_expires_at_unix_ms =
+        Some(NOW + crate::self_control_wire::MAX_LEASE_DURATION_MS + 10_000);
+    // Signature covers the intent, so re-sign after the edit.
+    command.authority_proofs =
+        vec![signed_proof(&command.intent, "minime", &fixture.minime_key, "nonce-cap-1")];
+    let receipt = fixture.runtime.process(&command, NOW + 1);
+    assert_eq!(receipt.status, SelfControlReceiptStatusV2::Rejected);
+    assert_eq!(receipt.reason.as_deref(), Some("malformed_command"));
+}
+
+#[test]
+fn lease_exceeding_envelope_duration_is_rejected_not_clamped() {
+    // Constitution C2: durations are policy, not values. The strict policy
+    // lives ONLY on exploration_noise here so concurrently-running lease
+    // tests (which lease fill_target) never see it if the env var leaks
+    // across threads for a moment.
+    let fixture = fixture();
+    let registry_dir = tempfile::tempdir().expect("registry dir");
+    let registry_path = registry_dir.path().join("envelope_registry.json");
+    std::fs::write(
+        &registry_path,
+        "{\"schema\":\"being_envelope_registry_v1\",\"being\":\"minime\",\"revision\":1,\
+         \"fields\":{\"exploration_noise\":{\"floor\":0.0,\"ceiling\":0.2,\
+         \"durability_policy\":{\"lease_max_secs\":1}}}}",
+    )
+    .expect("write registry");
+    std::env::set_var("MINIME_ENVELOPE_REGISTRY", &registry_path);
+
+    // 5-second lease vs a 1-second policy ceiling: REJECTED, never clamped.
+    let over = self_command(
+        &fixture.minime_key,
+        "lease-envelope-1",
+        "nonce-envelope-1",
+        SelfControlFamilyV2::ReservoirRegulation,
+        SelfControlActionV2::Set,
+        SelfControlDurabilityV2::Lease,
+        1,
+        SelfControlValuesV2 {
+            exploration_noise: Some(0.05),
+            ..SelfControlValuesV2::default()
+        },
+        None,
+    );
+    let receipt = fixture.runtime.process(&over, NOW + 1);
+    assert_eq!(receipt.status, SelfControlReceiptStatusV2::Rejected);
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("lease_exceeds_envelope_duration")
+    );
+
+    // The same lease under a generous policy applies — the rejection is the
+    // policy's, not the field's.
+    std::fs::write(
+        &registry_path,
+        "{\"schema\":\"being_envelope_registry_v1\",\"being\":\"minime\",\"revision\":1,\
+         \"fields\":{\"exploration_noise\":{\"floor\":0.0,\"ceiling\":0.2,\
+         \"durability_policy\":{\"lease_max_secs\":1200}}}}",
+    )
+    .expect("rewrite registry");
+    let within = self_command(
+        &fixture.minime_key,
+        "lease-envelope-2",
+        "nonce-envelope-2",
+        SelfControlFamilyV2::ReservoirRegulation,
+        SelfControlActionV2::Set,
+        SelfControlDurabilityV2::Lease,
+        1,
+        SelfControlValuesV2 {
+            exploration_noise: Some(0.05),
+            ..SelfControlValuesV2::default()
+        },
+        None,
+    );
+    let applied = fixture.runtime.process(&within, NOW + 2);
+    std::env::remove_var("MINIME_ENVELOPE_REGISTRY");
+    assert_eq!(applied.status, SelfControlReceiptStatusV2::Applied);
+}
+
+#[test]
 fn rejects_revision_conflict_bad_signature_stale_target_and_nonce_replay() {
     let fixture = fixture();
     let mut wrong_revision = self_command(

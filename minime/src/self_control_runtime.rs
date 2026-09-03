@@ -488,6 +488,35 @@ impl SelfControlRuntime {
         if !command.is_well_formed(now_unix_ms) {
             return self.rejected(command, current_revision, now_unix_ms, "malformed_command");
         }
+        // Constitution C2: a lease may not outlast the strictest
+        // durability_policy.lease_max_secs across its fields in the envelope
+        // registry. Durations are policy, not values — exceeding is REJECTED
+        // (never clamped), so no receipt-equality clause is disturbed. With
+        // no registry or no policy, only the wire-shape cap applies.
+        let lease_exceeds_envelope = match (
+            command.intent.durability,
+            command.intent.control_expires_at_unix_ms,
+        ) {
+            (SelfControlDurabilityV2::Lease, Some(expiry)) => {
+                crate::envelope_registry::load_registry()
+                    .and_then(|registry| {
+                        registry.strictest_lease_max_secs(command.intent.values.field_names())
+                    })
+                    .is_some_and(|max_secs| {
+                        expiry.saturating_sub(command.intent.issued_at_unix_ms)
+                            > max_secs.saturating_mul(1_000)
+                    })
+            }
+            _ => false,
+        };
+        if lease_exceeds_envelope {
+            return self.rejected(
+                command,
+                current_revision,
+                now_unix_ms,
+                "lease_exceeds_envelope_duration",
+            );
+        }
         if !self.authority_is_pinned(command) {
             return self.rejected(
                 command,
