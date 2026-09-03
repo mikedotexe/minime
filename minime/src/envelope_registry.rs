@@ -29,15 +29,10 @@ pub struct EnvelopeRegistry {
     fields: BTreeMap<String, EnvelopeField>,
 }
 
-// Bound fields are dormant until Stage C3 wires `envelope_for` into
-// `apply::clamp_values`; the allows come off with that stage.
 #[derive(Debug, Clone, Deserialize)]
 pub struct EnvelopeField {
-    #[allow(dead_code)]
     floor: Option<f64>,
-    #[allow(dead_code)]
     ceiling: Option<f64>,
-    #[allow(dead_code)]
     #[serde(default)]
     engine_backstop: Option<EngineBackstop>,
     #[serde(default)]
@@ -52,10 +47,8 @@ pub struct DurabilityPolicy {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct EngineBackstop {
-    #[allow(dead_code)]
     #[serde(default)]
     floor: Option<f64>,
-    #[allow(dead_code)]
     #[serde(default)]
     ceiling: Option<f64>,
 }
@@ -70,7 +63,6 @@ impl EnvelopeRegistry {
     /// field is uncovered, malformed, or wider than the engine backstop —
     /// callers fall back to the compiled clamp table.
     #[must_use]
-    #[allow(dead_code)] // C1 observe-only; Stage C3 consumes this.
     pub fn envelope_for(&self, field: &str) -> Option<(f32, f32)> {
         let entry = self.fields.get(field)?;
         let floor = entry.floor? as f32;
@@ -126,7 +118,11 @@ pub fn registry_path() -> PathBuf {
         .map_or_else(|| PathBuf::from(DEFAULT_PATH), PathBuf::from)
 }
 
-fn parse_registry(text: &str) -> Option<EnvelopeRegistry> {
+/// Parse a registry document (schema + being checked). Public so consumers
+/// can build fixture registries in tests; production reads go through
+/// `load_registry`.
+#[must_use]
+pub fn parse_registry(text: &str) -> Option<EnvelopeRegistry> {
     let registry: EnvelopeRegistry = serde_json::from_str(text).ok()?;
     if registry.schema != REGISTRY_SCHEMA || registry.being != TARGET_BEING {
         return None;
@@ -151,6 +147,12 @@ pub fn load_registry() -> Option<EnvelopeRegistry> {
     let text = std::fs::read_to_string(&path).ok()?;
     parse_registry(&text)
 }
+
+/// Serializes tests that set or read `MINIME_ENVELOPE_REGISTRY` — the env
+/// is process-global, and parallel test threads racing set/remove_var was a
+/// real observed flake (a lease-policy fixture vanished mid-test).
+#[cfg(test)]
+pub static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -235,6 +237,7 @@ mod tests {
 
     #[test]
     fn live_canonical_registry_loads_when_present() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if std::env::var_os("MINIME_ENVELOPE_REGISTRY").is_some() {
             return; // an override is in play; the default-path witness does not apply
         }

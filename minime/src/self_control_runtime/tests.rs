@@ -302,6 +302,135 @@ fn lease_applies_idempotently_and_expiry_restores_automatic_state() {
 }
 
 #[test]
+fn registry_second_pass_narrows_within_compiled_and_ticks_are_clamped() {
+    use super::apply::clamp_values;
+    let _env = crate::envelope_registry::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    // Constitution C3c: with the registry narrowing exploration_noise to
+    // 0.15, a compiled-legal 0.18 clamps to the registry envelope. The
+    // compiled table stays the outermost physics; the registry only narrows.
+    let registry_dir = tempfile::tempdir().expect("registry dir");
+    let registry_path = registry_dir.path().join("envelope_registry.json");
+    std::fs::write(
+        &registry_path,
+        "{\"schema\":\"being_envelope_registry_v1\",\"being\":\"minime\",\"revision\":1,\
+         \"fields\":{\"exploration_noise\":{\"floor\":0.0,\"ceiling\":0.15,\
+         \"engine_backstop\":{\"floor\":0.0,\"ceiling\":0.2}}}}",
+    )
+    .expect("write registry");
+    std::env::set_var("MINIME_ENVELOPE_REGISTRY", &registry_path);
+    let clamped = clamp_values(&SelfControlValuesV2 {
+        exploration_noise: Some(0.18),
+        ..SelfControlValuesV2::default()
+    });
+    std::env::remove_var("MINIME_ENVELOPE_REGISTRY");
+    assert_eq!(clamped.exploration_noise, Some(0.15));
+
+    // The formerly-passthrough one-shot ticks now honor the advertised
+    // python bounds at the engine too (closing a known drift).
+    let ticks = clamp_values(&SelfControlValuesV2 {
+        mode_disperse_duration_ticks: Some(500),
+        mode_disperse_decay_ticks: Some(0),
+        ..SelfControlValuesV2::default()
+    });
+    assert_eq!(ticks.mode_disperse_duration_ticks, Some(64));
+    assert_eq!(ticks.mode_disperse_decay_ticks, Some(1));
+}
+
+#[test]
+fn disjoint_tampered_registry_cannot_drag_values_past_compiled() {
+    use super::apply::clamp_values;
+    let _env = crate::envelope_registry::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // Adversarial review 2026-09-03: sequential clamping is not intersection
+    // for a DISJOINT registry interval — a tampered floor above the compiled
+    // ceiling (0.5 > 0.2, no engine_backstop recorded so the loader cannot
+    // refuse) would have dragged exploration_noise UP past compiled. The
+    // outermost compiled re-clamp must cap it at the compiled ceiling.
+    let registry_dir = tempfile::tempdir().expect("registry dir");
+    let registry_path = registry_dir.path().join("envelope_registry.json");
+    std::fs::write(
+        &registry_path,
+        "{\"schema\":\"being_envelope_registry_v1\",\"being\":\"minime\",\"revision\":1,\
+         \"fields\":{\"exploration_noise\":{\"floor\":0.5,\"ceiling\":0.9}}}",
+    )
+    .expect("write registry");
+    std::env::set_var("MINIME_ENVELOPE_REGISTRY", &registry_path);
+    let clamped = clamp_values(&SelfControlValuesV2 {
+        exploration_noise: Some(0.05),
+        ..SelfControlValuesV2::default()
+    });
+    std::env::remove_var("MINIME_ENVELOPE_REGISTRY");
+    // Never above the compiled ceiling 0.2 — the disjoint registry may pull
+    // toward its floor, but compiled physics is structurally last.
+    assert!(clamped.exploration_noise.expect("value") <= 0.2);
+}
+
+#[test]
+fn committed_seed_is_identity_for_the_engine_clamp_grid() {
+    use super::apply::clamp_values;
+    let _env = crate::envelope_registry::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // The flagship invariant, witnessed in Rust against the COMMITTED seed
+    // (not the mutable workspace copy): at the seed's bounds, the registry
+    // second pass changes nothing across a value grid.
+    let seed = concat!(env!("CARGO_MANIFEST_DIR"), "/../minime_autonomy/envelope_registry_seed.json");
+    assert!(std::path::Path::new(seed).exists(), "committed seed missing");
+    std::env::set_var("MINIME_ENVELOPE_REGISTRY", seed);
+    let absent = tempfile::tempdir().expect("dir");
+    let absent_path = absent.path().join("missing.json");
+    let grid = [-1.0_f32, -0.08, 0.0, 0.05, 0.15, 0.2, 0.5, 0.75, 3.0, 10.0];
+    for value in grid {
+        let sample = SelfControlValuesV2 {
+            exploration_noise: Some(value),
+            keep_bias: Some(value),
+            fill_target: Some(value),
+            synth_gain: Some(value),
+            pi_max_step: Some(value),
+            ..SelfControlValuesV2::default()
+        };
+        std::env::set_var("MINIME_ENVELOPE_REGISTRY", seed);
+        let with_registry = clamp_values(&sample);
+        // The control arm points at a MISSING file (not the default path,
+        // which is the live mutable workspace copy) so it is compiled-only.
+        std::env::set_var("MINIME_ENVELOPE_REGISTRY", &absent_path);
+        let compiled_only = clamp_values(&sample);
+        assert_eq!(with_registry, compiled_only, "seed not identity at {value}");
+    }
+    std::env::remove_var("MINIME_ENVELOPE_REGISTRY");
+}
+
+#[test]
+fn registry_second_pass_is_identity_at_todays_seeds_and_when_absent() {
+    use super::apply::clamp_values;
+    let _env = crate::envelope_registry::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    // Absent registry (or the live one, which records compiled values
+    // verbatim): the compiled result passes through byte-identical.
+    let registry_dir = tempfile::tempdir().expect("registry dir");
+    std::env::set_var(
+        "MINIME_ENVELOPE_REGISTRY",
+        registry_dir.path().join("missing.json"),
+    );
+    let clamped = clamp_values(&SelfControlValuesV2 {
+        exploration_noise: Some(0.18),
+        keep_bias: Some(-0.5),
+        fill_target: Some(0.68),
+        ..SelfControlValuesV2::default()
+    });
+    std::env::remove_var("MINIME_ENVELOPE_REGISTRY");
+    assert_eq!(clamped.exploration_noise, Some(0.18));
+    assert_eq!(clamped.keep_bias, Some(-0.08));
+    assert_eq!(clamped.fill_target, Some(0.68));
+}
+
+#[test]
 fn lease_beyond_wire_shape_cap_is_malformed() {
     // Constitution C2: the 24h wire cap refuses shapes no legitimate sender
     // produces (current traffic runs 120..=1200 second leases).
@@ -332,6 +461,9 @@ fn lease_beyond_wire_shape_cap_is_malformed() {
 
 #[test]
 fn lease_exceeding_envelope_duration_is_rejected_not_clamped() {
+    let _env = crate::envelope_registry::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     // Constitution C2: durations are policy, not values. The strict policy
     // lives ONLY on exploration_noise here so concurrently-running lease
     // tests (which lease fill_target) never see it if the env var leaks

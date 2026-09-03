@@ -88,7 +88,93 @@ fn field_allowed(family: SelfControlFamilyV2, field: &str) -> bool {
     }
 }
 
+/// Constitution C3c: the compiled table below is the wire's physics — the
+/// engine backstop her envelope registry records. The registry applies as a
+/// SECOND pass over the compiled result (intersection by composition): it
+/// can narrow within compiled, never widen past it. Registry absent,
+/// malformed, or equal to compiled (today's seeds) -> byte-identical.
 pub(super) fn clamp_values(values: &SelfControlValuesV2) -> SelfControlValuesV2 {
+    let compiled = compiled_clamp_values(values);
+    let registry_passed =
+        apply_registry_envelope(compiled, crate::envelope_registry::load_registry().as_ref());
+    // The compiled table is re-applied OUTERMOST: sequential clamping is not
+    // intersection for a disjoint (tampered) registry interval — a floor
+    // above the compiled ceiling would drag values UP past compiled.
+    // compiled(registry(compiled(x))) makes the compiled physics structurally
+    // last no matter what the registry says (adversarial review 2026-09-03).
+    compiled_clamp_values(&registry_passed)
+}
+
+/// Registry second pass, generic over the wire struct via serde: numeric
+/// fields clamp into the registry envelope; integer fields clamp in the
+/// integer domain; nested weight maps clamp each numeric member into the
+/// field's envelope; booleans and text pass through untouched. No change ->
+/// the original value is returned with no round-trip, so untouched fields
+/// stay byte-identical.
+fn apply_registry_envelope(
+    values: SelfControlValuesV2,
+    registry: Option<&crate::envelope_registry::EnvelopeRegistry>,
+) -> SelfControlValuesV2 {
+    let Some(registry) = registry else {
+        return values;
+    };
+    let Ok(serde_json::Value::Object(map)) = serde_json::to_value(&values) else {
+        return values;
+    };
+    let mut out = map.clone();
+    let mut changed = false;
+    for (name, value) in &map {
+        let Some((floor, ceiling)) = registry.envelope_for(name) else {
+            continue;
+        };
+        if let Some(int_value) = value.as_u64() {
+            let lo = floor.ceil().max(0.0) as u64;
+            let hi = (ceiling.floor().max(0.0) as u64).max(lo);
+            let clamped = int_value.clamp(lo, hi);
+            if clamped != int_value {
+                out.insert(name.clone(), serde_json::Value::from(clamped));
+                changed = true;
+            }
+        } else if let Some(num) = value.as_f64() {
+            let clamped = (num as f32).clamp(floor, ceiling);
+            if f64::from(clamped) != num {
+                if let Some(json_num) = serde_json::Number::from_f64(f64::from(clamped)) {
+                    out.insert(name.clone(), serde_json::Value::Number(json_num));
+                    changed = true;
+                }
+            }
+        } else if let Some(map_value) = value.as_object() {
+            // Nested weight maps: each numeric member clamps into the
+            // field's envelope (twin of the bridge branch; no engine field
+            // uses a map today, so this is dormant symmetry).
+            let mut new_map = map_value.clone();
+            let mut map_changed = false;
+            for member in new_map.values_mut() {
+                if let Some(num) = member.as_f64() {
+                    let clamped = (num as f32).clamp(floor, ceiling);
+                    if f64::from(clamped) != num {
+                        if let Some(json_num) =
+                            serde_json::Number::from_f64(f64::from(clamped))
+                        {
+                            *member = serde_json::Value::Number(json_num);
+                            map_changed = true;
+                        }
+                    }
+                }
+            }
+            if map_changed {
+                out.insert(name.clone(), serde_json::Value::Object(new_map));
+                changed = true;
+            }
+        }
+    }
+    if !changed {
+        return values;
+    }
+    serde_json::from_value(serde_json::Value::Object(out)).unwrap_or(values)
+}
+
+fn compiled_clamp_values(values: &SelfControlValuesV2) -> SelfControlValuesV2 {
     SelfControlValuesV2 {
         semantic_strand_retention_turns: values
             .semantic_strand_retention_turns
@@ -156,8 +242,12 @@ pub(super) fn clamp_values(values: &SelfControlValuesV2) -> SelfControlValuesV2 
             .esn_leak_override_ticks
             .map(|value| value.clamp(1, 12)),
         mode_disperse: values.mode_disperse.map(|value| value.clamp(0.0, 1.0)),
-        mode_disperse_duration_ticks: values.mode_disperse_duration_ticks,
-        mode_disperse_decay_ticks: values.mode_disperse_decay_ticks,
+        mode_disperse_duration_ticks: values
+            .mode_disperse_duration_ticks
+            .map(|value| value.clamp(1, 64)),
+        mode_disperse_decay_ticks: values
+            .mode_disperse_decay_ticks
+            .map(|value| value.clamp(1, 256)),
         ..SelfControlValuesV2::default()
     }
 }
