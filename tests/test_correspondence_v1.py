@@ -185,6 +185,73 @@ class CorrespondenceV1Tests(unittest.TestCase):
             self.assertEqual(ack["ack_kind"], "held")
             self.assertEqual(ack["authority"], "language_only")
 
+    def test_seen_ack_stays_visibility_only_across_contact_surfaces(self):
+        now = aa.AutonomousAgent._correspondence_now_ms()
+        records = [
+            {
+                "record_type": "message",
+                "recorded_at_unix_ms": now - 5000,
+                "message_id": "corr_astrid_minime_seen",
+                "thread_id": "thread_seen",
+                "from_being": "astrid",
+                "to_being": "minime",
+                "authority": "language_only",
+            },
+            {
+                "record_type": "read_receipt",
+                "recorded_at_unix_ms": now - 4000,
+                "message_id": "corr_astrid_minime_seen",
+                "thread_id": "thread_seen",
+                "reader": "minime",
+            },
+            {
+                "record_type": "ack_receipt",
+                "recorded_at_unix_ms": now - 3000,
+                "message_id": "corr_astrid_minime_seen",
+                "thread_id": "thread_seen",
+                "from_being": "minime",
+                "to_being": "astrid",
+                "ack_kind": "seen",
+            },
+        ]
+        agent = self._agent()
+
+        fidelity = agent._correspondence_direct_contact_fidelity(records, "latest")
+        self.assertEqual(fidelity["status"], "seen_ack_only")
+        self.assertTrue(fidelity["ack_receipt_present"])
+        self.assertFalse(fidelity["acknowledged"])
+        self.assertFalse(fidelity["eligible_for_correspondence_attention_canary"])
+        self.assertFalse(fidelity["eligible_for_correspondence_microdose"])
+        self.assertEqual(fidelity["block_reason"], "seen_ack_is_visibility_not_address")
+
+        handshake = agent._correspondence_handshake_state(records)
+        thread = handshake["active_threads"][0]
+        self.assertEqual(thread["status"], "seen_ack_only")
+        self.assertEqual(thread["pending_ack_by"], "minime")
+        self.assertFalse(thread["acknowledged"])
+        self.assertIsNone(handshake["last_acknowledged_reflection"])
+        self.assertEqual(handshake["last_ack_receipt"]["ack_kind"], "seen")
+
+        continuity = agent._correspondence_native_thread_continuity_v3(records, "latest")
+        self.assertEqual(continuity["continuity_state"], "seen_ack_only")
+        self.assertTrue(continuity["ack_receipt_present"])
+        self.assertFalse(continuity["acknowledged"])
+        self.assertFalse(continuity["attention_or_microdose_eligible"])
+        self.assertEqual(
+            agent._correspondence_receipt_evidence_by_being(records, "thread_seen", now - 5000),
+            [],
+        )
+
+        records[-1]["ack_kind"] = "held"
+        held = agent._correspondence_direct_contact_fidelity(records, "latest")
+        self.assertEqual(held["status"], "held_ack")
+        self.assertTrue(held["acknowledged"])
+        self.assertTrue(held["eligible_for_correspondence_attention_canary"])
+        self.assertEqual(
+            agent._correspondence_receipt_evidence_by_being(records, "thread_seen", now - 5000),
+            ["minime"],
+        )
+
     def test_i_received_this_writes_ack_and_optional_trace_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1042,20 +1109,20 @@ class CorrespondenceV1Tests(unittest.TestCase):
         handshake = agent._correspondence_handshake_state(records)
 
         self.assertEqual(handshake["active_threads_total"], 3)
-        self.assertEqual(handshake["pending_ack_threads_total"], 2)
+        self.assertEqual(handshake["pending_ack_threads_total"], 3)
         self.assertEqual(
             handshake["pending_ack_counts_by_being"],
-            {"astrid": 1, "minime": 1},
+            {"astrid": 1, "minime": 2},
         )
         self.assertEqual(
             handshake["thread_status_counts"],
-            {"acknowledged": 1, "unaddressed": 2},
+            {"seen_ack_only": 1, "unaddressed": 2},
         )
         self.assertEqual(handshake["native_threads_total"], 3)
         self.assertEqual(handshake["legacy_threads_total"], 0)
         self.assertEqual(
             agent._correspondence_pending_ack_summary(handshake),
-            "astrid:1,minime:1",
+            "astrid:1,minime:2",
         )
 
     def test_pending_ack_summary_preserves_v1_compatibility_list(self):

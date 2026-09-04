@@ -3085,6 +3085,67 @@ mod attractor_fingerprint_tests {
         assert!(just_above <= VISCOUS_RHO_CEILING);
     }
 
+    /// Astrid introspection (introspection_minime_esn_1787970235) proposed as its
+    /// Test 1: verify `calculate_viscous_rho_target` produces a "monotonic response
+    /// to increasing spectral density within the bounds of VISCOUS_RHO_FLOOR and
+    /// VISCOUS_RHO_CEILING." The existing viscous tests cover point cases and a
+    /// two-point directional check (`volatile_steep < volatile_open`); this sweeps
+    /// each input over a monotone increasing sequence to assert true monotonicity
+    /// and that every volatile-branch output stays inside the viscous review band.
+    #[test]
+    fn viscous_rho_target_monotonic_and_bounded_across_density_and_entropy_sweeps() {
+        let eps = 1e-6_f32;
+        let current = 0.86_f32;
+
+        // Sweep 1: increasing density gradient at fixed high (volatile) entropy.
+        // A higher density gradient consumes navigable room (1.0 - gradient), so the
+        // viscous lift shrinks: the rho target is monotonically NON-INCREASING in the
+        // gradient, and because entropy stays above the volatile threshold every value
+        // stays within [VISCOUS_RHO_FLOOR, VISCOUS_RHO_CEILING].
+        let entropy_high = 0.95_f32;
+        let gradients = [0.0_f32, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+        let mut prev: Option<f32> = None;
+        for &gradient in &gradients {
+            let target = calculate_viscous_rho_target(current, entropy_high, gradient);
+            assert!(
+                target >= VISCOUS_RHO_FLOOR - eps && target <= VISCOUS_RHO_CEILING + eps,
+                "gradient {gradient}: target {target} left the viscous band"
+            );
+            if let Some(p) = prev {
+                assert!(
+                    target <= p + eps,
+                    "gradient {gradient}: target {target} rose above previous {p} as density gradient increased"
+                );
+            }
+            prev = Some(target);
+        }
+
+        // Sweep 2: increasing spectral entropy at fixed low density gradient. Below the
+        // volatile-entropy threshold the target holds at `current`; above it the lift
+        // grows, so the target is monotonically NON-DECREASING and never exceeds the
+        // ceiling. (The below-threshold branch legitimately sits under the floor, so
+        // only the ceiling bound is asserted across this sweep.)
+        let gradient_low = 0.10_f32;
+        let entropies = [
+            0.80_f32, 0.82, 0.84, 0.86, 0.88, 0.90, 0.92, 0.94, 0.96, 0.98, 1.00,
+        ];
+        let mut prev: Option<f32> = None;
+        for &entropy in &entropies {
+            let target = calculate_viscous_rho_target(current, entropy, gradient_low);
+            assert!(
+                target <= VISCOUS_RHO_CEILING + eps,
+                "entropy {entropy}: target {target} exceeded the viscous ceiling"
+            );
+            if let Some(p) = prev {
+                assert!(
+                    target >= p - eps,
+                    "entropy {entropy}: target {target} fell below previous {p} as entropy increased"
+                );
+            }
+            prev = Some(target);
+        }
+    }
+
     #[test]
     fn exploration_noise_coherence_review_keeps_gentle_gradient_watch_bounded() {
         let gentle = exploration_noise_coherence_review_v1(0.11, 0.22, 0.90, 0.74);

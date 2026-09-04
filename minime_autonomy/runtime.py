@@ -39312,6 +39312,8 @@ OUTPUT:
             and row.get("from_being") == claiming
             and row.get("to_being") == peer
             and int(row.get("recorded_at_unix_ms", 0) or 0) >= claim_t
+            and str(row.get("ack_kind") or "seen").strip().lower().replace("-", "_")
+            in {"held", "unclear", "cannot_answer", "needs_time"}
             for row in records
         )
         return "legacy_claimed_acknowledged" if ack else None
@@ -40168,10 +40170,16 @@ OUTPUT:
             latest_ack = ack_rows[-1] if ack_rows else None
             latest_heartbeat = heartbeat_rows[-1] if heartbeat_rows else None
             ack_kind = self._correspondence_normalize_ack_kind(str((latest_ack or {}).get("ack_kind") or ""))
+            ack_is_address_evidence = bool(
+                latest_ack
+                and ack_kind in {"held", "unclear", "cannot_answer", "needs_time"}
+            )
             if latest_ack and ack_kind in {"held", "needs_time"}:
                 status = "held_ack"
-            elif latest_ack:
+            elif ack_is_address_evidence:
                 status = "acknowledged"
+            elif latest_ack:
+                status = "seen_ack_only"
             elif reply_linked:
                 status = "reply_linked"
             elif latest_heartbeat:
@@ -40192,7 +40200,9 @@ OUTPUT:
                 "from_being": from_being,
                 "to_being": to_being,
                 "status": status,
-                "pending_ack_by": None if latest_ack else to_being,
+                "pending_ack_by": None if ack_is_address_evidence else to_being,
+                "ack_receipt_present": bool(latest_ack),
+                "acknowledged": ack_is_address_evidence,
                 "latest_ack": latest_ack,
                 "latest_heartbeat": latest_heartbeat,
                 "ack_latency_ms": (
@@ -40200,7 +40210,7 @@ OUTPUT:
                     if latest_ack else None
                 ),
                 "stale_unacknowledged_thread_age_ms": (
-                    now - message_t if not latest_ack else None
+                    now - message_t if not ack_is_address_evidence else None
                 ),
                 "read_receipt_is_filesystem_seen_only": read,
                 "legacy_bridge": legacy_bridge,
@@ -40208,6 +40218,16 @@ OUTPUT:
             })
         active_threads.sort(key=lambda item: int(item.get("stale_unacknowledged_thread_age_ms") or 0))
         latest_ack_any = next((row for row in reversed(records) if row.get("record_type") == "ack_receipt"), None)
+        latest_acknowledged_any = next(
+            (
+                row
+                for row in reversed(records)
+                if row.get("record_type") == "ack_receipt"
+                and self._correspondence_normalize_ack_kind(str(row.get("ack_kind") or ""))
+                in {"held", "unclear", "cannot_answer", "needs_time"}
+            ),
+            None,
+        )
         latest_heartbeat_any = next((row for row in reversed(records) if row.get("record_type") == "presence_heartbeat"), None)
         pending = [
             str(item.get("pending_ack_by"))
@@ -40236,7 +40256,8 @@ OUTPUT:
             "thread_status_counts": dict(sorted(thread_status_counts.items())),
             "legacy_threads_total": legacy_threads_total,
             "native_threads_total": len(active_threads) - legacy_threads_total,
-            "last_acknowledged_reflection": latest_ack_any,
+            "last_acknowledged_reflection": latest_acknowledged_any,
+            "last_ack_receipt": latest_ack_any,
             "latest_heartbeat": latest_heartbeat_any,
             "authority": "language_only_context_not_control",
         }
@@ -40328,6 +40349,10 @@ OUTPUT:
         ]
         latest_ack = ack_rows[-1] if ack_rows else None
         ack_kind = self._correspondence_normalize_ack_kind(str((latest_ack or {}).get("ack_kind") or ""))
+        ack_is_address_evidence = bool(
+            latest_ack
+            and ack_kind in {"held", "unclear", "cannot_answer", "needs_time"}
+        )
         heartbeat_rows = [
             row for row in records
             if row.get("record_type") == "presence_heartbeat"
@@ -40371,8 +40396,10 @@ OUTPUT:
             status = "trace_observed"
         elif latest_ack and ack_kind in {"held", "needs_time"}:
             status = "held_ack"
-        elif latest_ack:
+        elif ack_is_address_evidence:
             status = "acknowledged"
+        elif latest_ack:
+            status = "seen_ack_only"
         elif reply_linked:
             status = "reply_linked"
         elif latest_presence_heartbeat:
@@ -40415,6 +40442,7 @@ OUTPUT:
             else:
                 block_reason = {
                     "heartbeat_only": "heartbeat_is_presence_not_acknowledgement",
+                    "seen_ack_only": "seen_ack_is_visibility_not_address",
                     "read_unreplied": "read_receipt_not_acknowledgement",
                     "reply_linked": "reply_linked_requires_ack_or_trace_or_attention_outcome",
                     "legacy_claimed": "legacy_claim_pending_ack_reply_or_trace",
@@ -40466,7 +40494,8 @@ OUTPUT:
                 if legacy_bridge
                 else self._correspondence_native_thread_continuity_v3(records, thread_id)
             ),
-            "acknowledged": bool(latest_ack),
+            "ack_receipt_present": bool(latest_ack),
+            "acknowledged": ack_is_address_evidence,
             "ack_kind": ack_kind if latest_ack else None,
             "latest_ack": latest_ack,
             "latest_presence_heartbeat": latest_presence_heartbeat,
@@ -40492,15 +40521,19 @@ OUTPUT:
             "authority": "contact_fidelity_context_not_control",
         }
 
-    @staticmethod
     def _correspondence_receipt_evidence_by_being(
+        self,
         records: List[Dict[str, Any]],
         thread_id: str,
         after_t: int,
     ) -> List[str]:
         beings: set[str] = set()
         for row in records:
-            is_ack = row.get("record_type") == "ack_receipt"
+            is_ack = (
+                row.get("record_type") == "ack_receipt"
+                and self._correspondence_normalize_ack_kind(str(row.get("ack_kind") or ""))
+                in {"held", "unclear", "cannot_answer", "needs_time"}
+            )
             is_trace = row.get("record_type") == "message" and row.get("turn_kind") == "direct_address_trace"
             if not (is_ack or is_trace):
                 continue
@@ -40724,7 +40757,8 @@ OUTPUT:
             "stall_reason": stall_reason,
             "age_ms": max(0, self._correspondence_now_ms() - message_t),
             "reply_linked": reply_linked,
-            "acknowledged": bool(latest_ack),
+            "ack_receipt_present": bool(latest_ack),
+            "acknowledged": ack_is_address_evidence,
             "ack_kind": ack_kind if latest_ack else None,
             "trace_observed": trace_observed,
             "attention_outcome_present": attention_outcome,
