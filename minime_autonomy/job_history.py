@@ -21,7 +21,8 @@ _FIELDS = (
 )
 _MAX_ROOTS = 8
 _MAX_ENTRIES = 50_000
-_MAX_BYTES = 16 * 1024 * 1024
+_MAX_BYTES = 64 * 1024 * 1024
+_MAX_TOTAL_BYTES = 128 * 1024 * 1024
 _CATALOGS = OrderedDict()
 _LOCK = threading.RLock()
 
@@ -125,8 +126,10 @@ def metadata_snapshot(jobs_dir):
                 current[path] = (signature, record, cost)
                 cached_bytes += cost
         _CATALOGS[root] = current
-        while len(_CATALOGS) > _MAX_ROOTS:
-            _CATALOGS.popitem(last=False)
+        total_bytes = sum(item[2] for entries in _CATALOGS.values() for item in entries.values())
+        while len(_CATALOGS) > _MAX_ROOTS or total_bytes > _MAX_TOTAL_BYTES:
+            _, removed = _CATALOGS.popitem(last=False)
+            total_bytes -= sum(item[2] for item in removed.values())
         return tuple(records)
 
 

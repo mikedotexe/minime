@@ -27,7 +27,8 @@ not installed in the cache.
 
 The job catalog enumerates and stats every job on every snapshot. It reuses only
 compact metadata for unchanged files, with at most eight cached roots, 50,000
-entries and an estimated 16 MiB metadata budget per root. Oversized entries
+entries and an estimated 64 MiB metadata budget per root, within a shared 128 MiB
+budget. Old roots are evicted when the shared budget is exceeded. Oversized entries
 remain in the result but are not cached. Complete selected jobs are freshly read
 from their actual paths under the job store's existing process transaction.
 Unstable reads raise an explicit error, so uncertainty cannot imply an idle
@@ -74,8 +75,35 @@ Validation, source review, benchmarks and any live activation receipt are kept
 under `/Users/v/.codex/artifacts/minime-continuity-performance-20260907/`.
 A committed source change alone is not proof that the running process loaded it.
 
-The full isolated suite passed 1,209 tests and 126 subtests, with one skip, under
+The first isolated suite passed 1,209 tests and 126 subtests, with one skip, under
 the kernel sandbox protecting live workspaces and endpoints. The broader run
 also exposed an inherited AST test that inspected a timing wrapper's source;
 the test now unwraps the method before checking its callers. Independent reviews
 found no remaining blocker in the history, archive, journal, or outcome contracts.
+
+## Full-history capacity correction
+
+The first live job at commit `2572e77` preserved every artifact and completed
+without deadline or checkpoint errors, but did not demonstrate overall speedup:
+283.765 seconds total, including 99.549 seconds of model work and 93.397 seconds
+of continuity finalization. Journal hooks took 0.064 seconds. Detailed spans
+showed 34 projections and 22 fingerprint checks dominating the remaining work.
+
+The initial 16 MiB per-root cache was too small for the actual working history.
+A read-only inventory found 23,555 jobs requiring an estimated 44.64 MiB: only
+8,440 records stayed cached, leaving 15,115 unchanged files to decode on every
+snapshot. The initial 2,000-job benchmark did not expose that capacity failure.
+
+The per-root budget is now 64 MiB, with a shared 128 MiB bound preserving the
+previous maximum across eight roots. A 23,542-job synthetic fixture changed from
+16,700 unnecessary warm decodes per snapshot to zero, improving repeated scans
+from 1.34–1.39 seconds to 0.449 seconds. Files are still stat-ed each time and
+every changed file is decoded again. This correction preserves all history and
+invalidation contracts; it does not introduce a time-based staleness window.
+
+Each projection also reused the same stale-action diagnostic query twice, once
+for a count and again for its details. Those fields now share one fresh result
+per projection, preserving the unreconciled-only count and reducing catalog
+snapshots from three to two per projection. The next projection reads anew.
+
+The corrected full suite passed 1,212 tests and 126 subtests, with one skip.

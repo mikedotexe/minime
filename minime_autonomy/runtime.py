@@ -17418,6 +17418,7 @@ class ActionContinuityStore:
         continuity_session_draft = (
             continuity_session_drafts[-1] if continuity_session_drafts else None
         )
+        stale_running_diagnostics = self._stale_running_action_diagnostics(thread_id)
         projection = {
             "schema_version": 1,
             "thread_id": thread_id,
@@ -17457,8 +17458,11 @@ class ActionContinuityStore:
                 f"{event.get('effective_action')} [{event.get('status')}]: {event.get('outcome_summary', '')}"
                 for event in recent_events
             ],
-            "stale_running_count": len(self._stale_running_action_events(thread_id)),
-            "stale_running_diagnostics": self._stale_running_action_diagnostics(thread_id),
+            "stale_running_count": sum(
+                item.get("reconciliation_state") == "unreconciled"
+                for item in stale_running_diagnostics
+            ),
+            "stale_running_diagnostics": stale_running_diagnostics,
             "top_actionable_proposals": self._proposal_diagnostics(thread_id, 6),
         }
         projection["continuity_control_plane_v1"] = build_continuity_control_plane_v1(

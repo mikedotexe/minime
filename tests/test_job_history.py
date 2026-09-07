@@ -179,3 +179,37 @@ def test_cache_bounds_do_not_truncate_results(tmp_path, monkeypatch):
     assert len(history._CATALOGS) <= 2
     assert all(len(entries) <= 1 for entries in history._CATALOGS.values())
     assert all(sum(item[2] for item in entries.values()) <= 2000 for entries in history._CATALOGS.values())
+
+
+def test_shared_budget_evicts_old_roots_without_partial_new_history(tmp_path, monkeypatch):
+    monkeypatch.setattr(history, "_MAX_TOTAL_BYTES", 2500)
+    roots = [tmp_path / str(index) for index in range(3)]
+    for root in roots:
+        write_job(root, "one")
+        assert history.recent_jobs(root, 20)[0]["job_id"] == "one"
+    assert roots[0] not in history._CATALOGS
+    assert roots[-1] in history._CATALOGS
+    assert sum(item[2] for entries in history._CATALOGS.values() for item in entries.values()) <= 2500
+    # Returning to an evicted root still yields its authoritative full record.
+    assert history.recent_jobs(roots[0], 20)[0]["summary"] == "retained"
+
+
+def test_fitting_working_history_is_not_reparsed_after_warmup(tmp_path, monkeypatch):
+    # Exceed the old 16 MiB estimate with only 12 files, staying below 64 MiB.
+    # This catches repeated warm decodes without a 24k-file fixture on every run.
+    # Full-count benchmarks separately cover the observed live history size.
+    for index in range(12):
+        write_job(tmp_path, str(index), summary="x" * 400_000)
+    original = history._stable_read
+    reads = []
+
+    def read(path):
+        reads.append(path)
+        return original(path)
+
+    monkeypatch.setattr(history, "_stable_read", read)
+    history.metadata_snapshot(tmp_path)
+    assert len(reads) == 12
+    reads.clear()
+    assert len(history.metadata_snapshot(tmp_path)) == 12
+    assert reads == []

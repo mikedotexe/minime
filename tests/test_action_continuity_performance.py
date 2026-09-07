@@ -6,6 +6,7 @@ from pathlib import Path
 import pstats
 import sqlite3
 import time
+from unittest.mock import Mock
 
 import autonomous_agent as aa
 from minime_autonomy import continuity_history
@@ -148,3 +149,26 @@ def test_continuity_subphases_fit_bounded_worker_timing(tmp_path):
     assert all(span["status"] != "active" for span in summary["spans"])
     # Leave space for the existing preparation/query/journal and manifest spans.
     assert len(summary["spans"]) < job_timing.MAX_SPANS - 32
+
+
+def test_projection_reuses_fresh_diagnostics_and_counts_only_unreconciled(tmp_path, monkeypatch):
+    store = aa.ActionContinuityStore(tmp_path)
+    thread = store.create_thread("Synthetic diagnostic reuse")
+    diagnostics = [
+        {"action_id": "one", "reconciliation_state": "unreconciled"},
+        {"action_id": "two", "reconciliation_state": "shadowed_by_terminal_job"},
+        {"action_id": "three", "reconciliation_state": "superseded_by_terminal_event"},
+        {"action_id": "four", "reconciliation_state": "unreconciled"},
+    ]
+    diagnostic_reader = Mock(return_value=diagnostics)
+    monkeypatch.setattr(store, "_stale_running_action_diagnostics", diagnostic_reader)
+    projection = store._thread_projection(thread)
+    diagnostic_reader.assert_called_once_with(thread["thread_id"])
+    assert projection["stale_running_count"] == 2
+    assert projection["stale_running_diagnostics"] == diagnostics
+    # A new projection must take a new observation; this is not a time-based cache.
+    diagnostic_reader.return_value = []
+    projection = store._thread_projection(thread)
+    assert diagnostic_reader.call_count == 2
+    assert projection["stale_running_count"] == 0
+    assert projection["stale_running_diagnostics"] == []
