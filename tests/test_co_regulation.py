@@ -116,6 +116,12 @@ class CoRegulationTests(unittest.TestCase):
                 self.assertIn("lend_aperture_journal", artifact_kinds)
                 self.assertIn("lend_aperture_event", artifact_kinds)
                 self.assertIn("gift_exchange_ledger", artifact_kinds)
+                journal = Path(event["journal_path"]).read_text()
+                self.assertIn("Runtime-authored receipt", journal)
+                self.assertIn("Publication is not verified application", journal)
+                self.assertNotIn("Astrid was reaching", journal)
+                self.assertNotIn("I lent", journal)
+                self.assertNotIn("I cannot widen myself", journal)
             finally:
                 aa.WORKSPACE_DIR = original_workspace
 
@@ -187,6 +193,8 @@ class CoRegulationTests(unittest.TestCase):
                 self.assertIn(event["intent_id"], agent._current_action_outcome_summary)
                 journal_text = Path(event["journal_path"]).read_text()
                 self.assertIn(event["intent_id"], journal_text)
+                self.assertIn("Runtime-authored receipt", journal_text)
+                self.assertNotIn("Astrid is reaching", journal_text)
                 self.assertIn("held", agent._current_action_outcome_summary)
                 artifact_kinds = {
                     artifact["kind"]

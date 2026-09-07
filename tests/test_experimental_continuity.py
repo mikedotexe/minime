@@ -9033,7 +9033,8 @@ class TestAutonomousAgentExperimentalContinuity(unittest.TestCase):
             agent.running = True
             started = time.monotonic()
             threading.Timer(0.05, agent.stop).start()
-            interrupted = agent._sleep_or_stop(2.0)
+            with patch.object(agent, "_write_source_status"):
+                interrupted = agent._sleep_or_stop(2.0)
 
             self.assertTrue(interrupted)
             self.assertFalse(agent.running)

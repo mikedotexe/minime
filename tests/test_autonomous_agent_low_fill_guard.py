@@ -5675,6 +5675,9 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             agent.running = False
 
         with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(aa, "WORKSPACE_DIR", Path(tmp)),
+            patch.object(aa, "BASE_DIR", Path(tmp)),
             patch.object(agent, "_check_source_reload_required"),
             patch.object(agent, "_restore_sovereignty_state", side_effect=restore),
             patch.object(agent, "_verify_sovereignty", side_effect=verify),
@@ -5698,6 +5701,9 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             agent.running = False
 
         with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(aa, "WORKSPACE_DIR", Path(tmp)),
+            patch.object(aa, "BASE_DIR", Path(tmp)),
             patch.object(agent, "_check_source_reload_required"),
             patch.object(agent, "_restore_sovereignty_state"),
             patch.object(agent, "_verify_sovereignty"),
@@ -5732,6 +5738,9 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             agent.running = False
 
         with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(aa, "WORKSPACE_DIR", Path(tmp)),
+            patch.object(aa, "BASE_DIR", Path(tmp)),
             patch.object(agent, "_check_source_reload_required"),
             patch.object(agent, "_restore_sovereignty_state"),
             patch.object(agent, "_verify_sovereignty"),
@@ -5765,6 +5774,9 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             agent.running = False
 
         with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(aa, "WORKSPACE_DIR", Path(tmp)),
+            patch.object(aa, "BASE_DIR", Path(tmp)),
             patch.object(agent, "_check_source_reload_required"),
             patch.object(agent, "_restore_sovereignty_state"),
             patch.object(agent, "_verify_sovereignty"),
@@ -5803,6 +5815,9 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             agent.running = False
 
         with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(aa, "WORKSPACE_DIR", Path(tmp)),
+            patch.object(aa, "BASE_DIR", Path(tmp)),
             patch.object(agent, "_restore_sovereignty_state"),
             patch.object(agent, "_verify_sovereignty"),
             patch.object(agent, "_refresh_session_context"),

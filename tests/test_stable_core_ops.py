@@ -433,7 +433,10 @@ class TestStableCoreOps(unittest.TestCase):
             stable_core_ops.write_json(runtime / "camera_status.json", {})
             stable_core_ops.write_json(runtime / "mic_status.json", {})
 
-            with mock.patch.object(stable_core_ops, "WORKSPACE_DIR", workspace):
+            with (
+                mock.patch.object(stable_core_ops, "WORKSPACE_DIR", workspace),
+                mock.patch.object(stable_core_ops, "STABLE_CORE_STATUS_PATH", workspace / "stable_core_status.json"),
+            ):
                 payload = stable_core_ops.build_status()
 
             self.assertEqual(payload["semantic_energy"], 0.0)

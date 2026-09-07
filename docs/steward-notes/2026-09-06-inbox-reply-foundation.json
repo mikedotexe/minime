@@ -1,0 +1,132 @@
+{
+  "schema": "reviewed_minime_foundation_v1",
+  "source_checkout": "/Users/v/other/minime",
+  "source_head": "a9f85f3c74c3d8e1c996c3689fe5aef696dacf27",
+  "source_branch": "codex/sovereign-daughter-runtime",
+  "target_branch": "codex/minime-inbox-reply-boundaries",
+  "baseline_patch": "/Users/v/.codex/artifacts/minime-inbox-reply-boundaries-20260906/foundation.patch",
+  "baseline_patch_sha256": "b6a67517225f3d543760a271d395b3bb28407361fedf3771a103e04b0e2fb4d0",
+  "scope": "Exact source-only copy of the 11 tracked WIP paths and 9 untracked code/test paths; no live workspace/runtime/configuration data copied. Existing behavior is foundation provenance, not this parser repair.",
+  "files": [
+    {
+      "path": "CHANGELOG.md",
+      "source_status": "tracked_modified",
+      "sha256": "76e4f8753f97a268cca146c46eba7077c45dc02a5856ae5f6068bce8f2a10f4b",
+      "bytes": 278918
+    },
+    {
+      "path": "continuity_control_plane.py",
+      "source_status": "tracked_modified",
+      "sha256": "2b85f63c6547ffbee4caa66a3d94e42879c0a326172ad4d01e36f159da6b76e4",
+      "bytes": 30649
+    },
+    {
+      "path": "docs/DOMAIN_BOUNDARIES.md",
+      "source_status": "tracked_modified",
+      "sha256": "725dc32c407194120428fb932795b93f1c88a125fe1887da81c817cba7e2311c",
+      "bytes": 2722
+    },
+    {
+      "path": "minime_autonomy/journaling.py",
+      "source_status": "tracked_modified",
+      "sha256": "58f18a867be5eddd9dd716232d6ba1d14d1cfa601a7a6154027f8097e4c68779",
+      "bytes": 464
+    },
+    {
+      "path": "minime_autonomy/runtime.py",
+      "source_status": "tracked_modified",
+      "sha256": "f2c96ed103685c29ab44c5cad7aad119300d66d41e469c859daa5742e34205cf",
+      "bytes": 2553493
+    },
+    {
+      "path": "tests/test_action_continuity.py",
+      "source_status": "tracked_modified",
+      "sha256": "534b5939edf1ca2231bc748b7c8a3b44ad1da5594fafcdf581bb322797576cab",
+      "bytes": 47106
+    },
+    {
+      "path": "tests/test_autonomous_agent_low_fill_guard.py",
+      "source_status": "tracked_modified",
+      "sha256": "4803b5ed8e0899eade2fca88a5cec0a4a8dbfe50d35069993834937844846888",
+      "bytes": 360003
+    },
+    {
+      "path": "tests/test_co_regulation.py",
+      "source_status": "tracked_modified",
+      "sha256": "113a69a42c145af5f86d32445daff00712be3d18a1a9b5e9fb3fc75a3ffda29b",
+      "bytes": 17833
+    },
+    {
+      "path": "tests/test_correspondence_v1.py",
+      "source_status": "tracked_modified",
+      "sha256": "c213cecdb2496c87e3341885bd553ac2822934513a26055862ef24eed0ebd145",
+      "bytes": 57995
+    },
+    {
+      "path": "tests/test_experimental_continuity.py",
+      "source_status": "tracked_modified",
+      "sha256": "f9007d8bf6ac3ab0b4d24600b2cbf7d05b47a5e260ced1f6d51d9ef375155488",
+      "bytes": 480374
+    },
+    {
+      "path": "tests/test_stable_core_ops.py",
+      "source_status": "tracked_modified",
+      "sha256": "79cc40861dfa82f71e5ef7a9b426dc3008430fa0bd930d11b7ca134e99ae69dc",
+      "bytes": 89408
+    },
+    {
+      "path": "minime_autonomy/deployment.py",
+      "source_status": "untracked",
+      "sha256": "4e7a287c8760aa3392f01c13608bc7cbe8963b002ad1e4a394ea2f3305a1b236",
+      "bytes": 670
+    },
+    {
+      "path": "minime_autonomy/inbox_delivery.py",
+      "source_status": "untracked",
+      "sha256": "2f50bd5f45efe34e860398424ebad2954eda19a1411a3a74dab50c182c8b408d",
+      "bytes": 9488
+    },
+    {
+      "path": "minime_autonomy/journal_context.py",
+      "source_status": "untracked",
+      "sha256": "a3aaeb4deec1202b998d67e34d9d2cdb4426157834795540f748873b73e28009",
+      "bytes": 5384
+    },
+    {
+      "path": "minime_autonomy/session_contract.py",
+      "source_status": "untracked",
+      "sha256": "16d2b222665e56ce2772fa8b6233df2ac0d300a1539078d79e534d0d04c2e3ce",
+      "bytes": 1897
+    },
+    {
+      "path": "tests/conftest.py",
+      "source_status": "untracked",
+      "sha256": "11cdba27b323290b8eb47386d09c1126e5d616f7b0b39d2cf315b9f393d82272",
+      "bytes": 3289
+    },
+    {
+      "path": "tests/test_agent_lifecycle.py",
+      "source_status": "untracked",
+      "sha256": "6b3ea6cc4cfbd70ce86dd2b450c22c0f4886080d656a75ee7d9219f3e36feb31",
+      "bytes": 6159
+    },
+    {
+      "path": "tests/test_inbox_delivery.py",
+      "source_status": "untracked",
+      "sha256": "fce6e246d902f72cec172b1a209447ba70a0ea95fe40cf16f4a42fca09d983ba",
+      "bytes": 19382
+    },
+    {
+      "path": "tests/test_journal_context.py",
+      "source_status": "untracked",
+      "sha256": "0170f9c7bc00e58eb984a1331f610d3a9e0ea4809859bf685b5ac750c3296e51",
+      "bytes": 23573
+    },
+    {
+      "path": "tests/test_session_contract.py",
+      "source_status": "untracked",
+      "sha256": "96cf611dd577c5c42fdbc7fde2afc81afa1edb83acbc1a60f1bc796fe09e52cd",
+      "bytes": 8834
+    }
+  ]
+}

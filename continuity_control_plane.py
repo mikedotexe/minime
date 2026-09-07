@@ -539,6 +539,10 @@ def _route_stack(projection: Dict[str, Any]) -> List[Dict[str, Any]]:
             routes.append(_route("Local Research", command, f"research budget stage: {stage}", priority, "research_budget_priority_route_v1", policy_class))
 
     session = projection.get("continuity_session_v1")
+    if isinstance(session, dict) and "active_session" in session:
+        session = session.get("active_session")
+    if isinstance(session, dict) and session.get("status") in {"parked", "held", "complete"}:
+        session = None
     if isinstance(session, dict):
         command = _text(session.get("suggested_next")) or "CONTINUITY_SESSION_STATUS latest"
         routes.append(_route("Continuity Session", command, "latest continuity session", 20, "continuity_session_v1", "continuity_capture"))

@@ -34,6 +34,12 @@ Canonical implementations now live in bounded modules for:
 - authority preflight and capability mapping; and
 - append-only continuity repair.
 
+`minime_autonomy/journal_context.py` owns pure private-journal framing,
+marker recording-age / engine-time rendering, and explicitly computed peer
+observations. The runtime owns snapshot capture, generation, and persistence;
+private saves opt out of public replay-hygiene annotations. This module has
+no file, network, scheduler, or live-control authority.
+
 Memory, correspondence, journaling, and attractor modules define the stable
 ownership protocols while their mutable `AutonomousAgent` method clusters remain
 in `runtime.py`. The event-sourced `ActionContinuityStore` and the mutable

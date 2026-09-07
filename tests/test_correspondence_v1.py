@@ -357,7 +357,7 @@ class CorrespondenceV1Tests(unittest.TestCase):
             self.assertEqual(records[-1]["record_type"], "read_receipt")
             self.assertEqual(records[-1]["reader"], "minime")
 
-    def test_outbox_reply_carries_exact_correspondence_headers(self):
+    def test_outbox_generation_does_not_inherit_previous_astrid_headers(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, astrid_inbox, shared, *patches = self._patch_paths(root)
@@ -369,10 +369,11 @@ class CorrespondenceV1Tests(unittest.TestCase):
             with patches[0], patches[1], patches[2]:
                 agent._save_outbox_reply("I answer from the same thread.")
 
-            reply = next((workspace / "outbox").glob("reply_*.txt")).read_text()
-            self.assertIn("Correspondence-Reply-To: corr_astrid_minime_seed", reply)
-            self.assertIn("Correspondence-Thread-Id: thread_shared_seed", reply)
-            self.assertIn("Correspondence-Authority: language_only", reply)
+            self.assertFalse(list((workspace / "outbox").glob("reply_*.txt")))
+            saved = next((workspace / "outbox" / "unaddressed").glob("*.txt")).read_text()
+            self.assertIn("NOT AN ADDRESSED REPLY", saved)
+            self.assertNotIn("Correspondence-Reply-To:", saved)
+            self.assertIn("I answer from the same thread.", saved)
 
     def test_legacy_astrid_self_study_still_reads(self):
         with tempfile.TemporaryDirectory() as tmp:

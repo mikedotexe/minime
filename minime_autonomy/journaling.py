@@ -13,6 +13,8 @@ class JournalRuntime(Protocol):
         reflection: str,
         state: Dict[str, float],
         file_path: str | None = None,
+        *,
+        private_canvas: bool = False,
     ) -> Path | None: ...
 
 
