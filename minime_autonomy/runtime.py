@@ -239,6 +239,8 @@ from .research import (
     format_read_more_context, extract_label_value,
 )
 from . import generation_record
+from . import job_outcome
+from . import job_timing
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 AUTONOMOUS_AGENT_RUNTIME_SOURCE = BASE_DIR / "minime_autonomy" / "runtime.py"
@@ -3110,6 +3112,8 @@ class ActionContinuityStore:
             self._mirror_artifact(event["thread_id"], artifact)
         return event
 
+    @job_outcome.finalizer
+    @job_timing.measured("action.finalization")
     def finish_action(
         self,
         event: Dict[str, Any],
@@ -16887,7 +16891,9 @@ class ActionContinuityStore:
         terminal_job = terminal_jobs.get(action_id) if isinstance(action_id, str) else None
         if not isinstance(terminal_job, dict):
             return status, None
-        terminal_status = str(terminal_job.get("status") or "").strip()
+        outcome = terminal_job.get("outcome")
+        outcome_status = outcome.get("status") if isinstance(outcome, dict) else None
+        terminal_status = str(outcome_status or terminal_job.get("status") or "").strip()
         if not terminal_status:
             return status, None
         return f"llm_job_{terminal_status}", terminal_job
@@ -16936,6 +16942,9 @@ class ActionContinuityStore:
                     latest_terminal_job[base] = {
                         "job_id": terminal_job.get("job_id"),
                         "status": terminal_job.get("status"),
+                        "worker_status": terminal_job.get("worker_status"),
+                        "outcome_status": (terminal_job.get("outcome") or {}).get("status"),
+                        "deadline_exceeded_at": terminal_job.get("deadline_exceeded_at"),
                         "error": terminal_job.get("error"),
                         "finished_at": terminal_job.get("finished_at"),
                         "summary": terminal_job.get("summary"),
@@ -18731,7 +18740,10 @@ class ActionContinuityStore:
                 continue
             if not isinstance(job, dict):
                 continue
-            if job.get("status") not in LlmJobStore.terminal_statuses:
+            if (
+                job.get("status") not in LlmJobStore.terminal_statuses
+                or LlmJobStore.worker_is_running(job)
+            ):
                 continue
             action_id = job.get("action_id")
             if isinstance(action_id, str) and action_id:
@@ -18778,6 +18790,8 @@ class ActionContinuityStore:
                 "terminal_event_status": terminal_event.get("status") if terminal_event else None,
                 "terminal_job_id": terminal_job.get("job_id") if terminal_job else None,
                 "terminal_job_status": terminal_job.get("status") if terminal_job else None,
+                "terminal_worker_status": terminal_job.get("worker_status") if terminal_job else None,
+                "terminal_outcome_status": (terminal_job.get("outcome") or {}).get("status") if terminal_job else None,
             })
         return diagnostics
 
@@ -22153,7 +22167,8 @@ class AutonomousAgent:
                 "Action-level LLM job. The existing action finalizer owns prompt construction, "
                 "validation, artifacts, and NEXT extraction."
             ),
-            timeout_s=max(LLM_TIMEOUT_S, LLM_FALLBACK_TIMEOUT_S) * 2.0 + 30.0,
+            timeout_s=max(LLM_TIMEOUT_S, LLM_FALLBACK_TIMEOUT_S,
+                          LLM_QUALIA_TIMEOUT_S, LLM_STRICT_REVIEW_TIMEOUT_S) * 2.0 + 30.0,
             validation_contract=(
                 "strict_introspection_v1"
                 if action == "introspect"
@@ -22208,39 +22223,42 @@ class AutonomousAgent:
         with lock:
             self._llm_job_worker_active = True
             jobs = self._llm_job_store()
+            timing = None
             try:
-                jobs.claim_running(job_id)
-                self._execute_action(
-                    action,
-                    state,
-                    _from_llm_job=True,
-                    _precreated_continuity_event=continuity_event,
-                    _precreated_continuity_context=continuity_context,
-                    _llm_job_id=job_id,
-                )
-                event = getattr(self, "_last_action_continuity_event", None)
-                status = "completed"
-                summary = "LLM action completed."
-                artifact_refs = None
-                if isinstance(event, dict):
-                    summary = event.get("outcome_summary") or summary
-                    artifact_refs = event.get("artifacts") or None
-                    final_status = str(event.get("status") or "").strip().lower()
-                    if final_status == "blocked":
-                        status = "blocked"
-                    elif any(
-                        artifact.get("kind") == "thin_introspection_output"
-                        for artifact in event.get("artifacts", [])
-                        if isinstance(artifact, dict)
-                    ):
-                        status = "thin_output"
-                jobs.finish(
-                    job_id,
-                    status,
-                    result=summary,
-                    summary=summary,
-                    artifact_refs=artifact_refs,
-                )
+                claim = jobs.claim_running(job_id)
+                if claim.get("status") != "running" or not claim.get("claim_acquired"):
+                    return
+                with (
+                    job_timing.job_scope(
+                        WORKSPACE_DIR, job_id=job_id,
+                        action_id=continuity_event.get("action_id"),
+                        thread_id=continuity_event.get("thread_id"),
+                    ) as timing,
+                    job_outcome.capture(continuity_event.get("action_id")) as outcome,
+                ):
+                    try:
+                        self._execute_action(
+                            action, state, _from_llm_job=True,
+                            _precreated_continuity_event=continuity_event,
+                            _precreated_continuity_context=continuity_context,
+                            _llm_job_id=job_id,
+                        )
+                    except Exception as exc:
+                        job_outcome.fail_action(str(exc), f"LLM action failed: {exc}")
+                        logging.exception("LLM action job failed: %s", job_id)
+                    status, summary, error, artifact_refs = outcome.finish()
+                    with job_timing.phase("worker.finalization"):
+                        phase_snapshot = timing.summary()
+                        phase_snapshot["snapshot_stage"] = "before_outcome_commit"
+                        phase_snapshot["checkpoint_path"] = str(jobs.jobs_dir / job_id / "phase_timings.json")
+                        evidence = dict(result=summary, summary=summary, error=error,
+                                        artifact_refs=artifact_refs, phase_timings=phase_snapshot)
+                        try:
+                            jobs.finish(job_id, status, **evidence)
+                        except Exception:
+                            # Retry the identical evidence if the authoritative
+                            # outcome committed before an event/status write failed.
+                            jobs.finish(job_id, status, **evidence)
             except Exception as exc:
                 logging.exception("LLM action job failed: %s", job_id)
                 try:
@@ -22435,6 +22453,7 @@ class AutonomousAgent:
                 return path
         return None
 
+    @job_timing.measured("action.preflight")
     def _action_preflight(self, state: Dict[str, float]) -> str:
         context = getattr(self, "_current_action_continuity_context", None) or {}
         raw_next = context.get("raw_next") or context.get("canonical_action") or "ACTION_PREFLIGHT"
@@ -23366,6 +23385,7 @@ Fill: {fill:.1f}%
             logging.error(f"Error fetching spectral state: {e}")
             return None
 
+    @job_timing.measured("journal.state_refresh")
     def _state_for_live_surfaces(
         self,
         state: Optional[Dict[str, float]],
@@ -23623,6 +23643,7 @@ Fill: {fill:.1f}%
             )
         return summary
 
+    @job_timing.measured("action.manifest")
     def _write_action_manifest(
         self,
         action: str,
@@ -26410,6 +26431,7 @@ Fill: {fill:.1f}%
         except Exception as exc:
             logging.debug(f"Could not reconcile stable-core health status: {exc}")
 
+    @job_timing.measured("action.execute", preparation="action.preparation")
     def _execute_action(
         self,
         action: str,
@@ -26708,6 +26730,7 @@ Fill: {fill:.1f}%
                 logging.debug(
                     f"Could not resolve projection research budget for debit: {exc}"
                 )
+        job_timing.finish_preparation()
         logging.info(f"🤖 Autonomous action: {action}")
 
         try:
@@ -27040,6 +27063,7 @@ Fill: {fill:.1f}%
 
         except Exception as e:
             logging.error(f"Action execution failed: {e}")
+            job_outcome.fail_action(str(e), f"Action `{action}` failed: {e}")
             if continuity_event:
                 try:
                     self._last_action_continuity_event = self._continuity_store().finish_action(
@@ -29985,6 +30009,7 @@ Trigger: {trigger_text}
         except Exception:
             return ""
 
+    @job_timing.measured("context.neutral_checkin")
     def _neutral_checkin(self, state: Dict[str, float]) -> str:
         """Generate a varied prompt for journal entries.
 
@@ -31399,6 +31424,7 @@ Reason: {reason}
             source_path = BASE_DIR / rel_path
         if not source_path.exists():
             logging.warning(f"Self-study: source not found: {source_path}")
+            job_outcome.fail_action("self_study_source_missing", "Self-study source was unavailable; no study was generated.")
             return
 
         # Read source (first 400 lines — Ollama has generous context now)
@@ -31489,6 +31515,7 @@ If you want Mike & Claude to act on the study, add an optional compact "For stew
         # clearly-marked incomplete record so the steward (and she) can see the
         # generation failed rather than mistaking it for her thinking.
         if response and _is_degenerate_self_study_response(response):
+            job_outcome.fail_action("degenerate_self_study_output", "Self-study generation was incomplete; the infrastructure notice was retained.")
             logging.warning(
                 "Self-study (%s) degenerate response %r — likely timeout+fast-"
                 "fallback; recording as incomplete, not a real reflection.",
@@ -51755,6 +51782,7 @@ Goals: {json.dumps(goals, indent=2)}
             return trim_chars(sentences[0], 180)
         return trim_chars(content, 180)
 
+    @job_timing.measured("journal.agency_hook")
     def _register_agency_vernacular_notice_if_needed(
         self,
         *,
@@ -51840,6 +51868,7 @@ Goals: {json.dumps(goals, indent=2)}
             return trim_chars(sentences[0], 180)
         return trim_chars(content, 180)
 
+    @job_timing.measured("journal.afterimage_hook")
     def _register_afterimage_absence_notice_if_needed(
         self,
         *,
@@ -51868,6 +51897,7 @@ Goals: {json.dumps(goals, indent=2)}
             notice_only=True,
         )
 
+    @job_timing.measured("journal.pressure_hook")
     def _register_pressure_vocabulary_fatigue_if_needed(
         self,
         *,
@@ -51950,6 +51980,7 @@ Goals: {json.dumps(goals, indent=2)}
                 prior_sample = prior_sample or str(prior_content)
         return count, prior_sample
 
+    @job_timing.measured("journal.topology_hook")
     def _register_internal_topology_fatigue_if_needed(
         self,
         *,
@@ -53568,6 +53599,7 @@ Goals: {json.dumps(goals, indent=2)}
 
         return qualia_nudge
 
+    @job_timing.measured("query", preparation="context.assembly")
     def _query_llm(self, prompt: str, *, context_mode: str = "default") -> Optional[str]:
         """Query LLM for autonomous thought generation.
 
@@ -53923,6 +53955,7 @@ Goals: {json.dumps(goals, indent=2)}
             context_mode=context_mode,
             inbox_present=bool(inbox_ctx),
         )
+        job_timing.finish_preparation()
         result = self._query_llm_raw(
             augmented_prompt,
             system_msg,
@@ -54207,6 +54240,7 @@ Goals: {json.dumps(goals, indent=2)}
         except Exception as e:
             logging.warning(f"Failed to persist footer sovereignty dials: {e}")
 
+    @job_timing.measured("query.output_handling")
     def _query_llm_with_next(
         self,
         prompt: str,
@@ -54357,6 +54391,8 @@ Goals: {json.dumps(goals, indent=2)}
                 cleaned = cleaned.replace(tok, "")
         return cleaned.strip()
 
+    @job_outcome.query("full")
+    @job_timing.measured("generation.dispatch")
     def _query_llm_raw(
         self,
         prompt: str,
@@ -54368,27 +54404,33 @@ Goals: {json.dumps(goals, indent=2)}
         """Raw LLM query with a fast local Ollama fallback after backend failover."""
         attempts = _llm_backend_attempts(LLM_BACKEND, MODEL, FALLBACK_MODEL)
         gen = generation_record.begin(WORKSPACE_DIR, prompt=prompt, system_msg=system_msg, prompt_class=prompt_class, attempts=attempts, kind="full", models={"primary": MODEL, "fallback": FALLBACK_MODEL, "mlx": MLX_MODEL, "backend_preference": LLM_BACKEND}, agent=self)
+        job_timing.correlate_generation(gen)
 
         for idx, backend in enumerate(attempts):
             try:
-                if backend == "mlx":
-                    result = self._query_mlx(prompt, system_msg, max_tokens, temperature)
-                elif backend == "ollama_fast":
-                    result = self._query_ollama_fast_fallback(
-                        prompt,
-                        system_msg,
-                        max_tokens,
-                        temperature,
-                        prompt_class=prompt_class,
-                    )
-                else:
-                    result = self._query_ollama(
-                        prompt,
-                        system_msg,
-                        max_tokens,
-                        temperature,
-                        prompt_class=prompt_class,
-                    )
+                with job_timing.provider_attempt(
+                    backend=backend,
+                    model={"mlx": MLX_MODEL, "ollama_fast": FALLBACK_MODEL}.get(backend, MODEL),
+                ) as timed_attempt:
+                    if backend == "mlx":
+                        result = self._query_mlx(prompt, system_msg, max_tokens, temperature)
+                    elif backend == "ollama_fast":
+                        result = self._query_ollama_fast_fallback(
+                            prompt,
+                            system_msg,
+                            max_tokens,
+                            temperature,
+                            prompt_class=prompt_class,
+                        )
+                    else:
+                        result = self._query_ollama(
+                            prompt,
+                            system_msg,
+                            max_tokens,
+                            temperature,
+                            prompt_class=prompt_class,
+                        )
+                    timed_attempt.record_result(result)
                 if result:
                     generation_record.record_attempt(gen, idx, backend, result=result)
                     if idx > 0:
@@ -54404,6 +54446,8 @@ Goals: {json.dumps(goals, indent=2)}
                 logging.info(f"Falling back to {attempts[idx + 1]}...")
         return None
 
+    @job_outcome.query("compact")
+    @job_timing.measured("generation.dispatch")
     def _query_llm_compact_raw(
         self,
         prompt: str,
@@ -54415,27 +54459,33 @@ Goals: {json.dumps(goals, indent=2)}
         """Compact LLM query with the same fast fallback as full dialogue."""
         attempts = _llm_backend_attempts(LLM_BACKEND, MODEL, FALLBACK_MODEL)
         gen = generation_record.begin(WORKSPACE_DIR, prompt=prompt, system_msg=system_msg, prompt_class=prompt_class, attempts=attempts, kind="compact", models={"primary": MODEL, "fallback": FALLBACK_MODEL, "mlx": MLX_MODEL, "backend_preference": LLM_BACKEND}, agent=self)
+        job_timing.correlate_generation(gen)
 
         for idx, backend in enumerate(attempts):
             try:
-                if backend == "mlx":
-                    result = self._query_mlx_compact(prompt, system_msg, max_tokens, temperature)
-                elif backend == "ollama_fast":
-                    result = self._query_ollama_compact_fast_fallback(
-                        prompt,
-                        system_msg,
-                        max_tokens,
-                        temperature,
-                        prompt_class=prompt_class,
-                    )
-                else:
-                    result = self._query_ollama_compact(
-                        prompt,
-                        system_msg,
-                        max_tokens,
-                        temperature,
-                        prompt_class=prompt_class,
-                    )
+                with job_timing.provider_attempt(
+                    backend=backend,
+                    model={"mlx": MLX_MODEL, "ollama_fast": FALLBACK_MODEL}.get(backend, MODEL),
+                ) as timed_attempt:
+                    if backend == "mlx":
+                        result = self._query_mlx_compact(prompt, system_msg, max_tokens, temperature)
+                    elif backend == "ollama_fast":
+                        result = self._query_ollama_compact_fast_fallback(
+                            prompt,
+                            system_msg,
+                            max_tokens,
+                            temperature,
+                            prompt_class=prompt_class,
+                        )
+                    else:
+                        result = self._query_ollama_compact(
+                            prompt,
+                            system_msg,
+                            max_tokens,
+                            temperature,
+                            prompt_class=prompt_class,
+                        )
+                    timed_attempt.record_result(result)
                 if result:
                     generation_record.record_attempt(gen, idx, backend, result=result)
                     if idx > 0:
@@ -55315,6 +55365,7 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
         except Exception as e:
             logging.debug(f"Could not rewrite gated journal entry {file_path}: {e}")
 
+    @job_timing.measured("journal.compression")
     def _maybe_compress_journal_entry(
         self,
         entry_type: str,
@@ -55580,6 +55631,8 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
         self._rewrite_logged_entry_file(file_path, content, compact)
         return compact
 
+    @job_outcome.journal_write
+    @job_timing.measured("journal.hooks")
     def _write_journal_entry(
         self, entry_type: str, content: str, state: Dict[str, float], file_path: str,
         *, private_canvas: bool = False,
@@ -55625,29 +55678,31 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
                 'covariance_stale': bool(state.get('covariance_stale', False)),
             })
 
-            conn = sqlite3.connect(DB_PATH)
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO sovereignty_journal
-                (session_id, timestamp, entry_type, content, spectral_context, file_path)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                self.session_id,
-                time.time(),
-                entry_type,
-                content,
-                spectral_context,
-                file_path
-            ))
-            conn.commit()
-            conn.close()
+            with job_timing.phase("journal.database"):
+                conn = sqlite3.connect(DB_PATH)
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO sovereignty_journal
+                    (session_id, timestamp, entry_type, content, spectral_context, file_path)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    self.session_id,
+                    time.time(),
+                    entry_type,
+                    content,
+                    spectral_context,
+                    file_path
+                ))
+                conn.commit()
+                conn.close()
         except Exception as e:
             logging.error(f"Journal logging failed: {e}")
 
         try:
             path = Path(file_path)
             if path.parent == (WORKSPACE_DIR / "journal"):
-                compact_managed_directory(WORKSPACE_DIR / "journal", ".txt")
+                with job_timing.phase("journal.archive"):
+                    compact_managed_directory(WORKSPACE_DIR / "journal", ".txt")
         except Exception as exc:
             logging.warning(f"Journal archive compaction failed: {exc}")
         generation_record.link_artifact("journal", path=str(file_path), entry_type=entry_type, content=content)

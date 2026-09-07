@@ -94,9 +94,12 @@ class MinimeSelfStudyDeliveryTests(unittest.TestCase):
             with (
                 patch.object(aa, "BASE_DIR", root),
                 patch.object(aa, "WORKSPACE_DIR", workspace),
+                aa.job_outcome.capture("act_degenerate") as outcome,
             ):
                 agent._self_study(dict(STATE))
 
+            self.assertEqual(outcome.finish()[0], "failed")
+            self.assertEqual(outcome.finish()[2], "degenerate_self_study_output")
             files = list((workspace / "journal").glob("self_study_*.txt"))
             self.assertEqual(len(files), 1)
             written = files[0].read_text(encoding="utf-8")

@@ -130,7 +130,7 @@ class TestMinimeLlmJobs(unittest.TestCase):
             self.assertIn("canceled", cancel_text)
             self.assertEqual(jobs.read_job(job["job_id"])["status"], "canceled")
 
-    def test_running_job_times_out_and_late_result_is_ignored(self):
+    def test_running_job_times_out_and_late_result_is_retained_separately(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
             jobs = aa.LlmJobStore(workspace)
@@ -154,6 +154,8 @@ class TestMinimeLlmJobs(unittest.TestCase):
             self.assertEqual(late["status"], "timeout")
             result_path = workspace / "llm_jobs" / "jobs" / job["job_id"] / "result.txt"
             self.assertFalse(result_path.exists())
+            self.assertEqual(Path(late["retained_result_path"]).read_text(), "late")
+            self.assertEqual(late["worker_status"], "completed")
 
     def test_llm_job_finishes_blocked_when_action_budget_blocks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -171,7 +173,10 @@ class TestMinimeLlmJobs(unittest.TestCase):
             )
 
             def block_action(*args, **kwargs):
-                agent._last_action_continuity_event = {
+                # Simulate the finalizer's worker-owned evidence, rather than a
+                # shared last-event field that unrelated activity can overwrite.
+                aa.job_outcome.current().event = {
+                    "action_id": "act_minime_blocked_perturb",
                     "status": "blocked",
                     "outcome_summary": "Stable-core agency budget blocked `perturb`: fill 11.1% is below stable-core action budget",
                     "artifacts": [],
