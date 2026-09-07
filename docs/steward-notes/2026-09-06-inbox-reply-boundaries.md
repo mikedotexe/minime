@@ -1,9 +1,10 @@
 # Bare inbox reply boundaries
 
-Source-only branch: `codex/minime-inbox-reply-boundaries`, based on
-`a9f85f3c74c3d8e1c996c3689fe5aef696dacf27`. No deployment, inbox resend, historical
-reply recovery or runtime service control was performed. The initial test
-isolation defect and its narrowly verified restoration are recorded below.
+Original source-only branch: `codex/minime-inbox-reply-boundaries`, based on
+`a9f85f3c74c3d8e1c996c3689fe5aef696dacf27`. During that source-only review, no
+deployment, inbox resend, historical reply recovery or runtime service control
+was performed. The later authorized rollout is recorded at the end of this note.
+The initial test isolation defect and its narrowly verified restoration are recorded below.
 
 ## Reviewed source foundation
 
@@ -100,3 +101,46 @@ the Python audit hook alone does not contain arbitrary child processes.
 
 Oversize handling, open-question closure, sender migration and retrieving prior
 messages by thread ID remain outside this repair.
+
+## Authorized agent rollout
+
+After the source-only review above, Mike authorized integration and deployment.
+The canonical Minime checkout was advanced to
+`63c1ab99abee7284df46e1532ce5f427c1b0fb21`, preserving the reviewed foundation.
+Only `minime_autonomy/inbox_delivery.py` and `minime_autonomy/runtime.py` changed
+among the agent's 70 startup inputs.
+
+The sanctioned agent-only wrapper sent one SIGTERM to PID **36143** at
+**2026-09-07T04:29:53.034638Z**, after a verified quiet boundary with no active
+jobs or TCP connections. Its process start was `Fri Sep 4 23:00:37 2026` local.
+Replacement PID **12456** started at `Sun Sep 6 21:30:44 2026` local. The reload
+succeeded at **2026-09-07T04:32:26.607251Z**, with `agent_drain_v1`, normal
+lifecycle activity and `reload_required=false`. No forced termination occurred;
+the wrapper does not claim atomic traffic quiescence.
+
+The pre-signal and post-ready continuity records match exactly: session **5316**,
+cycle **24725**, no pending NEXT, and canonical state digest
+`c90c35b5569242459a9847959240eeaf98fcce6c3c74580644cf87899e27b219`.
+All 70 recorded source hashes equal both the running process's startup inventory
+and current disk bytes. Managed launchd environment, rescue-profile and installed
+plist hashes are unchanged. All **ten protected services** retained their PID and
+process start across this Minime reload. Independent observations confirmed these
+claims before the separately authorized Astrid bridge activation.
+
+The model remained ready with a connected reservoir and no last generation
+error. Post-reload engine telemetry advanced with finite fill, lambda1_rel and
+geom_rel; the independent 04:32:19Z sample ranged **71.05–73.04% fill**. This is
+runtime health evidence, not proof of a delivered human reply. No test letter,
+inbox resend or synthetic live reply was used for this verification.
+
+Inference reliability remains a separate follow-up. Two natural jobs finished
+with `llm_job_timeout` while the wrapper waited for its quiet boundary, before
+the signal. This parser repair does not claim to fix those timeouts.
+
+The durable receipt is
+`/Users/v/other/minime/workspace/runtime/deployments/2026-09-06-inbox-reply-boundaries/reload.jsonl`
+(SHA-256 `ef5909892858e7277bfb1f803c78f33f11025bf3eb2ea0c872d4751fd161f425`).
+Independent source/configuration/continuity/identity verification and the
+read-only health samples are retained under
+`/Users/v/.codex/artifacts/human-replies-rollout-20260906/`, including
+`minime-independent-rollout-verification.json` and `minime-reload-success.json`.
