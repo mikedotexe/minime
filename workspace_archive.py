@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import os
 from pathlib import Path
 
 
@@ -45,7 +46,7 @@ def _compact(directory: Path, config: ManagedDirectoryConfig) -> list[Path]:
     archive_root = directory / "archive"
 
     while True:
-        live_files = _live_files(directory, config.suffix)
+        live_files = _live_files(directory, config.suffix, minimum_count=config.live_cap + 1)
         if len(live_files) <= config.live_cap:
             return created_buckets
 
@@ -64,11 +65,13 @@ def _compact(directory: Path, config: ManagedDirectoryConfig) -> list[Path]:
             created_buckets.append(bucket_dir)
 
 
-def _live_files(directory: Path, suffix: str) -> list[Path]:
-    paths = [
-        path
-        for path in directory.iterdir()
-        if path.is_file() and path.suffix == suffix
-    ]
-    paths.sort(key=lambda path: (path.stat().st_mtime, path.name))
-    return paths
+def _live_files(directory: Path, suffix: str, *, minimum_count: int = 0) -> list[Path]:
+    # Most calls are below the live cap. Directory-entry type information lets
+    # us count these without stat-ing and sorting every file's mtime. Retain a
+    # fresh scan after every bucket so arrivals and edits remain visible.
+    with os.scandir(directory) as scan:
+        entries = [entry for entry in scan if Path(entry.name).suffix == suffix and entry.is_file()]
+    if len(entries) < minimum_count:
+        return []
+    entries.sort(key=lambda entry: (entry.stat().st_mtime, entry.name))
+    return [Path(entry.path) for entry in entries]

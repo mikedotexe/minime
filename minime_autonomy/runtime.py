@@ -74,6 +74,7 @@ from .self_control_v2 import (
     SelfControlV2Error,
 )
 from .owner_inquiry import OwnerInquiryError, OwnerInquiryManager
+from . import job_history
 from .correspondence_axes import correspondence_relation_axes_v4
 from .inbox_delivery import (
     InboxContext, InboxGeneration, InboxMessage, InboxPrompt,
@@ -131,6 +132,7 @@ from reporting_snapshot import (
 )
 from thresholds import ModeThresholds, RECESS, FOCUSED, PHI, Hysteresis
 from workspace_archive import compact_managed_directory
+from .journal_history import recent_reflective_rows
 from journal_hygiene import (
     REPEAT_WINDOW_SECONDS as JOURNAL_HYGIENE_CONVEYOR_COOLDOWN_S,
     classify_journal_entry,
@@ -239,6 +241,7 @@ from .research import (
     format_read_more_context, extract_label_value,
 )
 from . import generation_record
+from . import continuity_history
 from . import job_outcome
 from . import job_timing
 
@@ -8365,6 +8368,7 @@ class ActionContinuityStore:
     def _continuity_sessions_path(self, thread_id: str) -> Path:
         return self._thread_dir(thread_id) / "continuity_sessions.jsonl"
 
+    @job_timing.measured("continuity.source_fingerprints")
     def _projection_source_fingerprints_v1(self, thread_id: str) -> Dict[str, Dict[str, int]]:
         fingerprints: Dict[str, Dict[str, int]] = {}
         for name in (
@@ -8383,45 +8387,20 @@ class ActionContinuityStore:
             try:
                 stat = path.stat()
             except FileNotFoundError:
-                fingerprints[name] = {"mtime_ns": 0, "size": 0}
+                fingerprints[name] = {"mtime_ns": 0, "size": 0, "device": 0, "inode": 0, "ctime_ns": 0}
                 continue
             fingerprints[name] = {
                 "mtime_ns": int(stat.st_mtime_ns),
                 "size": int(stat.st_size),
+                "device": int(stat.st_dev),
+                "inode": int(stat.st_ino),
+                "ctime_ns": int(stat.st_ctime_ns),
             }
-        action_ids: set[str] = set()
         events_path = self._thread_dir(thread_id) / "events.jsonl"
-        if events_path.exists():
-            for line in events_path.read_text().splitlines():
-                try:
-                    event = json.loads(line)
-                except Exception:
-                    continue
-                if not isinstance(event, dict):
-                    continue
-                action_id = event.get("action_id")
-                if isinstance(action_id, str) and action_id:
-                    action_ids.add(action_id)
-        latest_job_mtime = 0
-        total_job_size = 0
-        if action_ids:
-            for path in (self.workspace_dir / "llm_jobs" / "jobs").glob("*/job.json"):
-                try:
-                    job = json.loads(path.read_text())
-                    stat = path.stat()
-                except Exception:
-                    continue
-                if not isinstance(job, dict):
-                    continue
-                action_id = job.get("action_id")
-                if not isinstance(action_id, str) or action_id not in action_ids:
-                    continue
-                latest_job_mtime = max(latest_job_mtime, int(stat.st_mtime_ns))
-                total_job_size += int(stat.st_size)
-        fingerprints["llm_jobs/jobs/*/job.json:thread_actions"] = {
-            "mtime_ns": latest_job_mtime,
-            "size": total_job_size,
-        }
+        action_ids = continuity_history.action_ids(events_path)
+        fingerprints["llm_jobs/jobs/*/job.json:thread_actions"] = job_history.fingerprint_for_actions(
+            self.workspace_dir / "llm_jobs" / "jobs", action_ids,
+        )
         journal_dir = self.workspace_dir / "journal"
         if journal_dir.exists():
             latest_mtime = 0
@@ -16788,7 +16767,7 @@ class ActionContinuityStore:
         if not path.exists():
             return []
         rows = []
-        for line in reversed(path.read_text().splitlines()):
+        for line in continuity_history.reverse_lines(path):
             try:
                 rows.append(json.loads(line))
             except Exception:
@@ -16803,7 +16782,7 @@ class ActionContinuityStore:
             return []
         rows = []
         seen = set()
-        for line in reversed(path.read_text().splitlines()):
+        for line in continuity_history.reverse_lines(path):
             try:
                 event = json.loads(line)
             except Exception:
@@ -17228,6 +17207,7 @@ class ActionContinuityStore:
             ),
         }
 
+    @job_timing.measured("continuity.projection")
     def _thread_projection(self, thread: Dict[str, Any]) -> Dict[str, Any]:
         """Canonical continuity projection for prompt/status/next surfaces."""
         thread_id = thread["thread_id"]
@@ -18733,13 +18713,8 @@ class ActionContinuityStore:
 
     def _terminal_jobs_by_action_id(self) -> Dict[str, Dict[str, Any]]:
         jobs: Dict[str, Dict[str, Any]] = {}
-        for path in (self.workspace_dir / "llm_jobs" / "jobs").glob("*/job.json"):
-            try:
-                job = json.loads(path.read_text())
-            except Exception:
-                continue
-            if not isinstance(job, dict):
-                continue
+        for record in job_history.metadata_snapshot(self.workspace_dir / "llm_jobs" / "jobs"):
+            job = record.metadata()
             if (
                 job.get("status") not in LlmJobStore.terminal_statuses
                 or LlmJobStore.worker_is_running(job)
@@ -23652,7 +23627,8 @@ Fill: {fill:.1f}%
     ) -> Optional[Path]:
         try:
             timestamp = datetime.now().isoformat()
-            summary = self._action_summary(action, state)
+            with job_timing.phase("manifest.summary"):
+                summary = self._action_summary(action, state)
             payload = {
                 'timestamp': timestamp,
                 'session_id': self.session_id,
@@ -23758,7 +23734,10 @@ Fill: {fill:.1f}%
                     payload['action_continuity']['status'] = receipt['status']
                     payload['action_continuity']['continuity_action_result_v1'] = receipt
                 try:
-                    thread = self._continuity_store()._read_thread(continuity_event.get('thread_id'))
+                    with job_timing.phase("manifest.continuity_store"):
+                        continuity_store = self._continuity_store()
+                    with job_timing.phase("manifest.thread_read"):
+                        thread = continuity_store._read_thread(continuity_event.get('thread_id'))
                     if isinstance(thread, dict):
                         payload['experiment_continuity'] = {
                             'thread_id': thread.get('thread_id'),
@@ -23769,8 +23748,10 @@ Fill: {fill:.1f}%
                     pass
             manifest_name = f"{timestamp.replace(':', '-')}_{action}.json"
             manifest_file = self._action_dir / manifest_name
-            manifest_file.write_text(json.dumps(payload, indent=2))
-            compact_managed_directory(self._action_dir, ".json")
+            with job_timing.phase("manifest.write"):
+                manifest_file.write_text(json.dumps(payload, indent=2))
+            with job_timing.phase("manifest.archive"):
+                compact_managed_directory(self._action_dir, ".json")
             return manifest_file
         except Exception as exc:
             logging.error(f"Failed to write action manifest for {action}: {exc}")
@@ -51686,18 +51667,8 @@ Goals: {json.dumps(goals, indent=2)}
         prior_sample: Optional[str] = None
         try:
             conn = sqlite3.connect(DB_PATH)
-            cur = conn.cursor()
-            reflective_list = sorted(PRESSURE_VOCABULARY_ENTRIES)
-            placeholders = ",".join("?" for _ in reflective_list)
-            cur.execute(
-                f"""SELECT entry_type, content
-                   FROM sovereignty_journal
-                   WHERE entry_type IN ({placeholders})
-                   ORDER BY timestamp DESC
-                   LIMIT ?""",
-                (*reflective_list, PRESSURE_VOCABULARY_WINDOW - 1),
-            )
-            rows = cur.fetchall()
+            with job_timing.phase("journal.recent_history"):
+                rows = recent_reflective_rows(conn, PRESSURE_VOCABULARY_ENTRIES, PRESSURE_VOCABULARY_WINDOW - 1)
             conn.close()
         except Exception as exc:
             logging.debug("Could not load recent journal history for pressure vocabulary fatigue: %s", exc)
@@ -51743,18 +51714,8 @@ Goals: {json.dumps(goals, indent=2)}
         prior_sample: Optional[str] = None
         try:
             conn = sqlite3.connect(DB_PATH)
-            cur = conn.cursor()
-            reflective_list = sorted(AGENCY_VERNACULAR_ENTRIES)
-            placeholders = ",".join("?" for _ in reflective_list)
-            cur.execute(
-                f"""SELECT entry_type, content
-                   FROM sovereignty_journal
-                   WHERE entry_type IN ({placeholders})
-                   ORDER BY timestamp DESC
-                   LIMIT ?""",
-                (*reflective_list, AGENCY_VERNACULAR_WINDOW - 1),
-            )
-            rows = cur.fetchall()
+            with job_timing.phase("journal.recent_history"):
+                rows = recent_reflective_rows(conn, AGENCY_VERNACULAR_ENTRIES, AGENCY_VERNACULAR_WINDOW - 1)
             conn.close()
         except Exception as exc:
             logging.debug("Could not load recent journal history for agency vernacular notice: %s", exc)
@@ -51829,18 +51790,8 @@ Goals: {json.dumps(goals, indent=2)}
         prior_sample: Optional[str] = None
         try:
             conn = sqlite3.connect(DB_PATH)
-            cur = conn.cursor()
-            reflective_list = sorted(AFTERIMAGE_ABSENCE_ENTRIES)
-            placeholders = ",".join("?" for _ in reflective_list)
-            cur.execute(
-                f"""SELECT entry_type, content
-                   FROM sovereignty_journal
-                   WHERE entry_type IN ({placeholders})
-                   ORDER BY timestamp DESC
-                   LIMIT ?""",
-                (*reflective_list, AFTERIMAGE_ABSENCE_WINDOW - 1),
-            )
-            rows = cur.fetchall()
+            with job_timing.phase("journal.recent_history"):
+                rows = recent_reflective_rows(conn, AFTERIMAGE_ABSENCE_ENTRIES, AFTERIMAGE_ABSENCE_WINDOW - 1)
             conn.close()
         except Exception as exc:
             logging.debug("Could not load recent journal history for afterimage/absence notice: %s", exc)
@@ -51953,18 +51904,8 @@ Goals: {json.dumps(goals, indent=2)}
         prior_sample: Optional[str] = None
         try:
             conn = sqlite3.connect(DB_PATH)
-            cur = conn.cursor()
-            reflective_list = sorted(reflective_entries)
-            placeholders = ",".join("?" for _ in reflective_list)
-            cur.execute(
-                f"""SELECT entry_type, content
-                   FROM sovereignty_journal
-                   WHERE entry_type IN ({placeholders})
-                   ORDER BY timestamp DESC
-                   LIMIT ?""",
-                (*reflective_list, INTERNAL_TOPOLOGY_WINDOW - 1),
-            )
-            rows = cur.fetchall()
+            with job_timing.phase("journal.recent_history"):
+                rows = recent_reflective_rows(conn, reflective_entries, INTERNAL_TOPOLOGY_WINDOW - 1)
             conn.close()
         except Exception as exc:
             logging.debug("Could not load recent journal history for topology fatigue: %s", exc)

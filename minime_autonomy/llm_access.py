@@ -15,6 +15,8 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol
 
+from . import job_history
+
 
 _STORE_LOCKS = {}
 _STORE_LOCKS_GUARD = threading.Lock()
@@ -358,14 +360,7 @@ class LlmJobStore:
     @_serialized
     def list_jobs(self, limit: int = 20) -> List[Dict[str, Any]]:
         self.ensure_dirs_no_recover()
-        jobs: List[Dict[str, Any]] = []
-        for path in self.jobs_dir.glob("*/job.json"):
-            try:
-                jobs.append(json.loads(path.read_text()))
-            except Exception:
-                continue
-        jobs.sort(key=lambda item: item.get("created_at") or "")
-        return jobs[-limit:]
+        return job_history.recent_jobs(self.jobs_dir, limit)
 
     @_serialized
     def read_job(self, job_id: Optional[str]) -> Optional[Dict[str, Any]]:

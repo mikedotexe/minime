@@ -1,6 +1,5 @@
 """Isolated durable job-store tests; no autonomous runtime or model imports."""
 
-import importlib.util
 import json
 import multiprocessing
 import os
@@ -13,11 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-SPEC = importlib.util.spec_from_file_location(
-    "isolated_llm_access", Path(__file__).resolve().parents[1] / "minime_autonomy" / "llm_access.py"
-)
-llm_access = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(llm_access)
+from minime_autonomy import llm_access
 
 
 class ClockStore(llm_access.LlmJobStore):

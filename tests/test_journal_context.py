@@ -3,6 +3,7 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 import ast
+import inspect
 import json
 import os
 from pathlib import Path
@@ -254,7 +255,7 @@ def test_peer_observation_remains_available_and_respects_file_freshness(runtime,
 
 
 def test_peer_readers_have_only_explicit_status_callers():
-    source = Path(aa.AutonomousAgent._neutral_checkin.__code__.co_filename)
+    source = Path(inspect.unwrap(aa.AutonomousAgent._neutral_checkin).__code__.co_filename)
     tree = ast.parse(source.read_text())
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AutonomousAgent")
     allowed = {
