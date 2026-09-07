@@ -26,9 +26,9 @@ def _registry(fields: dict) -> dict:
 
 
 class EnvelopeRegistryLoaderTests(unittest.TestCase):
-    def test_live_registry_loads_and_covers_exploration_noise(self) -> None:
+    def test_seed_registry_loads_and_covers_exploration_noise(self) -> None:
         registry = load_registry()
-        self.assertIsNotNone(registry, "canonical registry should be installed (C1)")
+        self.assertIsNotNone(registry, "checked-in registry seed should load (C1)")
         bounds = envelope_for("exploration_noise", registry)
         self.assertEqual(bounds, (_f32(0.0), _f32(0.2)))
         footer = channel_range_for("exploration_noise", "footer", registry)

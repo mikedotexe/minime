@@ -40,6 +40,12 @@ observations. The runtime owns snapshot capture, generation, and persistence;
 private saves opt out of public replay-hygiene annotations. This module has
 no file, network, scheduler, or live-control authority.
 
+`minime_autonomy/inbox_delivery.py` owns sender-bound envelope validation,
+language-only reply block boundaries, protected model-supply evidence and local
+reply artifacts. Parsing preserves the complete generation separately and keeps
+recipient bodies out of native NEXT/footer interpretation. Runtime orchestration
+still owns model calls and execution; a reply declaration grants neither.
+
 Memory, correspondence, journaling, and attractor modules define the stable
 ownership protocols while their mutable `AutonomousAgent` method clusters remain
 in `runtime.py`. The event-sourced `ActionContinuityStore` and the mutable

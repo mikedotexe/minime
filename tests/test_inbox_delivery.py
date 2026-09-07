@@ -396,3 +396,148 @@ def test_actual_next_wrapper_does_not_queue_reply_blocks_or_apply_their_dials(ag
 def test_next_block_requires_actual_supply(tmp_path):
     inbox = context(tmp_path)
     assert declared_replies("NEXT: INBOX_REPLY human_seed\nHello.", inbox) == []
+
+
+@pytest.mark.parametrize("first", ["INBOX_REPLY", "NEXT: INBOX_REPLY"])
+@pytest.mark.parametrize("second", ["INBOX_REPLY", "NEXT: INBOX_REPLY"])
+def test_mid_output_declarations_route_only_each_recipients_exact_body(tmp_path, first, second):
+    inbox = mixed_context(tmp_path)
+    text = ("An independent thought.\n\n***\n"
+            f"{first} human_seed\nHello Mike.\nREGIME=focus\n"
+            f"{second} peer_seed\nHello Astrid.\n"
+            "NEXT: NOTICE")
+    blocks, action_text = reply_blocks(text)
+    assert blocks == [("human_seed", "Hello Mike.\nREGIME=focus\n"),
+                      ("peer_seed", "Hello Astrid.\n")]
+    assert action_text == "An independent thought.\n\n***\nNEXT: NOTICE"
+    archive = save_generation(tmp_path, text, inbox)
+    assert archive.read_text().endswith(text)
+    human = next((tmp_path / "outbox/human/mike").glob("*.txt")).read_text()
+    peer = next((tmp_path / "outbox").glob("reply_*.txt")).read_text()
+    assert human.endswith(blocks[0][1]) and peer.endswith(blocks[1][1])
+    assert "Hello Astrid" not in human and "Hello Mike" not in peer
+    assert "NEXT: NOTICE" not in human + peer
+    assert {row["recipient"] for row in rows(tmp_path) if row["stage"] == "authored_reply"} == {"mike", "astrid"}
+
+
+@pytest.mark.parametrize("declaration", [
+    "INBOX_REPLY unknown", "INBOX_REPLY ../../bad", "INBOX_REPLY",
+    "NEXT: INBOX_REPLY ../../bad", "INBOX_REPLY human_seed extra",
+    "NEXT:INBOX_REPLY ../../bad",
+])
+def test_unroutable_declaration_ends_prior_reply_and_quarantines_its_body(tmp_path, declaration):
+    inbox = context(tmp_path)
+    inbox.accepted("fixture_attempt", "fixture")
+    text = ("INBOX_REPLY human_seed\nOnly for Mike.\n"
+            f"{declaration}\nSeparate unroutable text.\nexploration_noise=0.1\n"
+            "NEXT: NOTICE")
+    replies = declared_replies(text, inbox)
+    assert len(replies) == 1 and replies[0][1] == "Only for Mike.\n"
+    assert reply_blocks(text)[1] == "NEXT: NOTICE"
+    archive = save_generation(tmp_path, text, inbox)
+    assert archive.read_text().endswith(text)
+    addressed = list((tmp_path / "outbox/human/mike").glob("*.txt"))
+    assert len(addressed) == 1
+    assert addressed[0].read_text().endswith("Only for Mike.\n")
+    assert not list((tmp_path / "outbox").glob("reply_*.txt"))
+
+
+@pytest.mark.parametrize("example", [
+    "> INBOX_REPLY human_seed\n> Quoted text.\n",
+    "    INBOX_REPLY human_seed\n    Indented code.\n",
+    "```text\nINBOX_REPLY human_seed\nExample only.\n```\n",
+    "~~~text\nINBOX_REPLY human_seed\nExample only.\n~~~\n",
+    "````text\n```\nINBOX_REPLY human_seed\nExample only.\n```\n````\n",
+    "~~~text\n```\nINBOX_REPLY human_seed\nExample only.\n```\n~~~\n",
+])
+def test_bare_reply_examples_remain_unaddressed_and_byte_preserved(tmp_path, example):
+    text = "Here is an example:\n" + example
+    inbox = context(tmp_path)
+    inbox.accepted("fixture_attempt", "fixture")
+    assert reply_blocks(text) == ([], text)
+    assert declared_replies(text, inbox) == []
+
+
+def test_reply_boundaries_preserve_crlf_and_trailing_space():
+    text = "Prose.\r\nINBOX_REPLY human_seed \t\r\nHi, Mike.\r\nNEXT: NOTICE\r\n"
+    assert reply_blocks(text) == (
+        [("human_seed", "Hi, Mike.\r\n")], "Prose.\r\nNEXT: NOTICE\r\n",
+    )
+
+
+def test_duplicate_bare_declarations_after_prose_still_have_no_route(tmp_path):
+    inbox = context(tmp_path)
+    inbox.accepted("fixture_attempt", "fixture")
+    text = "Prose.\nINBOX_REPLY human_seed\nOne.\nINBOX_REPLY human_seed\nTwo."
+    assert declared_replies(text, inbox) == []
+    assert reply_blocks(text)[1] == "Prose.\n"
+
+
+def test_bare_reply_blocks_preserve_actual_native_next_without_footer_leak(agent, monkeypatch):
+    seed_inbox()
+    text = ("Independent prose.\n***\nINBOX_REPLY human_seed\n"
+            "Hello Mike.\nexploration_noise=0.1\nNEXT: NOTICE")
+    monkeypatch.setattr(aa.requests, "post", Mock(return_value=Mock(
+        status_code=200, json=lambda: {"message": {"content": text}})))
+    monkeypatch.setattr(aa, "LLM_BACKEND", "ollama")
+    monkeypatch.setattr(aa, "MODEL", "gemma4:12b")
+    monkeypatch.setattr(agent, "_emit_next_hints", Mock(return_value=""))
+    for name in ("_terminal_research_budget_status_stage_for_next",
+                 "_experiment_resume_loop_note_for_llm_next", "_operational_tail_cooldown_available"):
+        monkeypatch.setattr(agent, name, Mock(return_value=None))
+    footer = Mock()
+    record = Mock(return_value="NOTICE")
+    monkeypatch.setattr(agent, "_apply_footer_directives", footer)
+    monkeypatch.setattr(agent, "_record_llm_next_action_choice", record)
+    response, next_action = agent._query_llm_with_next("A normal reflective turn.")
+    assert isinstance(response, InboxGeneration) and response == text
+    assert next_action == "NOTICE"
+    footer.assert_called_once_with("Independent prose.\n***\nNEXT: NOTICE")
+    assert record.call_args.args[0] == "NOTICE"
+    assert "Hello Mike" not in record.call_args.args[1]
+    assert "exploration_noise" not in record.call_args.args[1]
+    saved = next((aa.WORKSPACE_DIR / "outbox/human/mike").glob("*.txt")).read_text()
+    assert saved.endswith("Hello Mike.\nexploration_noise=0.1\n")
+    assert not list((aa.WORKSPACE_DIR / "outbox").glob("reply_*.txt"))
+
+
+def test_mailbox_prompt_shows_concrete_optional_reply_example(agent):
+    seed_inbox()
+    inbox = agent._read_inbox()
+    assert "A reply is optional" in inbox
+    assert "line anywhere" in inbox
+    assert "\nINBOX_REPLY human_seed\nYour reply to that sender goes here.\nNEXT: NOTICE\n" in inbox
+    assert "Each reply ends at the next INBOX_REPLY or NEXT: line." in inbox
+
+
+def test_observed_mixed_output_shape_routes_long_id_without_operator_recovery(tmp_path):
+    mid = "human_mike_minime_20260906_would_you_practice_holding_a_train_of_th_192117"
+    inbox = context(tmp_path, letter(mid=mid))
+    inbox.accepted("fixture_attempt", "fixture")
+    peer_prose = "First independent paragraph.\n\nSecond independent paragraph.\n\nThird independent paragraph.\n\n***\n"
+    human_body = "Mike, this is a synthetic first reply paragraph.\n\nThis second paragraph continues that reply.\n\n"
+    native_next = "NEXT: SHADOW_TRAJECTORY lambda-tail/lambda4"
+    text = peer_prose + f"INBOX_REPLY {mid}\n" + human_body + native_next
+    archive = save_generation(tmp_path, text, inbox)
+    assert archive.read_text().endswith(text)
+    blocks, action_text = reply_blocks(text)
+    assert blocks == [(mid, human_body)]
+    assert action_text == peer_prose + native_next
+    assert aa.parse_next_action(action_text)[0] == "SHADOW_TRAJECTORY lambda-tail/lambda4"
+    addressed = list((tmp_path / "outbox/human/mike").glob("*.txt"))
+    assert len(addressed) == 1 and addressed[0].read_text().endswith(human_body)
+    assert f"Reply-To: {mid}\n" in addressed[0].read_text()
+    assert not list((tmp_path / "outbox").glob("reply_*.txt"))
+
+
+def test_compact_next_reply_form_is_language_while_compact_native_next_remains(tmp_path):
+    inbox = mixed_context(tmp_path)
+    text = ("INBOX_REPLY human_seed\nHello Mike.\n"
+            "NEXT:INBOX_REPLY peer_seed\nHello Astrid.\nREGIME=focus\n"
+            "NEXT:NOTICE")
+    blocks, action_text = reply_blocks(text)
+    assert blocks == [("human_seed", "Hello Mike.\n"),
+                      ("peer_seed", "Hello Astrid.\nREGIME=focus\n")]
+    assert action_text == "NEXT:NOTICE"
+    assert aa.parse_next_action(action_text)[0] == "NOTICE"
+    assert [message.sender for message, _ in declared_replies(text, inbox)] == ["mike", "astrid"]

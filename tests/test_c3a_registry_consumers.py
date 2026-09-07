@@ -1,6 +1,6 @@
 """Constitution C3a: the V2 validator and footer bounds consult the envelope
-registry, with compiled tables as the fail-closed backstop. Today's registry
-records compiled values verbatim, so live behavior is byte-identical; these
+registry, with compiled tables as the fail-closed backstop. The checked-in seed
+records compiled values verbatim, so seeded behavior is byte-identical; these
 tests pin the consultation mechanics and the never-wider-than-compiled rule.
 """
 
@@ -30,8 +30,8 @@ def _registry(fields: dict) -> dict:
 
 
 class ValidatorRegistryConsultationTests(unittest.TestCase):
-    def test_live_registry_keeps_compiled_behavior_byte_identical(self) -> None:
-        # The installed registry records compiled bounds verbatim: the same
+    def test_seed_registry_keeps_compiled_behavior_byte_identical(self) -> None:
+        # The checked-in seed records compiled bounds verbatim: the same
         # values pass/fail as before C3a.
         cleaned = validate_exact_self_control_values({"exploration_noise": 0.15})
         self.assertIn("exploration_noise", cleaned)
@@ -79,7 +79,7 @@ class ValidatorRegistryConsultationTests(unittest.TestCase):
 
 
 class FooterBoundsRegistryTests(unittest.TestCase):
-    def test_live_registry_footer_matches_compiled_today(self) -> None:
+    def test_seed_registry_footer_matches_compiled(self) -> None:
         self.assertEqual(_footer_bounds("exploration_noise"), (0.0, _f32(0.08)))
         self.assertEqual(_footer_bounds("regulation_strength"), (_f32(0.4), 1.0))
 

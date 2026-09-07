@@ -19,6 +19,19 @@ import stable_core_ops  # noqa: E402
 
 
 class TestStableCoreOps(unittest.TestCase):
+    def setUp(self) -> None:
+        # Status composition tests use synthetic service state. Tests of the
+        # reservoir projection below replace these values explicitly.
+        for name, value in (
+            ("_socket_listening", False),
+            ("_port_listener_pids", []),
+            ("_launchctl_service_state", {"loaded": False, "running": False,
+                                          "pid": None, "state": "unavailable"}),
+        ):
+            patcher = mock.patch.object(stable_core_ops, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_status_includes_reconvergence_map_visibility(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"

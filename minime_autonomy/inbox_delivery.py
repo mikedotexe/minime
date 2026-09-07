@@ -132,26 +132,37 @@ class InboxGeneration(str):
 
 
 def reply_blocks(text):
-    """Recognize unquoted standalone declarations, not examples inside fences."""
+    """Split language-only reply blocks from native actions, preserving raw bytes.
+
+    A column-zero declaration can occur after ordinary prose or another reply.
+    Even an invalid address ends the preceding reply and keeps its own body out
+    of action parsing; only declared_replies validates and routes recipients.
+    """
     lines = text.splitlines(keepends=True)
     boundaries = []
     fenced = None
     for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith(("```", "~~~")):
-            marker = stripped[:3]
-            fenced = None if fenced == marker else (fenced or marker)
+        content = line.rstrip("\r\n")
+        fence = re.fullmatch(r" {0,3}(`{3,}|~{3,})(.*)", content)
+        if fence:
+            marker, suffix = fence.groups()
+            if fenced is None:
+                fenced = (marker[0], len(marker))
+            elif marker[0] == fenced[0] and len(marker) >= fenced[1] and not suffix.strip():
+                fenced = None
             continue
         if fenced is not None:
             continue
-        match = re.fullmatch(r"(?:NEXT: )?INBOX_REPLY ([A-Za-z0-9_-]{1,120})", line.rstrip("\r\n"))
-        if match and (i == 0 or line.startswith("NEXT: ")):
-            boundaries.append((i, match[1]))
+        declaration = re.fullmatch(r"(?:NEXT:[ \t]*)?INBOX_REPLY(?:[ \t]+(.*))?", content)
+        if declaration:
+            address = (declaration[1] or "").strip()
+            mid = address if re.fullmatch(r"[A-Za-z0-9_-]{1,120}", address) else None
+            boundaries.append((i, True, mid))
         elif line.startswith("NEXT:"):
-            boundaries.append((i, None))
+            boundaries.append((i, False, None))
     blocks, removed = [], set()
-    for position, (start, mid) in enumerate(boundaries):
-        if mid is None:
+    for position, (start, is_reply, mid) in enumerate(boundaries):
+        if not is_reply:
             continue
         end = boundaries[position + 1][0] if position + 1 < len(boundaries) else len(lines)
         body = "".join(lines[start + 1:end])
@@ -166,6 +177,8 @@ def declared_replies(text: str, context):
         return []
     result = []
     for mid, body in blocks:
+        if mid is None:
+            continue
         matches = [m for m in context.messages if m.message_id == mid]
         if (sum(ident == mid for ident, _ in blocks) != 1 or len(matches) != 1
                 or matches[0].sender == "unknown" or not body.strip()):
