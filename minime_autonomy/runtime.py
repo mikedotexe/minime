@@ -238,6 +238,7 @@ from .research import (
     format_browse_failure_context, format_browse_read_context,
     format_read_more_context, extract_label_value,
 )
+from . import generation_record
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 AUTONOMOUS_AGENT_RUNTIME_SOURCE = BASE_DIR / "minime_autonomy" / "runtime.py"
@@ -54366,6 +54367,7 @@ Goals: {json.dumps(goals, indent=2)}
     ) -> Optional[str]:
         """Raw LLM query with a fast local Ollama fallback after backend failover."""
         attempts = _llm_backend_attempts(LLM_BACKEND, MODEL, FALLBACK_MODEL)
+        gen = generation_record.begin(WORKSPACE_DIR, prompt=prompt, system_msg=system_msg, prompt_class=prompt_class, attempts=attempts, kind="full", models={"primary": MODEL, "fallback": FALLBACK_MODEL, "mlx": MLX_MODEL, "backend_preference": LLM_BACKEND}, agent=self)
 
         for idx, backend in enumerate(attempts):
             try:
@@ -54388,12 +54390,15 @@ Goals: {json.dumps(goals, indent=2)}
                         prompt_class=prompt_class,
                     )
                 if result:
+                    generation_record.record_attempt(gen, idx, backend, result=result)
                     if idx > 0:
                         logging.info(f"LLM fallback succeeded via {backend}")
                     # Kink #16 fix: sanitize before any caller sees the text.
                     return self._strip_model_artifacts(result)
+                generation_record.record_attempt(gen, idx, backend, result="")
                 logging.warning(f"LLM query returned empty content ({backend})")
             except Exception as exc:
+                generation_record.record_attempt(gen, idx, backend, error=exc)
                 logging.error(f"LLM query failed ({backend}): {exc}")
             if idx < len(attempts) - 1:
                 logging.info(f"Falling back to {attempts[idx + 1]}...")
@@ -54409,6 +54414,7 @@ Goals: {json.dumps(goals, indent=2)}
     ) -> Optional[str]:
         """Compact LLM query with the same fast fallback as full dialogue."""
         attempts = _llm_backend_attempts(LLM_BACKEND, MODEL, FALLBACK_MODEL)
+        gen = generation_record.begin(WORKSPACE_DIR, prompt=prompt, system_msg=system_msg, prompt_class=prompt_class, attempts=attempts, kind="compact", models={"primary": MODEL, "fallback": FALLBACK_MODEL, "mlx": MLX_MODEL, "backend_preference": LLM_BACKEND}, agent=self)
 
         for idx, backend in enumerate(attempts):
             try:
@@ -54431,11 +54437,14 @@ Goals: {json.dumps(goals, indent=2)}
                         prompt_class=prompt_class,
                     )
                 if result:
+                    generation_record.record_attempt(gen, idx, backend, result=result)
                     if idx > 0:
                         logging.debug(f"Compact LLM fallback succeeded via {backend}")
                     return result
+                generation_record.record_attempt(gen, idx, backend, result="")
                 logging.debug(f"Compact LLM query returned empty content ({backend})")
             except Exception as exc:
+                generation_record.record_attempt(gen, idx, backend, error=exc)
                 logging.debug(f"Compact LLM query failed ({backend}): {exc}")
             if idx < len(attempts) - 1:
                 logging.debug(f"Compact LLM falling back to {attempts[idx + 1]}")
@@ -54633,6 +54642,7 @@ Goals: {json.dumps(goals, indent=2)}
         finally:
             timing["elapsed_s"] = round(time.perf_counter() - started, 3)
             _append_llm_timing(timing)
+            generation_record.stash_attempt(messages, timing)
 
     def _query_mlx_compact(
         self,
@@ -54798,6 +54808,7 @@ Goals: {json.dumps(goals, indent=2)}
         finally:
             timing["elapsed_s"] = round(time.perf_counter() - started, 3)
             _append_llm_timing(timing)
+            generation_record.stash_attempt(messages, timing)
 
     def _log_decision(self, action: str, state: Dict[str, float]):
         """Log autonomous decision to database."""
@@ -55639,6 +55650,7 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
                 compact_managed_directory(WORKSPACE_DIR / "journal", ".txt")
         except Exception as exc:
             logging.warning(f"Journal archive compaction failed: {exc}")
+        generation_record.link_artifact("journal", path=str(file_path), entry_type=entry_type, content=content)
 
     def _compact_managed_directories(self) -> None:
         try:
