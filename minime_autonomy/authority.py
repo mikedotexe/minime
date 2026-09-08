@@ -279,6 +279,8 @@ class ActionPreflightStore:
         "LIST_COLLABORATIONS": "list_collaborations",
         "LIST_COLLABS": "list_collaborations",
         "COLLABORATIONS": "list_collaborations",
+        "COLLABORATION_STATUS": "collaboration_status",
+        "COLLAB_STATUS": "collaboration_status",
         # v5.1 Phase C — SHARE_THOUGHT.
         "SHARE_THOUGHT": "share_thought",
         "SHARE": "share_thought",
@@ -830,6 +832,7 @@ class CapabilitySelfMap:
             {"base": "DECLINE_COLLABORATION", "aliases": ["DECLINE_COLLAB"], "route": "decline_collaboration"},
             {"base": "LEAVE_COLLABORATION", "aliases": ["LEAVE_COLLAB"], "route": "leave_collaboration"},
             {"base": "LIST_COLLABORATIONS", "aliases": ["LIST_COLLABS", "COLLABORATIONS"], "route": "list_collaborations"},
+            {"base": "COLLABORATION_STATUS", "aliases": ["COLLAB_STATUS"], "route": "collaboration_status", "authority_class": "read_only", "continuity_effect": "reads one selected room projection without promoting it into ambient prompts"},
             # v5.1 Phase C — SHARE_THOUGHT.
             {"base": "SHARE_THOUGHT", "aliases": ["SHARE"], "route": "share_thought"},
             # Triadic Chamber v3.4 — public uptake + annotation lanes.

@@ -957,6 +957,81 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertIn("Triadic chamber", suffix)
         self.assertIn("not commands", suffix)
 
+    def test_collaboration_status_is_explicit_and_preserves_source_boundaries(self):
+        agent = self._agent()
+        agent._collab_shared_thoughts_cache = {}
+        agent._collab_chamber_state_cache = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            coll_id = "coll_123_status"
+            coll_dir = shared / coll_id
+            coll_dir.mkdir(parents=True)
+            (coll_dir / "meta.json").write_text(json.dumps({
+                "schema_version": 1,
+                "id": coll_id,
+                "topic": "quiet shared inquiry",
+                "inviter": "astrid",
+                "invitee": "minime",
+                "status": "joined",
+                "created_t_ms": 1000,
+                "updated_t_ms": 2000,
+                "members": ["astrid", "minime"],
+            }))
+            (coll_dir / "shared_thoughts.jsonl").write_text(json.dumps({
+                "id": "thought-2",
+                "source": "astrid",
+                "text": "A distinct authored note.",
+                "t_ms": 1900,
+            }) + "\n")
+            (coll_dir / "chamber_state.json").write_text(json.dumps({
+                "phase": "witness_active",
+                "prompt_summary": "The room remains available without ambient repetition.",
+                "attention_projection_v1": {
+                    "schema_version": 1,
+                    "policy": "collaboration_attention_projection_v1",
+                    "audience_revisions": {
+                        "minime": {
+                            "material_revision": "sha256:" + "d" * 64,
+                            "latest_material_event": {
+                                "event_id": "shared_thoughts.jsonl:thought-2",
+                                "kind": "shared_thought",
+                                "actor": "astrid",
+                            },
+                        },
+                    },
+                    "correspondence_scope": "protected_global_ledger_not_room_attributed",
+                },
+            }))
+            with (
+                patch.object(agent, "SHARED_COLLAB_DIR", shared),
+                patch.object(agent, "_collab_read_reservoir_state_cached", return_value=None),
+            ):
+                rendered = agent._collab_status_text("latest")
+
+        self.assertIn("Collaboration status (explicit read-only pull)", rendered)
+        self.assertIn("shared_thoughts.jsonl:thought-2", rendered)
+        self.assertIn("separate protected sender-bound lane", rendered)
+        self.assertIn("silence is neutral", rendered)
+        self.assertIn(str(coll_dir / "chamber_state.json"), rendered)
+
+    def test_collaboration_status_resolves_latest_once_before_checkpointing(self):
+        agent = self._agent()
+        agent._current_action_continuity_context = {
+            "raw_next": "COLLABORATION_STATUS latest"
+        }
+        selected = {"id": "coll_exact"}
+        with (
+            patch.object(agent, "_collab_find_meta", return_value=selected) as find,
+            patch.object(agent, "_collab_status_text", return_value="exact status") as render,
+            patch.object(agent, "_mark_collab_attention_inspection") as inspect,
+        ):
+            agent._collaboration_status({})
+
+        find.assert_called_once_with("latest")
+        render.assert_called_once_with("coll_exact")
+        inspect.assert_called_once_with("coll_exact")
+        self.assertEqual(agent._current_action_outcome_summary, "exact status")
+
     def test_collab_chamber_seen_writes_public_receipt(self):
         agent = self._agent()
         agent._collab_chamber_state_cache = {}
@@ -4581,6 +4656,37 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertEqual(result, "still thinking")
         primary.assert_called_once()
         fast.assert_called_once()
+
+    def test_llm_raw_does_not_repeat_submitted_collaboration_notice_on_fallback(self):
+        agent = self._agent()
+        notice = "[collab-attention-v1:abc123] optional collaboration notice"
+        tracker = aa.collab_attention.ContextSubmissionTracker(notice)
+
+        def primary(prompt, *_args, **_kwargs):
+            self.assertIn(notice, prompt)
+            tracker.mark_final_messages([{"role": "user", "content": prompt}])
+            raise TimeoutError("response timed out after request dispatch")
+
+        def fallback(prompt, *_args, **_kwargs):
+            self.assertNotIn(notice, prompt)
+            return "continued without replay"
+
+        with (
+            patch.object(aa, "LLM_BACKEND", "ollama"),
+            patch.object(aa, "MODEL", "gemma3:12b"),
+            patch.object(aa, "FALLBACK_MODEL", "gemma3:4b"),
+            patch.object(agent, "_query_ollama", side_effect=primary),
+            patch.object(agent, "_query_ollama_fast_fallback", side_effect=fallback),
+        ):
+            result = agent._query_llm_raw(
+                f"prompt\n{notice}",
+                "system",
+                512,
+                context_submission=tracker,
+            )
+
+        self.assertEqual(result, "continued without replay")
+        self.assertTrue(tracker.submitted)
 
     def test_compact_llm_uses_fast_ollama_after_primary_fail(self):
         # minime's chain is ollama -> fast-ollama (no MLX rung): MLX_URL@8090 is Astrid's.

@@ -4,6 +4,7 @@ from unittest.mock import Mock
 import pytest
 
 import autonomous_agent as aa
+from minime_autonomy import collaboration_attention
 from minime_autonomy.inbox_delivery import (
     InboxContext, InboxGeneration, InboxMessage, InboxPrompt,
     declared_replies, declared_reply, reply_blocks, save_generation,
@@ -49,6 +50,12 @@ def agent(monkeypatch):
                  "_llm_job_prompt_summary", "_owner_inquiry_prompt_summary",
                  "_get_relevant_research"):
         monkeypatch.setattr(agent, name, Mock(return_value=""))
+    monkeypatch.setattr(
+        agent,
+        "_prepare_collab_prompt_offer",
+        Mock(return_value=(None, None, "")),
+    )
+    monkeypatch.setattr(agent, "_finish_collab_prompt_offer", Mock())
     monkeypatch.setattr(aa, "format_btsp_status_for_prompt", Mock(return_value=""))
     monkeypatch.setattr(aa, "_append_llm_timing", Mock())
     return agent
@@ -63,7 +70,10 @@ def seed_inbox():
     return path, source
 
 
-@pytest.mark.parametrize("mode", ["default", "private_journal", "qualia_moment", "strict_review"])
+@pytest.mark.parametrize(
+    "mode",
+    ["default", "private_journal", "qualia_moment", "daydream", "strict_review"],
+)
 @pytest.mark.parametrize("model,compact", [("gemma4:12b", False), ("gemma3:4b", True)])
 def test_assembled_prompts_keep_authored_text_without_ambient_peer_state(agent, monkeypatch, mode, model, compact):
     agent._recent_next_actions = []
@@ -78,6 +88,7 @@ def test_assembled_prompts_keep_authored_text_without_ambient_peer_state(agent, 
     query = Mock(return_value="I choose an unrelated topic.\nNEXT: REST")
     monkeypatch.setattr(agent, "_query_llm_raw", query)
     agent._query_llm_with_next(own_text, context_mode=mode)
+    agent._prepare_collab_prompt_offer.assert_not_called()
     prompt, system = query.call_args.args[:2]
     # Exercise the same packing boundary used by live primary and fallback calls.
     messages, receipt = aa._adapt_ollama_messages_for_model(
@@ -99,6 +110,42 @@ def test_assembled_prompts_keep_authored_text_without_ambient_peer_state(agent, 
         assert receipt["protected_inbox_chars"] == len(inbox)
     else:
         reader.assert_not_called()
+
+
+def test_default_prompt_submits_one_exact_optional_collaboration_notice(agent, monkeypatch):
+    agent._recent_next_actions = []
+    monkeypatch.setattr(agent, "_persist_pending_next_action", Mock())
+    offer = collaboration_attention.PromptOffer(
+        collab_id="coll_test",
+        material_revision="sha256:" + "a" * 64,
+        event_id="shared_thoughts.jsonl:thought-2",
+        marker="[collab-attention-v1:aaaaaaaaaaaaaaaaaaaaaaaa]",
+        content=(
+            "[collab-attention-v1:aaaaaaaaaaaaaaaaaaaaaaaa] Collaboration update: "
+            "Astrid added a shared thought. No response is required; silence remains neutral."
+        ),
+    )
+    tracker = collaboration_attention.ContextSubmissionTracker(offer.content)
+    agent._prepare_collab_prompt_offer.return_value = (
+        offer,
+        tracker,
+        f"\n\n{offer.content}\n",
+    )
+
+    def query(prompt, _system, _max_tokens, **kwargs):
+        assert offer.content in prompt
+        assert kwargs["context_submission"] is tracker
+        tracker.mark_final_messages([{"role": "user", "content": prompt}])
+        return "I will let the update rest here.\nNEXT: REST"
+
+    monkeypatch.setattr(agent, "_query_llm_raw", Mock(side_effect=query))
+
+    response, next_action = agent._query_llm_with_next("This is your space.")
+
+    assert response == "I will let the update rest here.\nNEXT: REST"
+    assert next_action == "REST"
+    agent._finish_collab_prompt_offer.assert_called_once_with(offer, tracker)
+    assert tracker.submitted is True
 
 
 @pytest.mark.parametrize("model,compact,num_ctx", [

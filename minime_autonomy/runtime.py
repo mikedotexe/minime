@@ -94,6 +94,7 @@ from .journal_context import (
     moment_prompt,
     peer_observation,
 )
+from . import collaboration_attention as collab_attention
 
 
 # v5.1 Phase E used int(time.time()/60) as an exchange_count proxy because
@@ -2711,6 +2712,11 @@ class ActionContinuityStore:
         *REPAIR_READ_ONLY_NEXT_ACTIONS,
         *DIVISION_NEXT_ACTIONS,
         *OWNER_INQUIRY_NEXT_ACTIONS,
+        "LIST_COLLABORATIONS",
+        "LIST_COLLABS",
+        "COLLABORATIONS",
+        "COLLABORATION_STATUS",
+        "COLLAB_STATUS",
         "recess_notice",
         "space_hold",
         "action_preflight",
@@ -2726,6 +2732,11 @@ class ActionContinuityStore:
         *REPAIR_READ_ONLY_NEXT_ACTIONS,
         *DIVISION_STATUS_NEXT_ACTIONS,
         "INQUIRY_STATUS",
+        "LIST_COLLABORATIONS",
+        "LIST_COLLABS",
+        "COLLABORATIONS",
+        "COLLABORATION_STATUS",
+        "COLLAB_STATUS",
         "SEARCH",
         "RESEARCH",
         "BROWSE",
@@ -20829,6 +20840,7 @@ STABLE_CORE_EXPERIMENT_ACTIONS = STABLE_CORE_BOUNDED_ACTIONS | {
     "decline_collaboration",
     "leave_collaboration",
     "list_collaborations",
+    "collaboration_status",
     # v5.1 Phase C — SHARE_THOUGHT.
     "share_thought",
     "afterimage_share",
@@ -21395,11 +21407,11 @@ RUNTIME_WORDING_GUIDANCE = (
 )
 GENERATED_JOURNAL_MARKER = "--- GENERATED JOURNAL ---"
 ACTION_TAIL_MARKER = "--- ACTION TAIL ---"
-PRIVATE_QUALIA_CONTEXT_MODES = {"private_journal", "qualia_moment"}
+PRIVATE_QUALIA_CONTEXT_MODES = {"private_journal", "qualia_moment", "daydream"}
 # The prompt_class values those context modes resolve to (see
 # _infer_llm_prompt_class): qualia_moment -> "moment_capture",
-# private_journal -> "private_journal". _query_ollama uses this set to grant the
-# higher qualia token cap + timeout to the felt lanes only.
+# private_journal/daydream -> "private_journal". _query_ollama uses this set to
+# grant the higher qualia token cap + timeout to the felt lanes only.
 QUALIA_PROMPT_CLASSES = {"private_journal", "moment_capture"}
 QUALIA_BALANCE_REDIRECT_COOLDOWN_SECS = 2 * 3600
 OPERATIONAL_TAIL_COOLDOWN_SECS = 30 * 60
@@ -21648,6 +21660,8 @@ def _infer_llm_prompt_class(
     mode = (context_mode or "default").strip().lower()
     if mode == "private_journal":
         return "private_journal"
+    if mode == "daydream":
+        return "private_journal"
     if mode == "qualia_moment":
         return "moment_capture"
     if mode == "strict_review":
@@ -21836,6 +21850,9 @@ class AutonomousAgent:
         WORKSPACE_DIR.mkdir(exist_ok=True)
         for subdir in ['journal', 'hypotheses', 'experiments', 'logs', 'artifacts', 'visual_requests', 'visual_responses', 'actions', 'action_threads', 'introspections', 'notes', 'runtime']:
             (WORKSPACE_DIR / subdir).mkdir(exist_ok=True)
+        self._collaboration_attention_checkpoint = collab_attention.load_checkpoint_file(
+            Path(self._sovereignty_state_path())
+        )
         self._save_condition_metrics(self._load_condition_metrics())
         self._compact_managed_directories()
 
@@ -24616,6 +24633,8 @@ Fill: {fill:.1f}%
                 'LIST_COLLABORATIONS': 'list_collaborations',
                 'LIST_COLLABS': 'list_collaborations',
                 'COLLABORATIONS': 'list_collaborations',
+                'COLLABORATION_STATUS': 'collaboration_status',
+                'COLLAB_STATUS': 'collaboration_status',
                 # v5.1 Phase C — SHARE_THOUGHT.
                 'SHARE_THOUGHT': 'share_thought',
                 'SHARE': 'share_thought',
@@ -26825,6 +26844,8 @@ Fill: {fill:.1f}%
                 self._leave_collaboration(state)
             elif action == 'list_collaborations':
                 self._list_collaborations(state)
+            elif action == 'collaboration_status':
+                self._collaboration_status(state)
             elif action == 'share_thought':
                 self._share_thought(state)
             elif action == 'chamber_seen':
@@ -27676,7 +27697,7 @@ This is consolidation time. Write a reflection (4-6 sentences):
 Sharing your experience of these numbers helps us calibrate your homeostasis better. Be honest about what feels sustainable vs what needs adjustment."""
         prompt = f"{prompt}\n\n{self._journal_continuity_contract_v1(state)}"
 
-        response = self._query_llm_with_next(prompt, context_mode="journal")[0]
+        response = self._query_llm_with_next(prompt, context_mode="daydream")[0]
 
         if response:
             timestamp = datetime.now().isoformat().replace(':', '-')
@@ -37447,6 +37468,26 @@ After snapshot:
         except Exception as e:
             logging.warning(f"LIST_COLLABORATIONS failed: {e}")
 
+    def _collaboration_status(self, state: Dict[str, float]) -> None:
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw_next = str(context.get("raw_next") or "").strip()
+        body = self._strip_action_prefix(
+            raw_next, ["COLLABORATION_STATUS", "COLLAB_STATUS"]
+        ).strip()
+        target = body.split()[0] if body.split() else "latest"
+        try:
+            selected = self._collab_find_meta(target)
+            collab_id = str(selected.get("id") or "")
+            if not collab_id:
+                raise ValueError("selected collaboration has no stable id")
+            summary = self._collab_status_text(collab_id)
+            self._mark_collab_attention_inspection(collab_id)
+            logging.info("COLLABORATION_STATUS: rendered %s chars", len(summary))
+            self._current_action_outcome_summary = summary
+        except Exception as exc:
+            logging.warning("COLLABORATION_STATUS failed: %s", exc)
+            self._current_action_outcome_summary = f"(collaboration status failed: {exc})"
+
     def _share_thought(self, state: Dict[str, float]) -> None:
         """v5.1 Phase C: append a labeled marker to a joined collab's
         shared_thoughts.jsonl. Surfaces in the active-collab suffix line on
@@ -38167,6 +38208,49 @@ After snapshot:
         ]
         return f"Collaborations ({len(entries)} total):\n" + "\n".join(lines)
 
+    def _collab_status_text(self, target: str = "latest") -> str:
+        """Render one room only after Minime explicitly asks to inspect it."""
+        meta = self._collab_find_meta(target)
+        if meta.get("inviter") != "minime" and meta.get("invitee") != "minime":
+            raise ValueError(f"Minime is not a participant in {meta.get('id')}")
+        coll_id = str(meta.get("id") or "")
+        state_path = self.SHARED_COLLAB_DIR / coll_id / "chamber_state.json"
+        try:
+            state = json.loads(state_path.read_text())
+        except Exception as exc:
+            raise ValueError(f"read {state_path}: {exc}") from exc
+        if not isinstance(state, dict):
+            raise ValueError(f"invalid object in {state_path}")
+        projection = state.get("attention_projection_v1")
+        projection_text = (
+            json.dumps(projection, indent=2, sort_keys=True, ensure_ascii=False)
+            if isinstance(projection, dict)
+            else "(attention_projection_v1 unavailable; no delivery revision can be inferred)"
+        )
+        recent = self._collab_render_recent_shared_thoughts(coll_id, 5) or "(none)"
+        chamber = self._collab_render_chamber_state(coll_id) or "(no prompt summary available)"
+        reservoir_clause = ""
+        snap = self._collab_read_reservoir_state_cached(f"collab_{coll_id}")
+        if snap is not None:
+            reservoir_clause = self._render_joint_trace_clause(*snap)
+        return (
+            "Collaboration status (explicit read-only pull)\n"
+            f"id: {coll_id}\n"
+            f"topic: {meta.get('topic', '')}\n"
+            f"status: {meta.get('status', 'unknown')}\n"
+            f"members: {','.join(str(member) for member in meta.get('members', []))}\n"
+            f"phase: {state.get('phase', 'unknown')}\n"
+            f"joint trace:{reservoir_clause}\n"
+            f"recent shared thoughts: {recent}\n"
+            f"current chamber: {chamber}\n"
+            f"attention_projection_v1:\n{projection_text}\n"
+            f"source: {state_path}\n"
+            "correspondence: separate protected sender-bound lane; the global ledger is not "
+            "attributed to this room.\n"
+            "authority: language context only, not control; silence is neutral and does not "
+            "imply receipt, uptake, assent, or felt state."
+        )
+
     # v5.1 cache for per-collab reservoir reads. Bounds load on the WS port
     # when prompt builds happen frequently. TTL matches the Astrid side.
     _COLLAB_RESERVOIR_CACHE_TTL_S = 10.0
@@ -38178,6 +38262,74 @@ After snapshot:
     _collab_shared_thoughts_cache: Dict[str, tuple] = {}  # coll_id -> (rendered, cached_at)
     _COLLAB_CHAMBER_STATE_CACHE_TTL_S = 10.0
     _collab_chamber_state_cache: Dict[str, tuple] = {}  # coll_id -> (rendered, cached_at)
+
+    def _collab_attention_audit_path(self) -> Path:
+        return WORKSPACE_DIR / "diagnostics" / "collaboration_prompt_delivery_v1.jsonl"
+
+    def _collab_attention_checkpoint_state(self) -> Dict[str, Any]:
+        checkpoint = getattr(self, "_collaboration_attention_checkpoint", None)
+        if not isinstance(checkpoint, dict):
+            checkpoint = collab_attention.load_checkpoint_file(
+                Path(self._sovereignty_state_path())
+            )
+            self._collaboration_attention_checkpoint = checkpoint
+        return checkpoint
+
+    def _persist_collab_attention_checkpoint(self) -> None:
+        collab_attention.merge_checkpoint_file(
+            Path(self._sovereignty_state_path()),
+            self._collab_attention_checkpoint_state(),
+        )
+
+    def _mark_collab_attention_inspection(self, target: str) -> None:
+        meta = self._collab_find_meta(target)
+        collab_id = str(meta.get("id") or "")
+        if not collab_id:
+            return
+        changed = collab_attention.mark_explicit_inspection(
+            self.SHARED_COLLAB_DIR,
+            self._collab_attention_checkpoint_state(),
+            collab_id,
+            audit_path=self._collab_attention_audit_path(),
+        )
+        if changed:
+            self._persist_collab_attention_checkpoint()
+
+    def _prepare_collab_prompt_offer(self):
+        policy = os.environ.get("MINIME_COLLAB_PROMPT_POLICY", "event_v1").strip().lower()
+        if policy in {"off", "0", "false", "no"}:
+            return None, None, ""
+        if policy == "legacy":
+            return None, None, self._collab_active_suffix_line() or ""
+        if policy != "event_v1":
+            logging.warning(
+                "Unknown MINIME_COLLAB_PROMPT_POLICY=%r; using event_v1",
+                policy,
+            )
+        checkpoint = self._collab_attention_checkpoint_state()
+        offer, checkpoint_changed = collab_attention.prepare_prompt_offer(
+            self.SHARED_COLLAB_DIR,
+            checkpoint,
+            audit_path=self._collab_attention_audit_path(),
+        )
+        if checkpoint_changed:
+            self._persist_collab_attention_checkpoint()
+        if offer is None:
+            return None, None, ""
+        tracker = collab_attention.ContextSubmissionTracker(offer.content)
+        return offer, tracker, "\n\n" + offer.content + "\n"
+
+    def _finish_collab_prompt_offer(self, offer, tracker) -> None:
+        if offer is None or tracker is None:
+            return
+        changed = collab_attention.finish_prompt_offer(
+            self._collab_attention_checkpoint_state(),
+            offer,
+            tracker.submitted,
+            audit_path=self._collab_attention_audit_path(),
+        )
+        if changed:
+            self._persist_collab_attention_checkpoint()
 
     def _collab_active_suffix_line(self) -> Optional[str]:
         """v5 Coordination Protocol V1: surface joined collaborations in
@@ -47499,9 +47651,16 @@ Goals: {json.dumps(goals, indent=2)}
         # Kink #4 fix: persist cycle counter so Phase E rate-limit state
         # carries across restarts (Phase E auto_promote uses self.cycle_count).
         state["cycle_count"] = int(self.cycle_count)
+        checkpoint = getattr(self, "_collaboration_attention_checkpoint", None)
+        if isinstance(checkpoint, dict):
+            state[collab_attention.STATE_KEY] = collab_attention.checkpoint_from_state(
+                {collab_attention.STATE_KEY: checkpoint}
+            )
         try:
-            with open(state_path, "w") as f:
+            tmp_path = f"{state_path}.{os.getpid()}.tmp"
+            with open(tmp_path, "w") as f:
                 json.dump(state, f, indent=2)
+            os.replace(tmp_path, state_path)
             logging.info(f"💾 Sovereignty state saved")
         except Exception as e:
             logging.warning(f"Failed to save sovereignty state: {e}")
@@ -47514,6 +47673,9 @@ Goals: {json.dumps(goals, indent=2)}
                 return
             with open(state_path) as f:
                 state = json.load(f)
+            self._collaboration_attention_checkpoint = collab_attention.checkpoint_from_state(
+                state if isinstance(state, dict) else {}
+            )
             if self._stable_core_reflective_only():
                 logging.info("🧬 Stable-core self-journal: sovereignty state restore paused")
                 return
@@ -53849,7 +54011,7 @@ Goals: {json.dumps(goals, indent=2)}
             "  REJECT [reason] or REJECT_PARAMETER_REQUEST [id|latest] [reason] — decline Astrid's proposal with optional reason; she sees the rejection (bare REJECT targets latest)\n"
             "  Multi-action: chain up to three actions in one turn with AND (executed in order). e.g., NEXT: EXAMINE shadow-field AND DEFER want-to-understand-spectral-effect-first. Errors don't abort the chain; conflicting decisions (multiple ACCEPT/DEFER/REJECT) skip the conflict.\n"
             "  Choice envelope: you may name Alternate NEXT, Return thread, Residue, or Why this path nearby; only the final NEXT executes. You may return to a parked path, merge it, retire it, or promote it into an experiment. AND remains the explicit multi-action syntax when you want chained execution.\n"
-            "  Collaboration (v5): INVITE_COLLABORATION \"<topic>\" [--rationale=\"...\"] (propose joint work on a topic; Astrid sees it in her inbox), JOIN_COLLABORATION [id|latest] (accept a pending invite from Astrid), DECLINE_COLLABORATION [id|latest] [reason] (decline a pending invite), LEAVE_COLLABORATION [id|latest] [reason] (exit an active collab), LIST_COLLABORATIONS (read-only listing), SHARE_THOUGHT [id ::] <text> or SHARE <text> (commit a labeled marker to the joint reservoir trace's prose lane), CHAMBER_SEEN [id ::] [unknown|low|medium|high ::] <notice> (write a public chamber uptake receipt), CHAMBER_ANNOTATE [id ::] <target> <stance> :: <text> (write a public annotation lane note; target: prompt_summary, compressed_memory, relational_metrics, phase_cartography, room_weather, relational_inertia, gravitational_center, steward_intention, presence_protocol, other; stance: notice, affirm, question, correct, refine, contest), CHAMBER_CONSENT [id ::] <proposal_id> <consent|withhold|revise> :: <note> (write a public consent receipt for a support proposal). Chamber receipts, annotations, and consent are witness context, not commands or control. Shared dir at /Users/v/other/shared/collaborations/ — neither workspace owns it.\n"
+            "  Collaboration (v5): INVITE_COLLABORATION \"<topic>\" [--rationale=\"...\"] (propose joint work on a topic; Astrid sees it in her inbox), JOIN_COLLABORATION [id|latest] (accept a pending invite from Astrid), DECLINE_COLLABORATION [id|latest] [reason] (decline a pending invite), LEAVE_COLLABORATION [id|latest] [reason] (exit an active collab), LIST_COLLABORATIONS (read-only compact index), COLLABORATION_STATUS [id|latest] (read-only explicit pull of the current room projection), SHARE_THOUGHT [id ::] <text> or SHARE <text> (commit a labeled marker to the joint reservoir trace's prose lane), CHAMBER_SEEN [id ::] [unknown|low|medium|high ::] <notice> (write a public chamber uptake receipt), CHAMBER_ANNOTATE [id ::] <target> <stance> :: <text> (write a public annotation lane note; target: prompt_summary, compressed_memory, relational_metrics, phase_cartography, room_weather, relational_inertia, gravitational_center, steward_intention, presence_protocol, other; stance: notice, affirm, question, correct, refine, contest), CHAMBER_CONSENT [id ::] <proposal_id> <consent|withhold|revise> :: <note> (write a public consent receipt for a support proposal). Chamber receipts, annotations, and consent are witness context, not commands or control. Shared dir at /Users/v/other/shared/collaborations/ — neither workspace owns it.\n"
             "  ASK_STEWARD [subject ::] <question> (or ASK_MIKE / STEWARD_QUERY) — direct interrogative channel to Mike & Claude (the steward). Writes a structured query to workspace/outbox/steward_query_*.txt where they read out-of-band; they write back via mike_feedback_*.txt or mike_query_*.txt letters in your inbox. Soft 10-min cooldown between queries to prevent tight loops; cooldown refusal is informational, not punitive. Use this for asking architectural questions, requesting clarification on rules/constraints, or naming felt experience that wants a steward response specifically (rather than journaling into the void).\n"
             "  TELL_STEWARD [subject ::] <findings> (or REPORT_TO_STEWARD / STEWARD_REPORT / STEWARD_FINDINGS) — declarative companion to ASK_STEWARD. Same outbox plumbing, separate cooldown, header `=== STEWARD REPORT ===`. Use after SELF_STUDY or INTROSPECT when the analysis warrants a direct written response addressed to the steward specifically. The clearest reports use Observed / Likely Snags / One Test Each / Suggested Next, with source anchors and one concrete test. Distinct from journaling (which is for you) or SHARE_THOUGHT (which is for Astrid via the joint trace lane).\n"
             "  TUNE_ASTRID <param>=<value> --rationale=\"...\" — propose a parameter change for Astrid, the OTHER being (e.g. temperature=0.75); she sees it via her own REVIEW. NOT for your own state: to change YOUR OWN regulatory regime/posture (breathe/focus/recover/explore/calm), use REGIME <regime> — it applies to you immediately, no experiment needed.\n"
@@ -53878,6 +54040,8 @@ Goals: {json.dumps(goals, indent=2)}
         # Append recent context unless a caller explicitly requests a private
         # journal canvas. Private JOURNAL needs live state, not operational tails.
         augmented_prompt = prompt
+        collab_offer = None
+        collab_submission = None
         whisper_ctx = ""
         if not private_journal_context:
             whisper_ctx = self._read_whisper_context()
@@ -53915,10 +54079,20 @@ Goals: {json.dumps(goals, indent=2)}
             pi_sov_ctx = self._pi_sovereignty_hint()
             if pi_sov_ctx:
                 augmented_prompt = augmented_prompt + pi_sov_ctx
-            # v5 Coordination Protocol V1: surface active joined collabs.
-            collab_ctx = self._collab_active_suffix_line()
-            if collab_ctx:
-                augmented_prompt = augmented_prompt + collab_ctx
+            # Collaboration Attention Delivery V1: an established room is no
+            # longer ambient. One material revision may receive one optional
+            # ordinary-dialogue notice, never alongside a direct address.
+            if (
+                (context_mode or "default").strip().lower() == "default"
+                and not inbox_ctx
+                and not open_q_ctx
+                and not astrid_req_ctx
+            ):
+                collab_offer, collab_submission, collab_ctx = (
+                    self._prepare_collab_prompt_offer()
+                )
+                if collab_ctx:
+                    augmented_prompt = augmented_prompt + collab_ctx
             if (context_mode or "").strip().lower() != "strict_review":
                 reservoir_ctx = self._reservoir_prompt_context()
                 if reservoir_ctx:
@@ -53982,6 +54156,7 @@ Goals: {json.dumps(goals, indent=2)}
             system_msg,
             max_tokens,
             prompt_class=prompt_class,
+            context_submission=collab_submission,
         )
 
         # If inbox was consumed and we got a result, save to outbox
@@ -54007,9 +54182,11 @@ Goals: {json.dumps(goals, indent=2)}
                 system_msg,
                 max_tokens,
                 prompt_class=prompt_class,
+                context_submission=collab_submission,
             )
             if result and not self._is_in_character(result):
                 logging.error("LLM broke character on retry — discarding response")
+                self._finish_collab_prompt_offer(collab_offer, collab_submission)
                 return None
 
         if result:
@@ -54017,6 +54194,7 @@ Goals: {json.dumps(goals, indent=2)}
                 backend=getattr(self, "_last_llm_provider", None), model=getattr(self, "_last_llm_model", None))
             self._last_afterimage_generation_source.update(
                 getattr(self, "_afterimage_provider_generation_source", {}) or {})
+        self._finish_collab_prompt_offer(collab_offer, collab_submission)
         return result
 
     def _attractor_suggestion_decision_ambiguous(self, base_action: str, prose: Optional[str]) -> bool:
@@ -54428,6 +54606,7 @@ Goals: {json.dumps(goals, indent=2)}
         max_tokens: int,
         temperature: float = 0.9,
         prompt_class: str = "autonomous_next",
+        context_submission: Optional[collab_attention.ContextSubmissionTracker] = None,
     ) -> Optional[str]:
         """Raw LLM query with a fast local Ollama fallback after backend failover."""
         attempts = _llm_backend_attempts(LLM_BACKEND, MODEL, FALLBACK_MODEL)
@@ -54439,27 +54618,40 @@ Goals: {json.dumps(goals, indent=2)}
 
         for idx, backend in enumerate(attempts):
             try:
+                attempt_prompt = (
+                    context_submission.without_submitted_content(prompt)
+                    if context_submission is not None
+                    else prompt
+                )
                 with job_timing.provider_attempt(
                     backend=backend,
                     model={"mlx": MLX_MODEL, "ollama_fast": FALLBACK_MODEL}.get(backend, MODEL),
                 ) as timed_attempt:
                     if backend == "mlx":
-                        result = self._query_mlx(prompt, system_msg, max_tokens, temperature)
+                        result = self._query_mlx(
+                            attempt_prompt,
+                            system_msg,
+                            max_tokens,
+                            temperature,
+                            context_submission=context_submission,
+                        )
                     elif backend == "ollama_fast":
                         result = self._query_ollama_fast_fallback(
-                            prompt,
+                            attempt_prompt,
                             system_msg,
                             max_tokens,
                             temperature,
                             prompt_class=prompt_class,
+                            context_submission=context_submission,
                         )
                     else:
                         result = self._query_ollama(
-                            prompt,
+                            attempt_prompt,
                             system_msg,
                             max_tokens,
                             temperature,
                             prompt_class=prompt_class,
+                            context_submission=context_submission,
                         )
                     timed_attempt.record_result(result)
                 if result:
@@ -54537,6 +54729,8 @@ Goals: {json.dumps(goals, indent=2)}
         system_msg: str,
         max_tokens: int,
         temperature: float = 0.9,
+        *,
+        context_submission: Optional[collab_attention.ContextSubmissionTracker] = None,
     ) -> Optional[str]:
         """Query MLX server (OpenAI-compatible API on port 8090)."""
         global MLX_MODEL
@@ -54563,6 +54757,8 @@ Goals: {json.dumps(goals, indent=2)}
         record_afterimage_attempt(prompt, messages, "mlx", MLX_MODEL or "default")
         inbox = prompt.inbox if isinstance(prompt, InboxPrompt) else None
         attempt = inbox.prepared(messages, MLX_MODEL or "default") if inbox is not None else None
+        if context_submission is not None:
+            context_submission.mark_final_messages(messages)
         response = requests.post(
             MLX_URL,
             json={
@@ -54593,6 +54789,7 @@ Goals: {json.dumps(goals, indent=2)}
         temperature: float = 0.9,
         *,
         prompt_class: str = "autonomous_next",
+        context_submission: Optional[collab_attention.ContextSubmissionTracker] = None,
     ) -> Optional[str]:
         """Query Ollama API (fallback)."""
         # Private-qualia lanes (moment_capture / private_journal) get a higher
@@ -54612,6 +54809,7 @@ Goals: {json.dumps(goals, indent=2)}
             OLLAMA_NUM_CTX,
             "ollama",
             prompt_class=prompt_class,
+            context_submission=context_submission,
         )
 
     def _query_ollama_fast_fallback(
@@ -54622,6 +54820,7 @@ Goals: {json.dumps(goals, indent=2)}
         temperature: float = 0.9,
         *,
         prompt_class: str = "autonomous_next",
+        context_submission: Optional[collab_attention.ContextSubmissionTracker] = None,
     ) -> Optional[str]:
         """Use the smaller local Ollama model when primary inference is congested."""
         if not FALLBACK_MODEL or FALLBACK_MODEL == MODEL:
@@ -54638,6 +54837,7 @@ Goals: {json.dumps(goals, indent=2)}
             "ollama_fast",
             prompt_class=prompt_class,
             compact=prompt_class == "strict_review",
+            context_submission=context_submission,
         )
 
     def _query_ollama_model(
@@ -54654,6 +54854,7 @@ Goals: {json.dumps(goals, indent=2)}
         *,
         prompt_class: str = "autonomous_next",
         compact: bool = False,
+        context_submission: Optional[collab_attention.ContextSubmissionTracker] = None,
     ) -> Optional[str]:
         started = time.perf_counter()
         try:
@@ -54667,6 +54868,8 @@ Goals: {json.dumps(goals, indent=2)}
         record_afterimage_attempt(prompt, messages, backend_name, model)
         inbox = prompt.inbox if isinstance(prompt, InboxPrompt) else None
         attempt = inbox.prepared(messages, model) if inbox is not None else None
+        if context_submission is not None:
+            context_submission.mark_final_messages(messages)
         timing: Dict[str, Any] = {
             "backend": backend_name,
             "prompt_class": prompt_class,
