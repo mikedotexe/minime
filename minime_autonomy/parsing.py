@@ -629,6 +629,11 @@ def parse_next_action(text: str) -> tuple:
         if in_fence:
             continue
         if stripped.upper().startswith('NEXT:'):
+            raw_next = lines[i].lstrip()[5:].lstrip()
+            if raw_next.upper().startswith("AFTERIMAGE_KEEP "):
+                # The fragment is data, including trailing space and RESIDUE-like text.
+                cleaned = '\n'.join(lines[:i] + lines[i+1:]).strip()
+                return _parse_result(raw_next, cleaned)
             action = stripped[5:].strip()
             # Strip model end-of-turn tokens that leak into the action.
             action = action.replace('<end_of_turn>', '').replace('</s>', '').strip()

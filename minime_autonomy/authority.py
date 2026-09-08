@@ -43,6 +43,11 @@ class ActionPreflightStore:
 
     schema_version = 1
     ROUTE_BY_BASE = {
+        "AFTERIMAGE_LIST": "afterimage",
+        "AFTERIMAGE_OPEN": "afterimage",
+        "AFTERIMAGE_KEEP": "afterimage",
+        "AFTERIMAGE_SHARE": "afterimage_share",
+        "AFTERIMAGE_CUES": "afterimage",
         "SELF_STUDY": "self_study",
         "INTROSPECT": "introspect",
         "EXPERIMENT": "self_experiment",
@@ -325,7 +330,7 @@ class ActionPreflightStore:
         likely_gate = "normal dispatcher gates would apply"
         continuity = "Would record an action event and observation window if executed."
 
-        if _has_unresolved_angle_placeholder(inner):
+        if base != "AFTERIMAGE_KEEP" and _has_unresolved_angle_placeholder(inner):
             route = "placeholder"
             stage = "blocked"
             visibility = "protected_summary"
@@ -707,6 +712,11 @@ class CapabilitySelfMap:
 
     def _specs(self) -> List[Dict[str, Any]]:
         return [
+            {"base": "AFTERIMAGE_LIST", "aliases": ["AFTERIMAGE_OPEN", "AFTERIMAGE_KEEP", "AFTERIMAGE_CUES"],
+             "route": "afterimage", "continuity_effect": "reads physical transition archives; writes only owned notes, explicit sharing, capture requests and cue preferences",
+             "expected_artifacts": ["transition_afterimage_v1", "transition_afterimage_note_v1"], "known_tests": ["tests.test_afterimages"]},
+            {"base": "AFTERIMAGE_SHARE", "route": "afterimage_share", "continuity_effect": "explicitly publishes one owned note with its attribution; existing sharing-stage gates apply",
+             "expected_artifacts": ["transition_afterimage_note_v1"], "known_tests": ["tests.test_afterimages"]},
             {"base": "FACULTIES", "aliases": ["CAPABILITY_MAP"], "route": "thread_action", "continuity_effect": "writes a capability snapshot and records a protected read-only action", "known_tests": ["tests.test_experimental_continuity"]},
             {"base": "CAPABILITY_STATUS", "route": "thread_action", "known_tests": ["tests.test_experimental_continuity"]},
             {"base": "CAPABILITY_DIFF", "route": "thread_action", "known_tests": ["tests.test_experimental_continuity"]},

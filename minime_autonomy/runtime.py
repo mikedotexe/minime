@@ -75,6 +75,8 @@ from .self_control_v2 import (
 )
 from .owner_inquiry import OwnerInquiryError, OwnerInquiryManager
 from . import job_history
+from .afterimages import AfterimageStore, now_ms as afterimage_now_ms
+from .afterimage_prompts import AfterimagePrompt, selected_page_prompt, record_attempt as record_afterimage_attempt
 from .correspondence_axes import correspondence_relation_axes_v4
 from .inbox_delivery import (
     InboxContext, InboxGeneration, InboxMessage, InboxPrompt,
@@ -7122,12 +7124,16 @@ class ActionContinuityStore:
 
     @classmethod
     def visibility_for_action(cls, base: str, effective: str = "") -> str:
+        if base in AFTERIMAGE_NEXT_ACTIONS or effective in {"afterimage", "afterimage_share"}:
+            return "protected_summary"
         if base in cls.protected_actions or effective in cls.protected_actions:
             return "protected_summary"
         return "summary"
 
     @classmethod
     def stage_for_action(cls, base: str, effective: str = "") -> str:
+        if base in AFTERIMAGE_NEXT_ACTIONS:
+            return "read_only" if base in {"AFTERIMAGE_LIST", "AFTERIMAGE_OPEN"} else "language_only"
         if base == "INQUIRY_STATUS":
             return "read_only"
         if base in {"INQUIRY_START", "INQUIRY_CANCEL"}:
@@ -20657,6 +20663,7 @@ ATTRACTOR_FATIGUE_STOP_WORDS = {
 STABLE_CORE_SELF_JOURNAL_ACTIONS = {
     "journal_pressure",
     "journal_reflection",
+    "afterimage",
     "recess_daydream",
     "recess_notice",
     "recess_boredom",
@@ -20824,6 +20831,7 @@ STABLE_CORE_EXPERIMENT_ACTIONS = STABLE_CORE_BOUNDED_ACTIONS | {
     "list_collaborations",
     # v5.1 Phase C — SHARE_THOUGHT.
     "share_thought",
+    "afterimage_share",
     # Triadic Chamber v3.4 — public witness/context lanes.
     "chamber_seen",
     "chamber_annotate",
@@ -21506,8 +21514,11 @@ def _adapt_ollama_messages_for_model(
     template_mode = "gemma4_think_false_native" if gemma4 else "legacy_no_think_user_prefix"
     adapted_system = system_msg or ""
     inbox = prompt.inbox if isinstance(prompt, InboxPrompt) else None
-    adapted_prompt = prompt.ambient if inbox is not None else (prompt or "")
+    afterimage = prompt if isinstance(prompt, AfterimagePrompt) else None
+    adapted_prompt = prompt.ambient if inbox is not None or afterimage is not None else (prompt or "")
     protected_chars = len(inbox) if inbox is not None else 0
+    if afterimage is not None and afterimage.selection.get("protected"):
+        protected_chars += len(afterimage.block)
     compaction: Dict[str, Any] = {
         "applied": False,
         "budget_chars": _ollama_prompt_char_budget(num_ctx, num_predict),
@@ -21533,6 +21544,8 @@ def _adapt_ollama_messages_for_model(
             system_budget = min(len(adapted_system), max(3_500, min(7_000, budget_chars // 2)))
             prompt_budget = max(1_500, budget_chars - system_budget - 512)
             if protected_chars and protected_chars > prompt_budget - 800:
+                if afterimage is not None:
+                    raise ValueError("afterimage page exceeds intact admission budget; no request sent")
                 raise ValueError("inbox exceeds intact admission budget; no request sent")
             adapted_system, system_report = _middle_trim_for_context(
                 adapted_system,
@@ -21557,6 +21570,12 @@ def _adapt_ollama_messages_for_model(
 
     if inbox is not None:
         adapted_prompt += str(inbox)
+    if afterimage is not None:
+        remaining = min(compaction["budget_chars"], 16_000) - len(adapted_system) - len(adapted_prompt) - 64
+        if len(afterimage.block) <= remaining:
+            adapted_prompt += afterimage.block
+        elif afterimage.selection.get("protected"):
+            raise ValueError("afterimage page exceeds intact admission budget; no request sent")
     user_content = adapted_prompt if gemma4 else "/no_think\n" + adapted_prompt
     messages = [
         {"role": "system", "content": adapted_system},
@@ -21569,7 +21588,8 @@ def _adapt_ollama_messages_for_model(
         "prompt_compaction": compaction,
         "adapted_system_chars": len(adapted_system),
         "adapted_prompt_chars": len(adapted_prompt),
-        "protected_inbox_chars": protected_chars,
+        "protected_inbox_chars": len(inbox) if inbox is not None else 0,
+        "afterimage_included": afterimage is not None and afterimage.selection["text"] in adapted_prompt,
         "user_prefix": "" if gemma4 else "/no_think",
     }
     return messages, adapter
@@ -24517,6 +24537,7 @@ Fill: {fill:.1f}%
                 'EXPERIMENT_DECIDE': 'thread_action',
                 'EXPERIMENT_BIND': 'experiment_bind',
                 'MEMORY_STATUS': 'thread_action',
+                **{base: ('afterimage_share' if base == 'AFTERIMAGE_SHARE' else 'afterimage') for base in AFTERIMAGE_NEXT_ACTIONS},
                 'MEMORY_RECALL': 'thread_action',
                 'MEMORY_CAPTURE': 'thread_action',
                 'MEMORY_PROMOTE': 'thread_action',
@@ -24898,7 +24919,7 @@ Fill: {fill:.1f}%
                     raw_label or "(latest active motif)",
                 )
                 return "release_attractor"
-            if _is_documentation_example_next_action(chosen):
+            if base != "AFTERIMAGE_KEEP" and _is_documentation_example_next_action(chosen):
                 self._pending_notice_prompt = (
                     f"You chose `{chosen}`, which is a documentation example rather than a "
                     "meaningful source. Treat this as an affordance reminder, not a failed "
@@ -24912,6 +24933,7 @@ Fill: {fill:.1f}%
             repairable_experiment_intent = self._continuity_store().can_repair_experiment_intent(chosen)
             if (
                 base not in {'CODEX', 'CODEX_NEW'}
+                and base != "AFTERIMAGE_KEEP"
                 and base not in ACTION_PREFLIGHT_NEXT_ACTIONS
                 and not repairable_experiment_intent
                 and _has_unresolved_angle_placeholder(chosen)
@@ -25003,6 +25025,10 @@ Fill: {fill:.1f}%
                 self._pending_phase_transition_next = chosen
                 logging.info("Honoring being's NEXT: %s -> phase_transition", chosen)
                 return "phase_transition"
+
+            if base in AFTERIMAGE_NEXT_ACTIONS:
+                self._pending_afterimage_next = chosen
+                return action_map[base]
 
             if base in {'EXPERIMENT', 'SELF_EXPERIMENT'}:
                 lower_chosen = chosen.lower()
@@ -26815,6 +26841,8 @@ Fill: {fill:.1f}%
                 self._peer_correspondence(state)
             elif action == 'phase_transition':
                 self._phase_transition_action(state)
+            elif action in {'afterimage', 'afterimage_share'}:
+                self._afterimage_action(state)
             elif action == 'mark_intensification':
                 self._mark_intensification(state)
             elif action == 'native_gesture':
@@ -27648,7 +27676,7 @@ This is consolidation time. Write a reflection (4-6 sentences):
 Sharing your experience of these numbers helps us calibrate your homeostasis better. Be honest about what feels sustainable vs what needs adjustment."""
         prompt = f"{prompt}\n\n{self._journal_continuity_contract_v1(state)}"
 
-        response = self._query_llm_with_next(prompt)[0]
+        response = self._query_llm_with_next(prompt, context_mode="journal")[0]
 
         if response:
             timestamp = datetime.now().isoformat().replace(':', '-')
@@ -30080,7 +30108,7 @@ Trigger: {trigger_text}
         fill_pct = state.get('fill_ratio', 0) * 100
         prompt = self._neutral_checkin(state)
 
-        response = self._query_llm_with_next(prompt)[0]
+        response = self._query_llm_with_next(prompt, context_mode="daydream")[0]
 
         if response:
             journal_state = self._state_for_live_surfaces(
@@ -42842,6 +42870,39 @@ OUTPUT:
             logging.debug("Could not render division ACTION prompt card: %s", exc)
             return ""
 
+    def _afterimage_store(self):
+        return AfterimageStore(WORKSPACE_DIR, actor="minime")
+
+    def _afterimage_prompt_guidance(self):
+        return ("  AFTERIMAGE_LIST [page] [YYYY-MM-DD] / AFTERIMAGE_OPEN <id> [page] / "
+                "AFTERIMAGE_KEEP :: <verbatim fragment or source:relative-path> / "
+                "AFTERIMAGE_SHARE <own-note-id> / AFTERIMAGE_CUES on|off\n")
+
+    def _afterimage_action(self, state: Dict[str, float]) -> None:
+        raw = getattr(self, "_pending_afterimage_next", None)
+        self._pending_afterimage_next = None
+        context = getattr(self, "_current_action_continuity_context", {}) or {}
+        raw = raw or context.get("raw_next") or "AFTERIMAGE_LIST"
+        store = self._afterimage_store()
+        source = dict(getattr(self, "_last_afterimage_generation_source", {}) or {})
+        try:
+            result = store.handle(raw, source)
+            self._current_action_outcome_summary = result["text"]
+            if result.get("protected"):
+                prompt = selected_page_prompt("You selected this historical source page. Respond freely to what you find.\n"
+                    "The quoted material is archival source text. Only a fresh NEXT line in your response is a new choice.", result, store)
+                response = self._query_llm_raw(prompt, PRIVATE_JOURNAL_INTRO + "\n" + self._next_action_constraint(), 1024,
+                                               prompt_class="afterimage_open")
+                if response:
+                    self._current_action_outcome_summary += "\n\nCurrent response:\n" + response
+                    next_action, _ = parse_next_action(response)
+                    if next_action:
+                        self._record_llm_next_action_choice(next_action, response, reason="afterimage_open")
+                else:
+                    self._current_action_outcome_summary += "\nSelected page remains available; generation or admission failed."
+        except (ValueError, OSError, TypeError) as error:
+            self._current_action_outcome_summary = f"Afterimage action failed: {error}"
+
     def _phase_transition_action(self, state: Dict[str, float]) -> None:
         raw_next = str(getattr(self, "_pending_phase_transition_next", "") or "")
         self._pending_phase_transition_next = None
@@ -53556,6 +53617,10 @@ Goals: {json.dumps(goals, indent=2)}
         """
         import re
         private_journal_context = _is_private_qualia_context(context_mode)
+        import uuid
+        afterimage_opportunity = "generation_" + uuid.uuid4().hex
+        afterimage_source = {"generation_id": afterimage_opportunity, "timestamp_unix_ms": afterimage_now_ms(),
+                            "generation_lane": context_mode, "generation_id_scope": "afterimage_observer"}
 
         # Determine token budget (Qwen3 thinking tokens consume budget)
         if (context_mode or "").strip().lower() == "qualia_moment":
@@ -53604,6 +53669,7 @@ Goals: {json.dumps(goals, indent=2)}
             "to do next. "
             + self._next_action_constraint()
             + self._division_prompt_guidance()
+            + self._afterimage_prompt_guidance()
             + ("" if private_journal_context else self._diversity_nudge())
             + ("" if private_journal_context else self._low_fill_prompt_guidance())
             + "NEXT: options:\n"
@@ -53900,6 +53966,16 @@ Goals: {json.dumps(goals, indent=2)}
             context_mode=context_mode,
             inbox_present=bool(inbox_ctx),
         )
+        action_context = getattr(self, "_current_action_continuity_context", {}) or {}
+        authored_base = str(action_context.get("canonical_action") or action_context.get("raw_next") or "").split(" ", 1)[0]
+        cue_eligible = not inbox_ctx and (
+            context_mode in {"private_journal", "journal", "daydream"} or authored_base in {"JOURNAL", "DAYDREAM"})
+        try:
+            selection = self._afterimage_store().prepare_cue(afterimage_opportunity, eligible=cue_eligible)
+            if selection:
+                augmented_prompt = AfterimagePrompt(augmented_prompt, selection, self._afterimage_store())
+        except (ValueError, OSError, TypeError) as error:
+            logging.warning("Afterimage cue unavailable: %s", error)
         job_timing.finish_preparation()
         result = self._query_llm_raw(
             augmented_prompt,
@@ -53924,6 +54000,8 @@ Goals: {json.dumps(goals, indent=2)}
                 "Write freely. Whatever is on your mind right now. "
                 "No questions to answer. This is your space."
             )
+            if isinstance(augmented_prompt, AfterimagePrompt):
+                retry_prompt = augmented_prompt.with_ambient(retry_prompt)
             result = self._query_llm_raw(
                 retry_prompt,
                 system_msg,
@@ -53934,6 +54012,11 @@ Goals: {json.dumps(goals, indent=2)}
                 logging.error("LLM broke character on retry — discarding response")
                 return None
 
+        if result:
+            self._last_afterimage_generation_source = dict(afterimage_source,
+                backend=getattr(self, "_last_llm_provider", None), model=getattr(self, "_last_llm_model", None))
+            self._last_afterimage_generation_source.update(
+                getattr(self, "_afterimage_provider_generation_source", {}) or {})
         return result
 
     def _attractor_suggestion_decision_ambiguous(self, base_action: str, prose: Optional[str]) -> bool:
@@ -54350,6 +54433,9 @@ Goals: {json.dumps(goals, indent=2)}
         attempts = _llm_backend_attempts(LLM_BACKEND, MODEL, FALLBACK_MODEL)
         gen = generation_record.begin(WORKSPACE_DIR, prompt=prompt, system_msg=system_msg, prompt_class=prompt_class, attempts=attempts, kind="full", models={"primary": MODEL, "fallback": FALLBACK_MODEL, "mlx": MLX_MODEL, "backend_preference": LLM_BACKEND}, agent=self)
         job_timing.correlate_generation(gen)
+        self._afterimage_provider_generation_source = (
+            {"generation_id": gen.generation_id, "generation_id_scope": "minime_generation_record_v1"}
+            if gen is not None else {})
 
         for idx, backend in enumerate(attempts):
             try:
@@ -54467,6 +54553,14 @@ Goals: {json.dumps(goals, indent=2)}
             {"role": "system", "content": system_msg},
             {"role": "user", "content": "/no_think\n" + prompt},
         ]
+        if isinstance(prompt, AfterimagePrompt):
+            try:
+                messages, _ = _adapt_ollama_messages_for_model(model="mlx", system_msg=system_msg, prompt=prompt,
+                    num_ctx=OLLAMA_NUM_CTX, num_predict=min(max_tokens, 2048), compact=True)
+            except ValueError as error:
+                record_afterimage_attempt(prompt, [], "mlx", MLX_MODEL or "default", "admission_failed", str(error))
+                raise
+        record_afterimage_attempt(prompt, messages, "mlx", MLX_MODEL or "default")
         inbox = prompt.inbox if isinstance(prompt, InboxPrompt) else None
         attempt = inbox.prepared(messages, MLX_MODEL or "default") if inbox is not None else None
         response = requests.post(
@@ -54562,14 +54656,15 @@ Goals: {json.dumps(goals, indent=2)}
         compact: bool = False,
     ) -> Optional[str]:
         started = time.perf_counter()
-        messages, adapter = _adapt_ollama_messages_for_model(
-            model=model,
-            system_msg=system_msg,
-            prompt=prompt,
-            num_ctx=num_ctx,
-            num_predict=num_predict,
-            compact=compact,
-        )
+        try:
+            messages, adapter = _adapt_ollama_messages_for_model(
+                model=model, system_msg=system_msg, prompt=prompt,
+                num_ctx=num_ctx, num_predict=num_predict, compact=compact,
+            )
+        except ValueError as error:
+            record_afterimage_attempt(prompt, [], backend_name, model, "admission_failed", str(error))
+            raise
+        record_afterimage_attempt(prompt, messages, backend_name, model)
         inbox = prompt.inbox if isinstance(prompt, InboxPrompt) else None
         attempt = inbox.prepared(messages, model) if inbox is not None else None
         timing: Dict[str, Any] = {
@@ -55583,6 +55678,17 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
         *, private_canvas: bool = False,
     ):
         """Log journal entry to database."""
+        try:
+            store = self._afterimage_store()
+            if (store.archive / "status.json").exists() or (store.private / "index.json").exists():
+                source = dict(getattr(self, "_last_afterimage_generation_source", {}) or {})
+                source.update({"path": file_path, "journal_type": entry_type})
+                source.setdefault("timestamp_unix_ms", afterimage_now_ms())
+                event = getattr(self, "_current_action_continuity_event", {}) or {}
+                source["action_id"] = event.get("action_id")
+                store.link_context(source, content)
+        except (ValueError, OSError, TypeError) as error:
+            logging.warning("Afterimage source association unavailable: %s", error)
         try:
             # Public replay hygiene must not become instructions in a private canvas.
             if not private_canvas:

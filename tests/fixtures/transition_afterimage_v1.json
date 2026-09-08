@@ -1,0 +1,23 @@
+{
+  "policy": "transition_afterimage_v1",
+  "schema_version": 1,
+  "id": "ai_2026-09-07_fixture_001",
+  "session_id": "fixture_session",
+  "origin": "detected_event",
+  "anchor_engine_t_ms": 60000,
+  "anchor_unix_ms": 1788753600000,
+  "window_start_engine_t_ms": 30000,
+  "window_end_engine_t_ms": 150000,
+  "status": "incomplete",
+  "reasons": ["sparse_fixture"],
+  "capture_policy": {"pre_ms": 30000, "post_ms": 90000, "raw_activations_retained": false},
+  "request_ids": [],
+  "events": [{"session_id":"fixture_session","sequence":1,"engine_t_ms":60000,"event":{"phase":"expanding","crossed_target_fill":true}}],
+  "samples": [
+    {"channel":"body","engine_t_ms":30000,"wall_clock_unix_ms":1788753570000,"expected_cadence_ms":1000,"values":{"fill_pct":68.0,"lambda_stress":0.1}},
+    {"channel":"body","engine_t_ms":60000,"wall_clock_unix_ms":1788753600000,"expected_cadence_ms":1000,"values":{"fill_pct":73.0,"lambda_stress":0.2}},
+    {"channel":"body","engine_t_ms":150000,"wall_clock_unix_ms":1788753690000,"expected_cadence_ms":1000,"values":{"fill_pct":68.0,"lambda_stress":0.1}}
+  ],
+  "coverage": {"channels":{"body":{"samples":3,"gaps":[{"from_ms":30000,"to_ms":60000}],"invalid_samples":0}}},
+  "measurements": {"fill_half_return_s":{"value":null,"reason":"insufficient_contiguous_coverage"}}
+}

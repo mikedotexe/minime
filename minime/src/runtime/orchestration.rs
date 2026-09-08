@@ -608,6 +608,7 @@ async fn run_engine(
 
     // Start database session
     let session_id = db.start_session("active", 0.999998, "Neural-integrated session")?;
+    let afterimage_observer = AfterimageObserver::from_env(&workspace_dir, &session_id.to_string());
     println!("✅ Session {} started", session_id);
 
     // Log session start event
@@ -3210,6 +3211,16 @@ async fn run_engine(
                     &esn.x,
                 ) {
                     let _ = activation_trace_recorder.write_json(&activation_trace_path);
+                    if let (Some(observer), Some(frame)) = (&afterimage_observer, activation_trace_recorder.latest_frame()) {
+                        let mut sample = AfterimageSample::new("activation", frame.t_ms, serde_json::json!({
+                            "summary": &frame.summary,
+                            "top_active_node_indexes": &frame.top_active_node_indexes,
+                            "stage": &frame.stage,
+                            "esn_lambda1": esn.get_eig(),
+                        }), minime::activation_trace::ACTIVATION_SAMPLE_INTERVAL_MS);
+                        sample.wall_clock_unix_ms = frame.wall_clock_unix_ms;
+                        observer.observe(sample);
+                    }
                 }
 
                 // Update spectral source with ESN eigenvalues (real consciousness state)
@@ -3659,6 +3670,18 @@ async fn run_engine(
                 let target_lambda1_rel =
                     pi_reg.as_ref().map_or(1.05, |pi| pi.cfg.target_lambda1_rel);
 
+                if let Some(observer) = &afterimage_observer {
+                    observer.observe(AfterimageSample::new("body", start.elapsed().as_millis() as u64,
+                        serde_json::json!({"fill_pct": eigenfill_pct, "dfill_dt": dfill_dt,
+                            "phase": phase, "cascade_lambda1": lambda1, "lambda1_rel": lambda1_rel,
+                            "target_lambda1_rel": target_lambda1_rel,
+                            "lambda_stress": (lambda1_rel - target_lambda1_rel).abs(),
+                            "geom_rel": geom_rel, "spectral_entropy": latest_entropy,
+                            "stable_core_stage": format!("{:?}", stable_core_stage).to_ascii_lowercase(),
+                            "stable_core_mode": stable_core_structural_mode.to_string()}),
+                        (reg_tick_secs.max(1.0) * 1_000.0) as u64));
+                }
+
                 // Log phase transitions to consciousness_events AND moment markers
                 phase_transition_happened = phase != previous_phase;
                 let phase_dwell_ticks_for_event = phase_dwell_ticks;
@@ -3838,6 +3861,9 @@ async fn run_engine(
                     last_transition_event = event.legacy_json();
                     last_transition_event_v1 =
                         serde_json::to_value(&event).unwrap_or_else(|_| serde_json::json!(null));
+                    if let Some(observer) = &afterimage_observer {
+                        observer.event(&session_id.to_string(), &last_transition_event_v1);
+                    }
                     last_transition_event_tick = reg_tick_count;
                 } else {
                     last_transition_reason = format!("steady:{phase}/{current_fill_band}");
@@ -5173,6 +5199,9 @@ async fn run_engine(
                 last_transition_event = event.legacy_json();
                 last_transition_event_v1 =
                     serde_json::to_value(&event).unwrap_or_else(|_| serde_json::json!(null));
+                if let Some(observer) = &afterimage_observer {
+                    observer.event(&session_id.to_string(), &last_transition_event_v1);
+                }
                 sync_health_transition_surface(
                     &workspace_dir,
                     log_homeostat,
@@ -5377,6 +5406,22 @@ async fn run_engine(
                 distinguishability_loss,
             );
             latest_inhabitable_fluctuation_v1 = Some(inhabitable_fluctuation_v1.clone());
+            if let Some(observer) = &afterimage_observer {
+                observer.observe(AfterimageSample::new("spectral", start.elapsed().as_millis() as u64,
+                    serde_json::json!({"current_glimpse_12d": &current_glimpse_12d,
+                        "cascade_eigenvalues_top12": eigenvalues.iter().take(12).copied().collect::<Vec<_>>(),
+                        "structural_entropy": structural_entropy,
+                        "resonance_density_v1": {"density": resonance_density_v1.density,
+                            "containment_score": resonance_density_v1.containment_score,
+                            "components": &resonance_density_v1.components,
+                            "texture_signature": &resonance_density_v1.texture_signature},
+                        "pressure_source_v1": {"pressure_score": pressure_source_v1.pressure_score,
+                            "porosity_score": pressure_source_v1.porosity_score,
+                            "components": &pressure_source_v1.components},
+                        "inhabitable_fluctuation_v1": {"components": &inhabitable_fluctuation_v1.components,
+                            "fluctuation_score": inhabitable_fluctuation_v1.fluctuation_score,
+                            "rearrangement_intensity": inhabitable_fluctuation_v1.rearrangement_intensity}}), 1_000));
+            }
             previous_resonance_eigenvalues = Some(eigenvalues.clone());
             let _ = db.save_inhabitable_fluctuation(
                 session_id,

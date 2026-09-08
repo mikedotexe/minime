@@ -19,6 +19,7 @@ use minime::controller_recovery::{
 use minime::spectral_fingerprint::{SpectralDenominatorV1, SpectralFingerprintV1};
 use minime::stable_core::StableCoreRuntime;
 use minime::startup_restore::load_regulator_context;
+use minime::transition_afterimage::{AfterimageObserver, Sample as AfterimageSample};
 use minime::transition_event::{
     build_transition_event, fill_band, glimpse_distance as transition_glimpse_distance,
     TransitionEventInput, TRANSITION_FILL_BAND_THRESHOLD_PCT,

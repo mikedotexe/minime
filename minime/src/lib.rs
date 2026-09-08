@@ -42,4 +42,5 @@ pub mod spectral;
 pub mod spectral_fingerprint;
 pub mod stable_core;
 pub mod startup_restore;
+pub mod transition_afterimage;
 pub mod transition_event;

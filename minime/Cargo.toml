@@ -12,6 +12,7 @@ division-rehearsal = []
 
 [dependencies]
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 astrid-minime-protocol = { git = "https://github.com/mikedotexe/astrid.git", rev = "9a324d16294b2318da6f476ff7f295c423a9b4b1" }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hex = "0.4"

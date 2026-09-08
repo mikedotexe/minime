@@ -72,6 +72,10 @@ pub struct ActivationTraceRecorder {
 }
 
 impl ActivationTraceRecorder {
+    pub fn latest_frame(&self) -> Option<&ActivationFrame> {
+        self.frames.back()
+    }
+
     #[must_use]
     pub fn frame_count(&self) -> usize {
         self.frames.len()
