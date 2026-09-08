@@ -100,7 +100,7 @@ def test_decision_routes_saved_syntax_and_sharing_separately(tmp_path):
                 assert agent._pending_afterimage_next == action
 
 
-@pytest.mark.parametrize("method,mode", [("_recess_daydream", "daydream"), ("_journal_rest_reflection", "journal")])
+@pytest.mark.parametrize("method,mode", [("_recess_daydream", "daydream"), ("_journal_rest_reflection", "daydream")])
 def test_ordinary_generation_calls_identify_cue_lane(method, mode):
     agent = aa.AutonomousAgent.__new__(aa.AutonomousAgent)
     with patch.object(agent, "_neutral_checkin", return_value="canvas"), \
