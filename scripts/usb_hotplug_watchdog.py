@@ -42,6 +42,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 LOG_PATH = Path("/Users/v/other/minime/logs/usb_hotplug_watchdog.log")
 
@@ -79,11 +80,11 @@ def _log(msg: str) -> None:
     print(f"{ts}  {msg}", flush=True)
 
 
-def _sp_query(data_type: str) -> dict[str, Any]:
+def _sp_query(data_type: str) -> dict[str, Any] | None:
     """Run `system_profiler <data_type> -json` and return parsed JSON.
 
-    Returns empty dict on any failure — caller handles gracefully so a
-    flaky system_profiler doesn't kill the watchdog.
+    Returns None on failure. An unavailable observation is not evidence that
+    every previously observed device was removed.
     """
     try:
         res = subprocess.run(
@@ -92,25 +93,34 @@ def _sp_query(data_type: str) -> dict[str, Any]:
         )
     except Exception as e:
         _log(f"system_profiler {data_type} failed: {e}")
-        return {}
+        return None
     if res.returncode != 0:
         _log(f"system_profiler {data_type} returned rc={res.returncode}: {res.stderr.strip()[:120]}")
-        return {}
+        return None
     try:
-        return json.loads(res.stdout)
+        data = json.loads(res.stdout)
     except Exception as e:
         _log(f"system_profiler {data_type} JSON parse failed: {e}")
-        return {}
+        return None
+    if not isinstance(data, dict):
+        _log(f"system_profiler {data_type} JSON root was not an object")
+        return None
+    return data
 
 
-def list_camera_devices() -> set[str]:
+def list_camera_devices() -> set[str] | None:
     """Return a set of identifying strings for currently-attached cameras.
 
     Identity is `model-id` when present (includes VendorID + ProductID),
     falling back to `_name` for built-in cameras that have no model-id.
     """
     data = _sp_query("SPCameraDataType")
-    cameras = data.get("SPCameraDataType", []) or []
+    if data is None:
+        return None
+    cameras = data.get("SPCameraDataType")
+    if not isinstance(cameras, list):
+        _log("system_profiler SPCameraDataType omitted its expected list; retaining prior observation")
+        return None
     ids: set[str] = set()
     for cam in cameras:
         mid = cam.get("spcamera_model-id") or cam.get("_name", "?")
@@ -118,7 +128,7 @@ def list_camera_devices() -> set[str]:
     return ids
 
 
-def list_usb_audio_input_devices() -> set[str]:
+def list_usb_audio_input_devices() -> set[str] | None:
     """Return a set of identifying strings for currently-attached USB audio inputs.
 
     Walks SPAudioDataType, keeping only entries where
@@ -127,7 +137,12 @@ def list_usb_audio_input_devices() -> set[str]:
     headphone-only USB devices). Identity is `_name + manufacturer + srate`.
     """
     data = _sp_query("SPAudioDataType")
-    audio_root = data.get("SPAudioDataType", []) or []
+    if data is None:
+        return None
+    audio_root = data.get("SPAudioDataType")
+    if not isinstance(audio_root, list):
+        _log("system_profiler SPAudioDataType omitted its expected list; retaining prior observation")
+        return None
     ids: set[str] = set()
     for parent in audio_root:
         for item in parent.get("_items", []) or []:
@@ -141,24 +156,44 @@ def list_usb_audio_input_devices() -> set[str]:
     return ids
 
 
-def snapshot() -> dict[str, set[str]]:
+def snapshot() -> dict[str, set[str] | None]:
     return {
         "cameras": list_camera_devices(),
         "usb_audio_inputs": list_usb_audio_input_devices(),
     }
 
 
-def diff_snapshots(old: dict[str, set[str]], new: dict[str, set[str]]) -> dict[str, dict[str, set[str]]]:
-    """Compute added / removed sets per category."""
+def diff_snapshots(
+    old: dict[str, set[str] | None],
+    new: dict[str, set[str] | None],
+) -> dict[str, dict[str, set[str]]]:
+    """Compute device changes only where both observations succeeded."""
     out: dict[str, dict[str, set[str]]] = {}
     for k in ("cameras", "usb_audio_inputs"):
-        old_set = old.get(k, set())
-        new_set = new.get(k, set())
+        old_set = old.get(k)
+        new_set = new.get(k)
+        if old_set is None or new_set is None:
+            continue
         added = new_set - old_set
         removed = old_set - new_set
         if added or removed:
             out[k] = {"added": added, "removed": removed}
     return out
+
+
+def merge_snapshot(
+    current: dict[str, set[str] | None],
+    observed: dict[str, set[str] | None],
+) -> dict[str, set[str] | None]:
+    """Retain the last successful category observation across probe failures."""
+    return {
+        category: (
+            observed.get(category)
+            if observed.get(category) is not None
+            else current.get(category)
+        )
+        for category in ("cameras", "usb_audio_inputs")
+    }
 
 
 def kickstart_labels(labels: list[str], dry_run: bool = False) -> list[tuple[str, int]]:
@@ -208,14 +243,20 @@ def watchdog_loop(
 ) -> int:
     """Main loop. Returns only on fatal failure (process otherwise lives until launchd boots it out)."""
     baseline = snapshot()
+    camera_count = "unknown" if baseline["cameras"] is None else str(len(baseline["cameras"]))
+    audio_count = (
+        "unknown"
+        if baseline["usb_audio_inputs"] is None
+        else str(len(baseline["usb_audio_inputs"]))
+    )
     _log(
         f"watchdog started (poll={poll_interval}s, debounce={post_kickstart_debounce}s, "
-        f"dry_run={dry_run}); baseline cameras={len(baseline['cameras'])} "
-        f"usb_audio_inputs={len(baseline['usb_audio_inputs'])}"
+        f"dry_run={dry_run}); baseline cameras={camera_count} "
+        f"usb_audio_inputs={audio_count}"
     )
-    for cam in sorted(baseline["cameras"]):
+    for cam in sorted(baseline["cameras"] or set()):
         _log(f"  baseline camera: {cam}")
-    for au in sorted(baseline["usb_audio_inputs"]):
+    for au in sorted(baseline["usb_audio_inputs"] or set()):
         _log(f"  baseline usb-audio: {au}")
     current = baseline
     while True:
@@ -226,11 +267,11 @@ def watchdog_loop(
             _log(f"snapshot raised: {e}; continuing loop")
             continue
         diff = diff_snapshots(current, new)
+        current = merge_snapshot(current, new)
         if not diff:
             continue
         _log(f"DEVICE CHANGE: {fmt_diff(diff)}")
         kickstart_labels(KICKSTART_LABELS, dry_run=dry_run)
-        current = new
         _log(f"debounce {post_kickstart_debounce}s after kickstart")
         time.sleep(post_kickstart_debounce)
 
@@ -260,6 +301,20 @@ class WatchdogTests(unittest.TestCase):
         old = {"cameras": {"a"}, "usb_audio_inputs": {"c"}}
         new = {"cameras": {"a"}, "usb_audio_inputs": {"c"}}
         self.assertEqual(diff_snapshots(old, new), {})
+
+    def test_failed_probe_is_not_a_device_removal(self) -> None:
+        current = {"cameras": {"camera-a"}, "usb_audio_inputs": {"mic-a"}}
+        observed = {"cameras": None, "usb_audio_inputs": {"mic-a"}}
+        self.assertEqual(diff_snapshots(current, observed), {})
+        self.assertEqual(merge_snapshot(current, observed), current)
+
+    @mock.patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired("system_profiler", 8))
+    def test_system_profiler_timeout_is_unknown(self, _run: mock.Mock) -> None:
+        self.assertIsNone(_sp_query("SPCameraDataType"))
+
+    def test_missing_camera_root_is_unknown(self) -> None:
+        with mock.patch.object(sys.modules[__name__], "_sp_query", return_value={}):
+            self.assertIsNone(list_camera_devices())
 
     def test_fmt_diff_includes_category(self) -> None:
         diff = {
@@ -327,11 +382,17 @@ def main() -> int:
 
     if args.once:
         snap = snapshot()
-        print(f"cameras ({len(snap['cameras'])}):")
-        for c in sorted(snap["cameras"]):
+        camera_count = "unknown" if snap["cameras"] is None else str(len(snap["cameras"]))
+        audio_count = (
+            "unknown"
+            if snap["usb_audio_inputs"] is None
+            else str(len(snap["usb_audio_inputs"]))
+        )
+        print(f"cameras ({camera_count}):")
+        for c in sorted(snap["cameras"] or set()):
             print(f"  {c}")
-        print(f"usb_audio_inputs ({len(snap['usb_audio_inputs'])}):")
-        for a in sorted(snap["usb_audio_inputs"]):
+        print(f"usb_audio_inputs ({audio_count}):")
+        for a in sorted(snap["usb_audio_inputs"] or set()):
             print(f"  {a}")
         return 0
 
