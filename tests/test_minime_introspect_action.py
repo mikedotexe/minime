@@ -288,246 +288,52 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
             self.assertIn("INTROSPECT autonomous_agent.py 400", text)
             self.assertEqual(next_offset, 400)
 
-    def test_execute_introspect_writes_artifact_manifest_and_continuity(self):
+    def test_source_introspect_delegates_exact_offset_to_shared_reader(self):
+        agent = object.__new__(aa.AutonomousAgent)
+        agent._pending_introspect_target = "minime/minime_autonomy/runtime.py"
+        agent._pending_introspect_offset = 400
+        with patch.object(agent, "_resolve_introspect_target", return_value=(None, None)), patch.object(agent, "_run_shared_source_study") as study:
+            agent._introspect(dict(STATE))
+        study.assert_called_once_with(dict(STATE), "SELF_STUDY OPEN minime/minime_autonomy/runtime.py 401")
+        self.assertIsNone(agent._pending_introspect_target)
+
+    def test_source_introspect_without_offset_resumes_in_shared_reader(self):
+        agent = object.__new__(aa.AutonomousAgent)
+        agent._pending_introspect_target = "minime:esn"
+        agent._pending_introspect_offset = 0
+        with patch.object(agent, "_resolve_introspect_target", return_value=(None, None)), patch.object(agent, "_run_shared_source_study") as study:
+            agent._introspect(dict(STATE))
+        study.assert_called_once_with(dict(STATE), "SELF_STUDY RESUME minime:esn")
+
+    def test_next_self_study_preserves_full_navigation_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            base_dir = root / "minime"
-            workspace = base_dir / "workspace"
-            db_path = root / "minime.db"
-            write_lines(base_dir / "autonomous_agent.py", 420)
-            agent = self._agent(base_dir, workspace, db_path)
-            agent._pending_next_action = "INTROSPECT autonomous_agent.py"
-
-            with (
-                patch.object(aa, "BASE_DIR", base_dir),
-                patch.object(aa, "WORKSPACE_DIR", workspace),
-                patch.object(aa, "DB_PATH", db_path),
-                patch.object(agent, "_persist_pending_next_action"),
-                patch.object(agent, "_low_fill_guard_status", return_value={
-                    "active": False,
-                    "fill_ratio": 0.68,
-                    "target_fill_ratio": 0.68,
-                    "spread_relief": 0.0,
-                }),
-            ):
+            agent = self._agent(root / "minime", root / "workspace", root / "db.sqlite")
+            agent._pending_next_action = "SELF_STUDY OPEN astrid/crates/astrid-kernel/src/lib.rs 451"
+            with patch.object(agent, "_persist_pending_next_action"), patch.object(agent, "_low_fill_guard_status", return_value={"active": False}):
                 action = agent._decide_action(dict(STATE))
-            self.assertEqual(action, "introspect")
+            self.assertEqual(action, "self_study")
+            self.assertEqual(agent._pending_source_study_action, "SELF_STUDY OPEN astrid/crates/astrid-kernel/src/lib.rs 451")
 
-            with (
-                patch.object(aa, "BASE_DIR", base_dir),
-                patch.object(aa, "WORKSPACE_DIR", workspace),
-                patch.object(aa, "DB_PATH", db_path),
-                patch.object(agent, "_low_fill_guard_status", return_value={
-                    "active": False,
-                    "fill_ratio": 0.68,
-                    "target_fill_ratio": 0.68,
-                    "spread_relief": 0.0,
-                }),
-                patch.object(agent, "_stable_core_action_allowed", return_value=(True, "test")),
-                patch.object(agent, "_state_for_live_surfaces", return_value=dict(STATE)),
-                patch.object(agent, "_stable_core_reflective_only", return_value=True),
-                patch.object(agent, "_format_metrics", return_value="metrics"),
-                patch.object(agent, "_query_llm_strict_review", return_value=SECTIONED_INTROSPECTION) as query,
-                patch.object(agent, "_write_journal_entry"),
-                patch.object(agent, "_log_decision"),
-                patch.object(agent, "_record_stable_core_agent_success"),
-            ):
-                agent._execute_action(action, dict(STATE))
-
-            prompt = query.call_args.args[0]
-            self.assertIn("felt texture, generated-word quality, tone", prompt)
-            self.assertIn("then cite source lines, symbols, or telemetry", prompt)
-            artifacts = list((workspace / "introspections").glob("introspect_*.txt"))
-            self.assertEqual(len(artifacts), 1)
-            artifact_text = artifacts[0].read_text()
-            self.assertIn("Likely Snags:", artifact_text)
-            self.assertIn("One Test Each:", artifact_text)
-
-            manifests = list((workspace / "actions").glob("*_introspect.json"))
-            self.assertEqual(len(manifests), 1)
-            manifest = json.loads(manifests[0].read_text())
-            artifact_kinds = {
-                item["kind"]
-                for item in manifest["action_continuity"].get("artifacts", [])
-            }
-            self.assertIn("introspection", artifact_kinds)
-            self.assertIn(
-                "INTROSPECT read `autonomous_agent.py`",
-                manifest["action_continuity"]["outcome_summary"],
-            )
-
-            event = agent._last_action_continuity_event
-            self.assertEqual(event["effective_action"], "introspect")
-            self.assertEqual(event["stage"], "read_only")
-            self.assertIn("INTROSPECT read `autonomous_agent.py`", event["outcome_summary"])
-            self.assertIn("offset 0", event["outcome_summary"])
-            self.assertTrue(any(item["kind"] == "introspection" for item in event["artifacts"]))
-
-    def test_introspect_repairs_continuation_only_output(self):
+    def test_self_study_keeps_continuation_only_response_and_receipt(self):
+        from unittest.mock import Mock
+        from minime_autonomy.source_study import SourceStudyPrompt
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            base_dir = root / "minime"
-            workspace = base_dir / "workspace"
-            db_path = root / "minime.db"
-            write_lines(base_dir / "autonomous_agent.py", 420)
-            agent = self._agent(base_dir, workspace, db_path)
-            agent._pending_introspect_target = "autonomous_agent.py"
-
-            with (
-                patch.object(aa, "BASE_DIR", base_dir),
-                patch.object(aa, "WORKSPACE_DIR", workspace),
-                patch.object(agent, "_state_for_live_surfaces", return_value=dict(STATE)),
-                patch.object(agent, "_stable_core_reflective_only", return_value=True),
-                patch.object(agent, "_format_metrics", return_value="metrics"),
-                patch.object(
-                    agent,
-                    "_query_llm_strict_review",
-                    side_effect=[
-                        "NEXT: INTROSPECT autonomous_agent.py 400",
-                        SECTIONED_INTROSPECTION,
-                    ],
-                ) as query,
-                patch.object(agent, "_write_journal_entry") as journal,
-            ):
-                agent._introspect(dict(STATE))
-
-            self.assertEqual(query.call_count, 2)
-            first_prompt = query.call_args_list[0].args[0]
-            repair_prompt = query.call_args_list[1].args[0]
-            self.assertIn("felt texture, generated-word quality, tone", first_prompt)
-            self.assertIn("then cite source lines, symbols, or telemetry", first_prompt)
-            self.assertIn("felt texture, generated-word quality, tone", repair_prompt)
-            self.assertIn("before citing source lines, symbols, or telemetry", repair_prompt)
-            artifacts = list((workspace / "introspections").glob("introspect_*.txt"))
-            self.assertEqual(len(artifacts), 1)
-            self.assertIn("Observed:", artifacts[0].read_text())
-            self.assertIn("Suggested Next:", artifacts[0].read_text())
-            journal.assert_called_once()
-
-    def test_introspect_accepted_output_enqueues_terminal_next_after_validation(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            base_dir = root / "minime"
-            workspace = base_dir / "workspace"
-            db_path = root / "minime.db"
-            write_lines(base_dir / "autonomous_agent.py", 420)
-            agent = self._agent(base_dir, workspace, db_path)
-            agent._pending_introspect_target = "autonomous_agent.py"
-
-            with (
-                patch.object(aa, "BASE_DIR", base_dir),
-                patch.object(aa, "WORKSPACE_DIR", workspace),
-                patch.object(agent, "_state_for_live_surfaces", return_value=dict(STATE)),
-                patch.object(agent, "_stable_core_reflective_only", return_value=True),
-                patch.object(agent, "_format_metrics", return_value="metrics"),
-                patch.object(agent, "_query_llm_strict_review", return_value=SECTIONED_INTROSPECTION),
-                patch.object(agent, "_persist_pending_next_action") as persist,
-                patch.object(agent, "_write_journal_entry"),
-            ):
-                agent._introspect(dict(STATE))
-
-            self.assertEqual(agent._pending_next_action, "NOTICE")
-            persist.assert_called_once_with(
-                "NOTICE",
-                reason="accepted strict review next choice",
-            )
-
-    def test_introspect_double_thin_output_records_protected_notice(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            base_dir = root / "minime"
-            workspace = base_dir / "workspace"
-            db_path = root / "minime.db"
-            write_lines(base_dir / "autonomous_agent.py", 420)
-            agent = self._agent(base_dir, workspace, db_path)
-            agent._pending_next_action = "INTROSPECT autonomous_agent.py"
-
-            with (
-                patch.object(aa, "BASE_DIR", base_dir),
-                patch.object(aa, "WORKSPACE_DIR", workspace),
-                patch.object(aa, "DB_PATH", db_path),
-                patch.object(agent, "_persist_pending_next_action"),
-                patch.object(agent, "_low_fill_guard_status", return_value={
-                    "active": False,
-                    "fill_ratio": 0.68,
-                    "target_fill_ratio": 0.68,
-                    "spread_relief": 0.0,
-                }),
-            ):
-                action = agent._decide_action(dict(STATE))
-
-            with (
-                patch.object(aa, "BASE_DIR", base_dir),
-                patch.object(aa, "WORKSPACE_DIR", workspace),
-                patch.object(aa, "DB_PATH", db_path),
-                patch.object(agent, "_low_fill_guard_status", return_value={
-                    "active": False,
-                    "fill_ratio": 0.68,
-                    "target_fill_ratio": 0.68,
-                    "spread_relief": 0.0,
-                }),
-                patch.object(agent, "_stable_core_action_allowed", return_value=(True, "test")),
-                patch.object(agent, "_state_for_live_surfaces", return_value=dict(STATE)),
-                patch.object(agent, "_stable_core_reflective_only", return_value=True),
-                patch.object(agent, "_format_metrics", return_value="metrics"),
-                patch.object(
-                    agent,
-                    "_query_llm_strict_review",
-                    side_effect=[
-                        "NEXT: INTROSPECT autonomous_agent.py 400",
-                        "NEXT: INTROSPECT autonomous_agent.py 400",
-                    ],
-                ),
-                patch.object(agent, "_write_journal_entry"),
-                patch.object(agent, "_log_decision"),
-                patch.object(agent, "_record_stable_core_agent_success"),
-            ):
-                agent._execute_action(action, dict(STATE))
-
-            manifests = list((workspace / "actions").glob("*_introspect.json"))
-            self.assertEqual(len(manifests), 1)
-            manifest = json.loads(manifests[0].read_text())
-            artifact = manifest["action_continuity"]["artifacts"][0]
-            self.assertEqual(artifact["kind"], "thin_introspection_output")
-            self.assertEqual(artifact["visibility"], "protected")
-            self.assertIn("output was thin", manifest["action_continuity"]["outcome_summary"])
-            artifact_text = Path(artifact["path_or_uri"]).read_text()
-            self.assertIn("NEXT: INTROSPECT autonomous_agent.py 400", artifact_text)
-
-    def test_introspect_thin_next_only_output_does_not_enqueue_action(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            base_dir = root / "minime"
-            workspace = base_dir / "workspace"
-            db_path = root / "minime.db"
-            write_lines(base_dir / "autonomous_agent.py", 420)
-            agent = self._agent(base_dir, workspace, db_path)
-            agent._pending_introspect_target = "autonomous_agent.py"
-
-            with (
-                patch.object(aa, "BASE_DIR", base_dir),
-                patch.object(aa, "WORKSPACE_DIR", workspace),
-                patch.object(agent, "_state_for_live_surfaces", return_value=dict(STATE)),
-                patch.object(agent, "_stable_core_reflective_only", return_value=True),
-                patch.object(agent, "_format_metrics", return_value="metrics"),
-                patch.object(
-                    agent,
-                    "_query_llm_strict_review",
-                    side_effect=["NEXT: LOOK", "NEXT: LOOK"],
-                ),
-                patch.object(agent, "_persist_pending_next_action") as persist,
-                patch.object(agent, "_write_journal_entry"),
-            ):
-                agent._introspect(dict(STATE))
-
-            self.assertIsNone(agent._pending_next_action)
-            persist.assert_not_called()
-            artifacts = list((workspace / "introspections").glob("introspect_*.txt"))
-            self.assertEqual(len(artifacts), 1)
-            artifact_text = artifacts[0].read_text()
-            self.assertIn("thin answer", artifact_text)
-            self.assertIn("NEXT: LOOK", artifact_text)
-            self.assertIn("NEXT: INTROSPECT autonomous_agent.py 400", artifact_text)
+            workspace = root / "workspace"
+            agent = self._agent(root / "minime", workspace, root / "db.sqlite")
+            prompt = SourceStudyPrompt(Mock(), {"text": "source page", "system_prompt": "freeform", "page": {"source": "minime/minime_autonomy/runtime.py"}})
+            prompt.receipt = {"verified": True}
+            with patch.object(aa, "WORKSPACE_DIR", workspace), patch.object(aa, "StudyClient") as client, patch.object(agent, "_query_llm_raw", return_value="NEXT: SELF_STUDY CONTINUE") as raw, patch.object(agent, "_emit_next_hints") as hints, patch.object(agent, "_persist_pending_next_action"), patch.object(agent, "_state_for_live_surfaces", return_value=dict(STATE)), patch.object(agent, "_write_journal_entry") as journal, patch.object(agent, "_query_llm_strict_review") as review:
+                client.return_value.prepare.return_value = prompt
+                agent._self_study(dict(STATE))
+            self.assertIs(raw.call_args.args[0], prompt)
+            self.assertEqual(raw.call_count, 1)
+            hints.assert_not_called()
+            review.assert_not_called()
+            self.assertEqual(agent._pending_next_action, "SELF_STUDY CONTINUE")
+            self.assertIn("NEXT: SELF_STUDY CONTINUE", journal.call_args.args[1])
+            self.assertEqual(len(list((workspace / "journal").glob("self_study_*.txt"))), 1)
 
     def test_stable_core_classifies_introspect_like_self_study(self):
         self.assertIn("introspect", aa.STABLE_CORE_SELF_JOURNAL_ACTIONS)

@@ -531,7 +531,10 @@ class TestExperimentalContinuityStore(unittest.TestCase):
             self.assertNotIn(phrase, source)
         self.assertIn("RUNTIME_WORDING_GUIDANCE", source)
         self.assertIn("spectral runtime and language-agent research project", source)
-        self.assertIn("free-flowing notes", source)
+        # Source-study prose now comes from the common reader's prompt;
+        # the runtime must pass that prompt through instead of imposing review sections.
+        self.assertTrue('prompt.output["system_prompt"]' in source)
+        self.assertTrue('context_mode="source_study"' in source)
 
     def test_experiment_records_runs_observations_and_close(self):
         with tempfile.TemporaryDirectory() as tmp:

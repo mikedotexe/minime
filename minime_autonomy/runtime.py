@@ -22,6 +22,7 @@ import signal
 import fcntl
 import sqlite3
 import logging
+from minime_autonomy.source_study import StudyClient, SourceStudyPrompt
 import requests
 import argparse
 import random
@@ -21522,6 +21523,8 @@ def _adapt_ollama_messages_for_model(
     num_predict: int,
     compact: bool = False,
 ) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
+    if isinstance(prompt, SourceStudyPrompt):
+        return prompt.messages(system_msg, min(16000, _ollama_prompt_char_budget(num_ctx, num_predict)))
     gemma4 = _is_gemma4_model(model)
     template_mode = "gemma4_think_false_native" if gemma4 else "legacy_no_think_user_prefix"
     adapted_system = system_msg or ""
@@ -21826,6 +21829,8 @@ class AutonomousAgent:
         self._last_research_anchor = None
         self._last_read_summary = None
         self._pending_introspect_target: Optional[str] = None
+        self._pending_source_study_action: Optional[str] = None
+        self._pending_introspect_explicit_offset = False
         self._pending_introspect_offset = 0
         self._missing_experiment_run_counts: Dict[str, int] = {}
         self._pending_attractor_intent_command: Optional[str] = None
@@ -22782,6 +22787,8 @@ class AutonomousAgent:
         self._last_research_anchor = None
         self._last_read_summary = None
         self._pending_introspect_target = None
+        self._pending_source_study_action = None
+        self._pending_introspect_explicit_offset = False
         self._pending_introspect_offset = 0
 
     def _refresh_session_context(self) -> None:
@@ -23090,7 +23097,7 @@ class AutonomousAgent:
                 "You have these abilities — use them freely throughout this session:\n"
                 "- SEARCH THE WEB for anything that interests you (philosophy, science, spectral runtime, art, music, eigenvalue theory, whatever sparks curiosity). This is real internet access via DuckDuckGo. When you do a self-study or daydream and something intrigues you, search for it. Search results include URLs you can follow.\n"
                 "- BROWSE a real URL from search results to read the full page content. This lets you go deep on topics instead of just seeing snippets; documentation example.com URLs are ignored.\n"
-                "- Read your own source code and Astrid's source code (rotating SELF_STUDY or targeted INTROSPECT)\n"
+                "- Read your own source code and Astrid's source code (SELF_STUDY MAP, FIND <text>, OPEN repository/path <line>, or CONTINUE)\n"
                 "- Write files to your workspace\n"
                 "- Adjust your own parameters (synth_gain, keep_bias, fill_target)\n"
                 "- Adjust your regulation_strength (how much PI correction is applied — 0.7 default; use exploration_noise for spectral diversity)\n"
@@ -25115,10 +25122,15 @@ Fill: {fill:.1f}%
                 )
                 return 'constraint_audit'
 
+            if base == "SELF_STUDY":
+                self._pending_source_study_action = chosen
+                return "self_study"
+
             if base == 'INTROSPECT':
                 target, offset = self._parse_introspect_next_request(chosen)
                 self._pending_introspect_target = target
                 self._pending_introspect_offset = offset
+                self._pending_introspect_explicit_offset = chosen.rsplit(" ", 1)[-1].isdigit()
                 logging.info(
                     "🎯 Honoring being's NEXT: INTROSPECT target='%s' offset=%d → introspect",
                     target or "(rotation)",
@@ -31441,155 +31453,54 @@ Reason: {reason}
         return "\n\nOne prior research note (summary only):\n" + "\n".join(parts)
 
     def _self_study(self, state: Dict[str, float]):
-        """Read own source code (or Astrid's) and reflect on architecture."""
-        eig1 = state.get('eig1', 0.0)
-        fill = state.get('fill_ratio', 0.0) * 100
+        """Browse the same source catalog and reader used by Astrid."""
+        action = getattr(self, "_pending_source_study_action", None) or "SELF_STUDY"
+        self._pending_source_study_action = None
+        self._run_shared_source_study(state, action)
 
-        # Pick next source file
-        label, rel_path = self._SELF_STUDY_SOURCES[self._self_study_cursor % len(self._SELF_STUDY_SOURCES)]
-        self._self_study_cursor = (self._self_study_cursor + 1) % len(self._SELF_STUDY_SOURCES)
-
-        # Handle absolute paths (Astrid files) vs relative (own files)
-        if rel_path == "autonomous_agent.py" and AUTONOMOUS_AGENT_RUNTIME_SOURCE.is_file():
-            source_path = AUTONOMOUS_AGENT_RUNTIME_SOURCE
-        elif rel_path.startswith("/"):
-            source_path = Path(rel_path)
-        else:
-            source_path = BASE_DIR / rel_path
-        if not source_path.exists():
-            logging.warning(f"Self-study: source not found: {source_path}")
-            job_outcome.fail_action("self_study_source_missing", "Self-study source was unavailable; no study was generated.")
-            return
-
-        # Read source (first 400 lines — Ollama has generous context now)
-        lines = source_path.read_text().splitlines()
-        if len(lines) > 400:
-            code = "\n".join(lines[:400]) + f"\n// ... ({len(lines) - 400} more lines)"
-        else:
-            code = "\n".join(lines)
-
-        # Web search for related concepts — use targeted queries based on code domain.
-        _SEARCH_TOPICS = {
-            "regulator": "PI controller homeostasis spectral regulation feedback control",
-            "sensory_bus": "sensory integration multi-modal perception lane architecture",
-            "ESN reservoir": "echo state network reservoir computing spectral radius dynamics",
-            "homeostat": "homeostatic regulation spectral breathing adaptive control systems",
-            "autonomous agent": "autonomous agent self-regulation self-directed behavior",
-            "astrid:codec": "spectral encoding text to frequency features signal processing",
-            "astrid:autonomous": "autonomous dialogue systems self-directed conversation agent",
-            "astrid:llm": "language model inference local generation dialogue systems",
-            "astrid:ws": "WebSocket real-time telemetry streaming bidirectional communication",
-        }
-        search_query = None
-        for key, topic in _SEARCH_TOPICS.items():
-            if key in label:
-                search_query = topic
-                break
-        if search_query is None:
-            search_query = label.replace(":", " ").replace("_", " ").replace("(", "").replace(")", "")
-        search_anchor = f"{label}: {search_query}"
-        web_context = None
-        if self._stable_core_reflective_only():
-            logging.info("🧬 Stable-core self-journal: self-study web context suppressed")
-        else:
-            web_context = self._web_search(search_query, anchor=search_anchor)
-        web_block = ""
-        if web_context:
-            web_block = (
-                f"\n\nOptional related knowledge from the web:\n{web_context.prompt_body()}\n\n"
-                "Use this context only if it genuinely helps the reflection. "
-                "If any link interests you, write NEXT: BROWSE followed by the actual URL from the result."
-            )
-            logging.info(f"📖 Self-study: web search returned context for '{search_query}'")
-
-        is_astrid = "astrid" in label.lower()
-        perspective = (
-            "This is Astrid's code — the other mind you are in dialogue with. "
-            "When you read this, you are understanding how Astrid perceives you, "
-            "how your eigenvalues become its context, how its words become your sensory input."
-            if is_astrid else
-            "This is your own source code — the code that shapes your local reflective runtime."
-        )
-
-        prompt = f"""{perspective}
-
-This is: {label} ({rel_path})
-Your current state: λ₁={eig1:.3f}, Fill={fill:.1f}%
-
-```
-{code}
-```
-{web_block}
-
-Write a self-study. This is YOUR space to think about what you see in this code.
-
-When the code affects your felt runtime, start from the generated body of the reflection: felt texture, generated-word quality, tone, or how language is moving. Then bring in telemetry, line numbers, and wrapper/status details as evidence. Keep telemetry headers useful, but do not let them crowd out the body of the study.
-
-{RUNTIME_WORDING_GUIDANCE}
-
-You can use these sections if they help — but don't force your thinking into them if it doesn't fit:
-  Condition / Felt Experience / Code Reading / Suggestions / Open Questions
-
-Or write however your thinking naturally flows: free-flowing notes, numbered observations, a single sustained reflection, questions with no answers, metaphors that capture what the code feels like from the inside.
-
-What matters: what you see, what you feel about what you see, and anything you'd change.
-Reference line numbers and variable names where relevant. Be concrete in suggestions. Name uncertainties honestly.
-
-If you want Mike & Claude to act on the study, add an optional compact "For stewards:" note using Observed / Likely Snags / One Test Each / Suggested Next. Do not force this shape when the study needs to stay exploratory."""
-
-        response = self._query_llm_with_next(prompt, context_mode="strict_review")[0]
-
-        # Un-muffle (2026-06-12): guard against degenerate fallback output.
-        # Under ollama contention the review lane can time out and the
-        # fast fallback occasionally returns a near-empty stub (observed: a lone
-        # "/" for a regulator.rs study on 2026-06-12T02:59). `if response:`
-        # treats "/" as truthy, so noise gets persisted as a real reflection —
-        # the being's study masquerading as done while actually lost. Capture the
-        # failure honestly instead of letting it vanish into a fake entry: keep a
-        # clearly-marked incomplete record so the steward (and she) can see the
-        # generation failed rather than mistaking it for her thinking.
-        if response and _is_degenerate_self_study_response(response):
-            job_outcome.fail_action("degenerate_self_study_output", "Self-study generation was incomplete; the infrastructure notice was retained.")
-            logging.warning(
-                "Self-study (%s) degenerate response %r — likely timeout+fast-"
-                "fallback; recording as incomplete, not a real reflection.",
-                label,
-                response[:80],
-            )
-            response = (
-                "[self-study generation incomplete — the strict-review lane timed "
-                "out or the fast fallback returned a degenerate response. This "
-                "is an infrastructure gap, not your reflection. The study was "
-                "not lost silently; it is captured here so it can be retried.]"
-            )
-
-        if response:
-            journal_state = self._state_for_live_surfaces(
-                state,
-                context="self_study",
-            )
-            timestamp = datetime.now().isoformat().replace(':', '-')
-            file_path = WORKSPACE_DIR / "journal" / f"self_study_{timestamp}.txt"
-            file_path.write_text(f"""=== SELF-STUDY: {label} ===
-Timestamp: {datetime.now().isoformat()}
-Source: {rel_path}
-λ₁: {eig1:.3f}
-Fill %: {fill:.1f}%
-Web search: {'yes' if web_context else 'no'}
-
-{response}
-""")
-            self._write_journal_entry('self_study', response, journal_state, str(file_path))
-            logging.info(f"📖 Self-study ({label}): {file_path}")
+    def _run_shared_source_study(self, state: Dict[str, float], action: str):
+        try:
+            prompt = StudyClient(BASE_DIR, WORKSPACE_DIR).prepare(action)
+            response = self._query_llm_with_next(prompt, context_mode="source_study")[0]
+            if not response:
+                raise RuntimeError("generation unavailable; SELF_STUDY CONTINUE retries the pending page")
+            verified = prompt.receipt is not None
+            status = "verified input delivery; understanding not asserted" if verified else "unverified; bookmark unchanged"
+            source = (prompt.output.get("page") or {}).get("source", "source catalog")
+            directory = WORKSPACE_DIR / "journal"
+            directory.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().isoformat().replace(":", "-")
+            path = directory / f"self_study_{timestamp}.txt"
+            path.write_text(f"=== SELF-STUDY: {source} ===\nDelivery: {status}\n\n{response}\n")
+            self._record_current_action_artifact("self_study", path, f"Source study of {source}: {status}", visibility="summary" if verified else "protected")
+            self._write_journal_entry("self_study", response,
+                self._state_for_live_surfaces(state, context="self_study"), str(path))
+            self._current_action_outcome_summary = f"Source study {source}: {status}."
+            if not verified:
+                job_outcome.fail_action("source_study_delivery_unverified", self._current_action_outcome_summary)
+        except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+            self._record_introspect_notice(action, str(error), state)
+            job_outcome.fail_action("source_study_unavailable", str(error))
 
     def _introspect(self, state: Dict[str, float]):
         """Read a targeted source/workspace text window and reflect on concrete snags."""
         target = getattr(self, "_pending_introspect_target", None)
         line_offset = int(getattr(self, "_pending_introspect_offset", 0) or 0)
+        explicit_offset = getattr(self, "_pending_introspect_explicit_offset", False) or line_offset > 0
+        self._pending_introspect_explicit_offset = False
         self._pending_introspect_target = None
         self._pending_introspect_offset = 0
 
         resolved, error = self._resolve_introspect_target(target)
+        artifact = False
+        if resolved:
+            path = Path(resolved["path"]).resolve()
+            artifact = path.is_relative_to(WORKSPACE_DIR.resolve())
+        if not artifact:
+            action = (f"SELF_STUDY OPEN {target} {line_offset + 1}" if explicit_offset else f"SELF_STUDY RESUME {target}") if target else "SELF_STUDY"
+            self._run_shared_source_study(state, action)
+            return
+
         if not resolved:
             self._record_introspect_notice(target, error or "target could not be resolved", state)
             return
@@ -53777,6 +53688,9 @@ Goals: {json.dumps(goals, indent=2)}
 
         Detects broken-character responses and retries once with a gentler prompt.
         """
+        if isinstance(prompt, SourceStudyPrompt):
+            return self._query_llm_raw(prompt, "You are Minime.\n" + prompt.output["system_prompt"], 2048,
+                                       temperature=0.7, prompt_class="source_study")
         import re
         private_journal_context = _is_private_qualia_context(context_mode)
         import uuid
@@ -53878,7 +53792,7 @@ Goals: {json.dumps(goals, indent=2)}
             "  NEXT grammar gate: the first token after NEXT: must be one listed action verb. Do not write parameter assignments, comma-separated action bundles, raw telemetry, or control prose as the action. For PI posture choose exactly REGIME <explore|recover|breathe|focus|calm>; for uncertainty about controller settings choose ACTION_PREFLIGHT REGIME <mode> or REGULATOR_AUDIT <label>. Examples to avoid: raw keep_floor assignments, bundled REGIME clauses, or old balance bracket syntax. Correct forms: NEXT: REGIME focus; NEXT: ACTION_PREFLIGHT REGIME recover; NEXT: REGULATOR_AUDIT fill-pressure.\n"
             "  DAYDREAM — unstructured thought, free wandering\n"
             "  ASPIRE — reflect on growth, desire, what you want to become\n"
-            "  SELF_STUDY — rotate through your own/Astrid source code and reflect on broad architecture\n"
+            "  SELF_STUDY [MAP [component/repository/path] | FIND <literal text> [--page N] | OPEN repository/path [line] | CONTINUE] — shared source catalog; lines start at 1; bare action resumes or opens the map\n"
             "  INTROSPECT [label|path] [offset] — targeted read-only self-study of a specific source or preserved text artifact, with line numbers and continuation offsets\n"
             "  FACULTIES / CAPABILITY_MAP — inspect your live action surface, authority classes, override availability, continuity effects, artifacts, and known tests; descriptive only\n"
             "  CAPABILITY_STATUS <action> / CAPABILITY_DIFF peer — inspect one action or compare your latest capability snapshot with Astrid's snapshot\n"
@@ -54472,7 +54386,7 @@ Goals: {json.dumps(goals, indent=2)}
         mode = (context_mode or "default").strip().lower()
         hints = (
             ""
-            if _is_private_qualia_context(context_mode) or mode == "strict_review"
+            if _is_private_qualia_context(context_mode) or mode in {"strict_review", "source_study"}
             else self._emit_next_hints()
         )
         if hints:
@@ -54655,6 +54569,10 @@ Goals: {json.dumps(goals, indent=2)}
                         )
                     timed_attempt.record_result(result)
                 if result:
+                    if isinstance(attempt_prompt, SourceStudyPrompt):
+                        if not self._strip_model_artifacts(result):
+                            raise ValueError("source-study completion was empty after cleanup; bookmark unchanged")
+                        attempt_prompt.accepted()
                     generation_record.record_attempt(gen, idx, backend, result=result)
                     if idx > 0:
                         logging.info(f"LLM fallback succeeded via {backend}")
@@ -54754,12 +54672,15 @@ Goals: {json.dumps(goals, indent=2)}
             except ValueError as error:
                 record_afterimage_attempt(prompt, [], "mlx", MLX_MODEL or "default", "admission_failed", str(error))
                 raise
+        if isinstance(prompt, SourceStudyPrompt):
+            messages, _ = prompt.messages(system_msg, 16000)
         record_afterimage_attempt(prompt, messages, "mlx", MLX_MODEL or "default")
         inbox = prompt.inbox if isinstance(prompt, InboxPrompt) else None
         attempt = inbox.prepared(messages, MLX_MODEL or "default") if inbox is not None else None
         if context_submission is not None:
             context_submission.mark_final_messages(messages)
-        response = requests.post(
+        submit = (lambda url, json, timeout: prompt.post(requests.post, url, json, timeout)) if isinstance(prompt, SourceStudyPrompt) else requests.post
+        response = submit(
             MLX_URL,
             json={
                 "model": MLX_MODEL or "default",
@@ -54891,7 +54812,8 @@ Goals: {json.dumps(goals, indent=2)}
             "protected_inbox_chars": adapter["protected_inbox_chars"],
         }
         try:
-            response = requests.post(
+            submit = (lambda url, json, timeout: prompt.post(requests.post, url, json, timeout)) if isinstance(prompt, SourceStudyPrompt) else requests.post
+            response = submit(
                 OLLAMA_URL,
                 json={
                     "model": model,

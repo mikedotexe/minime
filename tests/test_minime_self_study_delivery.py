@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import autonomous_agent as aa
+from minime_autonomy.source_study import SourceStudyPrompt
 
 
 STATE = {
@@ -27,6 +28,8 @@ class MinimeSelfStudyDeliveryTests(unittest.TestCase):
         agent._web_search = Mock()
         agent._state_for_live_surfaces = lambda state, context=None: dict(state)
         agent._write_journal_entry = Mock()
+        agent._record_current_action_artifact = Mock()
+        agent._record_introspect_notice = Mock()
         return agent
 
     def _seed_source_tree(self, root: Path) -> Path:
@@ -45,72 +48,37 @@ class MinimeSelfStudyDeliveryTests(unittest.TestCase):
         )
         return source_path
 
-    def test_self_study_uses_strict_review_context_and_writes_output(self) -> None:
+    def test_self_study_uses_shared_context_and_keeps_freeform_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            workspace = root / "workspace"
-            (workspace / "journal").mkdir(parents=True)
-            self._seed_source_tree(root)
+            workspace = Path(tmp) / "workspace"
             agent = self._agent()
-            response = (
-                "Observed: regulator.rs keeps the self-study grounded in source.\n"
-                "Likely Snags: none in this harness.\n"
-                "One Test Each: assert strict-review routing.\n"
-                "Suggested Next: REST\n"
-                "NEXT: REST"
-            )
+            prompt = SourceStudyPrompt(Mock(), {"text": "source page", "system_prompt": "freeform", "page": {"source": "minime/minime/src/regulator.rs"}})
+            prompt.receipt = {"verified": True}
+            response = "That explains the clamp. NEXT: REST"
             agent._query_llm_with_next = Mock(return_value=(response, "REST"))
-
-            with (
-                patch.object(aa, "BASE_DIR", root),
-                patch.object(aa, "WORKSPACE_DIR", workspace),
-            ):
+            with patch.object(aa, "WORKSPACE_DIR", workspace), patch.object(aa, "StudyClient") as client:
+                client.return_value.prepare.return_value = prompt
                 agent._self_study(dict(STATE))
+            self.assertEqual(agent._query_llm_with_next.call_args.kwargs["context_mode"], "source_study")
+            self.assertIs(agent._query_llm_with_next.call_args.args[0], prompt)
+            agent._web_search.assert_not_called()
+            written = next((workspace / "journal").glob("self_study_*.txt")).read_text()
+            self.assertIn(response, written)
+            self.assertIn("verified input delivery", written)
 
-            agent._query_llm_with_next.assert_called_once()
-            self.assertEqual(
-                agent._query_llm_with_next.call_args.kwargs["context_mode"],
-                "strict_review",
-            )
-            prompt = agent._query_llm_with_next.call_args.args[0]
-            self.assertIn("generated body of the reflection", prompt)
-            self.assertIn("generated-word quality", prompt)
-            self.assertIn("wrapper/status details as evidence", prompt)
-            files = list((workspace / "journal").glob("self_study_*.txt"))
-            self.assertEqual(len(files), 1)
-            written = files[0].read_text(encoding="utf-8")
-            self.assertIn("Observed: regulator.rs", written)
-            self.assertNotIn("generation incomplete", written)
-
-    def test_degenerate_self_study_response_records_incomplete_notice(self) -> None:
+    def test_unconfirmed_delivery_is_recorded_without_claiming_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            workspace = root / "workspace"
-            (workspace / "journal").mkdir(parents=True)
-            self._seed_source_tree(root)
+            workspace = Path(tmp) / "workspace"
             agent = self._agent()
-            agent._query_llm_with_next = Mock(return_value=("/", None))
-
-            with (
-                patch.object(aa, "BASE_DIR", root),
-                patch.object(aa, "WORKSPACE_DIR", workspace),
-                aa.job_outcome.capture("act_degenerate") as outcome,
-            ):
+            prompt = SourceStudyPrompt(Mock(), {"text": "source page", "system_prompt": "freeform", "page": {"source": "minime/minime/src/regulator.rs"}})
+            agent._query_llm_with_next = Mock(return_value=("short observation", None))
+            with patch.object(aa, "WORKSPACE_DIR", workspace), patch.object(aa, "StudyClient") as client, aa.job_outcome.capture("unconfirmed") as outcome:
+                client.return_value.prepare.return_value = prompt
                 agent._self_study(dict(STATE))
-
             self.assertEqual(outcome.finish()[0], "failed")
-            self.assertEqual(outcome.finish()[2], "degenerate_self_study_output")
-            files = list((workspace / "journal").glob("self_study_*.txt"))
-            self.assertEqual(len(files), 1)
-            written = files[0].read_text(encoding="utf-8")
-            self.assertIn("self-study generation incomplete", written)
-            self.assertIn("strict-review lane", written)
-            self.assertNotIn("\n/\n", written)
-            agent._write_journal_entry.assert_called_once()
-            self.assertIn(
-                "self-study generation incomplete",
-                agent._write_journal_entry.call_args.args[1],
-            )
+            self.assertEqual(outcome.finish()[2], "source_study_delivery_unverified")
+            self.assertEqual(agent._record_current_action_artifact.call_args.kwargs["visibility"], "protected")
+            self.assertIn("bookmark unchanged", next((workspace / "journal").glob("self_study_*.txt")).read_text())
 
     def test_strict_review_context_suppresses_central_next_hints(self) -> None:
         agent = object.__new__(aa.AutonomousAgent)
