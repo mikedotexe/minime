@@ -112,4 +112,6 @@ class SourceStudyPrompt(str):
             self.receipt = self.client.call(operation="delivered", page_id=page["id"],
                                            request_json=request_json, response_json=response_json)
         else:
-            self.receipt = {"navigation": True}
+            self.receipt = self.client.call(operation="navigation_delivered",
+                                           navigation_id=self.output["navigation_id"],
+                                           request_json=request_json, response_json=response_json)

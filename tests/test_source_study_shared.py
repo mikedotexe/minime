@@ -62,6 +62,29 @@ class SharedSourceStudyTests(unittest.TestCase):
         self.assertIsNone(result.output["page"])
         self.assertIn("minime/minime_autonomy/runtime.py", self.client.prepare("SELF_STUDY MAP minime"))
 
+    def test_navigation_keeps_owned_notes_and_exact_pending_source(self):
+        source = self.client.prepare(self.action)
+        messages, _ = source.messages(source.output["system_prompt"], 16000)
+        body = {"message":{"content":"STUDY_NOTE: Trace the entry point.\nSTUDY_QUESTION: Who calls entry?\nNEXT: SELF_STUDY MAP"},"done":True}
+        source.post(Mock(return_value=Mock(status_code=200, text=json.dumps(body))), "fake", {"messages":messages}, 1)
+        source.accepted()
+        next_page = self.client.prepare("SELF_STUDY CONTINUE")
+        navigation = self.client.prepare("SELF_STUDY MAP minime")
+        self.assertIn("Partial delivery", navigation)
+        self.assertIn("Who calls entry?", navigation)
+        self.assertIn("SELF_STUDY RESUME minime/minime_autonomy/runtime.py", navigation)
+        messages, _ = navigation.messages(navigation.output["system_prompt"], 16000)
+        body = {"choices":[{"message":{"content":"STUDY_QUESTION: Which Action calls entry?\nNEXT: SELF_STUDY CONTINUE"},"finish_reason":"stop"}]}
+        navigation.post(Mock(return_value=Mock(status_code=200, text=json.dumps(body))), "fake", {"messages":messages}, 1)
+        navigation.accepted()
+        self.assertTrue(Path(navigation.receipt["artifact_path"]).is_file())
+        resumed = self.client.prepare("SELF_STUDY CONTINUE")
+        self.assertEqual(next_page.output["page"], resumed.output["page"])
+        self.assertIn("Which Action calls entry?", resumed)
+        self.assertIn("Trace the entry point.", resumed)
+        self.assertNotIn("Which Action calls entry?", resumed.output["system_prompt"])
+        self.assertIn('No matches for the exact literal query "entry;"', self.client.prepare("SELF_STUDY FIND entry;"))
+
     def test_selected_release_reader_is_bound_to_astrid_manifest(self):
         stage = (self.astrid.parent / "release").resolve()
         executable = stage / "helpers/astrid-source-study"
