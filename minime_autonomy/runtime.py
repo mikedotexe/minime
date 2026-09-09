@@ -21524,7 +21524,7 @@ def _adapt_ollama_messages_for_model(
     compact: bool = False,
 ) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
     if isinstance(prompt, SourceStudyPrompt):
-        return prompt.messages(system_msg, min(16000, _ollama_prompt_char_budget(num_ctx, num_predict)))
+        return prompt.messages(system_msg, min(prompt.input_budget_bytes, _ollama_prompt_char_budget(num_ctx, num_predict)))
     gemma4 = _is_gemma4_model(model)
     template_mode = "gemma4_think_false_native" if gemma4 else "legacy_no_think_user_prefix"
     adapted_system = system_msg or ""
@@ -54752,6 +54752,8 @@ Goals: {json.dumps(goals, indent=2)}
         effective_tokens, timeout_s, num_ctx = _journal_generation_budget(
             max_tokens, 2048, LLM_TIMEOUT_S, OLLAMA_NUM_CTX, journal=journal,
             source_study=isinstance(prompt, SourceStudyPrompt))
+        if isinstance(prompt, SourceStudyPrompt):
+            num_ctx = max(num_ctx, prompt.context_tokens)
         messages = [
             {"role": "system", "content": system_msg},
             {"role": "user", "content": "/no_think\n" + prompt},
@@ -54764,7 +54766,7 @@ Goals: {json.dumps(goals, indent=2)}
                 record_afterimage_attempt(prompt, [], "mlx", MLX_MODEL or "default", "admission_failed", str(error))
                 raise
         if isinstance(prompt, SourceStudyPrompt):
-            messages, _ = prompt.messages(system_msg, 16000)
+            messages, _ = prompt.messages(system_msg, prompt.input_budget_bytes)
         record_afterimage_attempt(prompt, messages, "mlx", MLX_MODEL or "default")
         inbox = prompt.inbox if isinstance(prompt, InboxPrompt) else None
         attempt = inbox.prepared(messages, MLX_MODEL or "default") if inbox is not None else None
@@ -54809,6 +54811,8 @@ Goals: {json.dumps(goals, indent=2)}
         effective_tokens, timeout_s, num_ctx = _journal_generation_budget(
             max_tokens, num_predict_cap, timeout_s, OLLAMA_NUM_CTX, journal=journal,
             source_study=isinstance(prompt, SourceStudyPrompt))
+        if isinstance(prompt, SourceStudyPrompt):
+            num_ctx = max(num_ctx, prompt.context_tokens)
         return self._query_ollama_model(
             prompt,
             system_msg,
@@ -54841,6 +54845,8 @@ Goals: {json.dumps(goals, indent=2)}
             max_tokens, OLLAMA_FALLBACK_NUM_PREDICT_CAP, LLM_FALLBACK_TIMEOUT_S,
             OLLAMA_FALLBACK_NUM_CTX, journal=journal,
             source_study=isinstance(prompt, SourceStudyPrompt))
+        if isinstance(prompt, SourceStudyPrompt):
+            num_ctx = max(num_ctx, prompt.context_tokens)
         return self._query_ollama_model(
             prompt,
             system_msg,

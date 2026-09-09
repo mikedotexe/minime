@@ -93,6 +93,14 @@ class SourceStudyPrompt(str):
         value._wire = None
         return value
 
+    @property
+    def input_budget_bytes(self) -> int:
+        return int(self.output.get("input_budget_bytes", 16000))
+
+    @property
+    def context_tokens(self) -> int:
+        return int(self.output.get("context_tokens", 10240))
+
     def messages(self, system: str, budget: int) -> tuple[list[dict[str, str]], dict[str, Any]]:
         if len((system + self).encode("utf-8")) > budget:
             raise ValueError("complete source page does not fit this provider lane; bookmark unchanged")

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Honor the shared SELF_STUDY input/context budgets on MLX, Ollama and fast fallback, preserving recent complete answers and comparison choices through provider adaptation. Existing output ceilings and thinking-off behavior remain. See `docs/2026-09-09-study-context.md`.
+
 ### Added — shared study inquiries (2026-09-09)
 - Expose the shared Being-owned question notebooks, lexical symbol relationships, bounded multi-page sessions and own retained execution views. Preserve complete inputs through every provider adapter and identify all session sources in the journal.
 

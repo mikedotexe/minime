@@ -73,3 +73,46 @@ def test_question_mutations_require_explicit_next():
     choice = "SELF_STUDY QUESTION NEW Where is the dispatch?"
     assert aa.parse_next_action(choice)[0] is None
     assert aa.parse_next_action("NEXT: " + choice)[0] == choice
+
+
+@pytest.mark.parametrize("backend", ["mlx", "ollama", "ollama_fast"])
+def test_complete_recent_answers_survive_larger_protected_provider_input(tmp_path, backend):
+    root = tmp_path / "minime"
+    source = root / "minime_autonomy/runtime.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("def entry():\n    return helper()\n" * 3000)
+    astrid = tmp_path / "astrid"
+    astrid.mkdir()
+    client = StudyClient(root, tmp_path / "workspace", astrid_root=astrid,
+                         executable=Path(os.environ["ASTRID_SOURCE_STUDY_BIN"]))
+    for index in range(3):
+        prompt = client.prepare(f"SELF_STUDY OPEN minime/minime_autonomy/runtime.py {index * 100 + 1}")
+        prose = f"Study {index}: " + "Evidence from the page. " * 115 + f"\nCONCLUSION_{index}"
+        body = json.dumps({"message": {"content": prose}, "done": True, "done_reason": "stop"})
+        prompt.post(Mock(return_value=Mock(status_code=200, text=body)), "fixture", {
+            "messages": [{"role": "system", "content": prompt.output["system_prompt"]},
+                         {"role": "user", "content": str(prompt)}]}, 1)
+        prompt.accepted()
+    prompt = client.prepare("SELF_STUDY CONTINUE")
+    assert "CONCLUSION_2" in prompt and "CONCLUSION_1" in prompt
+    assert len((prompt.output["system_prompt"] + prompt).encode()) > 16000
+    agent = object.__new__(aa.AutonomousAgent)
+    content = "The answer carries across pages.\nNEXT: SELF_STUDY CONTINUE"
+    body = ({"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
+            if backend == "mlx" else {"message": {"content": content}, "done": True})
+    response = Mock(status_code=200, text=json.dumps(body))
+    response.json.return_value = body
+    with patch.object(aa.requests, "post", return_value=response) as post, patch.object(aa, "MLX_MODEL", "fixture"), patch.object(aa, "FALLBACK_MODEL", "fixture-fallback"), patch.object(aa, "_append_llm_timing"):
+        if backend == "mlx":
+            result = agent._query_mlx(prompt, prompt.output["system_prompt"], 2048, journal=True)
+        elif backend == "ollama":
+            result = agent._query_ollama(prompt, prompt.output["system_prompt"], 2048, prompt_class="source_study", journal=True)
+        else:
+            result = agent._query_ollama_fast_fallback(prompt, prompt.output["system_prompt"], 2048, prompt_class="source_study", journal=True)
+    assert result == content
+    request = json.loads(post.call_args.kwargs["data"])
+    assert request["messages"][1]["content"] == prompt
+    assert request.get("max_tokens", request.get("options", {}).get("num_predict")) == 4096
+    if backend != "mlx":
+        assert request["options"]["num_ctx"] == prompt.context_tokens == 32768
+    prompt.accepted()
