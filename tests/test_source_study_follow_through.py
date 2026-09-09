@@ -104,3 +104,16 @@ def test_artifact_and_external_routes_keep_research_policy(study_agent):
         assert agent._decide_action(dict(STATE)) is None, raw
         assert not store.research_budget_preflight_for_action(raw, STATE)[0]
     assert not offers
+
+
+def test_map_journal_keeps_navigation_scope_and_does_not_claim_code(study_agent):
+    agent, _, _, offers = study_agent
+    agent._run_shared_source_study(dict(STATE), "SELF_STUDY MAP")
+    prompt = offers[-1]
+    assert prompt.output["input_kind"] == "map"
+    assert prompt.receipt
+    artifact = next((aa.WORKSPACE_DIR / "journal").glob("self_study_*.txt")).read_text()
+    assert "Input evidence: Map:" in artifact
+    assert "No new source page is supplied this turn." in artifact
+    assert "Source revision: navigation only" in artifact
+    assert "not independently verified code facts" in artifact

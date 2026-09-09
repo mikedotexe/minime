@@ -386,6 +386,8 @@ class CorrespondenceV1Tests(unittest.TestCase):
             with patches[0], patches[1], patches[2]:
                 context = agent._read_inbox()
             self.assertIn("legacy note", context)
+            self.assertIn("Astrid study account: peer-authored claims", context)
+            self.assertIn("not the accuracy of her response", context)
             records = [
                 json.loads(line)
                 for line in (shared / "correspondence_v1.jsonl").read_text().splitlines()

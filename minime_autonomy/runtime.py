@@ -31498,13 +31498,18 @@ Reason: {reason}
             if not response:
                 raise RuntimeError("generation unavailable; SELF_STUDY CONTINUE retries the pending page")
             verified = prompt.receipt is not None
-            status = "verified input delivery; understanding not asserted" if verified else "unverified; bookmark unchanged"
+            status = "verified input delivery; response claims and understanding not verified" if verified else "unverified; bookmark unchanged"
             source = (prompt.output.get("page") or {}).get("source", "source catalog")
             directory = WORKSPACE_DIR / "journal"
             directory.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().isoformat().replace(":", "-")
             path = directory / f"self_study_{timestamp}.txt"
-            path.write_text(f"=== SELF-STUDY: {source} ===\nDelivery: {status}\n\n{response}\n")
+            page = prompt.output.get("page") or {}
+            revision = (f"sha256:{page['revision']['sha256']}; bytes {page['start']['byte']}..{page['end']['byte']}"
+                        if page else "navigation only")
+            scope = prompt.output.get("evidence_scope") or "Older retained input; consult the exact offered input."
+            path.write_text(f"=== SELF-STUDY: {source} ===\nSource revision: {revision}\nInput evidence: {scope}\n"
+                            f"Account: Minime’s response to this input, not independently verified code facts.\nDelivery: {status}\n\n{response}\n")
             self._record_current_action_artifact("self_study", path, f"Source study of {source}: {status}", visibility="summary" if verified else "protected")
             self._write_journal_entry("self_study", response,
                 self._state_for_live_surfaces(state, context="self_study"), str(path))
@@ -53309,7 +53314,10 @@ Goals: {json.dumps(goals, indent=2)}
                         legacy_context_surface=legacy_surface,
                     )
                     if include_full and content:
-                        add_message(content, fname, content)
+                        account = ("[Astrid study account: peer-authored claims, not source you read this turn. "
+                                   "Delivery status describes her input, not the accuracy of her response. "
+                                   "Reopen the referenced source before treating recalled symbols or line numbers as code facts.]\n")
+                        add_message(account + content, fname, content)
                         full_astrid_self_studies_this_read += 1
                         logging.info("📬 Inbox: read Astrid companion note %s", fname)
                     else:

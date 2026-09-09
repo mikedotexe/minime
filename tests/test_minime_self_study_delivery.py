@@ -52,7 +52,7 @@ class MinimeSelfStudyDeliveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
             agent = self._agent()
-            prompt = SourceStudyPrompt(Mock(), {"text": "source page", "system_prompt": "freeform", "page": {"source": "minime/minime/src/regulator.rs"}})
+            prompt = SourceStudyPrompt(Mock(), {"text": "source page", "system_prompt": "freeform", "input_kind": "source_page", "evidence_scope": "Source page: numbered local source is supplied below.", "page": {"source": "minime/minime/src/regulator.rs", "revision": {"sha256": "a" * 64}, "start": {"byte": 0}, "end": {"byte": 128}}})
             prompt.receipt = {"verified": True}
             response = "That explains the clamp. NEXT: REST"
             agent._query_llm_with_next = Mock(return_value=(response, "REST"))
@@ -65,12 +65,15 @@ class MinimeSelfStudyDeliveryTests(unittest.TestCase):
             written = next((workspace / "journal").glob("self_study_*.txt")).read_text()
             self.assertIn(response, written)
             self.assertIn("verified input delivery", written)
+            self.assertIn("Input evidence: Source page:", written)
+            self.assertIn("bytes 0..128", written)
+            self.assertIn("response claims and understanding not verified", written)
 
     def test_unconfirmed_delivery_is_recorded_without_claiming_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
             agent = self._agent()
-            prompt = SourceStudyPrompt(Mock(), {"text": "source page", "system_prompt": "freeform", "page": {"source": "minime/minime/src/regulator.rs"}})
+            prompt = SourceStudyPrompt(Mock(), {"text": "source page", "system_prompt": "freeform", "input_kind": "source_page", "evidence_scope": "Source page: numbered local source is supplied below.", "page": {"source": "minime/minime/src/regulator.rs", "revision": {"sha256": "a" * 64}, "start": {"byte": 0}, "end": {"byte": 128}}})
             agent._query_llm_with_next = Mock(return_value=("short observation", None))
             with patch.object(aa, "WORKSPACE_DIR", workspace), patch.object(aa, "StudyClient") as client, aa.job_outcome.capture("unconfirmed") as outcome:
                 client.return_value.prepare.return_value = prompt

@@ -321,7 +321,7 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
             root = Path(tmp)
             workspace = root / "workspace"
             agent = self._agent(root / "minime", workspace, root / "db.sqlite")
-            prompt = SourceStudyPrompt(Mock(), {"text": "source page", "system_prompt": "freeform", "page": {"source": "minime/minime_autonomy/runtime.py"}})
+            prompt = SourceStudyPrompt(Mock(), {"text": "source page", "system_prompt": "freeform", "page": {"source": "minime/minime_autonomy/runtime.py", "revision": {"sha256": "b" * 64}, "start": {"byte": 0}, "end": {"byte": 128}}})
             prompt.receipt = {"verified": True}
             with patch.object(aa, "WORKSPACE_DIR", workspace), patch.object(aa, "StudyClient") as client, patch.object(agent, "_query_llm_raw", return_value="NEXT: SELF_STUDY CONTINUE") as raw, patch.object(agent, "_emit_next_hints") as hints, patch.object(agent, "_persist_pending_next_action"), patch.object(agent, "_state_for_live_surfaces", return_value=dict(STATE)), patch.object(agent, "_write_journal_entry") as journal, patch.object(agent, "_query_llm_strict_review") as review:
                 client.return_value.prepare.return_value = prompt
