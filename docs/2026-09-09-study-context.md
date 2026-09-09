@@ -16,3 +16,10 @@ shared reader and wrapper, with no new subsystem inside the runtime.
 
 Author/provenance: Codex Astra interactive; Mike approved the repair based on
 Minime's nine selected September 9 source studies.
+
+
+Live reload verified at 13:26:49 PDT: PID 76254 → 5331, session 5318 retained,
+cycle 27107 → 27108, no pending NEXT at signal. Shared reader activation followed
+at 13:29:05 PDT. The source tracker reports `reload_required=false`; all ten
+surrounding services retain their identities. Astrid's committed live-rollout
+receipt carries exact hashes and the selected immutable helper identity.
