@@ -17,8 +17,9 @@ Diagnostic writes are atomic, files are 0600 under a 0700 directory, storage
 errors do not change provider behavior, and `MINIME_GENERATION_RECORD=off`
 disables the new retention. The live workspace destination is
 `diagnostics/source_study_attempts/`; these records are steward-only and never
-fed back into a Being's prompts. Both Ollama and MLX adapter paths are covered;
-Astrid's own provider observer already retains its separate request/outcome wire.
+fed back into a Being's prompts. Both Minime provider adapters, Ollama and MLX,
+are covered. Astrid has a separate provider-observation system with event metadata
+and selective raw retention; this repair targets Minime's diagnosed missing outputs.
 
 All journal/output budgets, thinking-off mode, source acceptance, fallback policy,
 question ownership and freeform study remain as before. The independently
