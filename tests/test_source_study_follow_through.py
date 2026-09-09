@@ -117,3 +117,12 @@ def test_map_journal_keeps_navigation_scope_and_does_not_claim_code(study_agent)
     assert "No new source page is supplied this turn." in artifact
     assert "Source revision: navigation only" in artifact
     assert "not independently verified code facts" in artifact
+
+
+def test_final_bare_source_choice_is_preserved_but_examples_are_not_choices():
+    choice = "SELF_STUDY OPEN astrid/crates/astrid-kernel/src/lib.rs 1"
+    assert aa.parse_next_action("I want to inspect this.\n" + choice)[0] == choice
+    for text in ["```\n" + choice + "\n```", "```\n" + choice, "> " + choice,
+                 choice + "\nThis is an example.", "RUN rm example"]:
+        assert aa.parse_next_action(text)[0] is None
+    assert aa.parse_next_action("NEXT: REST\n" + choice)[0] == "REST"

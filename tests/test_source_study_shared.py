@@ -119,22 +119,28 @@ def test_actual_mlx_and_ollama_adapters_submit_same_protected_page(tmp_path):
     astrid.mkdir()
     client = StudyClient(tmp_path / "minime", tmp_path / "workspace", astrid_root=astrid, executable=BINARY)
     agent = object.__new__(aa.AutonomousAgent)
-    for backend in ("mlx", "ollama"):
+    for backend in ("mlx", "ollama", "ollama_fast"):
         prompt = client.prepare("SELF_STUDY OPEN minime/minime_autonomy/runtime.py")
         body = ({"choices":[{"message":{"content":"NEXT: SELF_STUDY CONTINUE"},"finish_reason":"stop"}]} if backend == "mlx" else {"message":{"content":"NEXT: SELF_STUDY CONTINUE"},"done":True})
         response = Mock(status_code=200, text=json.dumps(body))
         response.json.return_value = body
         with patch.object(aa.requests, "post", return_value=response) as post, patch.object(aa, "MLX_MODEL", "fixture"), patch.object(aa, "_append_llm_timing"), patch.object(aa.generation_record, "stash_attempt"):
             if backend == "mlx":
-                result = agent._query_mlx(prompt, prompt.output["system_prompt"], 2048)
+                result = agent._query_mlx(prompt, prompt.output["system_prompt"], 2048, journal=True)
+            elif backend == "ollama":
+                result = agent._query_ollama(prompt, prompt.output["system_prompt"], 2048, prompt_class="source_study", journal=True)
             else:
-                result = agent._query_ollama_model(prompt, prompt.output["system_prompt"], 2048, 0.7, "fixture", 1, 768, 8192, "ollama", prompt_class="source_study", compact=True)
+                with patch.object(aa, "FALLBACK_MODEL", "fixture-fallback"):
+                    result = agent._query_ollama_fast_fallback(prompt, prompt.output["system_prompt"], 2048, prompt_class="source_study", journal=True)
         assert result == "NEXT: SELF_STUDY CONTINUE"
         assert prompt.receipt is None
         prompt.accepted()
         assert prompt.receipt is not None
         submitted = json.loads(post.call_args.kwargs["data"])
         assert submitted["messages"][1]["content"] == str(prompt)
+        assert submitted.get("max_tokens", submitted.get("options", {}).get("num_predict")) == 4096
+        if backend != "mlx":
+            assert submitted["options"]["num_ctx"] >= 10240
 
 
 def test_dispatch_retries_invisible_completion_before_recording_delivery(tmp_path):

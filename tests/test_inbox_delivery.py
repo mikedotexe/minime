@@ -281,7 +281,7 @@ def test_actual_query_adapter_and_save_keep_sender_and_stage(agent, monkeypatch)
     monkeypatch.setattr(agent, "_is_in_character", Mock(side_effect=AssertionError("no reply rewriting")))
     assert agent._query_llm("Unrelated ambient context " * 1000) == body
     assert source in post.call_args.kwargs["json"]["messages"][1]["content"]
-    assert post.call_args.kwargs["json"]["options"]["num_ctx"] == aa.OLLAMA_NUM_CTX
+    assert post.call_args.kwargs["json"]["options"]["num_ctx"] == max(aa.OLLAMA_NUM_CTX, aa.JOURNAL_CONTEXT_FLOOR)
     stages = [r["stage"] for r in rows(aa.WORKSPACE_DIR)]
     assert stages == ["file_consumed", "request_prepared", "supplied_to_model", "authored_reply"]
     assert list((aa.WORKSPACE_DIR / "outbox" / "human" / "mike").glob("*.txt"))

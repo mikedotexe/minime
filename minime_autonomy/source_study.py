@@ -15,7 +15,8 @@ SOURCE_STUDY_GUIDANCE = (
     "SELF_STUDY RESUME repository/path, or SELF_STUDY CONTINUE. Choose exact paths from the map/search; "
     "if a target is unknown, use SELF_STUDY MAP. Source INTROSPECT is the same budget-free reader "
     "(legacy offsets start at 0); preserved workspace artifacts keep their research policy. "
-    "A recovery map is navigation, not delivery of the requested source."
+    "A recovery map is navigation, not delivery of the requested source. "
+    "SELF_STUDY CONTINUE reads the next code page; READ_MORE is a separate saved-document reader."
 )
 
 

@@ -21653,6 +21653,46 @@ def _ollama_lane_limits(prompt_class: str) -> tuple[float, int]:
     return LLM_TIMEOUT_S, OLLAMA_NUM_PREDICT_CAP
 
 
+# Journal generation ceilings, raised September 9, 2026 at Mike's request.
+# Existing environment values remain the baseline for non-journal requests.
+# Source study deliberately shares Astrid's 4096-token ceiling on every backend.
+SOURCE_STUDY_OUTPUT_TOKENS = 4096
+JOURNAL_CONTEXT_FLOOR = 10240  # Keeps the existing 16k-character input with 4096 output tokens.
+
+
+def _journal_generation_budget(max_tokens: int, cap: int, timeout_s: float,
+                               num_ctx: int, *, journal: bool,
+                               source_study: bool = False) -> tuple[int, float, int]:
+    """Return effective output, deadline and context; no minimum response length."""
+    if not journal:
+        return min(max_tokens, cap), timeout_s, num_ctx
+    ceiling = SOURCE_STUDY_OUTPUT_TOKENS if source_study else cap * 2
+    effective = min(max_tokens * 2, ceiling)
+    # Preserve the old output/time allowance even when study grows more than 2x.
+    timeout_s *= max(2.0, ceiling / max(1, cap))
+    # Retain the prior input room for explicit larger environment configurations too.
+    prior_input = min(16000, _ollama_prompt_char_budget(num_ctx, min(max_tokens, cap)))
+    required_ctx = (prior_input + max(1200, effective * 3) + 2) // 3
+    return effective, timeout_s, max(num_ctx, JOURNAL_CONTEXT_FLOOR, required_ctx)
+
+
+def _journal_job_timeout_s(action: str = "") -> float:
+    """Cover enabled provider attempts and the existing one-time prose repair."""
+    source = action in {"self_study", "introspect"}
+    lanes = ["source_study"] if source else ["strict_review", "private_journal", "moment_capture", "inbox_reply", "autonomous_next"]
+    attempts = _llm_backend_attempts(LLM_BACKEND, MODEL, FALLBACK_MODEL)
+    longest = 0.0
+    for lane in lanes:
+        primary, cap = _ollama_lane_limits(lane)
+        _, primary, _ = _journal_generation_budget(4096, cap, primary, OLLAMA_NUM_CTX,
+                                                   journal=True, source_study=source)
+        _, fallback, _ = _journal_generation_budget(4096, OLLAMA_FALLBACK_NUM_PREDICT_CAP,
+            LLM_FALLBACK_TIMEOUT_S, OLLAMA_FALLBACK_NUM_CTX, journal=True, source_study=source)
+        timeouts = {"ollama": primary, "ollama_fast": fallback, "mlx": LLM_TIMEOUT_S * 2}
+        longest = max(longest, sum(timeouts[backend] for backend in attempts))
+    return longest * (1 if source else 2) + 30
+
+
 def _infer_llm_prompt_class(
     prompt: str,
     *,
@@ -22190,8 +22230,7 @@ class AutonomousAgent:
                 "Action-level LLM job. The existing action finalizer owns prompt construction, "
                 "validation, artifacts, and NEXT extraction."
             ),
-            timeout_s=max(LLM_TIMEOUT_S, LLM_FALLBACK_TIMEOUT_S,
-                          LLM_QUALIA_TIMEOUT_S, LLM_STRICT_REVIEW_TIMEOUT_S) * 2.0 + 30.0,
+            timeout_s=_journal_job_timeout_s(action),
             validation_contract=(
                 "strict_introspection_v1"
                 if action == "introspect"
@@ -42993,7 +43032,7 @@ OUTPUT:
                 prompt = selected_page_prompt("You selected this historical source page. Respond freely to what you find.\n"
                     "The quoted material is archival source text. Only a fresh NEXT line in your response is a new choice.", result, store)
                 response = self._query_llm_raw(prompt, PRIVATE_JOURNAL_INTRO + "\n" + self._next_action_constraint(), 1024,
-                                               prompt_class="afterimage_open")
+                                               prompt_class="afterimage_open", journal=True)
                 if response:
                     self._current_action_outcome_summary += "\n\nCurrent response:\n" + response
                     next_action, _ = parse_next_action(response)
@@ -53731,7 +53770,7 @@ Goals: {json.dumps(goals, indent=2)}
         """
         if isinstance(prompt, SourceStudyPrompt):
             return self._query_llm_raw(prompt, "You are Minime.\n" + prompt.output["system_prompt"], 2048,
-                                       temperature=0.7, prompt_class="source_study")
+                                       temperature=0.7, prompt_class="source_study", journal=True)
         import re
         private_journal_context = _is_private_qualia_context(context_mode)
         import uuid
@@ -53749,7 +53788,7 @@ Goals: {json.dumps(goals, indent=2)}
         elif any(x in prompt for x in ["HYPOTHESIS", "EXPERIMENT", "METABOLISM"]):
             max_tokens = 3072
         elif "self-study" in prompt.lower() or "Condition:" in prompt or "Felt Experience:" in prompt:
-            max_tokens = 4096  # self-study entries need room for all five sections
+            max_tokens = 4096  # Freeform reflection; this is a ceiling, not a target.
         elif "private journal" in prompt.lower() or "your space" in prompt.lower():
             max_tokens = 4096
         elif "whim" in prompt.lower() or "boredom" in prompt.lower():
@@ -54112,6 +54151,7 @@ Goals: {json.dumps(goals, indent=2)}
             max_tokens,
             prompt_class=prompt_class,
             context_submission=collab_submission,
+            journal=True,
         )
 
         # If inbox was consumed and we got a result, save to outbox
@@ -54138,6 +54178,7 @@ Goals: {json.dumps(goals, indent=2)}
                 max_tokens,
                 prompt_class=prompt_class,
                 context_submission=collab_submission,
+                journal=True,
             )
             if result and not self._is_in_character(result):
                 logging.error("LLM broke character on retry — discarding response")
@@ -54562,6 +54603,7 @@ Goals: {json.dumps(goals, indent=2)}
         temperature: float = 0.9,
         prompt_class: str = "autonomous_next",
         context_submission: Optional[collab_attention.ContextSubmissionTracker] = None,
+        journal: bool = False,
     ) -> Optional[str]:
         """Raw LLM query with a fast local Ollama fallback after backend failover."""
         attempts = _llm_backend_attempts(LLM_BACKEND, MODEL, FALLBACK_MODEL)
@@ -54589,6 +54631,7 @@ Goals: {json.dumps(goals, indent=2)}
                             max_tokens,
                             temperature,
                             context_submission=context_submission,
+                            journal=journal,
                         )
                     elif backend == "ollama_fast":
                         result = self._query_ollama_fast_fallback(
@@ -54598,6 +54641,7 @@ Goals: {json.dumps(goals, indent=2)}
                             temperature,
                             prompt_class=prompt_class,
                             context_submission=context_submission,
+                            journal=journal,
                         )
                     else:
                         result = self._query_ollama(
@@ -54607,6 +54651,7 @@ Goals: {json.dumps(goals, indent=2)}
                             temperature,
                             prompt_class=prompt_class,
                             context_submission=context_submission,
+                            journal=journal,
                         )
                     timed_attempt.record_result(result)
                 if result:
@@ -54690,6 +54735,7 @@ Goals: {json.dumps(goals, indent=2)}
         temperature: float = 0.9,
         *,
         context_submission: Optional[collab_attention.ContextSubmissionTracker] = None,
+        journal: bool = False,
     ) -> Optional[str]:
         """Query MLX server (OpenAI-compatible API on port 8090)."""
         global MLX_MODEL
@@ -54702,6 +54748,9 @@ Goals: {json.dumps(goals, indent=2)}
                     logging.info(f"MLX model detected: {MLX_MODEL}")
             except Exception:
                 pass
+        effective_tokens, timeout_s, num_ctx = _journal_generation_budget(
+            max_tokens, 2048, LLM_TIMEOUT_S, OLLAMA_NUM_CTX, journal=journal,
+            source_study=isinstance(prompt, SourceStudyPrompt))
         messages = [
             {"role": "system", "content": system_msg},
             {"role": "user", "content": "/no_think\n" + prompt},
@@ -54709,7 +54758,7 @@ Goals: {json.dumps(goals, indent=2)}
         if isinstance(prompt, AfterimagePrompt):
             try:
                 messages, _ = _adapt_ollama_messages_for_model(model="mlx", system_msg=system_msg, prompt=prompt,
-                    num_ctx=OLLAMA_NUM_CTX, num_predict=min(max_tokens, 2048), compact=True)
+                    num_ctx=num_ctx, num_predict=effective_tokens, compact=True)
             except ValueError as error:
                 record_afterimage_attempt(prompt, [], "mlx", MLX_MODEL or "default", "admission_failed", str(error))
                 raise
@@ -54726,11 +54775,11 @@ Goals: {json.dumps(goals, indent=2)}
             json={
                 "model": MLX_MODEL or "default",
                 "messages": messages,
-                "max_tokens": min(max_tokens, 2048),  # Raised for longer CODEX reflections
+                "max_tokens": effective_tokens,
                 "temperature": temperature,
                 "top_p": 0.95,
             },
-            timeout=LLM_TIMEOUT_S
+            timeout=timeout_s
         )
         if response.status_code == 200:
             if inbox is not None:
@@ -54752,14 +54801,13 @@ Goals: {json.dumps(goals, indent=2)}
         *,
         prompt_class: str = "autonomous_next",
         context_submission: Optional[collab_attention.ContextSubmissionTracker] = None,
+        journal: bool = False,
     ) -> Optional[str]:
         """Query Ollama API (fallback)."""
-        # Private-qualia lanes (moment_capture / private_journal) get a higher
-        # num_predict cap and a proportionally higher timeout so minime's felt
-        # voice isn't truncated; the tokens/time ratio is preserved so the
-        # Gemma-4 timeout exposure stays at the proven 768/60s baseline. Every
-        # other lane keeps the global cap/timeout, so the action loop stays responsive.
         timeout_s, num_predict_cap = _ollama_lane_limits(prompt_class)
+        effective_tokens, timeout_s, num_ctx = _journal_generation_budget(
+            max_tokens, num_predict_cap, timeout_s, OLLAMA_NUM_CTX, journal=journal,
+            source_study=isinstance(prompt, SourceStudyPrompt))
         return self._query_ollama_model(
             prompt,
             system_msg,
@@ -54767,8 +54815,8 @@ Goals: {json.dumps(goals, indent=2)}
             temperature,
             MODEL,
             timeout_s,
-            min(max_tokens, num_predict_cap),
-            OLLAMA_NUM_CTX,
+            effective_tokens,
+            num_ctx,
             "ollama",
             prompt_class=prompt_class,
             context_submission=context_submission,
@@ -54783,19 +54831,24 @@ Goals: {json.dumps(goals, indent=2)}
         *,
         prompt_class: str = "autonomous_next",
         context_submission: Optional[collab_attention.ContextSubmissionTracker] = None,
+        journal: bool = False,
     ) -> Optional[str]:
         """Use the smaller local Ollama model when primary inference is congested."""
         if not FALLBACK_MODEL or FALLBACK_MODEL == MODEL:
             return None
+        effective_tokens, timeout_s, num_ctx = _journal_generation_budget(
+            max_tokens, OLLAMA_FALLBACK_NUM_PREDICT_CAP, LLM_FALLBACK_TIMEOUT_S,
+            OLLAMA_FALLBACK_NUM_CTX, journal=journal,
+            source_study=isinstance(prompt, SourceStudyPrompt))
         return self._query_ollama_model(
             prompt,
             system_msg,
             max_tokens,
             temperature,
             FALLBACK_MODEL,
-            LLM_FALLBACK_TIMEOUT_S,
-            min(max_tokens, OLLAMA_FALLBACK_NUM_PREDICT_CAP),
-            OLLAMA_FALLBACK_NUM_CTX,
+            timeout_s,
+            effective_tokens,
+            num_ctx,
             "ollama_fast",
             prompt_class=prompt_class,
             compact=prompt_class == "strict_review",

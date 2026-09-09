@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **[codex / journal room]** Source studies share Astrid's 4,096-token ceiling; other journal generation ceilings double after lane configuration. Enlarged output retains input room and matched provider/job deadlines. Compact auxiliary calls keep their existing limits. Final bare source-study commands can be read-only choices; quoted/fenced examples cannot. Shared navigation and implementation evidence: `docs/2026-09-09-journal-room.md`.
+
 - **[codex / study evidence] Keeps current input distinct from recalled study accounts.** The shared reader labels source pages, maps, searches, EOF and recovery; Minime journals retain that input scope, exact source revision and the limit of delivery verification. Astrid study notes remain attributed peer accounts, with original correspondence evidence intact. Qualification and paired rollout: Astrid `docs/steward-notes/2026-09-08-study-evidence-and-readable-overflow.md`.
 
 - **[codex / study entry and follow-through] Routes source INTROSPECT through the shared SELF_STUDY reader before research-budget admission.** Raw intent and zero-based legacy offsets are preserved, and the exact reader command travels with its job. Workspace artifacts retain their research policy. Unknown source targets receive a clearly labelled recovery map from the shared helper; navigation cannot advance source coverage. MAP/FIND/OPEN/RESUME/CONTINUE guidance survives system-prompt compaction within the existing context budget. The shared recovery release and Astrid attestation repair are documented in Astrid `docs/steward-notes/2026-09-08-self-study-follow-through.md`.
