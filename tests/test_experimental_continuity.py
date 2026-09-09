@@ -67,7 +67,7 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                 self.assertIn("loop_research=5/21600s", surface)
                 self.assertIn("consequence=1 gated slot", surface)
                 self.assertIn(
-                    "internal JOURNAL/NOTICE/DRIFT/ASPIRE/SELF_STUDY/INTROSPECT routes are budget-free",
+                    "internal JOURNAL/NOTICE/DRIFT/ASPIRE/SELF_STUDY and source INTROSPECT are budget-free",
                     surface,
                 )
             self.assertIn("Command palette (generated):", prompt)

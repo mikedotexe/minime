@@ -181,3 +181,28 @@ def test_strict_review_lane_gets_extended_timeout_global_cap():
         aa.OLLAMA_NUM_PREDICT_CAP,
     )
     assert aa.LLM_STRICT_REVIEW_TIMEOUT_S > aa.LLM_TIMEOUT_S
+
+
+def test_source_navigation_survives_middle_compaction_within_existing_budget():
+    from minime_autonomy.source_study import SOURCE_STUDY_GUIDANCE
+    system = "Identity.\n" + "ambient context\n" * 1800 + "SELF_STUDY MAP\n" + "ambient tail\n" * 1800
+    for model, compact in [("gemma4:12b", False), ("gemma3:4b", True)]:
+        messages, adapter = aa._adapt_ollama_messages_for_model(
+            model=model, system_msg=system, prompt="state\n" * 4000,
+            num_ctx=8192, num_predict=768, compact=compact,
+        )
+        assert SOURCE_STUDY_GUIDANCE in messages[0]["content"]
+        assert adapter["prompt_compacted"]
+        assert sum(len(m["content"]) for m in messages) <= 16000
+        assert "workspace artifacts keep their research policy" in messages[0]["content"]
+
+
+def test_compact_short_system_reserves_navigation_before_allocating_user_context():
+    from minime_autonomy.source_study import SOURCE_STUDY_GUIDANCE
+    messages, adapter = aa._adapt_ollama_messages_for_model(
+        model="gemma3:4b", system_msg="SELF_STUDY", prompt="ambient context\n" * 4000,
+        num_ctx=8192, num_predict=768, compact=True,
+    )
+    assert SOURCE_STUDY_GUIDANCE in messages[0]["content"]
+    assert sum(len(m["content"]) for m in messages) <= 16000
+    assert adapter["prompt_compaction"]["adapted_total_chars"] <= 16000

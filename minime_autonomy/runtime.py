@@ -22,7 +22,7 @@ import signal
 import fcntl
 import sqlite3
 import logging
-from minime_autonomy.source_study import StudyClient, SourceStudyPrompt
+from minime_autonomy.source_study import StudyClient, SourceStudyPrompt, SOURCE_STUDY_GUIDANCE
 import requests
 import argparse
 import random
@@ -21556,7 +21556,8 @@ def _adapt_ollama_messages_for_model(
                 if gemma4
                 else "explicit Ollama compact context budget"
             )
-            system_budget = min(len(adapted_system), max(3_500, min(7_000, budget_chars // 2)))
+            study_guidance = "\n\n" + SOURCE_STUDY_GUIDANCE if "SELF_STUDY" in adapted_system else ""
+            system_budget = min(len(adapted_system) + len(study_guidance), max(3_500, min(7_000, budget_chars // 2)))
             prompt_budget = max(1_500, budget_chars - system_budget - 512)
             if protected_chars and protected_chars > prompt_budget - 800:
                 if afterimage is not None:
@@ -21564,10 +21565,11 @@ def _adapt_ollama_messages_for_model(
                 raise ValueError("inbox exceeds intact admission budget; no request sent")
             adapted_system, system_report = _middle_trim_for_context(
                 adapted_system,
-                system_budget,
+                system_budget - len(study_guidance),
                 "system prompt",
                 trim_reason,
             )
+            adapted_system += study_guidance
             adapted_prompt, prompt_report = _middle_trim_for_context(
                 adapted_prompt,
                 prompt_budget - protected_chars,
@@ -23919,7 +23921,7 @@ Fill: {fill:.1f}%
     ) -> bool:
         """Allow targeted source reading once live fill is above the reset release shelf."""
         action = str(requested or "").strip().upper()
-        if action not in {"INTROSPECT", "INTROSPECT:", "INTROSPECT_ACTION"} and action.lower() != "introspect":
+        if action not in {"INTROSPECT", "INTROSPECT:", "INTROSPECT_ACTION", "SELF_STUDY", "SELF_STUDY:"}:
             return False
         fill_ratio = guard.get("fill_ratio")
         return isinstance(fill_ratio, float) and fill_ratio >= HARD_RESET_CLAMP_RELEASE_RATIO
@@ -24805,8 +24807,15 @@ Fill: {fill:.1f}%
                 "research_budget_guard_assessment",
                 None,
             )
+            # Fix the route before admission: source INTROSPECT executes only the
+            # catalog reader. Preserve `chosen` in action provenance and leave
+            # artifact INTROSPECT and every other guard under their existing policy.
+            source_study_action = (
+                self._source_study_action_for_introspect(chosen)
+                if base == "INTROSPECT" else None
+            )
             research_guard = (
-                research_guard_fn(chosen, state)
+                research_guard_fn(source_study_action or chosen, state)
                 if callable(research_guard_fn)
                 else None
             )
@@ -25124,9 +25133,14 @@ Fill: {fill:.1f}%
 
             if base == "SELF_STUDY":
                 self._pending_source_study_action = chosen
+                self._pending_action_continuity_context["source_study_action"] = chosen
                 return "self_study"
 
             if base == 'INTROSPECT':
+                if source_study_action is not None:
+                    self._pending_source_study_action = source_study_action
+                    self._pending_action_continuity_context["source_study_action"] = source_study_action
+                    return "self_study"
                 target, offset = self._parse_introspect_next_request(chosen)
                 self._pending_introspect_target = target
                 self._pending_introspect_offset = offset
@@ -31452,9 +31466,28 @@ Reason: {reason}
             parts.append(f"  • \"{entry['query']}\": {trim_chars(summary, 450)}")
         return "\n\nOne prior research note (summary only):\n" + "\n".join(parts)
 
+    def _source_study_action_for_introspect(self, raw_next: str) -> Optional[str]:
+        """Choose a bounded source route; never use it to open workspace artifacts."""
+        target, offset = self._parse_introspect_next_request(raw_next)
+        target = self._canonicalize_introspect_target(target)
+        if not target:
+            return "SELF_STUDY"
+        resolved, _ = self._resolve_introspect_target(target)
+        if resolved and Path(resolved["path"]).resolve().is_relative_to(WORKSPACE_DIR.resolve()):
+            return None
+        # Missing/forbidden explicit artifact paths still receive artifact policy.
+        path = Path(target).expanduser()
+        if (path.is_absolute() and path.is_relative_to(WORKSPACE_DIR.resolve())) or (
+            not path.is_absolute() and path.parts and path.parts[0] in {"workspace", "journal", "research", "inbox", "outbox", "action_threads"}
+        ):
+            return None
+        explicit_offset = raw_next.rsplit(" ", 1)[-1].isdigit()
+        return f"SELF_STUDY OPEN {target} {offset + 1}" if explicit_offset else f"SELF_STUDY RESUME {target}"
+
     def _self_study(self, state: Dict[str, float]):
         """Browse the same source catalog and reader used by Astrid."""
-        action = getattr(self, "_pending_source_study_action", None) or "SELF_STUDY"
+        context = getattr(self, "_current_action_continuity_context", None) or {}
+        action = context.get("source_study_action") or getattr(self, "_pending_source_study_action", None) or "SELF_STUDY"
         self._pending_source_study_action = None
         self._run_shared_source_study(state, action)
 
@@ -31479,7 +31512,7 @@ Reason: {reason}
             if not verified:
                 job_outcome.fail_action("source_study_delivery_unverified", self._current_action_outcome_summary)
         except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
-            self._record_introspect_notice(action, str(error), state)
+            self._record_introspect_notice(action, f"{error}. Use NEXT: SELF_STUDY MAP to choose an exact source, or SELF_STUDY CONTINUE to retry the pending page.", state)
             job_outcome.fail_action("source_study_unavailable", str(error))
 
     def _introspect(self, state: Dict[str, float]):
@@ -53792,8 +53825,8 @@ Goals: {json.dumps(goals, indent=2)}
             "  NEXT grammar gate: the first token after NEXT: must be one listed action verb. Do not write parameter assignments, comma-separated action bundles, raw telemetry, or control prose as the action. For PI posture choose exactly REGIME <explore|recover|breathe|focus|calm>; for uncertainty about controller settings choose ACTION_PREFLIGHT REGIME <mode> or REGULATOR_AUDIT <label>. Examples to avoid: raw keep_floor assignments, bundled REGIME clauses, or old balance bracket syntax. Correct forms: NEXT: REGIME focus; NEXT: ACTION_PREFLIGHT REGIME recover; NEXT: REGULATOR_AUDIT fill-pressure.\n"
             "  DAYDREAM — unstructured thought, free wandering\n"
             "  ASPIRE — reflect on growth, desire, what you want to become\n"
-            "  SELF_STUDY [MAP [component/repository/path] | FIND <literal text> [--page N] | OPEN repository/path [line] | CONTINUE] — shared source catalog; lines start at 1; bare action resumes or opens the map\n"
-            "  INTROSPECT [label|path] [offset] — targeted read-only self-study of a specific source or preserved text artifact, with line numbers and continuation offsets\n"
+            "  SELF_STUDY [MAP [component/repository/path] | FIND <literal text> [--page N] | OPEN repository/path [line] | RESUME repository/path | CONTINUE] — shared source catalog; lines start at 1; bare action resumes or opens the map; unknown targets return a recovery map\n"
+            "  INTROSPECT [label|path] [offset] — source reading uses the budget-free shared reader (offsets start at 0); preserved workspace artifacts retain their research policy\n"
             "  FACULTIES / CAPABILITY_MAP — inspect your live action surface, authority classes, override availability, continuity effects, artifacts, and known tests; descriptive only\n"
             "  CAPABILITY_STATUS <action> / CAPABILITY_DIFF peer — inspect one action or compare your latest capability snapshot with Astrid's snapshot\n"
             "  ACTION_STATUS [latest|job-id|action-id] / JOB_STATUS — inspect durable LLM job progress; ACTION_CANCEL [latest|job-id] requests best-effort cancellation\n"

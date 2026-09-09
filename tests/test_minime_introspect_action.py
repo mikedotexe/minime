@@ -73,9 +73,8 @@ class TestMinimeIntrospectAction(unittest.TestCase):
             ):
                 action = agent._decide_action(dict(STATE))
 
-            self.assertEqual(action, "introspect")
-            self.assertEqual(agent._pending_introspect_target, "autonomous_agent.py")
-            self.assertEqual(agent._pending_introspect_offset, 400)
+            self.assertEqual(action, "self_study")
+            self.assertEqual(agent._pending_source_study_action, "SELF_STUDY OPEN autonomous_agent.py 401")
 
     def test_parse_next_action_accepts_terminal_bare_attractor_suggestions(self):
         action, cleaned = aa.parse_next_action(
@@ -602,9 +601,8 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
             ):
                 action = agent._decide_action(dict(STATE))
 
-            self.assertEqual(action, "introspect")
-            self.assertEqual(agent._pending_introspect_target, "autonomous_agent.py")
-            self.assertEqual(agent._pending_introspect_offset, 8878)
+            self.assertEqual(action, "self_study")
+            self.assertEqual(agent._pending_source_study_action, "SELF_STUDY OPEN autonomous_agent.py 8879")
 
     def test_hard_reset_still_blocks_introspect_during_deep_underfill(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -672,9 +670,8 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
                     action = agent._decide_action(dict(STATE))
 
             payload = json.loads(override_path.read_text())
-            self.assertEqual(action, "introspect")
-            self.assertEqual(agent._pending_introspect_target, "autonomous_agent.py")
-            self.assertEqual(agent._pending_introspect_offset, 8400)
+            self.assertEqual(action, "self_study")
+            self.assertEqual(agent._pending_source_study_action, "SELF_STUDY OPEN autonomous_agent.py 8401")
             self.assertEqual(payload["status"], "consumed")
             self.assertIsNone(payload["pending_next_action"])
             self.assertFalse(payload["active"])
@@ -712,9 +709,8 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
                 action = agent._decide_action(dict(STATE))
 
             payload = json.loads(override_path.read_text())
-            self.assertEqual(action, "introspect")
-            self.assertEqual(agent._pending_introspect_target, "autonomous_agent.py")
-            self.assertEqual(agent._pending_introspect_offset, 8400)
+            self.assertEqual(action, "self_study")
+            self.assertEqual(agent._pending_source_study_action, "SELF_STUDY OPEN autonomous_agent.py 8401")
             self.assertEqual(payload["status"], "consumed")
             self.assertIsNone(payload["pending_next_action"])
             self.assertEqual(payload["last_pending_next_action"], "INTROSPECT autonomous_agent.py 8400")

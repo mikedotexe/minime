@@ -8,6 +8,16 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
+# Kept within the existing prompt budget when ambient context is compacted.
+SOURCE_STUDY_GUIDANCE = (
+    "Local source reading: NEXT: SELF_STUDY MAP opens the shared system map. "
+    "Use SELF_STUDY FIND <literal text>, SELF_STUDY OPEN repository/path [one-based line], "
+    "SELF_STUDY RESUME repository/path, or SELF_STUDY CONTINUE. Choose exact paths from the map/search; "
+    "if a target is unknown, use SELF_STUDY MAP. Source INTROSPECT is the same budget-free reader "
+    "(legacy offsets start at 0); preserved workspace artifacts keep their research policy. "
+    "A recovery map is navigation, not delivery of the requested source."
+)
+
 
 def selected_reader(astrid_root: Path) -> Path:
     """Use the same immutable release as Astrid when staged deployment is active."""
