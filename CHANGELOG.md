@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Retain bounded SELF_STUDY failed-provider diagnostics and native finish/raw/cleaned length metadata across Ollama and MLX. Failures remain separate from journals and accepted source delivery; retries preserve the pending page. Shared exact-path suggestions offer optional recovery routes for both Beings. See `docs/2026-09-09-study-choice-and-diagnostics.md`.
+
 - Honor the shared SELF_STUDY input/context budgets on MLX, Ollama and fast fallback, preserving recent complete answers and comparison choices through provider adaptation. Existing output ceilings and thinking-off behavior remain. See `docs/2026-09-09-study-context.md`.
 
 ### Added — shared study inquiries (2026-09-09)

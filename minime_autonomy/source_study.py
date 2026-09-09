@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 from typing import Any
+from .source_study_diagnostics import StudyAttemptDiagnostics
 
 # Kept within the existing prompt budget when ambient context is compacted.
 SOURCE_STUDY_GUIDANCE = (
@@ -91,6 +92,7 @@ class SourceStudyPrompt(str):
         value.output = output
         value.receipt = None
         value._wire = None
+        value._diagnostics = None
         return value
 
     @property
@@ -117,11 +119,33 @@ class SourceStudyPrompt(str):
         if not any(m.get("role") == "user" and str(self) in m.get("content", "")
                    for m in payload.get("messages", [])):
             raise ValueError("source page was shortened before submission; bookmark unchanged")
-        response = post(url, data=request_json.encode("utf-8"),
-                        headers={"Content-Type": "application/json"}, timeout=timeout)
+        self._wire = None
+        self._diagnostics = StudyAttemptDiagnostics(self.client.workspace, self.output, request_json)
+        try:
+            response = post(url, data=request_json.encode("utf-8"),
+                            headers={"Content-Type": "application/json"}, timeout=timeout)
+        except Exception as error:
+            self._diagnostics.fail("transport_error", error)
+            raise
+        self._diagnostics.response(response)
         if response.status_code == 200:
             self._wire = (request_json, response.text)
         return response
+
+    @property
+    def diagnostic_summary(self) -> dict:
+        return dict(self._diagnostics.summary) if self._diagnostics else {}
+
+    def clean_content(self, cleaner, content):
+        try:
+            cleaned = cleaner(content)
+        except Exception as error:
+            if self._diagnostics:
+                self._diagnostics.fail("cleanup_error", error)
+            raise
+        if self._diagnostics:
+            self._diagnostics.cleaned(cleaned)
+        return cleaned
 
     def accepted(self):
         """Called by dispatch after a nonempty visible completion survives cleanup."""
@@ -129,10 +153,15 @@ class SourceStudyPrompt(str):
             raise RuntimeError("source delivery has no retained provider wire bodies")
         request_json, response_json = self._wire
         page = self.output.get("page")
-        if page:
-            self.receipt = self.client.call(operation="delivered", page_id=page["id"],
-                                           request_json=request_json, response_json=response_json)
-        else:
-            self.receipt = self.client.call(operation="navigation_delivered",
-                                           navigation_id=self.output["navigation_id"],
-                                           request_json=request_json, response_json=response_json)
+        try:
+            if page:
+                self.receipt = self.client.call(operation="delivered", page_id=page["id"],
+                                               request_json=request_json, response_json=response_json)
+            else:
+                self.receipt = self.client.call(operation="navigation_delivered",
+                                               navigation_id=self.output["navigation_id"],
+                                               request_json=request_json, response_json=response_json)
+        except Exception as error:
+            if self._diagnostics:
+                self._diagnostics.fail("delivery_rejected", error)
+            raise

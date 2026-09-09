@@ -54657,18 +54657,21 @@ Goals: {json.dumps(goals, indent=2)}
                     timed_attempt.record_result(result)
                 if result:
                     if isinstance(attempt_prompt, SourceStudyPrompt):
-                        if not self._strip_model_artifacts(result):
+                        if not attempt_prompt.clean_content(self._strip_model_artifacts, result):
                             raise ValueError("source-study completion was empty after cleanup; bookmark unchanged")
                         attempt_prompt.accepted()
-                    generation_record.record_attempt(gen, idx, backend, result=result)
+                    generation_record.record_attempt(gen, idx, backend, result=result,
+                        diagnostics=attempt_prompt.diagnostic_summary if isinstance(attempt_prompt, SourceStudyPrompt) else None)
                     if idx > 0:
                         logging.info(f"LLM fallback succeeded via {backend}")
                     # Kink #16 fix: sanitize before any caller sees the text.
                     return self._strip_model_artifacts(result)
-                generation_record.record_attempt(gen, idx, backend, result="")
+                generation_record.record_attempt(gen, idx, backend, result="",
+                    diagnostics=attempt_prompt.diagnostic_summary if isinstance(attempt_prompt, SourceStudyPrompt) else None)
                 logging.warning(f"LLM query returned empty content ({backend})")
             except Exception as exc:
-                generation_record.record_attempt(gen, idx, backend, error=exc)
+                generation_record.record_attempt(gen, idx, backend, error=exc,
+                    diagnostics=attempt_prompt.diagnostic_summary if isinstance(attempt_prompt, SourceStudyPrompt) else None)
                 logging.error(f"LLM query failed ({backend}): {exc}")
             if idx < len(attempts) - 1:
                 logging.info(f"Falling back to {attempts[idx + 1]}...")
@@ -54791,7 +54794,8 @@ Goals: {json.dumps(goals, indent=2)}
             if content:
                 self._last_llm_model = MLX_MODEL or "default"
                 self._last_llm_provider = "mlx"
-            return self._clean_llm_content(content)
+            return (prompt.clean_content(self._clean_llm_content, content)
+                    if isinstance(prompt, SourceStudyPrompt) else self._clean_llm_content(content))
         else:
             raise Exception(f"MLX server returned {response.status_code}: {response.text[:200]}")
 
@@ -54946,7 +54950,8 @@ Goals: {json.dumps(goals, indent=2)}
                 if content:
                     self._last_llm_model = model
                     self._last_llm_provider = backend_name
-                return self._clean_llm_content(content)
+                return (prompt.clean_content(self._clean_llm_content, content)
+                        if isinstance(prompt, SourceStudyPrompt) else self._clean_llm_content(content))
             timing["status"] = "http_error"
             raise Exception(f"Ollama {model} returned {response.status_code}")
         except Exception as exc:
@@ -54957,6 +54962,8 @@ Goals: {json.dumps(goals, indent=2)}
             raise
         finally:
             timing["elapsed_s"] = round(time.perf_counter() - started, 3)
+            if isinstance(prompt, SourceStudyPrompt):
+                timing.update(prompt.diagnostic_summary)
             _append_llm_timing(timing)
             generation_record.stash_attempt(messages, timing)
 

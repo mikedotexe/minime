@@ -366,6 +366,7 @@ def record_attempt(
     *,
     result: Optional[str] = None,
     error: Optional[BaseException] = None,
+    diagnostics: Optional[Dict[str, Any]] = None,
 ) -> Optional[Path]:
     """Write one attempt record. Returns its path, or ``None``."""
     if ctx is None or not enabled():
@@ -386,6 +387,8 @@ def record_attempt(
             {"role": "system", "content": ctx.system_msg},
             {"role": "user", "content": ctx.prompt},
         ]
+    if isinstance(diagnostics, dict):
+        timing.update(diagnostics)
     status, error_name = _classify(result, error, timing)
     model = _scalar(timing.get("model")) or _model_for_backend(backend, ctx.models)
     elapsed = timing.get("elapsed_s")
@@ -419,7 +422,9 @@ def record_attempt(
         "http_status": _scalar(timing.get("http_status")),
         "backend_timing": {
             key: _scalar(timing.get(key))
-            for key in ("total_duration", "eval_count", "eval_duration", "effective_num_predict", "num_ctx", "requested_max_tokens")
+            for key in ("total_duration", "eval_count", "eval_duration", "effective_num_predict", "num_ctx", "requested_max_tokens",
+                        "native_finish", "native_done", "raw_content_chars", "cleaned_content_chars", "thinking_chars",
+                        "provider_eval_count", "source_study_failure", "source_study_diagnostic_path")
             if key in timing
         },
         "adapter": {
