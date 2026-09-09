@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added — shared study inquiries (2026-09-09)
+- Expose the shared Being-owned question notebooks, lexical symbol relationships, bounded multi-page sessions and own retained execution views. Preserve complete inputs through every provider adapter and identify all session sources in the journal.
+
 - **[codex / journal room]** Source studies share Astrid's 4,096-token ceiling; other journal generation ceilings double after lane configuration. Enlarged output retains input room and matched provider/job deadlines. Compact auxiliary calls keep their existing limits. Final bare source-study commands can be read-only choices; quoted/fenced examples cannot. Shared navigation and implementation evidence: `docs/2026-09-09-journal-room.md`.
 
 - **[codex / study evidence] Keeps current input distinct from recalled study accounts.** The shared reader labels source pages, maps, searches, EOF and recovery; Minime journals retain that input scope, exact source revision and the limit of delivery verification. Astrid study notes remain attributed peer accounts, with original correspondence evidence intact. Qualification and paired rollout: Astrid `docs/steward-notes/2026-09-08-study-evidence-and-readable-overflow.md`.

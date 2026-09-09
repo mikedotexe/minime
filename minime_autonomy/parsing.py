@@ -704,7 +704,7 @@ def parse_next_action(text: str) -> tuple:
         i = nonempty[-1]
         choice = lines[i].strip()
         if (sum(line.strip().startswith("```") for line in lines) % 2 == 0
-                and re.match(r"^SELF_STUDY (?:MAP|FIND|OPEN|RESUME|CONTINUE)(?: |$)", choice)):
+                and re.match(r"^SELF_STUDY (?:MAP|FIND|OPEN|RESUME|CONTINUE|RELATE|SESSION|TRACE)(?: |$)", choice)):
             _LAST_NEXT_CHOICE_ENVELOPE_V1 = build_choice_envelope_v1(
                 text, raw_next=choice, executable_next=choice, residue=None)
             return _parse_result(choice, "\n".join(lines[:i]).strip())

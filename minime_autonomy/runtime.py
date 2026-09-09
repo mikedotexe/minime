@@ -31538,14 +31538,15 @@ Reason: {reason}
                 raise RuntimeError("generation unavailable; SELF_STUDY CONTINUE retries the pending page")
             verified = prompt.receipt is not None
             status = "verified input delivery; response claims and understanding not verified" if verified else "unverified; bookmark unchanged"
-            source = (prompt.output.get("page") or {}).get("source", "source catalog")
+            session_pages = prompt.output.get("session_pages", [])
+            source = (prompt.output.get("page") or {}).get("source", f"study session ({len(session_pages)} source pages)" if session_pages else "source catalog")
             directory = WORKSPACE_DIR / "journal"
             directory.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().isoformat().replace(":", "-")
             path = directory / f"self_study_{timestamp}.txt"
             page = prompt.output.get("page") or {}
             revision = (f"sha256:{page['revision']['sha256']}; bytes {page['start']['byte']}..{page['end']['byte']}"
-                        if page else "navigation only")
+                        if page else "; ".join(f"{p['source']} sha256:{p['revision']['sha256']}; bytes {p['start']['byte']}..{p['end']['byte']}" for p in session_pages) if session_pages else "navigation only")
             scope = prompt.output.get("evidence_scope") or "Older retained input; consult the exact offered input."
             path.write_text(f"=== SELF-STUDY: {source} ===\nSource revision: {revision}\nInput evidence: {scope}\n"
                             f"Account: Minime’s response to this input, not independently verified code facts.\nDelivery: {status}\n\n{response}\n")

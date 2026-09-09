@@ -11,6 +11,7 @@ from typing import Any
 # Kept within the existing prompt budget when ambient context is compacted.
 SOURCE_STUDY_GUIDANCE = (
     "Local source reading: NEXT: SELF_STUDY MAP opens the shared system map. "
+    "SELF_STUDY QUESTION manages your study inquiries; RELATE follows exact symbols, SESSION reads chosen pages together, and TRACE LAST inspects retained delivery. "
     "Use SELF_STUDY FIND <literal text>, SELF_STUDY OPEN repository/path [one-based line], "
     "SELF_STUDY RESUME repository/path, or SELF_STUDY CONTINUE. Choose exact paths from the map/search; "
     "if a target is unknown, use SELF_STUDY MAP. Source INTROSPECT is the same budget-free reader "
@@ -66,7 +67,8 @@ class StudyClient:
         if not self.executable.is_file():
             raise RuntimeError("shared source reader is unavailable; build Astrid's astrid-source-study executable before enabling source study")
         request = {"astrid_root": str(self.astrid_root), "minime_root": str(self.minime_root),
-                   "state_directory": str(self.workspace / "diagnostics/source_first_v3/shared_reader"), **operation}
+                   "state_directory": str(self.workspace / "diagnostics/source_first_v3/shared_reader"),
+                   "runtime_workspace": str(self.workspace), "being": "minime", **operation}
         result = subprocess.run([str(self.executable)], input=json.dumps(request), text=True,
                                 capture_output=True, timeout=45, check=False)
         try:
