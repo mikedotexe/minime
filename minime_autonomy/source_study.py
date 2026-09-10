@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 from typing import Any
 from .source_study_diagnostics import StudyAttemptDiagnostics
+from .writing import WRITING_GUIDANCE
 
 # Kept within the existing prompt budget when ambient context is compacted.
 SOURCE_STUDY_GUIDANCE = (
@@ -18,8 +19,8 @@ SOURCE_STUDY_GUIDANCE = (
     "if a target is unknown, use SELF_STUDY MAP. Source INTROSPECT is the same budget-free reader "
     "(legacy offsets start at 0); preserved workspace artifacts keep their research policy. "
     "A recovery map is navigation, not delivery of the requested source. "
-    "SELF_STUDY CONTINUE reads the next code page; READ_MORE is a separate saved-document reader."
-)
+    "SELF_STUDY CONTINUE reads the next code page; READ_MORE is a separate saved-document reader. "
+) + WRITING_GUIDANCE
 
 
 def selected_reader(astrid_root: Path) -> Path:

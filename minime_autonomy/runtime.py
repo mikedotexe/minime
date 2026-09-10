@@ -22,6 +22,7 @@ import signal
 import fcntl
 import sqlite3
 import logging
+from minime_autonomy import writing
 from minime_autonomy.source_study import StudyClient, SourceStudyPrompt, SOURCE_STUDY_GUIDANCE
 import requests
 import argparse
@@ -301,6 +302,7 @@ OPERATOR_PENDING_NEXT_ALLOWED_BASES = {
     "REST",
     "SEARCH",
     "SELF_STUDY",
+    "WRITE",
     "SHUT_EARS",
     "SHUT_EYES",
     "SPECTRAL_EXPLORER",
@@ -21673,7 +21675,8 @@ def _journal_generation_budget(max_tokens: int, cap: int, timeout_s: float,
     # Retain the prior input room for explicit larger environment configurations too.
     prior_input = min(16000, _ollama_prompt_char_budget(num_ctx, min(max_tokens, cap)))
     required_ctx = (prior_input + max(1200, effective * 3) + 2) // 3
-    return effective, timeout_s, max(num_ctx, JOURNAL_CONTEXT_FLOOR, required_ctx)
+    return writing.profile_budget(writing.selected_profile(WORKSPACE_DIR),
+        (effective, timeout_s, max(num_ctx, JOURNAL_CONTEXT_FLOOR, required_ctx)))
 
 
 def _journal_job_timeout_s(action: str = "") -> float:
@@ -21688,8 +21691,12 @@ def _journal_job_timeout_s(action: str = "") -> float:
                                                    journal=True, source_study=source)
         _, fallback, _ = _journal_generation_budget(4096, OLLAMA_FALLBACK_NUM_PREDICT_CAP,
             LLM_FALLBACK_TIMEOUT_S, OLLAMA_FALLBACK_NUM_CTX, journal=True, source_study=source)
-        timeouts = {"ollama": primary, "ollama_fast": fallback, "mlx": LLM_TIMEOUT_S * 2}
+        _, mlx, _ = _journal_generation_budget(4096, 2048, LLM_TIMEOUT_S, OLLAMA_NUM_CTX,
+                                               journal=True, source_study=source)
+        timeouts = {"ollama": primary, "ollama_fast": fallback, "mlx": mlx}
         longest = max(longest, sum(timeouts[backend] for backend in attempts))
+    if writing.selected_profile(WORKSPACE_DIR) == "extended":
+        longest = max(longest, 1200 * len(attempts))
     return longest * (1 if source else 2) + 30
 
 
@@ -23960,7 +23967,7 @@ Fill: {fill:.1f}%
     ) -> bool:
         """Allow targeted source reading once live fill is above the reset release shelf."""
         action = str(requested or "").strip().upper()
-        if action not in {"INTROSPECT", "INTROSPECT:", "INTROSPECT_ACTION", "SELF_STUDY", "SELF_STUDY:"}:
+        if action not in {"INTROSPECT", "INTROSPECT:", "INTROSPECT_ACTION", "SELF_STUDY", "SELF_STUDY:", "WRITE", "WRITE:"}:
             return False
         fill_ratio = guard.get("fill_ratio")
         return isinstance(fill_ratio, float) and fill_ratio >= HARD_RESET_CLAMP_RELEASE_RATIO
@@ -23978,7 +23985,7 @@ Fill: {fill:.1f}%
             return (
                 "Stable-core self-journal restoration is active. Choose only NEXT: NOTICE, "
                 "NEXT: DRIFT, NEXT: ASPIRE, NEXT: DAYDREAM, NEXT: BOREDOM, NEXT: WHIM, "
-                "NEXT: JOURNAL, NEXT: SELF_STUDY, NEXT: INTROSPECT autonomous_agent.py, NEXT: MARK_INTENSIFICATION lambda-edge, "
+                "NEXT: JOURNAL, NEXT: SELF_STUDY, NEXT: WRITE HELP, NEXT: INTROSPECT autonomous_agent.py, NEXT: MARK_INTENSIFICATION lambda-edge, "
                 "NEXT: SPACE_HOLD eigenplane, NEXT: RELEASE lambda-pressure, NEXT: MARK_RESOLVED lambda-pressure, "
                 "NEXT: DIVISION_STATUS, NEXT: REST, or NEXT: PASS. "
                 "Other choices will be blocked by the health budget during this gate.\n\n"
@@ -23987,7 +23994,7 @@ Fill: {fill:.1f}%
             return (
                 "Stable-core local-reflective restoration is active. Choose only local reflective "
                 "actions: NEXT: NOTICE, DRIFT, ASPIRE, DAYDREAM, BOREDOM, WHIM, JOURNAL, "
-                "SELF_STUDY, INTROSPECT autonomous_agent.py, DECOMPOSE, SPECTRAL_EXPLORER, CONSTRAINT_AUDIT lambda-tail/lambda4, PRESSURE_SOURCE_AUDIT inwardness, RESERVOIR_READ, RESERVOIR_RESONANCE, "
+                "SELF_STUDY, WRITE HELP, INTROSPECT autonomous_agent.py, DECOMPOSE, SPECTRAL_EXPLORER, CONSTRAINT_AUDIT lambda-tail/lambda4, PRESSURE_SOURCE_AUDIT inwardness, RESERVOIR_READ, RESERVOIR_RESONANCE, "
                 "RESERVOIR_LAYERS, MARK_INTENSIFICATION lambda-edge, REGULATOR_AUDIT fill-pressure, SHADOW_FIELD lambda-tail, SHADOW_TRAJECTORY lambda-tail/lambda4, GAP_STRUCTURE shoulder-gap, DECAY_MAP attrition-baseline, SPACE_HOLD eigenplane, RESONANCE_FORECAST next-motion, "
                 "NATIVE_GESTURE trace membrane, RESIST lambda-pull, FISSURE shoulder-ambiguity, RELEASE lambda-pressure, MARK_RESOLVED lambda-pressure, REST, or PASS. "
                 "Web search, Astrid pings/questions, "
@@ -24377,6 +24384,7 @@ Fill: {fill:.1f}%
                 'DAYDREAM': 'recess_daydream',
                 'ASPIRE': 'recess_aspiration',
                 'SELF_STUDY': 'self_study',
+                'WRITE': 'self_study',
                 'INTROSPECT': 'introspect',
                 'ACTION_PREFLIGHT': 'action_preflight',
                 'NEXT_PROBE': 'action_preflight',
@@ -25170,7 +25178,7 @@ Fill: {fill:.1f}%
                 )
                 return 'constraint_audit'
 
-            if base == "SELF_STUDY":
+            if base in {"SELF_STUDY", "WRITE"}:
                 self._pending_source_study_action = chosen
                 self._pending_action_continuity_context["source_study_action"] = chosen
                 return "self_study"
@@ -31539,25 +31547,37 @@ Reason: {reason}
             verified = prompt.receipt is not None
             status = "verified input delivery; response claims and understanding not verified" if verified else "unverified; bookmark unchanged"
             session_pages = prompt.output.get("session_pages", [])
+            private_writing = prompt.output.get("input_kind") == "private_writing"
+            mode = "private_writing" if private_writing else "self_study"
             source = (prompt.output.get("page") or {}).get("source", f"study session ({len(session_pages)} source pages)" if session_pages else "source catalog")
-            directory = WORKSPACE_DIR / "journal"
+            if private_writing:
+                source = "private draft"
+            directory = WORKSPACE_DIR / ("private_writing/journal" if private_writing else "journal")
             directory.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().isoformat().replace(":", "-")
-            path = directory / f"self_study_{timestamp}.txt"
+            path = directory / f"{mode}_{timestamp}.txt"
             page = prompt.output.get("page") or {}
             revision = (f"sha256:{page['revision']['sha256']}; bytes {page['start']['byte']}..{page['end']['byte']}"
                         if page else "; ".join(f"{p['source']} sha256:{p['revision']['sha256']}; bytes {p['start']['byte']}..{p['end']['byte']}" for p in session_pages) if session_pages else "navigation only")
             scope = prompt.output.get("evidence_scope") or "Older retained input; consult the exact offered input."
-            path.write_text(f"=== SELF-STUDY: {source} ===\nSource revision: {revision}\nInput evidence: {scope}\n"
+            heading = "PRIVATE WRITING" if private_writing else "SELF-STUDY"
+            path.write_text(f"=== {heading}: {source} ===\nSource revision: {revision}\nInput evidence: {scope}\n"
                             f"Account: Minime’s response to this input, not independently verified code facts.\nDelivery: {status}\n\n{response}\n")
-            self._record_current_action_artifact("self_study", path, f"Source study of {source}: {status}", visibility="summary" if verified else "protected")
-            self._write_journal_entry("self_study", response,
-                self._state_for_live_surfaces(state, context="self_study"), str(path))
+            self._record_current_action_artifact(mode, path, f"{mode}: {status}", visibility="protected" if private_writing else "summary" if verified else "protected")
+            self._write_journal_entry(mode, response,
+                self._state_for_live_surfaces(state, context=mode), str(path), private_canvas=private_writing)
             self._current_action_outcome_summary = f"Source study {source}: {status}."
             if not verified:
                 job_outcome.fail_action("source_study_delivery_unverified", self._current_action_outcome_summary)
         except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
-            self._record_introspect_notice(action, f"{error}. Use NEXT: SELF_STUDY MAP to choose an exact source, or SELF_STUDY CONTINUE to retry the pending page.", state)
+            if action.split()[:1] == ["WRITE"]:
+                directory = WORKSPACE_DIR / "private_writing/journal"
+                directory.mkdir(parents=True, exist_ok=True)
+                path = directory / f"notice_{time.time_ns()}.txt"
+                path.write_text(f"Private writing unavailable: {error}. WRITE CONTINUE retries the pending turn; WRITE HELP lists choices.\n")
+                self._record_current_action_artifact("private_writing_notice", path, "Private writing turn was not completed.", visibility="protected")
+            else:
+                self._record_introspect_notice(action, f"{error}. Use NEXT: SELF_STUDY MAP to choose an exact source, or SELF_STUDY CONTINUE to retry the pending page.", state)
             job_outcome.fail_action("source_study_unavailable", str(error))
 
     def _introspect(self, state: Dict[str, float]):
@@ -53771,7 +53791,7 @@ Goals: {json.dumps(goals, indent=2)}
         """
         if isinstance(prompt, SourceStudyPrompt):
             return self._query_llm_raw(prompt, "You are Minime.\n" + prompt.output["system_prompt"], 2048,
-                                       temperature=0.7, prompt_class="source_study", journal=True)
+                                       temperature=0.7, prompt_class="private_writing" if prompt.output.get("input_kind") == "private_writing" else "source_study", journal=True)
         import re
         private_journal_context = _is_private_qualia_context(context_mode)
         import uuid
@@ -54608,6 +54628,12 @@ Goals: {json.dumps(goals, indent=2)}
     ) -> Optional[str]:
         """Raw LLM query with a fast local Ollama fallback after backend failover."""
         attempts = _llm_backend_attempts(LLM_BACKEND, MODEL, FALLBACK_MODEL)
+        if journal and not isinstance(prompt, SourceStudyPrompt):
+            preference = writing.selected_profile(WORKSPACE_DIR)
+            if preference != "default":
+                system_msg += "\n" + writing.WRITING_GUIDANCE + (
+                    "\nYou selected extended writing. Up to 8192 output tokens are available; you can develop the thought freely or choose a short response. Any earlier suggestion of brevity is optional."
+                    if preference == "extended" else "\nYou selected short writing: an output ceiling of 512 tokens.")
         gen = generation_record.begin(WORKSPACE_DIR, prompt=prompt, system_msg=system_msg, prompt_class=prompt_class, attempts=attempts, kind="full", models={"primary": MODEL, "fallback": FALLBACK_MODEL, "mlx": MLX_MODEL, "backend_preference": LLM_BACKEND}, agent=self)
         job_timing.correlate_generation(gen)
         self._afterimage_provider_generation_source = (

@@ -49,6 +49,7 @@ class ActionPreflightStore:
         "AFTERIMAGE_SHARE": "afterimage_share",
         "AFTERIMAGE_CUES": "afterimage",
         "SELF_STUDY": "self_study",
+        "WRITE": "self_study",
         "INTROSPECT": "introspect",
         "EXPERIMENT": "self_experiment",
         "SELF_EXPERIMENT": "self_experiment",

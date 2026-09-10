@@ -114,5 +114,5 @@ def test_complete_recent_answers_survive_larger_protected_provider_input(tmp_pat
     assert request["messages"][1]["content"] == prompt
     assert request.get("max_tokens", request.get("options", {}).get("num_predict")) == 4096
     if backend != "mlx":
-        assert request["options"]["num_ctx"] == prompt.context_tokens == 32768
+        assert request["options"]["num_ctx"] == prompt.context_tokens == 65536
     prompt.accepted()

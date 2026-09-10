@@ -126,3 +126,20 @@ def test_final_bare_source_choice_is_preserved_but_examples_are_not_choices():
                  choice + "\nThis is an example.", "RUN rm example"]:
         assert aa.parse_next_action(text)[0] is None
     assert aa.parse_next_action("NEXT: REST\n" + choice)[0] == "REST"
+
+
+def test_write_choice_survives_real_action_routing_and_keeps_private_artifact(study_agent):
+    agent, store, client, offers = study_agent
+    agent._pending_next_action = "WRITE START Why did my explanation change?"
+    route = agent._decide_action(dict(STATE))
+    assert route == "self_study"
+    context = dict(agent._pending_action_continuity_context)
+    assert context["source_study_action"].startswith("WRITE START")
+    agent._execute_action(route, dict(STATE), _from_llm_job=True,
+                          _precreated_continuity_context=context)
+    assert offers[-1].output["input_kind"] == "private_writing"
+    assert offers[-1].receipt
+    journals = list((aa.WORKSPACE_DIR / "private_writing/journal").glob("*.txt"))
+    assert journals and "Who calls entry?" in journals[0].read_text()
+    assert not list((aa.WORKSPACE_DIR / "journal").glob("private_writing*"))
+    assert "Who calls entry?" in client.prepare("WRITE CONTINUE")
