@@ -110,7 +110,7 @@ def test_artifact_and_external_routes_keep_research_policy(study_agent):
 
 @pytest.mark.parametrize("raw, expected", [
     ("RELATE", ["SELF_STUDY MAP"]),
-    ("RELATE sense_tx", ["SELF_STUDY RELATE sense_tx"]),
+    ("RELATE " + "".join(["cobalt", "_dispatch"]), ["SELF_STUDY RELATE " + "".join(["cobalt", "_dispatch"])]),
     ('RELATE dispatch.rs "Route" "Stage"', ["SELF_STUDY FIND dispatch.rs", "SELF_STUDY RELATE Route", "SELF_STUDY RELATE Stage"]),
 ])
 def test_bare_relate_gives_exact_recovery_without_executing_a_guess(study_agent, monkeypatch, raw, expected):
@@ -264,6 +264,36 @@ def test_busy_study_receipt_failure_is_not_reported_as_queued(study_agent, monke
         })
     assert agent._pending_source_study_action == command
     assert not offers
+
+
+@pytest.mark.parametrize("prefix", [
+    "WRITE", "write", "SELF_STUDY REPLACE WRITE", "self_study replace write",
+    "INVESTIGATE REPLACE WRITE", "investigate RePlAcE WrItE",
+    "SELF_STUDY WRITE", "SELF_STUDY REPLACE REPLACE WRITE",
+    "SELF_STUDY: REPLACE WRITE",
+])
+def test_busy_private_looking_malformed_choice_keeps_raw_text_only_in_private_notice(study_agent, prefix):
+    agent, store, _, offers = study_agent
+    command = f"{prefix} START Private-marker-in-malformed-choice"
+    agent._llm_job_worker_active = True
+    agent._pending_source_study_action = command
+    assert agent._queue_llm_action_job("self_study", dict(STATE), {
+        "raw_next": command, "source_study_action": command,
+    })
+    event = agent._last_action_continuity_event
+    assert event["status"] == "blocked"
+    assert event["raw_next"] == "WRITE"
+    assert event["visibility"] == "protected"
+    assert "Private-marker" not in json.dumps(event)
+    assert "Private-marker" not in agent._pending_notice_prompt
+    assert "NEXT: SELF_STUDY REPLACE WRITE" not in agent._pending_notice_prompt
+    artifact = event["artifacts"][0]
+    assert artifact["visibility"] == "protected"
+    retained = json.loads(Path(artifact["path_or_uri"]).read_text())
+    assert retained["requested_action"] == command
+    assert retained["raw_next"] == command
+    assert not offers
+    assert agent._pending_source_study_action is None
 
 
 def test_map_journal_keeps_navigation_scope_and_does_not_claim_code(study_agent):

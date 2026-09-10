@@ -22286,7 +22286,12 @@ class AutonomousAgent:
     def _record_busy_source_study(self, state: Dict[str, float], context: Dict[str, Any]) -> None:
         """A second study choice was not queued; retain a truthful, retryable receipt."""
         command = context.get("source_study_action") or context.get("raw_next") or "SELF_STUDY"
-        private = self._pending_next_base(command) == "WRITE"
+        # Privacy classification precedes syntax validity: even a malformed
+        # source-study replacement can carry a private draft title/direction.
+        private = any(re.match(
+            r"(?i)^\s*(?:NEXT:\s*)?(?:(?:SELF_STUDY|INVESTIGATE):?\s+)?(?:REPLACE:?\s+)*WRITE(?:\s|:|$)",
+            str(candidate or ""),
+        ) for candidate in (command, context.get("raw_next")))
         raw = "WRITE" if private else (context.get("raw_next") or command)
         retry = (
             "Retry the exact private-writing choice after the current job ends; WRITE HELP lists your choices."
@@ -22309,7 +22314,7 @@ class AutonomousAgent:
             directory = WORKSPACE_DIR / "private_writing/notices"
             directory.mkdir(parents=True, exist_ok=True)
             path = directory / f"busy_{time.time_ns()}.json"
-            path.write_text(json.dumps({"requested_action": command, "status": "not_queued_busy",
+            path.write_text(json.dumps({"requested_action": command, "raw_next": context.get("raw_next"), "status": "not_queued_busy",
                                         "summary": summary}, ensure_ascii=False) + "\n")
             artifacts.append({"artifact_id": f"art_{event['action_id']}_private_choice",
                               "action_id": event["action_id"], "kind": "private_writing_notice", "path_or_uri": str(path),
