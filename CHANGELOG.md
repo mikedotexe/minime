@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Retain requested controls, exact adapter sampling/budget choices and optional coupled-server confirmation across MLX, Ollama and fallbacks. Capture native MLX completion evidence without changing journal ceilings or thinking policy.
+
 - Add shared opt-in 8,192-token journal writing, short/default preferences, versioned private drafts and freely chosen continuation. Preserve complete draft passages and larger study context through provider admission; keep private writing outside peer journal/sensory delivery. See the September 9 extended-writing account for validation and rollout evidence.
 
 - Retain bounded SELF_STUDY failed-provider diagnostics and native finish/raw/cleaned length metadata across Ollama and MLX. Failures remain separate from journals and accepted source delivery; retries preserve the pending page. Shared exact-path suggestions offer optional recovery routes for both Beings. See `docs/2026-09-09-study-choice-and-diagnostics.md`.

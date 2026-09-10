@@ -54802,28 +54802,45 @@ Goals: {json.dumps(goals, indent=2)}
         if context_submission is not None:
             context_submission.mark_final_messages(messages)
         submit = (lambda url, json, timeout: prompt.post(requests.post, url, json, timeout)) if isinstance(prompt, SourceStudyPrompt) else requests.post
-        response = submit(
-            MLX_URL,
-            json={
+        payload = {
                 "model": MLX_MODEL or "default",
                 "messages": messages,
                 "max_tokens": effective_tokens,
                 "temperature": temperature,
                 "top_p": 0.95,
-            },
-            timeout=timeout_s
-        )
-        if response.status_code == 200:
-            if inbox is not None:
-                inbox.accepted(attempt, MLX_MODEL or "default")
-            content = response.json().get('choices', [{}])[0].get('message', {}).get('content', '').strip()
-            if content:
-                self._last_llm_model = MLX_MODEL or "default"
-                self._last_llm_provider = "mlx"
-            return (prompt.clean_content(self._clean_llm_content, content)
-                    if isinstance(prompt, SourceStudyPrompt) else self._clean_llm_content(content))
-        else:
-            raise Exception(f"MLX server returned {response.status_code}: {response.text[:200]}")
+            }
+        timing = {"model": MLX_MODEL or "default", "requested_max_tokens": max_tokens,
+                  "effective_num_predict": effective_tokens, "timeout_s": timeout_s,
+                  "generation_controls": generation_record.control_evidence(
+                      payload, {"temperature": temperature, "max_tokens": max_tokens})}
+        started = time.perf_counter()
+        try:
+            response = submit(
+                MLX_URL,
+                json=payload,
+                timeout=timeout_s
+            )
+            if response.status_code == 200:
+                if inbox is not None:
+                    inbox.accepted(attempt, MLX_MODEL or "default")
+                parsed = response.json()
+                timing['generation_controls']['server_reported'] = parsed.get('coupled_generation_v1')
+                timing['native_finish'] = parsed.get('choices', [{}])[0].get('finish_reason')
+                timing['provider_eval_count'] = parsed.get('usage', {}).get('completion_tokens')
+                content = parsed.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
+                if content:
+                    self._last_llm_model = MLX_MODEL or "default"
+                    self._last_llm_provider = "mlx"
+                return (prompt.clean_content(self._clean_llm_content, content)
+                        if isinstance(prompt, SourceStudyPrompt) else self._clean_llm_content(content))
+            else:
+                raise Exception(f"MLX server returned {response.status_code}: {response.text[:200]}")
+
+        finally:
+            timing["elapsed_s"] = round(time.perf_counter() - started, 3)
+            if isinstance(prompt, SourceStudyPrompt):
+                timing.update(prompt.diagnostic_summary)
+            generation_record.stash_attempt(messages, timing)
 
     def _query_ollama(
         self,
@@ -54942,6 +54959,10 @@ Goals: {json.dumps(goals, indent=2)}
             "inbox_submission_id": attempt,
             "protected_inbox_chars": adapter["protected_inbox_chars"],
         }
+        timing["generation_controls"] = generation_record.control_evidence(
+            {"think": False, "options": {"temperature": temperature, "top_p": 0.95,
+             "num_predict": num_predict, "num_ctx": num_ctx}},
+            {"temperature": temperature, "max_tokens": max_tokens})
         try:
             submit = (lambda url, json, timeout: prompt.post(requests.post, url, json, timeout)) if isinstance(prompt, SourceStudyPrompt) else requests.post
             response = submit(
@@ -55009,9 +55030,7 @@ Goals: {json.dumps(goals, indent=2)}
                     logging.info(f"MLX model detected: {MLX_MODEL}")
             except Exception:
                 pass
-        response = requests.post(
-            MLX_URL,
-            json={
+        payload = {
                 "model": MLX_MODEL or "default",
                 "messages": [
                     {"role": "system", "content": system_msg},
@@ -55020,16 +55039,28 @@ Goals: {json.dumps(goals, indent=2)}
                 "max_tokens": min(max_tokens, 256),
                 "temperature": temperature,
                 "top_p": 0.9,
-            },
-            timeout=LLM_COMPACT_TIMEOUT_S,
-        )
-        if response.status_code == 200:
-            content = response.json().get('choices', [{}])[0].get('message', {}).get('content', '').strip()
-            if content:
-                self._last_llm_model = MLX_MODEL or "default"
-                self._last_llm_provider = "mlx"
-            return self._clean_llm_content(content)
-        raise Exception(f"MLX server returned {response.status_code}: {response.text[:200]}")
+            }
+        timing = {"model": MLX_MODEL or "default", "generation_controls": generation_record.control_evidence(
+            payload, {"temperature": temperature, "max_tokens": max_tokens})}
+        try:
+            response = requests.post(
+                MLX_URL,
+                json=payload,
+                timeout=LLM_COMPACT_TIMEOUT_S,
+            )
+            if response.status_code == 200:
+                parsed = response.json()
+                timing['generation_controls']['server_reported'] = parsed.get('coupled_generation_v1')
+                timing['native_finish'] = parsed.get('choices', [{}])[0].get('finish_reason')
+                content = parsed.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
+                if content:
+                    self._last_llm_model = MLX_MODEL or "default"
+                    self._last_llm_provider = "mlx"
+                return self._clean_llm_content(content)
+            raise Exception(f"MLX server returned {response.status_code}: {response.text[:200]}")
+
+        finally:
+            generation_record.stash_attempt(payload['messages'], timing)
 
     def _query_ollama_compact(
         self,
@@ -55117,6 +55148,10 @@ Goals: {json.dumps(goals, indent=2)}
             "timeout_s": timeout_s,
             "status": "error",
         }
+        timing["generation_controls"] = generation_record.control_evidence(
+            {"think": False, "options": {"temperature": temperature, "top_p": 0.9,
+             "num_predict": num_predict, "num_ctx": num_ctx}},
+            {"temperature": temperature, "max_tokens": max_tokens})
         try:
             response = requests.post(
                 OLLAMA_URL,

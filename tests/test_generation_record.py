@@ -299,3 +299,26 @@ def test_snapshot_replaces_system_content_with_sha():
     assert snapshot[0] == {"role": "system", "content_sha256": sha, "chars": 3}
     assert snapshot[1] == {"role": "user", "content": "hello", "chars": 5}
     assert prompts == {sha: "SYS"}
+
+
+def test_control_receipts_distinguish_ollama_request_from_confirmation(isolated, agent):
+    with patch.object(aa.requests, 'post', lambda *a, **k: _FakeResponse(ANSWER)):
+        agent._query_llm_raw(PROMPT, SYSTEM, 512, .9, prompt_class='private_journal')
+    record = _load(_records(isolated)[0])
+    controls = record['generation_controls']
+    assert controls['requested'] == {'temperature': .9, 'max_tokens': 512}
+    assert controls['adapter_sent']['top_p'] == .95
+    assert controls['adapter_sent']['think'] is False
+    assert controls['server_reported'] is None
+
+
+def test_mlx_control_receipt_retains_server_report(isolated, agent):
+    from types import SimpleNamespace
+    server = {'schema': 'coupled_generation_v1', 'controls': {'top_p': .95, 'max_tokens': 512}}
+    response = SimpleNamespace(status_code=200, json=lambda: {'choices': [{'message': {'content': ANSWER}, 'finish_reason': 'stop'}], 'usage': {'completion_tokens': 48}, 'coupled_generation_v1': server})
+    with patch.object(aa, 'LLM_BACKEND', 'mlx'), patch.object(aa, 'MLX_MODEL', 'coupled-astrid'), patch.object(aa.requests, 'post', return_value=response):
+        agent._query_llm_raw(PROMPT, SYSTEM, 512, .9, prompt_class='private_journal')
+    record = _load(_records(isolated)[0])
+    assert record['generation_controls']['server_reported'] == server
+    assert record['generation_controls']['adapter_sent']['top_p'] == .95
+    assert record['backend_timing']['native_finish'] == 'stop'

@@ -427,6 +427,7 @@ def record_attempt(
                         "provider_eval_count", "source_study_failure", "source_study_diagnostic_path")
             if key in timing
         },
+        "generation_controls": timing.get("generation_controls"),
         "adapter": {
             "template_mode": _scalar(timing.get("prompt_template_mode")),
             "compacted": _scalar(timing.get("prompt_compacted")),
@@ -692,3 +693,14 @@ def write_record_at(
         if _write_private_file_once(path, payload):
             return path
     return None
+
+
+def control_evidence(payload: Dict[str, Any], requested: Dict[str, Any]) -> Dict[str, Any]:
+    """Adapter values are sent settings, never inferred server confirmation."""
+    keys = ("temperature", "top_p", "top_k", "min_p", "repetition_penalty",
+            "repetition_context_size", "max_tokens", "think", "stream", "aperture")
+    sent = {key: payload[key] for key in keys if key in payload}
+    sent.update(payload.get("options", {}))
+    return {"schema": "provider_generation_controls_v1", "requested": dict(requested),
+            "adapter_sent": sent, "adapter_evidence": "serialized_request_not_server_confirmation",
+            "server_reported": None, "omitted_settings": "provider_defaults_unconfirmed"}
