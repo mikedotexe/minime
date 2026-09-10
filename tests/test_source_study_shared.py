@@ -62,6 +62,15 @@ class SharedSourceStudyTests(unittest.TestCase):
         self.assertIsNone(result.output["page"])
         self.assertIn("minime/minime_autonomy/runtime.py", self.client.prepare("SELF_STUDY MAP minime"))
 
+    def test_recovery_is_stateless_and_does_not_prepare_or_claim_source(self):
+        self.assertFalse(self.client.workspace.exists())
+        recovery = self.client.recover_navigation("RELATE entry")
+        self.assertIn("SELF_STUDY RELATE entry", recovery["commands"])
+        self.assertFalse(self.client.workspace.exists())
+        self.assertIsNone(self.client.recover_navigation("SEARCH reservoir continuity"))
+        self.assertIsNone(self.client.recover_navigation("WRITE CONTINUE"))
+        self.assertFalse(self.client.workspace.exists())
+
     def test_navigation_keeps_owned_notes_and_exact_pending_source(self):
         source = self.client.prepare(self.action)
         messages, _ = source.messages(source.output["system_prompt"], 16000)

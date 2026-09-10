@@ -13,7 +13,7 @@ from .writing import WRITING_GUIDANCE
 # Kept within the existing prompt budget when ambient context is compacted.
 SOURCE_STUDY_GUIDANCE = (
     "Local source reading: NEXT: SELF_STUDY MAP opens the shared system map. "
-    "SELF_STUDY QUESTION manages your study inquiries; RELATE follows exact symbols, SESSION reads chosen pages together, and TRACE LAST inspects retained delivery. "
+    "SELF_STUDY QUESTION manages your study inquiries; SELF_STUDY RELATE follows one exact symbol, SELF_STUDY SESSION reads chosen pages together, and SELF_STUDY TRACE LAST inspects retained delivery. "
     "Use SELF_STUDY FIND <literal text>, SELF_STUDY OPEN repository/path [one-based line], "
     "SELF_STUDY RESUME repository/path, or SELF_STUDY CONTINUE. Choose exact paths from the map/search; "
     "if a target is unknown, use SELF_STUDY MAP. Source INTROSPECT is the same budget-free reader "
@@ -77,9 +77,17 @@ class StudyClient:
             value = json.loads(result.stdout)
         except (ValueError, TypeError) as error:
             raise RuntimeError("shared source reader returned an invalid response") from error
+        if value is None and operation.get("operation") == "recover_navigation" and not result.returncode:
+            return {}
+        if not isinstance(value, dict):
+            raise RuntimeError("shared source reader returned an invalid response")
         if result.returncode or "error" in value:
             raise RuntimeError(value.get("error", "shared source reader failed"))
         return value
+
+    def recover_navigation(self, action: str) -> dict[str, Any] | None:
+        """Stateless guidance only: never prepare input or alter reader state."""
+        return self.call(operation="recover_navigation", action=action) or None
 
     def prepare(self, action: str) -> SourceStudyPrompt:
         return SourceStudyPrompt(self, self.call(operation="prepare", action=action))

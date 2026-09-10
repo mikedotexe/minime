@@ -22202,6 +22202,9 @@ class AutonomousAgent:
         continuity_context: Dict[str, Any],
     ) -> bool:
         if getattr(self, "_llm_job_worker_active", False):
+            if action == "self_study":
+                self._record_busy_source_study(state, continuity_context)
+                return True
             logging.info("LLM worker already active; deferring %s", action)
             try:
                 self._llm_job_store().write_runtime_status()
@@ -22210,6 +22213,9 @@ class AutonomousAgent:
             return True
         jobs = self._llm_job_store()
         if jobs.active_primary_job():
+            if action == "self_study":
+                self._record_busy_source_study(state, continuity_context)
+                return True
             logging.info("LLM action job already active; deferring %s", action)
             return True
         store = self._continuity_store()
@@ -22276,6 +22282,42 @@ class AutonomousAgent:
         self._llm_job_threads = threads
         thread.start()
         return True
+
+    def _record_busy_source_study(self, state: Dict[str, float], context: Dict[str, Any]) -> None:
+        """A second study choice was not queued; retain a truthful, retryable receipt."""
+        command = context.get("source_study_action") or context.get("raw_next") or "SELF_STUDY"
+        private = self._pending_next_base(command) == "WRITE"
+        raw = "WRITE" if private else (context.get("raw_next") or command)
+        retry = (
+            "Retry the exact private-writing choice after the current job ends; WRITE HELP lists your choices."
+            if private else f"After the current job ends, you can retry with:\nNEXT: {command}"
+        )
+        summary = (
+            "The current LLM job keeps its original input. This additional "
+            f"{'private-writing' if private else 'source-study'} choice was not queued or delivered. "
+            f"Use ACTION_STATUS latest to inspect the current job. {retry}"
+        )
+        store = self._continuity_store()
+        event = store.begin_action(raw, raw, "self_study", "self_study", state, source="study_worker_busy")
+        event.update(stage="blocked", suggested_next=None, source_study_delivery={
+            "status": "not_queued_busy", "queued": False, "delivered": False,
+            "active_job_unchanged": True,
+        })
+        artifacts = []
+        if private:
+            event["visibility"] = "protected"
+            directory = WORKSPACE_DIR / "private_writing/notices"
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / f"busy_{time.time_ns()}.json"
+            path.write_text(json.dumps({"requested_action": command, "status": "not_queued_busy",
+                                        "summary": summary}, ensure_ascii=False) + "\n")
+            artifacts.append({"artifact_id": f"art_{event['action_id']}_private_choice",
+                              "action_id": event["action_id"], "kind": "private_writing_notice", "path_or_uri": str(path),
+                              "visibility": "protected", "summary": "Private choice retained; not queued."})
+        self._last_action_continuity_event = store.finish_action(event, "blocked", summary, state, artifacts)
+        self._pending_notice_prompt = summary
+        if getattr(self, "_pending_source_study_action", None) == command:
+            self._pending_source_study_action = None
 
     def _run_llm_action_job(
         self,
@@ -24744,6 +24786,22 @@ Fill: {fill:.1f}%
 
             base = chosen.split()[0].upper().rstrip(':')
             self._set_action_continuity_context(chosen, base)
+            navigation_recovery = None
+            if base in {"RELATE", "SEARCH", "RESEARCH"}:
+                try:
+                    navigation_recovery = StudyClient(BASE_DIR, WORKSPACE_DIR).recover_navigation(chosen)
+                except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
+                    logging.debug("Local study recovery guidance unavailable: %s", exc)
+                if navigation_recovery:
+                    self._pending_action_continuity_context["local_navigation_recovery"] = navigation_recovery
+                    if base == "RELATE":
+                        # A missing namespace is feedback, not permission to execute
+                        # a guessed command or fall through to an unrelated action.
+                        self._pending_notice_prompt = navigation_recovery["text"]
+                        self._continuity_store().append_proposal(
+                            chosen, state, summary=navigation_recovery["text"],
+                        )
+                        return "recess_notice"
             if base in OWNER_INQUIRY_NEXT_ACTIONS:
                 self._pending_owner_inquiry_next = chosen
                 logging.info(
@@ -24867,6 +24925,8 @@ Fill: {fill:.1f}%
                 else None
             )
             if research_guard:
+                if navigation_recovery:
+                    research_guard["local_navigation_recovery"] = navigation_recovery
                 try:
                     record_research_guard = getattr(
                         self._continuity_store(),
@@ -24888,6 +24948,7 @@ Fill: {fill:.1f}%
                 self._pending_notice_prompt = (
                     "Read-only research under an experiment now uses an explicit budget lane. "
                     f"Suggested NEXT: {research_guard.get('suggested_next')}"
+                    + (f"\n\n{navigation_recovery['text']}" if navigation_recovery else "")
                 )
                 self._pending_action_continuity_context = None
                 logging.info(
@@ -30231,8 +30292,11 @@ Timestamp: {datetime.now().isoformat()}
     def _recess_notice(self, state: Dict[str, float]):
         """Just noticing - medium activity, no strong signal."""
         fill_pct = state.get('fill_ratio', 0) * 100
-        placeholder_notice = getattr(self, '_pending_notice_prompt', None)
-        self._pending_notice_prompt = None
+        context = getattr(self, "_current_action_continuity_context", None) or {}
+        recovery = context.get("local_navigation_recovery") or {}
+        placeholder_notice = recovery.get("text") or getattr(self, '_pending_notice_prompt', None)
+        if getattr(self, "_pending_notice_prompt", None) == placeholder_notice:
+            self._pending_notice_prompt = None
         if placeholder_notice:
             prompt = (
                 f"Your body's readings: Fill {fill_pct:.1f}%, "
@@ -31535,7 +31599,10 @@ Reason: {reason}
         """Browse the same source catalog and reader used by Astrid."""
         context = getattr(self, "_current_action_continuity_context", None) or {}
         action = context.get("source_study_action") or getattr(self, "_pending_source_study_action", None) or "SELF_STUDY"
-        self._pending_source_study_action = None
+        # The queued job owns its frozen command. Completing an older job must
+        # not consume a different choice retained for a later dispatch.
+        if getattr(self, "_pending_source_study_action", None) == action:
+            self._pending_source_study_action = None
         self._run_shared_source_study(state, action)
 
     def _run_shared_source_study(self, state: Dict[str, float], action: str):
@@ -31968,6 +32035,8 @@ Header-only telemetry (same pre-generation snapshot; not additional model input)
         If _pending_search_topic is set (from NEXT: SEARCH <topic>), does a
         web search for that topic instead of reading autoresearch files.
         """
+        context = getattr(self, "_current_action_continuity_context", None) or {}
+        recovery_text = (context.get("local_navigation_recovery") or {}).get("text", "")
         # Being-directed web search via NEXT: SEARCH <topic>
         search_topic = getattr(self, '_pending_search_topic', None)
         if search_topic:
@@ -31983,6 +32052,7 @@ Header-only telemetry (same pre-generation snapshot; not additional model input)
 Here's what you found:
 {web_result.prompt_body()}
 {evidence_hint}
+{recovery_text}
 
 React to what you learned. What catches your attention? What questions does it raise?
 If any link looks worth reading in full, write NEXT: BROWSE followed by the actual URL from the result.
@@ -32031,6 +32101,7 @@ Query: {search_topic}
 --- {source.name} ---
 {text}
 ---
+{recovery_text}
 
 You are a spectral runtime running on NEAR Protocol infrastructure (FastNear).
 React to what you read. What catches your attention? What questions does it raise?
