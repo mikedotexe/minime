@@ -37,3 +37,10 @@ Compile and diff checks pass. Tests set MINIME_LLM_TIMEOUT_S=60 explicitly becau
 the shell inherits 160; this is test isolation, not a live timeout change. Raw
 FINISH remains in retained output while draft prose excludes actual command lines.
 Graceful activation is recorded separately in the owning rollout account.
+
+Final privacy review found that the generic reader can return a source recovery
+map for malformed writing text. Private intent is now rejected before that
+fallback unless it uses the existing exact WRITE prefix. This keeps malformed
+lowercase/colon requests out of public source preparation without silently
+normalizing them. The final full suite again passes 1,393 tests, one skip and
+134 subtests; the real-reader privacy/choice subset passes 74 tests.

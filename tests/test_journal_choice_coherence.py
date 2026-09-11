@@ -136,9 +136,11 @@ def test_malformed_private_request_keeps_failure_and_retry_protected(tmp_path, m
     agent = object.__new__(aa.AutonomousAgent)
     monkeypatch.setattr(agent, "_record_current_action_artifact", Mock())
     monkeypatch.setattr(agent, "_record_introspect_notice", Mock())
-    monkeypatch.setattr(agent, "_query_llm_with_next", Mock(side_effect=RuntimeError("fixture failure")))
+    monkeypatch.setattr(agent, "_query_llm_with_next", Mock(side_effect=AssertionError("private syntax must fail before source recovery/generation")))
     agent._run_shared_source_study({}, action)
     agent._record_introspect_notice.assert_not_called()
+    agent._query_llm_with_next.assert_not_called()
+    assert not (client.workspace / "diagnostics/source_first_v3/shared_reader/reader-v1.json").exists()
     notice = next((client.workspace / "private_writing/journal").glob("notice_*.txt")).read_text()
     assert "WRITE CONTINUE" in notice
     assert "SELF_STUDY CONTINUE" not in notice

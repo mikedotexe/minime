@@ -31611,6 +31611,10 @@ Reason: {reason}
     def _run_shared_source_study(self, state: Dict[str, float], action: str):
         private_request = writing.is_private_request(action)
         try:
+            # The generic reader can recover malformed text to a public map.
+            # Private intent must fail privately before that source fallback.
+            if private_request and action.split()[:1] != ["WRITE"]:
+                raise RuntimeError("unrecognized private-writing syntax; use WRITE START <topic> or WRITE HELP")
             prompt = StudyClient(BASE_DIR, WORKSPACE_DIR).prepare(action)
             response = self._query_llm_with_next(prompt, context_mode="source_study")[0]
             if not response:
