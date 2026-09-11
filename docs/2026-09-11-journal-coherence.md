@@ -44,3 +44,17 @@ fallback unless it uses the existing exact WRITE prefix. This keeps malformed
 lowercase/colon requests out of public source preparation without silently
 normalizing them. The final full suite again passes 1,393 tests, one skip and
 134 subtests; the real-reader privacy/choice subset passes 74 tests.
+
+Verified live on September 11: implementation `96b0b615d917c8edc164ab8a457c1dd1ddb5b0df`
+is merged and pushed to main. The graceful wrapper sent one SIGTERM at 14:13:32 UTC
+after a stable quiet window and reports success at 14:14:14.224998 UTC. New PID
+93033 starts at 14:13:32; all 82 recorded startup inputs match source and
+reload_required is false. Session 5318 remains, cycle 28859 advances to 28860,
+and no NEXT is pending at either boundary. No force or new interrupted-job
+recovery occurs. Managed configuration is unchanged. Paired verification at
+14:14:36.589629 UTC confirms all nine surrounding services retain their PID/start
+identities. All 71 existing draft IDs remain; mutable drafts may advance through
+natural work and are not exact restart checkpoints. Astrid's selected shared
+reader SHA-256 is `0aa85909094a849ba4a96d53385162273744cf082031afd12cdecbac9e39d746`.
+The owning Astrid account retains exact receipts and the research account tracks
+bounded natural exposure separately from claims about benefit.
