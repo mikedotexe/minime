@@ -89,6 +89,10 @@ class StudyClient:
         """Stateless guidance only: never prepare input or alter reader state."""
         return self.call(operation="recover_navigation", action=action) or None
 
+    def analyze_response(self, text: str, *, private_writing: bool = False) -> dict[str, Any]:
+        """Stateless shared choice feedback; never queues or executes a choice."""
+        return self.call(operation="analyze_response", text=text, private_writing=private_writing)
+
     def prepare(self, action: str) -> SourceStudyPrompt:
         return SourceStudyPrompt(self, self.call(operation="prepare", action=action))
 

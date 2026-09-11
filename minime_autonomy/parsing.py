@@ -606,6 +606,59 @@ def build_choice_envelope_v1(
     return envelope
 
 
+def _choice_hidden_tag_after(line: str, tag: str | None = None) -> tuple[bool, str | None]:
+    """Track existing model-only block tags, without interpreting arbitrary XML."""
+    tags = ("think", "analysis", "thinking", "Thinking", "writing_mode", "denial_record")
+    touched = tag is not None
+    remaining = line
+    while True:
+        if tag is not None:
+            closing = f"</{tag}>"
+            position = remaining.find(closing)
+            if position < 0:
+                return True, tag
+            remaining = remaining[position + len(closing):]
+            tag = None
+        openings = [(remaining.find(f"<{candidate}>"), candidate) for candidate in tags]
+        openings = [(position, candidate) for position, candidate in openings if position >= 0]
+        if not openings:
+            return touched, None
+        position, tag = min(openings)
+        remaining = remaining[position + len(tag) + 2:]
+        touched = True
+
+
+def eligible_choice_line_indices(lines: list[str]) -> list[int]:
+    """Top-level lines only; match the shared reader's forward fence scanner.
+
+    Closing fences must match their opener and be at least as long. An open
+    fence stays data through EOF. Quoted and indented code never choose actions.
+    """
+    eligible = []
+    fence = None
+    hidden_tag = None
+    for index, line in enumerate(lines):
+        if hidden_tag is not None:
+            _, hidden_tag = _choice_hidden_tag_after(line, hidden_tag)
+            continue
+        if line.startswith("    ") or line[:len(line) - len(line.lstrip())].find("\t") >= 0:
+            continue
+        stripped = line.strip()
+        marker = re.match(r"^(`{3,}|~{3,})(.*)$", stripped)
+        if fence is not None:
+            if marker and marker[1][0] == fence[0] and len(marker[1]) >= fence[1] and not marker[2].strip():
+                fence = None
+            continue
+        if marker:
+            fence = (marker[1][0], len(marker[1]))
+            continue
+        if stripped and not stripped.startswith((">", '"', "'", "`", "“", "‘")):
+            hidden, hidden_tag = _choice_hidden_tag_after(line)
+            if not hidden:
+                eligible.append(index)
+    return eligible
+
+
 def parse_next_action(text: str) -> tuple:
     """Extract NEXT: action from LLM response.
 
@@ -620,14 +673,9 @@ def parse_next_action(text: str) -> tuple:
     _LAST_NEXT_NORMALIZATION_SIGNAL_V1 = None
     _LAST_NEXT_CHOICE_ENVELOPE_V1 = None
     lines = text.split('\n')
-    in_fence = False
-    for i in range(len(lines) - 1, -1, -1):
+    eligible = eligible_choice_line_indices(lines)
+    for i in reversed(eligible):
         stripped = lines[i].strip()
-        if stripped.startswith("```"):
-            in_fence = not in_fence
-            continue
-        if in_fence:
-            continue
         if stripped.upper().startswith('NEXT:'):
             raw_next = lines[i].lstrip()[5:].lstrip()
             if raw_next.upper().startswith("AFTERIMAGE_KEEP "):
@@ -684,27 +732,14 @@ def parse_next_action(text: str) -> tuple:
             if is_experiment_run_transcript_action(action):
                 return _parse_result(None, cleaned)
             return _parse_result(action, cleaned)
-    in_fence = False
-    for i in range(len(lines) - 1, -1, -1):
-        stripped = lines[i].strip()
-        if stripped.startswith("```"):
-            in_fence = not in_fence
-            continue
-        if in_fence:
-            continue
-        if not stripped:
-            continue
-        if stripped == "ATTRACTOR_SUGGESTIONS":
-            cleaned = '\n'.join(lines[:i] + lines[i+1:]).strip()
-            return _parse_result(stripped, cleaned)
-        break
-    # An explicit final source-reading command can omit NEXT; examples cannot.
+    # Bare affordances are eligible only on the actual final nonempty line.
     nonempty = [i for i, line in enumerate(lines) if line.strip()]
-    if nonempty:
+    if nonempty and nonempty[-1] in eligible:
         i = nonempty[-1]
         choice = lines[i].strip()
-        if (sum(line.strip().startswith("```") for line in lines) % 2 == 0
-                and re.match(r"^SELF_STUDY (?:MAP|FIND|OPEN|RESUME|CONTINUE|RELATE|SESSION|TRACE)(?: |$)", choice)):
+        if choice == "ATTRACTOR_SUGGESTIONS":
+            return _parse_result(choice, "\n".join(lines[:i]).strip())
+        if re.match(r"^SELF_STUDY (?:MAP|FIND|OPEN|RESUME|CONTINUE|RELATE|SESSION|TRACE)(?: |$)", choice):
             _LAST_NEXT_CHOICE_ENVELOPE_V1 = build_choice_envelope_v1(
                 text, raw_next=choice, executable_next=choice, residue=None)
             return _parse_result(choice, "\n".join(lines[:i]).strip())

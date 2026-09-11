@@ -64,6 +64,38 @@ class TestVisualFrameService(unittest.TestCase):
             self.assertFalse(allowed)
             self.assertEqual(reason, "stable_core_visual_semantic_disabled")
 
+    def test_captured_frame_without_analysis_is_not_a_model_description(self) -> None:
+        for analyze in (True, False):
+            with self.subTest(analyze=analyze), tempfile.TemporaryDirectory() as tmp:
+                workspace = Path(tmp)
+                requests = workspace / "visual_requests"
+                responses = workspace / "visual_responses"
+                with (
+                    mock.patch.object(vfs, "REQUESTS_DIR", requests),
+                    mock.patch.object(vfs, "RESPONSES_DIR", responses),
+                    mock.patch.object(vfs, "CAPTURES_DIR", workspace / "visual_captures"),
+                ):
+                    service = vfs.VisualFrameService()
+                    request = requests / "fixture.json"
+                    request.write_text(json.dumps({"request_id": "fixture", "analyze": analyze}))
+                    frame = vfs.np.zeros((8, 8), dtype=vfs.np.uint8)
+                    with (
+                        mock.patch.object(service, "capture_frame", return_value=(frame, "host")),
+                        mock.patch.object(service, "analyze_with_llava", return_value=None) as model,
+                        mock.patch.object(service, "_semantic_send_allowed", return_value=(False, "fixture")),
+                        mock.patch.object(service, "send_semantic") as semantic,
+                    ):
+                        service.process_request(request)
+                    self.assertEqual(model.call_count, int(analyze))
+                    semantic.assert_not_called()
+                    response = json.loads((responses / "response_fixture.json").read_text())
+                    self.assertTrue(response["visual_available"])
+                    self.assertEqual(response["source"], "host")
+                    self.assertEqual(response["analysis_type"], "none")
+                    self.assertEqual(response["description"], "(LLaVA unavailable)")
+                    self.assertIn("response_timestamp", response)
+                    self.assertNotIn("error", response)
+
 
 if __name__ == "__main__":
     unittest.main()

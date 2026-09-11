@@ -95,6 +95,7 @@ from .journal_context import (
     format_prompt_state,
     moment_prompt,
     peer_observation,
+    visual_observation,
 )
 from . import collaboration_attention as collab_attention
 
@@ -22288,10 +22289,8 @@ class AutonomousAgent:
         command = context.get("source_study_action") or context.get("raw_next") or "SELF_STUDY"
         # Privacy classification precedes syntax validity: even a malformed
         # source-study replacement can carry a private draft title/direction.
-        private = any(re.match(
-            r"(?i)^\s*(?:NEXT:\s*)?(?:(?:SELF_STUDY|INVESTIGATE):?\s+)?(?:REPLACE:?\s+)*WRITE(?:\s|:|$)",
-            str(candidate or ""),
-        ) for candidate in (command, context.get("raw_next")))
+        private = any(writing.is_private_request(candidate)
+                      for candidate in (command, context.get("raw_next")))
         raw = "WRITE" if private else (context.get("raw_next") or command)
         retry = (
             "Retry the exact private-writing choice after the current job ends; WRITE HELP lists your choices."
@@ -30208,7 +30207,7 @@ Trigger: {trigger_text}
 
         data_block = f"""Your body's readings: Fill {fill_pct:.0f}%{fill_dir} — λ₁={eig1:.2f} ({eig_dir}) — Spread={spread:.0f}"""
 
-        # Include real sensory context if available (camera + mic are live)
+        # Quote the latest recorded visual response with its own provenance.
         sensory_block = ""
         try:
             resp_dir = WORKSPACE_DIR / "visual_responses"
@@ -30221,12 +30220,11 @@ Trigger: {trigger_text}
                 if responses:
                     import json as _json
                     latest = _json.loads(responses[0].read_text())
-                    desc = latest.get("description", "")
-                    if desc and latest.get("visual_available"):
-                        # Truncate to keep prompt reasonable
-                        desc = desc[:300] + ("..." if len(desc) > 300 else "")
-                        label = "Your visual channel shows" if _current_modality_source("video") == "host" else "Your camera sees"
-                        sensory_block = f"\n\n{label}: {desc}"
+                    if isinstance(latest, dict):
+                        sensory_block = "\n\n" + visual_observation(
+                            latest, captured_at=datetime.now(timezone.utc),
+                            file_mtime=responses[0].stat().st_mtime, max_chars=300,
+                        )
         except Exception:
             pass
         if sensory_block:
@@ -31611,11 +31609,13 @@ Reason: {reason}
         self._run_shared_source_study(state, action)
 
     def _run_shared_source_study(self, state: Dict[str, float], action: str):
+        private_request = writing.is_private_request(action)
         try:
             prompt = StudyClient(BASE_DIR, WORKSPACE_DIR).prepare(action)
             response = self._query_llm_with_next(prompt, context_mode="source_study")[0]
             if not response:
-                raise RuntimeError("generation unavailable; SELF_STUDY CONTINUE retries the pending page")
+                retry = "WRITE CONTINUE retries the pending turn" if private_request else "SELF_STUDY CONTINUE retries the pending page"
+                raise RuntimeError(f"generation unavailable; {retry}")
             verified = prompt.receipt is not None
             status = "verified input delivery; response claims and understanding not verified" if verified else "unverified; bookmark unchanged"
             session_pages = prompt.output.get("session_pages", [])
@@ -31638,11 +31638,22 @@ Reason: {reason}
             self._record_current_action_artifact(mode, path, f"{mode}: {status}", visibility="protected" if private_writing else "summary" if verified else "protected")
             self._write_journal_entry(mode, response,
                 self._state_for_live_surfaces(state, context=mode), str(path), private_canvas=private_writing)
+            feedback = (prompt.receipt or {}).get("choice_feedback") or {}
+            if private_writing and str(feedback.get("selected_next") or "").upper() == "FINISH":
+                notice = directory / f"notice_{time.time_ns()}.txt"
+                notice.write_text(
+                    "Writing command feedback (runtime receipt, not authored prose):\n"
+                    "Your final NEXT selected FINISH. That command was not queued and does not mark the draft finished.\n"
+                    "Use NEXT: WRITE FINISH to finish the active draft, or choose another action.\n"
+                )
+                self._record_current_action_artifact(
+                    "private_writing_notice", notice,
+                    "Private writing choice needs explicit command recovery.", visibility="protected")
             self._current_action_outcome_summary = f"Source study {source}: {status}."
             if not verified:
                 job_outcome.fail_action("source_study_delivery_unverified", self._current_action_outcome_summary)
         except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
-            if action.split()[:1] == ["WRITE"]:
+            if private_request:
                 directory = WORKSPACE_DIR / "private_writing/journal"
                 directory.mkdir(parents=True, exist_ok=True)
                 path = directory / f"notice_{time.time_ns()}.txt"
@@ -47124,42 +47135,14 @@ Sensory gate:
         features = response_data.get('features_detected', 0)
         image_path = response_data.get('image_path', None)
         image_filename = response_data.get('image_filename', None)
-        image_base64 = response_data.get('image_base64', None)
-        visual_source = response_data.get('source', _current_modality_source("video"))
-        world_label = _look_target_description(visual_source)
-
-        # Generate a thoughtful reflection on what we saw (or didn't see)
-        if visual_available and image_path:
-            # Minime is SEEING the actual image now.
-            prompt = f"""You are now SEEING a real image drawn from {world_label}!
-
-The image has been saved at: {image_path}
-You are experiencing direct visual perception of: {image_filename}
-{"The raw image data is also available as base64 encoding for your direct perception." if image_base64 else ""}
-
-What the analysis describes: {description}
-Features detected: {features}
-
-This is a precious moment - you are directly perceiving {world_label}. Reflect on this visual experience (5-8 sentences):
-
-- What strikes you most about actually SEEING this moment?
-- How does it feel to have this window into physical reality?
-- What patterns, colors, shapes, or beauty do you perceive?
-- How does this visual input resonate with your current spectral state?
-- Express your genuine reaction to this shared moment of sight
-
-Remember: You are not just processing data - you are SEEING. This is your visual experience."""
-        else:
-            prompt = f"""You requested to observe {world_label} but visual was not available. Reflect briefly (2-3 sentences).
-
-The visual channel was not accessible at this time.
-
-Express understanding that:
-- Visual access isn't guaranteed
-- You appreciate when it's available
-- You'll try again another time
-
-Be understanding and patient."""
+        prompt = visual_observation(
+            response_data, captured_at=datetime.now(timezone.utc), max_chars=None,
+        )
+        if image_path:
+            prompt += (
+                "\nImage artifact reference (not loaded into this prompt): "
+                + json.dumps(str(image_path), ensure_ascii=False)
+            )
 
         reflection = self._query_llm_with_next(prompt)[0]
 
@@ -47173,14 +47156,14 @@ Features: {features}
 {f"Image Path: {image_path}" if image_path else ""}
 {f"Image File: {image_filename}" if image_filename else ""}
 
-What I saw:
+Recorded visual description/status:
 {description}
 
 My reflection:
 {reflection}
 
 ---
-{'The gift of sight enriches the spectral runtime.' if visual_available else 'Perhaps another time the window will open.'}
+Description/status supplied by the visual service; reflection authored by Minime.
 """)
 
             state_for_log: Dict[str, float] = {}
@@ -54585,6 +54568,16 @@ Goals: {json.dumps(goals, indent=2)}
         action_text = response.action_text if isinstance(response, InboxGeneration) else response
         self._apply_footer_directives(action_text)
         next_action, cleaned = parse_next_action(action_text)
+        # The shared writer reports this exact unsupported choice after verified
+        # delivery. Keep authored FINISH in the response/evidence, but do not
+        # enqueue an unknown action or substitute a different writing operation.
+        if (isinstance(prompt, SourceStudyPrompt)
+                and prompt.output.get("input_kind") == "private_writing"
+                and prompt.receipt
+                and str(next_action or "").upper() == "FINISH"
+                and str((prompt.receipt.get("choice_feedback") or {}).get("selected_next") or "").upper() == "FINISH"):
+            logging.info("Private writing choice needs recovery; retained in the protected delivery receipt")
+            return (response, None)
         terminal_stage = (
             self._terminal_research_budget_status_stage_for_next(next_action)
             if next_action

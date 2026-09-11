@@ -1,14 +1,23 @@
 """Thin preference adapter. The shared Rust reader owns profile and draft mutations."""
 import json
 import logging
+import re
 from pathlib import Path
 
 WRITING_GUIDANCE = (
     "Private writing: NEXT: WRITE START <topic>, WRITE CONTINUE, WRITE REVISE <direction>, "
     "WRITE BRANCH <direction>, WRITE RESUME dN, WRITE FINISH, or WRITE HELP. "
     "WRITE PROFILE EXTENDED allows up to 8192 output tokens across journals; SHORT sets 512; "
-    "DEFAULT restores ordinary preferences. No minimum length. Drafts and references persist; sharing is separate."
+    "DEFAULT restores ordinary preferences. No minimum length. New drafts start without study notes. WRITE EVIDENCE <text> attaches or replaces references; bare WRITE EVIDENCE clears them. Existing drafts and branches retain their context; sharing is separate."
 )
+
+
+def is_private_request(action: str) -> bool:
+    """Classify intended private writing before validating command grammar."""
+    return bool(re.match(
+        r"(?i)^\s*(?:NEXT:\s*)?(?:(?:SELF_STUDY|INVESTIGATE):?\s+)?(?:REPLACE:?\s+)*WRITE(?:\s|:|$)",
+        str(action or ""),
+    ))
 
 
 def selected_profile(workspace: Path) -> str:
