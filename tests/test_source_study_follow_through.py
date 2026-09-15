@@ -92,7 +92,7 @@ def test_source_entry_completes_under_paused_experiment_and_dispatches_its_next(
     agent._execute_action("self_study", dict(STATE), _from_llm_job=True)
     assert len(offers) == 2 and offers[1].output["page"] is None
     assert "Who calls entry?" in offers[1]
-    assert "minime/minime_autonomy/runtime.py" in offers[1]
+    assert "SELF_STUDY MAP minime/minime_autonomy" in offers[1]
     assert store.research_budget_guard_assessment("READ_MORE", STATE) is not None
 
 
@@ -309,13 +309,44 @@ def test_map_journal_keeps_navigation_scope_and_does_not_claim_code(study_agent)
     assert "not independently verified code facts" in artifact
 
 
-def test_final_bare_source_choice_is_preserved_but_examples_are_not_choices():
-    choice = "SELF_STUDY OPEN astrid/crates/astrid-kernel/src/lib.rs 1"
+@pytest.mark.parametrize("choice", [
+    "SELF_STUDY OPEN astrid/crates/astrid-kernel/src/lib.rs 1",
+    "SELF_STUDY LIST minime/minime_autonomy --page 2",
+])
+def test_final_bare_source_choice_is_preserved_but_examples_are_not_choices(choice):
     assert aa.parse_next_action("I want to inspect this.\n" + choice)[0] == choice
     for text in ["```\n" + choice + "\n```", "```\n" + choice, "> " + choice,
                  choice + "\nThis is an example.", "RUN rm example"]:
         assert aa.parse_next_action(text)[0] is None
     assert aa.parse_next_action("NEXT: REST\n" + choice)[0] == "REST"
+
+
+@pytest.mark.parametrize("prefix", ["", "NEXT: "])
+def test_list_choice_reaches_shared_reader_and_preserves_pending_source(study_agent, prefix):
+    agent, store, client, offers = study_agent
+    pending = client.prepare("SELF_STUDY OPEN minime/minime_autonomy/runtime.py 1")
+    command = "SELF_STUDY LIST minime --page 1"
+    response = "I want the recursive source list.\n" + prefix + command
+    choice, _ = aa.parse_next_action(response)
+    assert choice == command
+    assert client.analyze_response(response)["selected_next"] == command
+    agent._pending_next_action = choice
+    route = agent._decide_action(dict(STATE))
+    assert route == "self_study"
+    context = dict(agent._pending_action_continuity_context)
+    assert context["source_study_action"] == command
+    assert store.research_budget_guard_assessment(command, STATE) is None
+    agent._execute_action(route, dict(STATE), _from_llm_job=True,
+                          _precreated_continuity_context=context)
+    offered = offers[-1]
+    assert offered.output["input_kind"] == "map"
+    assert offered.output["page"] is None
+    assert "Recursive source list" in offered
+    assert "minime/minime_autonomy/runtime.py" in offered
+    assert offered.receipt
+    state = json.loads((client.workspace / "diagnostics/source_first_v3/shared_reader/reader-v1.json").read_text())
+    assert state["pending"] == pending.output["page"]
+    assert state["bookmarks"] == {}
 
 
 def test_write_choice_survives_real_action_routing_and_keeps_private_artifact(study_agent):

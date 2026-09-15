@@ -739,7 +739,7 @@ def parse_next_action(text: str) -> tuple:
         choice = lines[i].strip()
         if choice == "ATTRACTOR_SUGGESTIONS":
             return _parse_result(choice, "\n".join(lines[:i]).strip())
-        if re.match(r"^SELF_STUDY (?:MAP|FIND|OPEN|RESUME|CONTINUE|RELATE|SESSION|TRACE)(?: |$)", choice):
+        if re.match(r"^SELF_STUDY (?:MAP|LIST|FIND|OPEN|RESUME|CONTINUE|RELATE|SESSION|TRACE)(?: |$)", choice):
             _LAST_NEXT_CHOICE_ENVELOPE_V1 = build_choice_envelope_v1(
                 text, raw_next=choice, executable_next=choice, residue=None)
             return _parse_result(choice, "\n".join(lines[:i]).strip())

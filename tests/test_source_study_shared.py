@@ -60,7 +60,8 @@ class SharedSourceStudyTests(unittest.TestCase):
         result = self.client.prepare("SELF_STUDY FIND entry")
         self.assertIn("OPEN minime/minime_autonomy/runtime.py 1", result)
         self.assertIsNone(result.output["page"])
-        self.assertIn("minime/minime_autonomy/runtime.py", self.client.prepare("SELF_STUDY MAP minime"))
+        self.assertIn("SELF_STUDY MAP minime/minime_autonomy", self.client.prepare("SELF_STUDY MAP minime"))
+        self.assertIn("minime/minime_autonomy/runtime.py", self.client.prepare("SELF_STUDY MAP minime/minime_autonomy"))
 
     def test_recovery_is_stateless_and_does_not_prepare_or_claim_source(self):
         self.assertFalse(self.client.workspace.exists())

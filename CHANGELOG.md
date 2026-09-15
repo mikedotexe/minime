@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Recognize a final unquoted `SELF_STUDY LIST <repository/directory>` choice with the same parser rules as Astrid. Recursive listings use the shared reader, retain source bookmarks and queued command identity, and remain available alongside compact directory maps. Explicit NEXT still takes precedence; fenced, quoted and nonterminal examples remain data.
+
 - Attribute visual descriptions to their recorded service/model source, age and availability instead of claiming direct perception or a personal search. Preserve final command choices, keep fenced examples inert, and surface private FINISH recovery with shared-reader receipts. New drafts no longer inherit unrelated study notes; existing drafts retain their context.
 
 - Preserve queued study commands when an older source/private-writing job completes. A second study submitted while a worker is busy gets an explicit not-queued receipt and retry guidance instead of being silently dropped as "deferred"; private choices remain protected. Share exact recovery suggestions for malformed local RELATE and code-looking SEARCH/RESEARCH; retain original intent and existing external-search authority. Compact guidance names the complete SELF_STUDY commands. Recovery is optional navigation help and never executes a guessed source request.
