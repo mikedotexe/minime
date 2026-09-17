@@ -54383,6 +54383,7 @@ Goals: {json.dumps(goals, indent=2)}
         cleaned: Optional[str],
         *,
         reason: str,
+        choice_envelope: Optional[Dict[str, Any]] = None,
     ) -> str:
         base_action = next_action.split()[0].upper().rstrip(":")
         if self._attractor_suggestion_decision_ambiguous(base_action, cleaned):
@@ -54416,7 +54417,8 @@ Goals: {json.dumps(goals, indent=2)}
             self._pending_next_normalization_signal = dict(signal)
         else:
             self._pending_next_normalization_signal = None
-        choice_envelope = globals().get("_LAST_NEXT_CHOICE_ENVELOPE_V1")
+        if choice_envelope is None:
+            choice_envelope = globals().get("_LAST_NEXT_CHOICE_ENVELOPE_V1")
         if isinstance(choice_envelope, dict):
             self._pending_choice_envelope_v1 = dict(choice_envelope)
         else:
@@ -54572,6 +54574,48 @@ Goals: {json.dumps(goals, indent=2)}
         action_text = response.action_text if isinstance(response, InboxGeneration) else response
         self._apply_footer_directives(action_text)
         next_action, cleaned = parse_next_action(action_text)
+        private_choice_envelope = None
+        # This shorthand belongs only to the current, verified private-writing
+        # response. Keep its authored text and receipt; queue the explicit route.
+        if (isinstance(prompt, SourceStudyPrompt)
+                and prompt.output.get("input_kind") == "private_writing"
+                and str(next_action or "").upper() == "CONTINUE"):
+            feedback = prompt.verified_choice_feedback(action_text)
+            if (str(feedback.get("selected_next") or "").upper() == "CONTINUE"
+                    and feedback.get("selection_kind") == "explicit_next"
+                    and feedback.get("normalized_next") == "WRITE CONTINUE"):
+                # Use the existing persisted diagnostic envelope so restart and
+                # action records retain the authored spelling beside the route.
+                private_choice_envelope = dict(globals().get("_LAST_NEXT_CHOICE_ENVELOPE_V1") or {
+                    "policy": "choice_envelope_v1", "schema_version": 1,
+                    "source": "minime_next_response", "authority": "diagnostic_context_not_command",
+                    "primary_next": next_action, "alternate_nexts": [], "return_threads": [],
+                })
+                private_choice_envelope.update({
+                    "raw_next": feedback["selected_next"],
+                    "executable_next": "WRITE CONTINUE",
+                    "private_writing_normalization": {
+                        "authored_next": feedback["selected_next"],
+                        "normalized_next": "WRITE CONTINUE",
+                        "input_id": prompt.receipt["page_id"],
+                        "request_sha256": prompt.receipt["request_sha256"],
+                        "response_sha256": prompt.receipt["response_sha256"],
+                        "explanation": feedback.get("explanation"),
+                    },
+                })
+                if "mismatch_warning" in private_choice_envelope:
+                    private_choice_envelope["mismatch_warning"] = (
+                        "The declared primary path differed from the final NEXT. "
+                        "The verified final private CONTINUE normalizes to WRITE CONTINUE; "
+                        "this envelope does not establish dispatch or completion."
+                    )
+                next_action = "WRITE CONTINUE"
+                logging.info("Private writing NEXT normalized: CONTINUE -> WRITE CONTINUE; verified selection, not yet dispatched")
+            else:
+                # A missing, older or mismatching receipt cannot authorize the
+                # private route, nor should it spill into unknown-NEXT fallback.
+                logging.info("Private writing CONTINUE was not queued: verified normalization receipt unavailable")
+                return (response, None)
         # The shared writer reports this exact unsupported choice after verified
         # delivery. Keep authored FINISH in the response/evidence, but do not
         # enqueue an unknown action or substitute a different writing operation.
@@ -54620,10 +54664,13 @@ Goals: {json.dumps(goals, indent=2)}
             )
             return (response, None)
         if next_action:
+            choice_options = ({"choice_envelope": private_choice_envelope}
+                              if private_choice_envelope is not None else {})
             next_action = self._record_llm_next_action_choice(
                 next_action,
                 cleaned,
                 reason="llm next choice",
+                **choice_options,
             )
         return (response, next_action)
 

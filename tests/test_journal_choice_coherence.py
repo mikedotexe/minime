@@ -160,6 +160,6 @@ def test_both_hosts_share_choice_scanner_and_feedback_fixtures(tmp_path):
         assert eligible_choice_line_indices(text.split("\n")) == fixture["eligible_indices"], fixture["name"]
         assert aa.parse_next_action(text)[0] == fixture["selected_next"], fixture["name"]
         observed = client.analyze_response(text, private_writing=fixture["private_writing"])
-        for field in ("selected_next", "selection_kind", "earlier_source_command", "recovery_commands"):
-            assert observed[field] == fixture[field], (fixture["name"], field)
+        for field in ("selected_next", "normalized_next", "selection_kind", "earlier_source_command", "recovery_commands"):
+            assert observed.get(field) == fixture.get(field), (fixture["name"], field)
     assert not client.workspace.exists()

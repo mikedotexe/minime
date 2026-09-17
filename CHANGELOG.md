@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Normalize explicit private-writing `NEXT: CONTINUE` to `WRITE CONTINUE` only with a verified receipt for that exact input and response. Preserve original prose and selection evidence, keep failed deliveries and earlier pending choices intact, and use full command spelling in writing guidance. Source-page boundary and finding-save feedback repairs ship through the shared reader. Qualification and graceful rollout are recorded in Astrid's `docs/steward-notes/2026-09-17-study-interface-repairs.md`.
+
 - Recognize a final unquoted `SELF_STUDY LIST <repository/directory>` choice with the same parser rules as Astrid. Recursive listings use the shared reader, retain source bookmarks and queued command identity, and remain available alongside compact directory maps. Explicit NEXT still takes precedence; fenced, quoted and nonterminal examples remain data.
 
 - Attribute visual descriptions to their recorded service/model source, age and availability instead of claiming direct perception or a personal search. Preserve final command choices, keep fenced examples inert, and surface private FINISH recovery with shared-reader receipts. New drafts no longer inherit unrelated study notes; existing drafts retain their context.

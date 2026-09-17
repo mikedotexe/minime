@@ -7,6 +7,7 @@ from pathlib import Path
 WRITING_GUIDANCE = (
     "Private writing: NEXT: WRITE START <topic>, WRITE CONTINUE, WRITE REVISE <direction>, "
     "WRITE BRANCH <direction>, WRITE RESUME dN, WRITE FINISH, or WRITE HELP. "
+    "To keep developing the active draft, choose NEXT: WRITE CONTINUE. "
     "WRITE PROFILE EXTENDED allows up to 8192 output tokens across journals; SHORT sets 512; "
     "DEFAULT restores ordinary preferences. No minimum length. New drafts start without study notes. WRITE EVIDENCE <text> attaches or replaces references; bare WRITE EVIDENCE clears them. Existing drafts and branches retain their context; sharing is separate."
 )

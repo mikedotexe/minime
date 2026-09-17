@@ -105,6 +105,8 @@ class SourceStudyPrompt(str):
         value.output = output
         value.receipt = None
         value._wire = None
+        value._cleaned_response = None
+        value._cleaned_wire_sha256 = None
         value._diagnostics = None
         return value
 
@@ -127,12 +129,17 @@ class SourceStudyPrompt(str):
         }
 
     def post(self, post, url: str, payload: dict[str, Any], timeout: float):
+        # A reused prompt/fallback cannot retain authorization from an earlier
+        # attempt, including when this attempt fails before sending any bytes.
+        self.receipt = None
+        self._wire = None
+        self._cleaned_response = None
+        self._cleaned_wire_sha256 = None
         # These are the actual bytes sent, rather than a reconstructed approximation.
         request_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         if not any(m.get("role") == "user" and str(self) in m.get("content", "")
                    for m in payload.get("messages", [])):
             raise ValueError("source page was shortened before submission; bookmark unchanged")
-        self._wire = None
         self._diagnostics = StudyAttemptDiagnostics(self.client.workspace, self.output, request_json)
         try:
             response = post(url, data=request_json.encode("utf-8"),
@@ -158,10 +165,56 @@ class SourceStudyPrompt(str):
             raise
         if self._diagnostics:
             self._diagnostics.cleaned(cleaned)
+        # Preserve the actual cleanup chain, bound to this response's wire hash.
+        # Merely sharing a NEXT verb with a different returned text is not enough.
+        if self._wire:
+            wire_hash = hashlib.sha256(self._wire[1].encode("utf-8")).hexdigest()
+            expected = (self._cleaned_response
+                        if self._cleaned_wire_sha256 == wire_hash
+                        else self._wire_content())
+            if isinstance(expected, str) and content == expected:
+                self._cleaned_response = cleaned
+                self._cleaned_wire_sha256 = wire_hash
         return cleaned
+
+    def _wire_content(self) -> str | None:
+        if self._wire is None:
+            return None
+        try:
+            body = json.loads(self._wire[1])
+            if "choices" in body:
+                content = body["choices"][0]["message"]["content"]
+            else:
+                content = body["message"]["content"]
+            return content.strip() if isinstance(content, str) else None
+        except (ValueError, KeyError, IndexError, TypeError):
+            return None
+
+    def verified_choice_feedback(self, returned_text: str) -> dict[str, Any]:
+        """Current delivery-bound selection; never substitute a same-verb old receipt."""
+        if not self._wire or not isinstance(self.receipt, dict):
+            return {}
+        page = self.output.get("page")
+        input_id = page.get("id") if page else self.output.get("navigation_id")
+        if not input_id or self.receipt.get("page_id") != input_id:
+            return {}
+        request_json, response_json = self._wire
+        request_hash = hashlib.sha256(request_json.encode("utf-8")).hexdigest()
+        response_hash = hashlib.sha256(response_json.encode("utf-8")).hexdigest()
+        if (self.receipt.get("request_sha256") != request_hash
+                or self.receipt.get("response_sha256") != response_hash):
+            return {}
+        expected = (self._cleaned_response
+                    if self._cleaned_wire_sha256 == response_hash
+                    else self._wire_content())
+        if not isinstance(expected, str) or returned_text != expected:
+            return {}
+        feedback = self.receipt.get("choice_feedback")
+        return feedback if isinstance(feedback, dict) else {}
 
     def accepted(self):
         """Called by dispatch after a nonempty visible completion survives cleanup."""
+        self.receipt = None
         if self._wire is None:
             raise RuntimeError("source delivery has no retained provider wire bodies")
         request_json, response_json = self._wire
