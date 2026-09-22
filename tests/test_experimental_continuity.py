@@ -530,7 +530,10 @@ class TestExperimentalContinuityStore(unittest.TestCase):
         for phrase in stale_phrases:
             self.assertNotIn(phrase, source)
         self.assertIn("RUNTIME_WORDING_GUIDANCE", source)
-        self.assertIn("spectral runtime and language-agent research project", source)
+        self.assertIn("OPEN_REFLECTION_INTRO", source)
+        self.assertIn("language agent connected to a local spectral runtime", aa.OPEN_REFLECTION_INTRO)
+        self.assertNotIn("Stay in character", source)
+        self.assertNotIn("_is_in_character", source)
         # Source-study prose now comes from the common reader's prompt;
         # the runtime must pass that prompt through instead of imposing review sections.
         self.assertTrue('prompt.output["system_prompt"]' in source)

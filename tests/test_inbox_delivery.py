@@ -264,7 +264,6 @@ def test_read_is_not_supply_and_batch_does_not_leak_to_next_read(agent):
 def test_unrelated_or_private_lanes_do_not_consume_mail(agent, monkeypatch, mode, prompt):
     path, _ = seed_inbox()
     monkeypatch.setattr(agent, "_query_llm_raw", Mock(return_value="An unrelated result."))
-    monkeypatch.setattr(agent, "_is_in_character", Mock(return_value=True))
     agent._query_llm(prompt, context_mode=mode)
     assert path.exists()
     assert not (aa.WORKSPACE_DIR / "outbox").exists()
@@ -278,7 +277,6 @@ def test_actual_query_adapter_and_save_keep_sender_and_stage(agent, monkeypatch)
     monkeypatch.setattr(aa.requests, "post", post)
     monkeypatch.setattr(aa, "LLM_BACKEND", "ollama")
     monkeypatch.setattr(aa, "MODEL", "gemma4:12b")
-    monkeypatch.setattr(agent, "_is_in_character", Mock(side_effect=AssertionError("no reply rewriting")))
     assert agent._query_llm("Unrelated ambient context " * 1000) == body
     assert source in post.call_args.kwargs["json"]["messages"][1]["content"]
     assert post.call_args.kwargs["json"]["options"]["num_ctx"] == max(aa.OLLAMA_NUM_CTX, aa.JOURNAL_CONTEXT_FLOOR)

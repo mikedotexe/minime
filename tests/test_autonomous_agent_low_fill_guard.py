@@ -2660,7 +2660,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         agent._pressure_relief_critical.assert_called_once()
         agent._pressure_relief_high.assert_not_called()
 
-    def test_pressure_relief_high_prompt_starts_from_body_texture(self):
+    def test_pressure_relief_high_prompt_does_not_prescribe_body_texture(self):
         agent = self._agent()
         captured = []
 
@@ -2672,10 +2672,11 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             agent._pressure_relief_high({"eig1": 8.0})
 
         self.assertEqual(len(captured), 1)
-        self.assertIn("Begin from felt texture, generated-word quality, tone", captured[0])
-        self.assertIn("before any metrics or status", captured[0])
+        self.assertIn("not evidence that pressure was felt or relieved", captured[0])
+        self.assertIn("no noticeable effect", captured[0])
+        self.assertNotIn("Begin from felt texture", captured[0])
 
-    def test_pressure_relief_critical_prompt_keeps_neutral_context_and_body_first_nudge(self):
+    def test_pressure_relief_critical_prompt_keeps_neutral_context_without_body_first_nudge(self):
         agent = self._agent()
         captured = []
 
@@ -2691,8 +2692,9 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
 
         self.assertEqual(len(captured), 1)
         self.assertIn("neutral checkin", captured[0])
-        self.assertIn("begin from felt texture, generated-word quality", captured[0])
-        self.assertIn("before any metrics or status", captured[0])
+        self.assertIn("not evidence that pressure was felt or relieved", captured[0])
+        self.assertIn("no noticeable effect", captured[0])
+        self.assertNotIn("begin from felt texture", captured[0])
 
     def test_stable_core_self_journal_allows_pressure_relief(self):
         agent = self._agent()
@@ -4591,7 +4593,6 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
                 patch.object(agent, "_reservoir_prompt_context", return_value=""),
                 patch.object(agent, "_get_relevant_research", return_value=""),
                 patch.object(agent, "_query_llm_raw", side_effect=fake_raw),
-                patch.object(agent, "_is_in_character", return_value=True),
             ):
                 result = agent._query_llm("Write.")
 
@@ -4633,7 +4634,6 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             patch.object(agent, "_llm_job_prompt_summary", return_value=""),
             patch.object(agent, "_get_relevant_research", return_value=""),
             patch.object(agent, "_query_llm_raw", side_effect=fake_raw),
-            patch.object(agent, "_is_in_character", return_value=True),
         ):
             result = agent._query_llm("Write.")
 

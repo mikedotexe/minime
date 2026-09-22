@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Candidate: open reflection without character enforcement (2026-09-22).** Remove the general prompt's required spectral character and its phrase-based response regeneration/discard. Preserve exact authored prose/NEXT, mailbox delivery, protected attention, provider error handling and action gates. Open rest, relief, dispersal, drift, perturbation, metabolism and sensory-gate reflection prompts; separate new journal system status from authored felt accounts. No historical rewrite, engine/control change or restart. Qualification and remaining prompt-audit debt: `docs/steward-notes/2026-09-22-open-reflection-without-character-enforcement.md`.
+
 - **Live: open aspiration context (2026-09-22).** Fast-forward local main to `e62d0100b49c588ef541db9390b39b3d0ebcbbeb`, then gracefully restart only the autonomous agent. PID 45403 loads all 84 qualified inputs without reload debt; exact pending-NEXT admission and session continuity are verified. Protected services and selected helper are unchanged. No engine/decay change, push or automation resume. See `docs/steward-notes/2026-09-22-open-aspiration.md`.
 
 - **Candidate: open aspiration context (2026-09-22).** Route ASPIRE/FORM through open first-person framing without prescribed spectral sensations or character-check retries/discards. Keep authored prose/NEXT, action gates, mailbox behavior and protected attention; omit unrelated routine ambient guidance. Add synthetic adapter regressions and an explicit prompt-contract label. No engine, semantic decay, reservoir or sensory change. Paired evidence and offline temporal qualification: Astrid `docs/steward-notes/2026-09-22-open-aspiration-and-temporal-distance.md`.

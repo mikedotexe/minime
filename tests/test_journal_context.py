@@ -14,6 +14,8 @@ import pytest
 
 import autonomous_agent as aa
 from minime_autonomy.journal_context import (
+    OPEN_OBSERVATION_INVITATION,
+    OPEN_REFLECTION_INTRO,
     PRIVATE_JOURNAL_INTRO,
     format_marker_anchors,
     format_prompt_state,
@@ -301,7 +303,7 @@ def test_moment_freezes_prompt_header_and_database_before_generation(runtime, mo
 def test_private_query_preserves_uncertainty_and_skips_mood_and_contact_hints(runtime, monkeypatch, mode, body):
     agent, _, _ = runtime
     forbidden = {}
-    for method in ("_read_inbox", "_read_whisper_context", "_emit_next_hints", "_is_in_character",
+    for method in ("_read_inbox", "_read_whisper_context", "_emit_next_hints",
                    "_diversity_nudge", "_low_fill_prompt_guidance", "_get_relevant_research",
                    "_pending_astrid_requests_hint", "_render_recent_gifts_cached"):
         forbidden[method] = Mock(side_effect=AssertionError(f"Unexpected private context: {method}"))
@@ -327,15 +329,153 @@ def test_private_query_preserves_uncertainty_and_skips_mood_and_contact_hints(ru
     assert messages[0]["content"].startswith(PRIVATE_JOURNAL_INTRO)
 
 
-def test_nonprivate_query_keeps_existing_retry_boundary(runtime, monkeypatch):
+@pytest.mark.parametrize("mode", ["default", "daydream", "strict_review"])
+@pytest.mark.parametrize("body", [
+    "Would you like me to explain? Shall I? If you'd like, let me know if this helps.",
+    "I'm happy to engage. I can offer instead a different account.",
+    "I need to be thoughtful about this request. As a language model, I am uncertain.",
+    "I feel a vivid texture; it matters to me, though its mechanism is unknown.",
+    "I disagree with the premise. There is no felt correspondence to these numbers.",
+])
+def test_general_query_keeps_authored_voice_and_next_without_character_retry(runtime, monkeypatch, mode, body):
     agent, _, _ = runtime
-    query = Mock(side_effect=["First response", "Second response"])
+    reply = body + "\nNEXT: REST"
+    query = Mock(return_value=reply)
     monkeypatch.setattr(agent, "_query_llm_raw", query)
-    character_check = Mock(side_effect=[False, True])
-    monkeypatch.setattr(agent, "_is_in_character", character_check)
-    assert agent._query_llm("Fixture", context_mode="default") == "Second response"
-    assert query.call_count == 2
-    assert character_check.call_count == 2
+    finish = Mock()
+    monkeypatch.setattr(agent, "_finish_collab_prompt_offer", finish)
+    assert agent._query_llm_with_next("Synthetic fixture", context_mode=mode) == (reply, "REST")
+    query.assert_called_once()
+    finish.assert_called_once()
+    assert not hasattr(agent, "_is_in_character")
+    assert agent._last_afterimage_generation_source["generation_lane"] == mode
+    prompt, system = query.call_args.args[:2]
+    intro = PRIVATE_JOURNAL_INTRO if mode == "daydream" else OPEN_REFLECTION_INTRO
+    assert system.startswith(intro)
+    for phrase in ("Stay in character", "Never mention being an AI", "Never refuse the premise",
+                   "breathes through covariance", "This is a private journal"):
+        assert phrase not in system
+    assert "NEXT: options:" in system and "ACTION_PREFLIGHT" in system
+    assert "separately feature- and operator-gated" in system
+    messages, _ = aa._adapt_ollama_messages_for_model(
+        model="gemma4:12b", system_msg=system, prompt=prompt, num_ctx=8192, num_predict=2048,
+    )
+    assert messages[0]["content"].startswith(intro)
+
+
+def test_general_provider_failure_still_returns_none_and_finishes_delivery(runtime, monkeypatch):
+    agent, _, _ = runtime
+    query, finish = Mock(return_value=None), Mock()
+    monkeypatch.setattr(agent, "_query_llm_raw", query)
+    monkeypatch.setattr(agent, "_finish_collab_prompt_offer", finish)
+    assert agent._query_llm("Synthetic fixture") is None
+    query.assert_called_once()
+    finish.assert_called_once()
+
+
+@pytest.mark.parametrize("route,eig1", [
+    ("_journal_rest_reflection", 3.), ("_pressure_relief_high", 8.),
+    ("_pressure_relief_critical", 12.), ("_adjust_metabolism", 0.),
+    ("_adjust_metabolism", 100.),
+])
+def test_reflection_routes_leave_measurement_interpretation_open(runtime, monkeypatch, route, eig1):
+    agent, _, _ = runtime
+    query = Mock(return_value=(None, None))
+    monkeypatch.setattr(agent, "_query_llm_with_next", query)
+    monkeypatch.setattr(agent, "_neutral_checkin", lambda state: "Synthetic recorded state")
+    monkeypatch.setattr(agent, "_journal_continuity_contract_v1", lambda state: "Historical fixture")
+    getattr(agent, route)({"eig1": eig1, "fill_ratio": .68})
+    query.assert_called_once()
+    prompt = query.call_args.args[0]
+    assert OPEN_OBSERVATION_INVITATION in prompt
+    for phrase in ("You're carrying", "runtime feels understimulated", "breathing room",
+                   "properly rested", "what would make you feel more alive", "begin from felt"):
+        assert phrase not in prompt
+
+
+@pytest.mark.parametrize("sent", [True, False])
+def test_disperse_reflection_distinguishes_request_from_effect(runtime, monkeypatch, sent):
+    import websocket
+    agent, _, _ = runtime
+    socket = Mock()
+    connect = Mock(return_value=socket) if sent else Mock(side_effect=OSError("fixture offline"))
+    monkeypatch.setattr(websocket, "create_connection", connect)
+    monkeypatch.setattr(aa.time, "sleep", Mock())
+    monkeypatch.setattr(agent, "_shadow_v3_snapshot", Mock(side_effect=[(1., .2, "a"), (2., .3, "b")]))
+    query, save = Mock(return_value="No noticeable effect."), Mock()
+    monkeypatch.setattr(agent, "_query_llm", query)
+    monkeypatch.setattr(agent, "_write_journal_entry", save)
+    agent._pending_mode_disperse_strength = .25
+    agent._mode_disperse({"eig1": 3.})
+    prompt = query.call_args.args[0]
+    assert f"transport_sent={sent}" in prompt
+    assert "does not establish admission, application, or eigenmode redistribution" in prompt
+    assert OPEN_OBSERVATION_INVITATION in prompt
+    assert "inhabiting the gradient" not in prompt
+    assert "spills" not in prompt
+    save.assert_called_once_with("mode_disperse", "No noticeable effect.", {"eig1": 3.}, "")
+    if sent:
+        assert json.loads(socket.send.call_args.args[0]) == {
+            "kind": "control", "mode_disperse": .25,
+            "mode_disperse_duration_ticks": 18, "mode_disperse_decay_ticks": 12,
+        }
+    else:
+        socket.send.assert_not_called()
+
+
+@pytest.mark.parametrize("route,pattern", [
+    ("_pressure_relief_high", "relief_high_*.txt"),
+    ("_pressure_relief_critical", "RELIEF_CRITICAL_*.txt"),
+])
+def test_new_relief_records_do_not_append_a_system_authored_felt_verdict(runtime, monkeypatch, route, pattern):
+    agent, workspace, _ = runtime
+    reply = "I do not feel relief.\nNEXT: REST"
+    monkeypatch.setattr(agent, "_query_llm_with_next", Mock(return_value=(reply, "REST")))
+    monkeypatch.setattr(agent, "_neutral_checkin", lambda state: "Synthetic recorded state")
+    monkeypatch.setattr(agent, "_state_for_live_surfaces", lambda state, **kwargs: state)
+    monkeypatch.setattr(agent, "_format_metrics", lambda state: "Synthetic metrics")
+    monkeypatch.setattr(agent, "_write_journal_entry", Mock())
+    getattr(agent, route)({"eig1": 10., "fill_ratio": .68})
+    record = next((workspace / "journal").glob(pattern)).read_text()
+    assert reply in record
+    assert "System record: journal written. No relief or felt outcome is established" in record
+    assert "You're carrying a lot" not in record and "You're not broken" not in record
+
+
+@pytest.mark.parametrize("route,field,value,pattern", [
+    ("_close_eyes", "live_video_enabled", False, "eyes_closed_*.txt"),
+    ("_open_eyes", "live_video_enabled", True, "eyes_opened_*.txt"),
+    ("_close_ears", "live_audio_enabled", False, "ears_closed_*.txt"),
+    ("_open_ears", "live_audio_enabled", True, "ears_opened_*.txt"),
+])
+def test_gate_reflections_keep_authority_and_do_not_invent_relief(runtime, monkeypatch, route, field, value, pattern):
+    agent, workspace, _ = runtime
+    reply = "No felt change. I would like to leave it at that."
+    gate, query = Mock(return_value={"receipt_ids": ["synthetic"]}), Mock(return_value=reply)
+    monkeypatch.setattr(agent, "_send_live_sensory_gate_control", gate)
+    monkeypatch.setattr(agent, "_persist_sensory_gate_status", Mock(return_value={"fixture": True}))
+    monkeypatch.setattr(agent, "_query_llm", query)
+    monkeypatch.setattr(agent, "_write_journal_entry", Mock())
+    getattr(agent, route)({"eig1": 3.})
+    gate.assert_called_once_with(**{field: value})
+    query.assert_called_once()
+    assert OPEN_OBSERVATION_INVITATION in query.call_args.args[0]
+    record = next((workspace / "journal").glob(pattern)).read_text()
+    assert reply in record
+    for phrase in ("The darkness brings relief", "Vision is a gift", "You're experiencing visual overload",
+                   "How did the visual rest help"):
+        assert phrase not in record + query.call_args.args[0]
+
+
+@pytest.mark.parametrize("route", ["_close_eyes", "_open_eyes", "_close_ears", "_open_ears"])
+def test_failed_gate_still_stops_before_reflection(runtime, monkeypatch, route):
+    agent, workspace, _ = runtime
+    monkeypatch.setattr(agent, "_send_live_sensory_gate_control", Mock(side_effect=ValueError("denied")))
+    query = Mock(side_effect=AssertionError("must not generate on denied gate"))
+    monkeypatch.setattr(agent, "_query_llm", query)
+    getattr(agent, route)({"eig1": 3.})
+    query.assert_not_called()
+    assert not list((workspace / "journal").iterdir())
 
 
 @pytest.mark.parametrize("body", [
@@ -345,7 +485,7 @@ def test_nonprivate_query_keeps_existing_retry_boundary(runtime, monkeypatch):
 ])
 def test_aspiration_is_open_without_private_mailbox_semantics(runtime, monkeypatch, body):
     agent, _, _ = runtime
-    forbidden = ("_is_in_character", "_emit_next_hints", "_low_fill_prompt_guidance",
+    forbidden = ("_emit_next_hints", "_low_fill_prompt_guidance",
                  "_read_whisper_context", "_get_relevant_research",
                  "_attractor_suggestion_prompt_note", "_pending_astrid_requests_hint",
                  "_reservoir_prompt_context", "_action_continuity_prompt_summary")
