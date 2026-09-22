@@ -325,6 +325,7 @@ EXPERIMENT_STATUS exp_astrid_20990101_peer-thread"""
             prompt.receipt = {"verified": True}
             with patch.object(aa, "WORKSPACE_DIR", workspace), patch.object(aa, "StudyClient") as client, patch.object(agent, "_query_llm_raw", return_value="NEXT: SELF_STUDY CONTINUE") as raw, patch.object(agent, "_emit_next_hints") as hints, patch.object(agent, "_persist_pending_next_action"), patch.object(agent, "_state_for_live_surfaces", return_value=dict(STATE)), patch.object(agent, "_write_journal_entry") as journal, patch.object(agent, "_query_llm_strict_review") as review:
                 client.return_value.prepare.return_value = prompt
+                agent._current_action_continuity_event = {"action_id": "synthetic-dispatch-327"}
                 agent._self_study(dict(STATE))
             self.assertIs(raw.call_args.args[0], prompt)
             self.assertEqual(raw.call_count, 1)

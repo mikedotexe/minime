@@ -653,10 +653,23 @@ def eligible_choice_line_indices(lines: list[str]) -> list[int]:
             fence = (marker[1][0], len(marker[1]))
             continue
         if stripped and not stripped.startswith((">", '"', "'", "`", "“", "‘")):
-            hidden, hidden_tag = _choice_hidden_tag_after(line)
+            hidden, hidden_tag = (False, None) if stripped.startswith("NEXT: SELF_STUDY GEOMETRY ") else _choice_hidden_tag_after(line)
             if not hidden:
                 eligible.append(index)
     return eligible
+
+
+def final_bare_choice_index(lines: list[str], eligible: list[int]) -> int | None:
+    """Locate an existing bare affordance without publishing parse evidence."""
+    nonempty = [i for i, line in enumerate(lines) if line.strip()]
+    if nonempty and nonempty[-1] in eligible:
+        index = nonempty[-1]
+        choice = lines[index].strip()
+        if choice == "ATTRACTOR_SUGGESTIONS" or re.match(
+            r"^SELF_STUDY (?:MAP|LIST|FIND|OPEN|RESUME|CONTINUE|RELATE|SESSION|TRACE)(?: |$)", choice
+        ):
+            return index
+    return None
 
 
 def parse_next_action(text: str) -> tuple:
@@ -678,7 +691,7 @@ def parse_next_action(text: str) -> tuple:
         stripped = lines[i].strip()
         if stripped.upper().startswith('NEXT:'):
             raw_next = lines[i].lstrip()[5:].lstrip()
-            if raw_next.upper().startswith("AFTERIMAGE_KEEP "):
+            if raw_next.upper().startswith("AFTERIMAGE_KEEP ") or raw_next.startswith("SELF_STUDY GEOMETRY "):
                 # The fragment is data, including trailing space and RESIDUE-like text.
                 cleaned = '\n'.join(lines[:i] + lines[i+1:]).strip()
                 return _parse_result(raw_next, cleaned)
@@ -733,16 +746,14 @@ def parse_next_action(text: str) -> tuple:
                 return _parse_result(None, cleaned)
             return _parse_result(action, cleaned)
     # Bare affordances are eligible only on the actual final nonempty line.
-    nonempty = [i for i, line in enumerate(lines) if line.strip()]
-    if nonempty and nonempty[-1] in eligible:
-        i = nonempty[-1]
+    i = final_bare_choice_index(lines, eligible)
+    if i is not None:
         choice = lines[i].strip()
         if choice == "ATTRACTOR_SUGGESTIONS":
             return _parse_result(choice, "\n".join(lines[:i]).strip())
-        if re.match(r"^SELF_STUDY (?:MAP|LIST|FIND|OPEN|RESUME|CONTINUE|RELATE|SESSION|TRACE)(?: |$)", choice):
-            _LAST_NEXT_CHOICE_ENVELOPE_V1 = build_choice_envelope_v1(
-                text, raw_next=choice, executable_next=choice, residue=None)
-            return _parse_result(choice, "\n".join(lines[:i]).strip())
+        _LAST_NEXT_CHOICE_ENVELOPE_V1 = build_choice_envelope_v1(
+            text, raw_next=choice, executable_next=choice, residue=None)
+        return _parse_result(choice, "\n".join(lines[:i]).strip())
     return _parse_result(None, text)
 
 

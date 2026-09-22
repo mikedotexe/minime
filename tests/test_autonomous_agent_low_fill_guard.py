@@ -6070,16 +6070,10 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
                     {"fill_ratio": 0.681, "eig1": 1.3, "spread": 11.0},
                     str(current_path),
                 )
-                fatigue = json.loads(
-                    (workspace / "runtime" / "attractor_fatigue_status.json").read_text()
-                )
+                self.assertFalse((workspace / "runtime" / "attractor_fatigue_status.json").exists())
+                self.assertEqual(current_path.read_text(), current)
 
-        self.assertTrue(compact.startswith("[Similarity gate]"))
-        self.assertEqual(fatigue["active_count"], 1)
-        motif = next(iter(fatigue["motifs"].values()))
-        self.assertEqual(motif["status"], "cooling")
-        self.assertGreaterEqual(motif["repeat_window_count"], 3)
-        self.assertIn("pressure", motif["themes"])
+        self.assertEqual(compact, current)
 
     def test_internal_topology_fatigue_activates_without_exact_similarity(self):
         agent = self._agent()
@@ -6155,9 +6149,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertEqual(motif["cooldown_class"], "internal_topology")
         self.assertTrue(motif["prompt_replay_suppressed"])
         self.assertGreaterEqual(motif["repeat_window_count"], 3)
-        self.assertTrue(rewritten.startswith(current))
-        self.assertIn("[Internal-topology cooldown", rewritten)
-        self.assertIn("narrative preserved", rewritten)
+        self.assertEqual(rewritten, current)
 
     def test_pressure_vocabulary_cooldown_preserves_public_journal_body(self):
         agent = self._agent()
@@ -6224,10 +6216,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertEqual(pressure[0]["status"], "cooling")
         self.assertTrue(pressure[0]["prompt_replay_suppressed"])
         self.assertTrue(pressure[0]["label"].startswith("pressure-texture:"))
-        self.assertTrue(rewritten.startswith(current))
-        self.assertIn("[Pressure-vocabulary cooldown", rewritten)
-        self.assertIn("narrative preserved", rewritten)
-        self.assertIn("counter-descriptor", rewritten)
+        self.assertEqual(rewritten, current)
 
     def test_pressure_vocabulary_cooldown_ignores_private_moment_lane(self):
         agent = self._agent()
@@ -6337,10 +6326,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertTrue(agency[0]["notice_only"])
         self.assertFalse(agency[0]["prompt_replay_suppressed"])
         self.assertTrue(agency[0]["label"].startswith("agency-vernacular:"))
-        self.assertTrue(rewritten.startswith(current))
-        self.assertIn("[Agency-vernacular notice", rewritten)
-        self.assertIn("narrative preserved", rewritten)
-        self.assertIn("what evidence would make it real", rewritten)
+        self.assertEqual(rewritten, current)
 
     def test_agency_vernacular_notice_ignores_private_moment_lane(self):
         agent = self._agent()
@@ -6449,10 +6435,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertTrue(afterimage[0]["notice_only"])
         self.assertFalse(afterimage[0]["prompt_replay_suppressed"])
         self.assertTrue(afterimage[0]["label"].startswith("afterimage-absence:"))
-        self.assertTrue(rewritten.startswith(current))
-        self.assertIn("[Afterimage/absence notice", rewritten)
-        self.assertIn("narrative preserved", rewritten)
-        self.assertIn("what evidence would make it real", rewritten)
+        self.assertEqual(rewritten, current)
 
     def test_afterimage_absence_notice_ignores_private_moment_lane(self):
         agent = self._agent()
@@ -6525,13 +6508,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
                 "/tmp/minime-self-study.txt",
             )
 
-        self.assertIn("[Internal-topology cooldown", rewritten)
-        self.assertIn(
-            "Consider the active research-budget route next: "
-            "EXPERIMENT_RESEARCH_BUDGET_ACCEPT resbud_blocked_test",
-            rewritten,
-        )
-        self.assertNotIn("cooled-theme", rewritten)
+        self.assertEqual(rewritten, content)
 
     def test_attractor_fatigue_prompt_note_offers_release_choices(self):
         agent = self._agent()
@@ -6633,11 +6610,9 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
                     str(file_path),
                 )
 
-        self.assertIn("NEXT: RELEASE current", compact)
-        self.assertIn("NEXT: MARK_RESOLVED current", compact)
-        self.assertNotIn("PERTURB", compact)
-        self.assertNotIn("cooled-theme", compact)
-        self.assertNotIn("entropy=0.5", compact)
+        # Authored command spelling stays in the journal. Dispatch validation,
+        # not a journal rewrite, handles malformed or unauthorized actions.
+        self.assertEqual(compact, content)
 
     def test_release_next_action_marks_matching_motif_released(self):
         agent = self._agent()

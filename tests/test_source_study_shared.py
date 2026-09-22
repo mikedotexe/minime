@@ -11,6 +11,17 @@ from minime_autonomy.source_study import StudyClient, selected_reader
 BINARY = Path(os.environ.get("ASTRID_SOURCE_STUDY_BIN", str(Path(__file__).resolve().parents[2] / "astrid/target/debug/astrid-source-study")))
 
 class SharedSourceStudyTests(unittest.TestCase):
+    def test_durable_preparation_identity_survives_lost_ack(self):
+        action = "SELF_STUDY QUESTION NEW Synthetic question?"
+        first = self.client.prepare(action, request_id="action-1")
+        reopened = StudyClient(self.minime, self.client.workspace, astrid_root=self.astrid, executable=BINARY)
+        self.assertEqual(first.output, reopened.prepare(action, request_id="action-1").output)
+        with self.assertRaisesRegex(RuntimeError, "conflicting preparation retry"):
+            reopened.prepare("SELF_STUDY MAP", request_id="action-1")
+        reopened.prepare(action, request_id="action-2")
+        saved = json.loads((self.client.workspace / "diagnostics/source_first_v3/shared_reader/reader-v1.json").read_bytes())
+        self.assertEqual(len(saved["questions"]["entries"]), 2)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

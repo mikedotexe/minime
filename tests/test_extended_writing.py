@@ -62,6 +62,7 @@ def test_private_writing_saves_outside_peer_journal_scan_and_skips_compression(t
     agent._query_llm_with_next=Mock(return_value=("Complete private passage.\nNEXT: WRITE CONTINUE", "WRITE CONTINUE"))
     with patch.object(aa,"WORKSPACE_DIR",tmp_path),patch.object(aa,"StudyClient") as client:
         client.return_value.prepare.return_value=prompt
+        agent._current_action_continuity_event = {"action_id": "synthetic-dispatch-64"}
         agent._run_shared_source_study({"fill_ratio":.68},"WRITE CONTINUE")
     assert not (tmp_path/"journal").exists()
     assert "Complete private passage." in next((tmp_path/"private_writing/journal").glob("*.txt")).read_text()

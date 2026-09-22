@@ -12,16 +12,22 @@ No dependency on the full Python consciousness stack.
 
 import argparse
 import base64
+import hashlib
 import json
 import logging
 import os
+import signal
+import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import cv2
 import numpy as np
+
+from minime_autonomy.visual_context import visual_freshness, vision_prompt_parts
+from minime_autonomy.deployment import source_inputs
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
@@ -54,6 +60,12 @@ class VisualFrameService:
         self.poll_interval = poll_interval
         self.source = source
         self.running = False
+        self.stop_requested = threading.Event()
+        self.active_request = None
+        inputs = source_inputs(Path(__file__).resolve().parent)
+        self.source_inputs_sha256_at_start = hashlib.sha256(
+            json.dumps(inputs, sort_keys=True).encode()
+        ).hexdigest()
 
         for d in [REQUESTS_DIR, RESPONSES_DIR, CAPTURES_DIR,
                   REQUESTS_DIR / "processed", RESPONSES_DIR / "processed"]:
@@ -238,13 +250,28 @@ class VisualFrameService:
                 request_file.unlink(missing_ok=True)
             return
 
-        prompt = request_data.get("prompt", "Describe what you see concisely.")
+        prompt, action_lines = vision_prompt_parts(request_data.get("prompt", "Describe what you see concisely."))
         analyze = request_data.get("analyze", True)
         request_id = request_data.get("request_id", request_file.stem)
+
+        if analyze and not prompt:
+            response = {
+                "request_id": request_id, "request_timestamp": request_data.get("timestamp", ""),
+                "response_timestamp": datetime.now(timezone.utc).isoformat(),
+                "visual_available": False, "analysis_type": "none",
+                "description": "No visual analysis was requested: the payload contained no visual prose.",
+                "error": "visual_prompt_empty_after_action_separation", "source": "none",
+                "semantic_sent": False, "semantic_block_reason": "invalid_visual_prompt",
+                "separated_action_lines": action_lines,
+            }
+            (RESPONSES_DIR / f"response_{request_id}.json").write_text(json.dumps(response, indent=2))
+            request_file.rename(REQUESTS_DIR / "processed" / request_file.name)
+            return
 
         logging.info(f"Processing visual request: {request_id}")
 
         frame, capture_source = self.capture_frame()
+        capture_timestamp = datetime.now(timezone.utc).isoformat()
         if frame is None:
             response = {
                 "visual_available": False,
@@ -277,6 +304,8 @@ class VisualFrameService:
 
             response = {
                 "visual_available": True,
+                "capture_timestamp": capture_timestamp,
+                "capture_clock_scope": "service_frame_acquisition_not_host_image_creation",
                 "description": description or "(LLaVA unavailable)",
                 "analysis_type": "llava" if description else "none",
                 "image_path": str(image_path),
@@ -289,7 +318,8 @@ class VisualFrameService:
 
         response["request_id"] = request_id
         response["request_timestamp"] = request_data.get("timestamp", "")
-        response["response_timestamp"] = datetime.now().isoformat()
+        response["response_timestamp"] = datetime.now(timezone.utc).isoformat()
+        response["separated_action_lines"] = action_lines
 
         resp_file = RESPONSES_DIR / f"response_{request_id}.json"
         resp_file.write_text(json.dumps(response, indent=2))
@@ -303,7 +333,18 @@ class VisualFrameService:
 
     def process_pending(self):
         for f in sorted(REQUESTS_DIR.glob("*.json")):
-            self.process_request(f)
+            if self.stop_requested.is_set():
+                break
+            self.active_request = f.name
+            self._write_status()
+            try:
+                self.process_request(f)
+            finally:
+                self.active_request = None
+
+    def request_stop(self, signum=None, frame=None):
+        """Finish the current request; leave unstarted requests on disk."""
+        self.stop_requested.set()
 
     def _write_status(self):
         try:
@@ -318,8 +359,14 @@ class VisualFrameService:
                 ).isoformat()
             payload = {
                 "ts_ms": int(time.time() * 1000),
-                "state": "polling",
-                "healthy": True,
+                "state": "stopping" if self.stop_requested.is_set() else "busy" if self.active_request else "polling",
+                "healthy": not self.stop_requested.is_set(),
+                "pid": os.getpid(),
+                "lifecycle_contract": "visual_finish_current_request_v1",
+                "active_request": self.active_request,
+                "source_inputs_sha256_at_start": self.source_inputs_sha256_at_start,
+                "health_scope": "request_poll_loop_not_fresh_visual_observation",
+                "visual_freshness": visual_freshness(RESPONSES_DIR, now=time.time()),
                 "pending_requests": pending,
                 "processed_count": len(processed_files),
                 "last_request_at": last_request_at,
@@ -337,17 +384,18 @@ class VisualFrameService:
         self.running = True
         logging.info(f"Visual Frame Service started (camera {self.camera_index}, poll {self.poll_interval}s)")
 
-        while self.running:
+        while self.running and not self.stop_requested.is_set():
             try:
                 self.process_pending()
                 self._write_status()
-                time.sleep(self.poll_interval)
+                self.stop_requested.wait(self.poll_interval)
             except KeyboardInterrupt:
                 break
             except Exception as e:
                 logging.error(f"Service error: {e}")
-                time.sleep(10)
+                self.stop_requested.wait(10)
         self.running = False
+        self._write_status()
         logging.info("Visual Frame Service stopped")
 
 
@@ -363,6 +411,8 @@ def main():
         poll_interval=args.interval,
         source=args.source,
     )
+    signal.signal(signal.SIGTERM, service.request_stop)
+    signal.signal(signal.SIGINT, service.request_stop)
     service.start()
 
 

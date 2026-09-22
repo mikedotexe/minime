@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -19,6 +20,97 @@ import visual_frame_service as vfs  # noqa: E402
 
 
 class TestVisualFrameService(unittest.TestCase):
+    def test_shutdown_finishes_current_request_and_preserves_next(self):
+        service = vfs.VisualFrameService()
+        first = vfs.REQUESTS_DIR / "a.json"
+        second = vfs.REQUESTS_DIR / "b.json"
+        first.write_text("{}")
+        second.write_text("{}")
+        calls = []
+        def process(path):
+            self.assertEqual(service.active_request, "a.json")
+            service.request_stop()
+            calls.append(path.name)
+            path.rename(vfs.REQUESTS_DIR / "processed" / path.name)
+        with mock.patch.object(service, "process_request", side_effect=process):
+            service.start()
+        self.assertEqual(calls, ["a.json"])
+        self.assertTrue(second.exists())
+        self.assertFalse(service.running)
+        status = json.loads(vfs.VISUAL_STATUS_PATH.read_text())
+        self.assertEqual(status["state"], "stopping")
+        self.assertIsNone(status["active_request"])
+        self.assertFalse(status["healthy"])
+        self.assertEqual(status["pid"], vfs.os.getpid())
+        self.assertEqual(status["lifecycle_contract"], "visual_finish_current_request_v1")
+        self.assertEqual(status["source_inputs_sha256_at_start"], service.source_inputs_sha256_at_start)
+
+    def test_busy_status_written_before_request(self):
+        service = vfs.VisualFrameService()
+        (vfs.REQUESTS_DIR / "fixture.json").write_text("{}")
+        def process(path):
+            status = json.loads(vfs.VISUAL_STATUS_PATH.read_text())
+            self.assertEqual(status["state"], "busy")
+            self.assertEqual(status["active_request"], path.name)
+        with mock.patch.object(service, "process_request", side_effect=process):
+            service.process_pending()
+        self.assertIsNone(service.active_request)
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        workspace = Path(temporary.name)
+        (workspace / "runtime").mkdir()
+        for name, path in {
+            "WORKSPACE_DIR": workspace, "REQUESTS_DIR": workspace / "visual_requests",
+            "RESPONSES_DIR": workspace / "visual_responses", "CAPTURES_DIR": workspace / "visual_captures",
+            "RUNTIME_DIR": workspace / "runtime",
+            "VISUAL_STATUS_PATH": workspace / "runtime/visual_status.json",
+        }.items():
+            patcher = mock.patch.object(vfs, name, path)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_command_only_legacy_request_has_receipt_without_capture(self):
+        service = vfs.VisualFrameService()
+        request = vfs.REQUESTS_DIR / "fixture.json"
+        request.write_text(json.dumps({"prompt": "NEXT: EXPERIMENT_PLAN 4"}))
+        with mock.patch.object(service, "capture_frame") as capture:
+            service.process_request(request)
+        capture.assert_not_called()
+        data = json.loads((vfs.RESPONSES_DIR / "response_fixture.json").read_text())
+        self.assertEqual(data["error"], "visual_prompt_empty_after_action_separation")
+        self.assertFalse(data["semantic_sent"])
+        self.assertTrue((vfs.REQUESTS_DIR / "processed/fixture.json").exists())
+
+    def test_capture_clock_precedes_analysis_and_next_never_reaches_model(self):
+        service = vfs.VisualFrameService()
+        request = vfs.REQUESTS_DIR / "fixture.json"
+        request.write_text(json.dumps({"prompt": "Describe the window.\nNEXT: REST"}))
+        start = datetime(2026, 9, 18, tzinfo=timezone.utc)
+        clock = mock.Mock(wraps=datetime)
+        clock.now.return_value = start
+        def analyze(frame, prompt):
+            self.assertEqual(prompt, "Describe the window.")
+            clock.now.return_value = start + timedelta(seconds=15)
+            return "A window"
+        with (
+            mock.patch.object(vfs, "datetime", clock),
+            mock.patch.object(service, "capture_frame", return_value=(vfs.np.zeros((8, 8), dtype=vfs.np.uint8), "host")),
+            mock.patch.object(service, "analyze_with_llava", side_effect=analyze),
+            mock.patch.object(service, "_semantic_send_allowed", return_value=(False, "fixture")),
+        ):
+            service.process_request(request)
+        data = json.loads((vfs.RESPONSES_DIR / "response_fixture.json").read_text())
+        self.assertEqual(data["capture_timestamp"], start.isoformat())
+        self.assertEqual(data["response_timestamp"], (start + timedelta(seconds=15)).isoformat())
+        with mock.patch.object(vfs.time, "time", return_value=start.timestamp() + 900):
+            service._write_status()
+        status = json.loads(vfs.VISUAL_STATUS_PATH.read_text())
+        self.assertTrue(status["healthy"])
+        self.assertEqual(status["visual_freshness"]["response_freshness"], "stale")
+        self.assertEqual(status["visual_freshness"]["last_frame_acquired_age_s"], 900)
+
     def test_stale_requests_are_skipped_without_capture(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

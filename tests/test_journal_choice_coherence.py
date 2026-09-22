@@ -65,7 +65,7 @@ def test_verified_private_finish_retains_raw_choice_without_queueing_unknown(tmp
     assert agent._query_llm_with_next(prompt, context_mode="source_study") == (text, None)
     agent._record_llm_next_action_choice.assert_not_called()
     assert agent._pending_next_action == "REST"
-    state = json.loads((client.workspace / "diagnostics/source_first_v3/shared_reader/writing/drafts-v1.json").read_text())
+    state = json.loads((client.workspace / "diagnostics/source_first_v3/shared_reader/writing/drafts-v2.json").read_text())
     assert state["drafts"]["d1"]["finished"] is False
     continued = client.prepare("WRITE CONTINUE")
     assert explanation in continued
@@ -103,6 +103,7 @@ def test_private_finish_feedback_is_separate_from_authored_journal(tmp_path, mon
     monkeypatch.setattr(agent, "_state_for_live_surfaces", lambda state, **kwargs: state)
     monkeypatch.setattr(agent, "_record_current_action_artifact", Mock())
     monkeypatch.setattr(agent, "_record_llm_next_action_choice", Mock())
+    agent._current_action_continuity_event = {"action_id": "synthetic-dispatch-105"}
     agent._run_shared_source_study({}, "WRITE START An independent thought")
     agent._record_llm_next_action_choice.assert_not_called()
     journal = next((client.workspace / "private_writing/journal").glob("private_writing_*.txt")).read_text()
@@ -122,6 +123,7 @@ def test_empty_private_generation_only_offers_writing_retry(tmp_path, monkeypatc
     agent = object.__new__(aa.AutonomousAgent)
     monkeypatch.setattr(agent, "_query_llm_with_next", Mock(return_value=(None, None)))
     monkeypatch.setattr(agent, "_record_current_action_artifact", Mock())
+    agent._current_action_continuity_event = {"action_id": "synthetic-dispatch-124"}
     agent._run_shared_source_study({}, "WRITE START An unfinished thought")
     notice = next((client.workspace / "private_writing/journal").glob("notice_*.txt")).read_text()
     assert "WRITE CONTINUE" in notice
@@ -137,6 +139,7 @@ def test_malformed_private_request_keeps_failure_and_retry_protected(tmp_path, m
     monkeypatch.setattr(agent, "_record_current_action_artifact", Mock())
     monkeypatch.setattr(agent, "_record_introspect_notice", Mock())
     monkeypatch.setattr(agent, "_query_llm_with_next", Mock(side_effect=AssertionError("private syntax must fail before source recovery/generation")))
+    agent._current_action_continuity_event = {"action_id": "synthetic-dispatch-139"}
     agent._run_shared_source_study({}, action)
     agent._record_introspect_notice.assert_not_called()
     agent._query_llm_with_next.assert_not_called()

@@ -58,6 +58,7 @@ class MinimeSelfStudyDeliveryTests(unittest.TestCase):
             agent._query_llm_with_next = Mock(return_value=(response, "REST"))
             with patch.object(aa, "WORKSPACE_DIR", workspace), patch.object(aa, "StudyClient") as client:
                 client.return_value.prepare.return_value = prompt
+                agent._current_action_continuity_event = {"action_id": "synthetic-dispatch-60"}
                 agent._self_study(dict(STATE))
             self.assertEqual(agent._query_llm_with_next.call_args.kwargs["context_mode"], "source_study")
             self.assertIs(agent._query_llm_with_next.call_args.args[0], prompt)
@@ -77,6 +78,7 @@ class MinimeSelfStudyDeliveryTests(unittest.TestCase):
             agent._query_llm_with_next = Mock(return_value=("short observation", None))
             with patch.object(aa, "WORKSPACE_DIR", workspace), patch.object(aa, "StudyClient") as client, aa.job_outcome.capture("unconfirmed") as outcome:
                 client.return_value.prepare.return_value = prompt
+                agent._current_action_continuity_event = {"action_id": "synthetic-dispatch-79"}
                 agent._self_study(dict(STATE))
             self.assertEqual(outcome.finish()[0], "failed")
             self.assertEqual(outcome.finish()[2], "source_study_delivery_unverified")

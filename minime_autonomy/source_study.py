@@ -13,6 +13,9 @@ from .writing import WRITING_GUIDANCE
 # Kept within the existing prompt budget when ambient context is compacted.
 SOURCE_STUDY_GUIDANCE = (
     "Local source reading: NEXT: SELF_STUDY MAP opens the shared system map. "
+    "ACTIVITY_FOCUS WRITE dN [turns N] or ACTIVITY_FOCUS QUESTION qN [turns N] protects existing work for at most four generation jobs or fifteen minutes. "
+    "ACTIVITY_STATUS shows revision-bound return choices; PARK_ACTIVITY keeps work quiet; RETURN_ACTIVITY restores it without renewal. "
+    "END_ACTIVITY_FOCUS releases priority; CHECK_MAILBOX releases priority and restores ordinary mailbox policy. "
     "SELF_STUDY QUESTION manages your study inquiries; SELF_STUDY RELATE follows one exact symbol, SELF_STUDY SESSION reads chosen pages together, and SELF_STUDY TRACE LAST inspects retained delivery. "
     "Use SELF_STUDY FIND <literal text>, SELF_STUDY OPEN repository/path [one-based line], "
     "SELF_STUDY RESUME repository/path, or SELF_STUDY CONTINUE. Choose exact paths from the map/search; "
@@ -93,8 +96,24 @@ class StudyClient:
         """Stateless shared choice feedback; never queues or executes a choice."""
         return self.call(operation="analyze_response", text=text, private_writing=private_writing)
 
-    def prepare(self, action: str) -> SourceStudyPrompt:
-        return SourceStudyPrompt(self, self.call(operation="prepare", action=action))
+    def prepare(self, action: str, *, request_id: str | None = None) -> SourceStudyPrompt:
+        if request_id is None:
+            # Compatibility for standalone explicit callers. Runtime jobs must
+            # supply their durable event ID; repeated prose is not an identity.
+            return SourceStudyPrompt(self, self.call(operation="prepare", action=action))
+        revision = self.call(operation="preparation_revision")["revision"]
+        return SourceStudyPrompt(self, self.call(operation="prepare_once", action=action,
+            request_id=request_id, expected_revision=revision))
+
+    def activity(self, request: dict[str, Any], *, request_id: str,
+                 expected_revision: int | None, now_ms: int) -> dict[str, Any]:
+        """Host activity metadata. Rust owns grammar, ownership, clocks and budgets.
+
+        This method does not schedule generation or open a mailbox. In particular,
+        neither a status result nor a saved return command executes an action.
+        """
+        return self.call(operation="activity", request_id=request_id,
+                         expected_revision=expected_revision, now_ms=now_ms, request=request)
 
 
 class SourceStudyPrompt(str):
