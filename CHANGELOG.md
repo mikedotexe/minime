@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- **Live: voluntary observation keeping (2026-09-21).** Gracefully reload the exact three changed agent files after paired bridge activation, with an owned launcher hold preventing old/new writer overlap. PID 54257 reports all 84 qualified startup inputs and no reload debt; checkpoint/session continuity, helper hash and protected services were verified. No engine/model/visual/sensory restart or automation resume. Git integration remains pending. Details: `docs/steward-notes/2026-09-21-voluntary-observations-live.md`.
+
+- **Candidate: voluntary observation keeping (2026-09-21).** Carry typed `WRITE OBSERVE` and `SELF_STUDY OBSERVE` bytes unchanged through NEXT parsing and use the shared Rust helper for private capture, reproducible analysis and deliberate disclosure. Storage-only receipts cause no model generation or public entry. Withhold private payloads from ordinary NEXT logs and observation action-continuity summaries. No engine, model, visual or sensory restart; deployment remains a separate reviewed step. Details: Astrid `docs/steward-notes/2026-09-21-voluntary-observation-keeping.md`.
+
 - **Git checkpoint (2026-09-21).** Merge the deployed continuity/geometry candidate into local `main` at `4cd230a45f1ceb504d85c00c406b1b264892654b`. Archive the earlier read-only sensory checker and attributed source comments with 43 regression tests and 12 checker self-tests passing. No service restart, engine behavior change, push or automation resume is part of this checkpoint. Historical candidate and rollout entries below retain their original scope.
 
 - **Live paired continuity release (2026-09-21).** Gracefully reload the reviewed continuity/geometry adapter and shared reader, with an owned launcher hold across the bridge transition. Exact 84-source inventory and helper identity verified; old accepted jobs drained; session retained. No engine, model, visual or sensory restart, no changed control policy and no inferred felt improvement. See `docs/steward-notes/2026-09-21-paired-continuity-live.md`. The subsequent Git checkpoint above records its local merge.

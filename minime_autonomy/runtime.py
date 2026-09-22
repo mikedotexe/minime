@@ -3046,6 +3046,9 @@ class ActionContinuityStore:
         choice_envelope_v1: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         self.ensure_dirs()
+        if any(str(value or "").lstrip().startswith("WRITE OBSERVE ") for value in (raw_next, canonical_action)):
+            raw_next, canonical_action = None, "WRITE"
+            normalization_signal, choice_envelope_v1 = None, None
         thread = self.ensure_active_thread(raw_next)
         base = self.base_action(canonical_action or effective_action)
         started_at = self._now()
@@ -7141,6 +7144,8 @@ class ActionContinuityStore:
 
     @classmethod
     def visibility_for_action(cls, base: str, effective: str = "") -> str:
+        if base == "WRITE":
+            return "protected_summary"
         if base in AFTERIMAGE_NEXT_ACTIONS or effective in {"afterimage", "afterimage_share"}:
             return "protected_summary"
         if base in cls.protected_actions or effective in cls.protected_actions:
@@ -24290,7 +24295,7 @@ Fill: {fill:.1f}%
         """
         if not raw_next:
             return []
-        if raw_next.lstrip().startswith("SELF_STUDY GEOMETRY "):
+        if raw_next.lstrip().startswith(("SELF_STUDY GEOMETRY ", "SELF_STUDY OBSERVE ", "WRITE OBSERVE ")):
             return [raw_next.lstrip()]
         segments = []
         remaining = raw_next
@@ -24342,7 +24347,7 @@ Fill: {fill:.1f}%
         """
         n = len(segments)
         logging.info(
-            f"v4.0 Phase 4: multi-action NEXT ({n} segments): {' || '.join(segments)}"
+            f"v4.0 Phase 4: multi-action NEXT ({n} segments): {' || '.join(writing.diagnostic_action(s) for s in segments)}"
         )
         decision_emitted = False
         for i, segment in enumerate(segments[:-1]):
@@ -24364,14 +24369,14 @@ Fill: {fill:.1f}%
                 continue
             if not route:
                 logging.info(
-                    f"Multi-action [{i+1}/{n}] dispatched: `{segment}` → rest/skip"
+                    f"Multi-action [{i+1}/{n}] dispatched: `{writing.diagnostic_action(segment)}` → rest/skip"
                 )
                 continue
             try:
                 self._execute_action(route, dict(state))
             except Exception as exc:
                 logging.warning(f"Multi-action [{i+1}/{n}] exec failed: {exc}")
-            logging.info(f"Multi-action [{i+1}/{n}] dispatched: `{segment}` → route={route}")
+            logging.info(f"Multi-action [{i+1}/{n}] dispatched: `{writing.diagnostic_action(segment)}` → route={route}")
         # Last segment: set pending, return route to caller for normal execution.
         last_segment = segments[-1]
         last_base = last_segment.split()[0].upper().rstrip(':') if last_segment.split() else ''
@@ -24388,7 +24393,7 @@ Fill: {fill:.1f}%
             logging.warning(f"Multi-action [{n}/{n}] route resolution failed: {exc}")
             return None
         logging.info(
-            f"Multi-action [{n}/{n}] return to caller: `{last_segment}` → route={route or 'rest'}"
+            f"Multi-action [{n}/{n}] return to caller: `{writing.diagnostic_action(last_segment)}` → route={route or 'rest'}"
         )
         return route
 
@@ -25093,7 +25098,7 @@ Fill: {fill:.1f}%
                     raw_label or "(latest active motif)",
                 )
                 return "release_attractor"
-            if base != "AFTERIMAGE_KEEP" and not chosen.startswith("SELF_STUDY GEOMETRY ") and _is_documentation_example_next_action(chosen):
+            if base != "AFTERIMAGE_KEEP" and not chosen.startswith(("SELF_STUDY GEOMETRY ", "SELF_STUDY OBSERVE ", "WRITE OBSERVE ")) and _is_documentation_example_next_action(chosen):
                 self._pending_notice_prompt = (
                     f"You chose `{chosen}`, which is a documentation example rather than a "
                     "meaningful source. Treat this as an affordance reminder, not a failed "
@@ -25108,7 +25113,7 @@ Fill: {fill:.1f}%
             if (
                 base not in {'CODEX', 'CODEX_NEW'}
                 and base != "AFTERIMAGE_KEEP"
-                and not chosen.startswith("SELF_STUDY GEOMETRY ")
+                and not chosen.startswith(("SELF_STUDY GEOMETRY ", "SELF_STUDY OBSERVE ", "WRITE OBSERVE "))
                 and base not in ACTION_PREFLIGHT_NEXT_ACTIONS
                 and not repairable_experiment_intent
                 and _has_unresolved_angle_placeholder(chosen)
@@ -31684,6 +31689,11 @@ Reason: {reason}
             if not operation:
                 raise RuntimeError("study preparation requires a durable action identity")
             prompt = StudyClient(BASE_DIR, WORKSPACE_DIR).prepare(action, request_id=f"prepare-{operation}")
+            if not prompt.output.get("generation_requested", True):
+                # The Rust preparation receipt is already durable in the owner store.
+                # Do not promote its private contents into ambient context or public logs.
+                self._current_action_outcome_summary = "Observation operation retained in its owner store; no model generation or public entry."
+                return
             if self._activity_checkpoint_exists():
                 host = self._activity_focus()
                 event = getattr(self, "_current_action_continuity_event", None) or {}
@@ -31755,7 +31765,7 @@ Reason: {reason}
                 self._record_current_action_artifact("private_writing_notice", path, "Private writing turn was not completed.", visibility="protected")
             else:
                 self._record_introspect_notice(action, f"{error}. Use NEXT: SELF_STUDY MAP to choose an exact source, or SELF_STUDY CONTINUE to retry the pending page.", state)
-            job_outcome.fail_action("source_study_unavailable", str(error))
+            job_outcome.fail_action("source_study_unavailable", "Private writing unavailable; details retained only in the private notice." if private_request else str(error))
 
     def _introspect(self, state: Dict[str, float]):
         """Read a targeted source/workspace text window and reflect on concrete snags."""
@@ -47744,8 +47754,8 @@ Goals: {json.dumps(goals, indent=2)}
                 if stored is not None and str(stored) != str(expected_action):
                     logging.info(
                         "🎯 Leaving persisted pending NEXT unchanged; stored %r != %r",
-                        stored,
-                        expected_action,
+                        writing.diagnostic_action(stored),
+                        writing.diagnostic_action(expected_action),
                     )
                     return
 
@@ -47786,7 +47796,7 @@ Goals: {json.dumps(goals, indent=2)}
             logging.info(
                 "🎯 Pending NEXT state %s: %s",
                 state["pending_next_action_status"],
-                action or expected_action or "(none)",
+                writing.diagnostic_action(action or expected_action or "(none)"),
             )
         except Exception as e:
             logging.warning(f"Failed to persist pending NEXT state: {e}")
@@ -47868,14 +47878,14 @@ Goals: {json.dumps(goals, indent=2)}
                     dict(choice_envelope) if isinstance(choice_envelope, dict) else None
                 )
                 if same_session:
-                    logging.info(f"🎯 Restored pending NEXT: {self._pending_next_action}")
+                    logging.info("Restored pending NEXT: %s", writing.diagnostic_action(self._pending_next_action))
                 else:
                     logging.info(
                         "🎯 Restored fresh pending NEXT despite session metadata drift "
                         "(stored %s, current %s): %s",
                         stored_session,
                         self.session_id,
-                        self._pending_next_action,
+                        writing.diagnostic_action(self._pending_next_action),
                     )
             elif "pending_next_action" in state:
                 self._pending_choice_envelope_v1 = None
@@ -54526,7 +54536,7 @@ Goals: {json.dumps(goals, indent=2)}
             self._pending_choice_envelope_v1 = None
         self._recent_next_actions.append(base_action)
         self._persist_pending_next_action(next_action, reason=reason)
-        logging.info(f"🎯 Being chose NEXT: {next_action}")
+        logging.info("Being chose NEXT: %s", writing.diagnostic_action(next_action))
         return next_action
 
     def _apply_footer_directives(self, response: Optional[str]) -> None:

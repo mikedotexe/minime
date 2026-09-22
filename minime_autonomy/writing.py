@@ -6,6 +6,7 @@ from pathlib import Path
 
 WRITING_GUIDANCE = (
     "Private writing: NEXT: WRITE START <topic>, WRITE CONTINUE, WRITE REVISE <direction>, "
+    'WRITE OBSERVE {"owner":"minime","draft":"dN","present":true,"operation":{"kind":"status"}} for optional private observations on an existing exact draft ID, '
     "WRITE BRANCH <direction>, WRITE RESUME dN, WRITE FINISH, WRITE PARK, or WRITE HELP. "
     "WRITE STOPPING_POINT <text> retains an optional stopping point as reference, never an executed command. "
     "To keep developing the active draft, choose NEXT: WRITE CONTINUE. "
@@ -20,6 +21,11 @@ def is_private_request(action: str) -> bool:
         r"(?i)^\s*(?:NEXT:\s*)?(?:(?:SELF_STUDY|INVESTIGATE):?\s+)?(?:REPLACE:?\s+)*WRITE(?:\s|:|$)",
         str(action or ""),
     ))
+
+
+def diagnostic_action(action: str) -> str:
+    """Privacy classification only; never parse or change executable commands."""
+    return "WRITE [private payload withheld]" if is_private_request(action) else action
 
 
 def selected_profile(workspace: Path) -> str:

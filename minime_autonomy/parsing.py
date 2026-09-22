@@ -653,7 +653,7 @@ def eligible_choice_line_indices(lines: list[str]) -> list[int]:
             fence = (marker[1][0], len(marker[1]))
             continue
         if stripped and not stripped.startswith((">", '"', "'", "`", "“", "‘")):
-            hidden, hidden_tag = (False, None) if stripped.startswith("NEXT: SELF_STUDY GEOMETRY ") else _choice_hidden_tag_after(line)
+            hidden, hidden_tag = (False, None) if stripped.startswith(("NEXT: SELF_STUDY GEOMETRY ", "NEXT: SELF_STUDY OBSERVE ", "NEXT: WRITE OBSERVE ")) else _choice_hidden_tag_after(line)
             if not hidden:
                 eligible.append(index)
     return eligible
@@ -691,7 +691,7 @@ def parse_next_action(text: str) -> tuple:
         stripped = lines[i].strip()
         if stripped.upper().startswith('NEXT:'):
             raw_next = lines[i].lstrip()[5:].lstrip()
-            if raw_next.upper().startswith("AFTERIMAGE_KEEP ") or raw_next.startswith("SELF_STUDY GEOMETRY "):
+            if raw_next.upper().startswith("AFTERIMAGE_KEEP ") or raw_next.startswith(("SELF_STUDY GEOMETRY ", "SELF_STUDY OBSERVE ", "WRITE OBSERVE ")):
                 # The fragment is data, including trailing space and RESIDUE-like text.
                 cleaned = '\n'.join(lines[:i] + lines[i+1:]).strip()
                 return _parse_result(raw_next, cleaned)
