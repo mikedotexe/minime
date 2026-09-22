@@ -108,6 +108,29 @@ def test_artifact_and_external_routes_keep_research_policy(study_agent):
     assert not offers
 
 
+def test_geometry_json_stays_opaque_through_real_routing_and_delivery(study_agent):
+    from minime_autonomy.parsing import parse_next_action
+    agent, store, client, offers = study_agent
+    client.prepare("SELF_STUDY QUESTION NEW Chosen geometry?")
+    # Parser data must survive intact even when it resembles markup or a second action.
+    data_action = "SELF_STUDY GEOMETRY " + json.dumps({"question":"q1", "request_id":"fixture", "expected_head":"empty",
+        "operation":{"kind":"revise", "target":"missing", "text":"<think>quoted text</think> <unfinished> AND SELF_STUDY MAP </s>"}})
+    assert parse_next_action("NEXT: " + data_action)[0] == data_action
+    assert agent._split_multi_action(data_action) == [data_action]
+    agent._pending_next_action = data_action
+    assert agent._decide_action(dict(STATE)) == "self_study"
+    assert agent._pending_action_continuity_context["raw_next"] == data_action
+    assert parse_next_action("```\nNEXT: " + data_action + "\n```")[0] is None
+    action = 'SELF_STUDY GEOMETRY {"question":"q1","operation":{"kind":"status"}}'
+    agent._pending_next_action = action
+    assert agent._decide_action(dict(STATE)) == "self_study"
+    agent._execute_action("self_study", dict(STATE), _from_llm_job=True)
+    assert offers[-1].output["input_kind"] == "geometry" and offers[-1].receipt
+    journals = list((aa.WORKSPACE_DIR / "journal").glob("self_study_*.txt"))
+    assert journals and "chosen geometry evidence" in journals[-1].read_text()
+    assert "frozen observation hashes" in journals[-1].read_text()
+
+
 @pytest.mark.parametrize("raw, expected", [
     ("RELATE", ["SELF_STUDY MAP"]),
     ("RELATE " + "".join(["cobalt", "_dispatch"]), ["SELF_STUDY RELATE " + "".join(["cobalt", "_dispatch"])]),
@@ -182,10 +205,12 @@ def test_delivering_private_job_does_not_consume_another_frozen_source_choice(st
     agent._pending_source_study_action = later
     run = Mock()
     monkeypatch.setattr(agent, "_run_shared_source_study", run)
+    agent._current_action_continuity_event = {"action_id": "synthetic-dispatch-207"}
     agent._self_study(dict(STATE))
     run.assert_called_once_with(STATE, first)
     assert agent._pending_source_study_action == later
     agent._current_action_continuity_context = {"source_study_action": later}
+    agent._current_action_continuity_event = {"action_id": "synthetic-dispatch-211"}
     agent._self_study(dict(STATE))
     assert run.call_args.args == (STATE, later)
     assert agent._pending_source_study_action is None
@@ -298,6 +323,7 @@ def test_busy_private_looking_malformed_choice_keeps_raw_text_only_in_private_no
 
 def test_map_journal_keeps_navigation_scope_and_does_not_claim_code(study_agent):
     agent, _, _, offers = study_agent
+    agent._current_action_continuity_event = {"action_id": "synthetic-dispatch-323"}
     agent._run_shared_source_study(dict(STATE), "SELF_STUDY MAP")
     prompt = offers[-1]
     assert prompt.output["input_kind"] == "map"

@@ -1,6 +1,7 @@
 """Verified private choices reach the real queue/dispatcher, using isolated state."""
 import json
 import os
+import threading
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -36,6 +37,119 @@ def deliver(prompt, text, *, finish_reason="stop"):
     }))
     prompt.post(Mock(return_value=response), "fake", {"messages": messages}, 1)
     prompt.accepted()
+
+
+def test_protected_runtime_recovers_choice_defers_mail_and_counts_jobs(writing_agent, monkeypatch):
+    agent, client = writing_agent
+    deliver(client.prepare("WRITE START synthetic private work"), "Exact prior prose.\nNEXT: REST")
+    host = agent._activity_focus()
+    host.command("ACTIVITY_FOCUS WRITE d1 turns 2")
+    inbox = client.workspace / "inbox"
+    inbox.mkdir(exist_ok=True)
+    mail = inbox / "human_letter_fixture.txt"
+    mail.write_text("An ordinary message from Mike.")
+    agent._pending_next_action = None
+    assert agent._read_inbox() == "" and mail.exists()
+    calls = []
+
+    def provider(prompt, **kwargs):
+        assert "Exact prior prose." in prompt
+        assert "ordinary message" not in prompt
+        calls.append(prompt)
+        result = "New exact private prose.\nNEXT: WRITE CONTINUE"
+        deliver(prompt, result)
+        return result
+
+    monkeypatch.setattr(agent, "_query_llm", provider)
+    for _ in range(2):
+        # Simulates loss of the ephemeral NEXT queue between durable deliveries.
+        agent._pending_next_action = None
+        assert agent._decide_action(dict(STATE)) == "self_study"
+        agent._execute_action("self_study", dict(STATE), _from_llm_job=True)
+    assert len(calls) == 2
+    final = host.status()
+    assert not final["protected"] and final["admitted"] == 2
+    assert not final["pending_job"] and mail.exists()
+    # Exhaustion never erases an authored pending action.
+    assert agent._pending_next_action == "WRITE CONTINUE"
+
+
+def test_protected_metadata_park_and_mailbox_do_not_generate(writing_agent, monkeypatch):
+    agent, client = writing_agent
+    client.prepare("WRITE START fixture")
+    provider = Mock(side_effect=AssertionError("metadata must not generate"))
+    monkeypatch.setattr(agent, "_query_llm", provider)
+    for action in ("ACTIVITY_FOCUS WRITE d1", "ACTIVITY_STATUS", "PARK_ACTIVITY"):
+        agent._pending_next_action = action
+        assert agent._decide_action(dict(STATE)) == "activity_focus"
+        agent._execute_action("activity_focus", dict(STATE))
+    status = agent._activity_focus().status()
+    assert status["admitted"] == 0 and not status["protected"]
+    for action in (status["return_command"], "ACTIVITY_FOCUS WRITE d1", "CHECK_MAILBOX"):
+        agent._pending_next_action = action
+        assert agent._decide_action(dict(STATE)) == "activity_focus"
+        agent._execute_action("activity_focus", dict(STATE))
+    assert not agent._activity_focus().status()["protected"]
+    provider.assert_not_called()
+
+
+def test_protected_boot_and_stop_preserve_budget(writing_agent, monkeypatch):
+    agent, client = writing_agent
+    client.prepare("WRITE START fixture")
+    host = agent._activity_focus()
+    host.command("ACTIVITY_FOCUS WRITE d1")
+    monkeypatch.setattr(agent, "_query_llm", Mock(side_effect=AssertionError("no competing boot reflection")))
+    agent._verify_sovereignty()
+    assert agent._pending_next_action == "WRITE RESUME d1"
+    assert host.status()["admitted"] == 0
+    agent.stop()
+    assert not agent.running and agent._shutdown_requested
+    assert host.status()["admitted"] == 0
+
+
+def test_actual_protected_worker_drains_after_stop_and_keeps_authored_next(writing_agent, monkeypatch):
+    agent, client = writing_agent
+    client.prepare("WRITE START synthetic owned work")
+    host = agent._activity_focus()
+    host.command("ACTIVITY_FOCUS WRITE d1 turns 2")
+    entered, release = threading.Event(), threading.Event()
+    exact = "Exact synthetic continuation.\nNEXT: WRITE CONTINUE"
+    calls = []
+
+    def provider(prompt, **kwargs):
+        calls.append(prompt)
+        entered.set()
+        assert release.wait(10)
+        deliver(prompt, exact)
+        return exact
+
+    monkeypatch.setattr(agent, "_query_llm", provider)
+    agent.running = True
+    agent._pending_next_action = None
+    assert agent._decide_action(dict(STATE)) == "self_study"
+    agent._execute_action("self_study", dict(STATE))
+    try:
+        assert entered.wait(10)
+        before = host.status()
+        assert before["admitted"] == 1 and before["pending_job"]
+        agent.stop()
+        assert host.status()["pending_job"] == before["pending_job"]
+    finally:
+        release.set()
+        agent.wait_for_llm_jobs()
+    assert len(calls) == 1
+    assert host.status()["admitted"] == 1 and host.status()["pending_job"] is None
+    assert agent._pending_next_action == "WRITE CONTINUE"
+    assert agent._llm_job_store().active_primary_job() is None
+    returned = client.prepare("WRITE CONTINUE").output["text"]
+    assert "Exact synthetic continuation." in returned
+    assert "WRITE CONTINUE" in returned
+    artifact = json.loads(Path(calls[0].receipt["artifact_path"]).read_text())
+    assert json.loads(artifact["response_json"])["message"]["content"] == exact
+    assert not list((client.workspace / "journal").glob("private_writing*"))
+    # A later explicit metadata read and replacement host do not refill budget.
+    assert agent._activity_focus().status()["remaining"] == 1
+    assert agent._lifecycle_phase == "exited"
 
 
 @pytest.mark.parametrize("choice", ["CONTINUE", "continue", "WRITE CONTINUE"])
@@ -89,7 +203,7 @@ def test_private_choice_reaches_queue_dispatch_and_same_draft(writing_agent, mon
     assert "chosen action: WRITE CONTINUE" in offers[1]
     assert "Draft d1, revision 1" in offers[1]
     assert "First passage." in offers[1]
-    state = json.loads((client.workspace / "diagnostics/source_first_v3/shared_reader/writing/drafts-v1.json").read_text())
+    state = json.loads((client.workspace / "diagnostics/source_first_v3/shared_reader/writing/drafts-v2.json").read_text())
     assert state["drafts"]["d1"]["parts"] == ["First passage.", "Second passage."]
     assert list(state["drafts"]) == ["d1"]
 
@@ -110,11 +224,12 @@ def test_failed_private_delivery_never_queues_or_advances(writing_agent, monkeyp
 
     monkeypatch.setattr(agent, "_query_llm", failed)
     agent._pending_next_action = "REST"
+    agent._current_action_continuity_event = {"action_id": "synthetic-dispatch-180"}
     agent._run_shared_source_study(dict(STATE), "WRITE START A pending thought")
     assert offers[0].receipt is None
     assert agent._pending_next_action == "REST"
     assert client.prepare("WRITE CONTINUE").output == offers[0].output
-    state = json.loads((client.workspace / "diagnostics/source_first_v3/shared_reader/writing/drafts-v1.json").read_text())
+    state = json.loads((client.workspace / "diagnostics/source_first_v3/shared_reader/writing/drafts-v2.json").read_text())
     assert state["drafts"]["d1"]["revision"] == 0
     assert state["drafts"]["d1"]["parts"] == []
 

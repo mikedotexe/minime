@@ -33,7 +33,8 @@ def test_receipt_gates_agency_hook_and_existing_motif_notice(
     monkeypatch.setattr(aa.generation_record, "link_artifact", Mock())
     agent._write_journal_entry(entry_type, content, {}, str(path), verified_source_study=verified)
     assert register.called == expected_notice
-    assert ("Agency-vernacular notice" in path.read_text()) == expected_notice
+    # Diagnostics stay separate from authored prose even without a study receipt.
+    assert "Agency-vernacular notice" not in path.read_text()
     with sqlite3.connect(aa.DB_PATH) as db:
         stored = db.execute("SELECT content FROM sovereignty_journal").fetchone()[0]
     assert stored == path.read_text()
@@ -54,13 +55,14 @@ def test_shared_study_passes_only_verified_public_receipt_to_journal(
 ):
     agent = object.__new__(aa.AutonomousAgent)
     prompt = SimpleNamespace(output={"input_kind": kind}, receipt=receipt)
-    monkeypatch.setattr(aa, "StudyClient", lambda *args: SimpleNamespace(prepare=lambda action: prompt))
+    monkeypatch.setattr(aa, "StudyClient", lambda *args: SimpleNamespace(prepare=lambda action, **kwargs: prompt))
     monkeypatch.setattr(agent, "_query_llm_with_next", lambda *args, **kwargs: ("Source mapping remains open.", None))
     monkeypatch.setattr(agent, "_state_for_live_surfaces", lambda state, **kwargs: state)
     monkeypatch.setattr(agent, "_record_current_action_artifact", Mock())
     monkeypatch.setattr(aa.job_outcome, "fail_action", Mock())
     write = Mock()
     monkeypatch.setattr(agent, "_write_journal_entry", write)
+    agent._current_action_continuity_event = {"action_id": "synthetic-dispatch-64"}
     agent._run_shared_source_study({}, "SELF_STUDY MAP")
     assert write.call_count == 1
     assert write.call_args.kwargs["verified_source_study"] is expected

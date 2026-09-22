@@ -100,6 +100,47 @@ def test_signal_during_moment_preserves_its_next_without_new_dispatch(tmp_path):
     agent._check_visual_responses.assert_not_called()
 
 
+def test_stop_after_choice_resolution_does_not_start_an_unaccepted_action(tmp_path):
+    agent = agent_stub(tmp_path)
+    agent._pending_next_action = "WRITE CONTINUE"
+    agent._pending_action_continuity_context = {"raw_next": "WRITE CONTINUE"}
+    agent._persist_pending_next_action = Mock()
+    agent._consume_action_continuity_context = Mock(side_effect=AssertionError("consumed during drain"))
+    agent._queue_llm_action_job = Mock(side_effect=AssertionError("queued during drain"))
+    agent.stop()
+    agent._execute_action("self_study", {})
+    assert agent._pending_next_action == "WRITE CONTINUE"
+    agent._consume_action_continuity_context.assert_not_called()
+
+
+def test_stop_between_decision_and_dispatch_restores_exact_choice(tmp_path):
+    agent = agent_stub(tmp_path)
+    choice = "WRITE REVISE synthetic exact direction"
+    agent._pending_next_action = choice
+    agent.check_interval = 60
+    for name in ("_restore_sovereignty_state", "_apply_pending_next_override_if_present",
+                 "_verify_sovereignty", "_refresh_session_context", "_check_source_reload_required",
+                 "_update_hard_recovery_clamp", "_reconcile_stable_core_health_status",
+                 "_self_regulate", "_auto_defer_stale_pending_astrid", "_check_visual_responses",
+                 "_execute_action", "_persist_pending_next_action"):
+        setattr(agent, name, Mock())
+    agent._get_latest_spectral_state = lambda: {"fill_ratio": 0.68}
+    agent._llm_job_store = lambda: SimpleNamespace(active_primary_job=lambda: None)
+    agent._can_act = lambda: True
+
+    def decide(_):
+        agent._pending_next_action = None
+        agent._pending_action_continuity_context = {"raw_next": choice}
+        agent.stop()
+        return "self_study"
+
+    agent._decide_action = decide
+    agent.start()
+    agent._execute_action.assert_not_called()
+    assert agent._pending_next_action == choice
+    agent._persist_pending_next_action.assert_called_once_with(choice, reason="shutdown_before_admission")
+
+
 def test_source_inventory_includes_imports_and_launcher_not_private_workspace(tmp_path):
     (tmp_path / "minime_autonomy").mkdir()
     (tmp_path / "workspace").mkdir()
