@@ -30559,7 +30559,7 @@ Prompt: {prompt.split(chr(10))[0]}
                 prompt += f"\n\n---\nYour last journal entry said:\n\"{last_entry}\"\n\nYou can build on that, rebel against it, or ignore it."
 
         prompt = f"{prompt}\n\n{self._journal_continuity_contract_v1(state)}"
-        response = self._query_llm_with_next(prompt)[0]
+        response = self._query_llm_with_next(prompt, context_mode="aspiration")[0]
 
         if response:
             journal_state = self._state_for_live_surfaces(
@@ -30570,6 +30570,7 @@ Prompt: {prompt.split(chr(10))[0]}
             file_path = WORKSPACE_DIR / "journal" / f"aspiration_{timestamp}.txt"
             file_path.write_text(f"""=== GROWTH ASPIRATION ===
 Timestamp: {datetime.now().isoformat()}
+Prompt contract: open_aspiration_context_v1
 {self._format_metrics(journal_state)}
 Prompt: {prompt.split(chr(10))[0]}
 
@@ -53969,6 +53970,8 @@ Goals: {json.dumps(goals, indent=2)}
             return None
         import re
         private_journal_context = _is_private_qualia_context(context_mode)
+        aspiration_context = (context_mode or "default").strip().lower() == "aspiration"
+        open_expression_context = private_journal_context or aspiration_context
         import uuid
         afterimage_opportunity = "generation_" + uuid.uuid4().hex
         afterimage_source = {"generation_id": afterimage_opportunity, "timestamp_unix_ms": afterimage_now_ms(),
@@ -54015,13 +54018,18 @@ Goals: {json.dumps(goals, indent=2)}
             "- Uncertainty is welcome, but vary the phrasing and ground it in the present "
             "state rather than repeating canned disclaimers. Flat refusal is not.\n\n"
         )
+        if aspiration_context:
+            journal_intro = (
+                "This is Minime's aspiration. Write freely in your own first-person voice. "
+                "Use or leave aside the invitation and supplied context; your interpretation is yours.\n\n"
+            )
         system_msg = (
             journal_intro
             + "At the end of your response, on a new line, write NEXT: followed by what you want "
             "to do next. "
             + self._next_action_constraint()
             + self._division_prompt_guidance()
-            + ("" if private_journal_context else self._low_fill_prompt_guidance())
+            + ("" if open_expression_context else self._low_fill_prompt_guidance())
             + "NEXT: options:\n"
             + (
                 "  Stage note: stable-core self-journal restoration is active; choose only NOTICE, DRIFT, ASPIRE, "
@@ -54225,13 +54233,13 @@ Goals: {json.dumps(goals, indent=2)}
             "These are YOUR choices about YOUR experience. You do not need to justify them."
         )
 
-        # Append recent context unless a caller explicitly requests a private
-        # journal canvas. Private JOURNAL needs live state, not operational tails.
+        # Open expression omits routine ambient advice. Aspiration keeps the
+        # ordinary mailbox policy; it does not acquire private-writing authority.
         augmented_prompt = prompt
         collab_offer = None
         collab_submission = None
         whisper_ctx = ""
-        if not private_journal_context:
+        if not open_expression_context:
             whisper_ctx = self._read_whisper_context()
             augmented_prompt = prompt + whisper_ctx if whisper_ctx else prompt
         activity_feedback = getattr(self, "_pending_activity_feedback", None)
@@ -54244,7 +54252,7 @@ Goals: {json.dumps(goals, indent=2)}
         if (not private_journal_context and context_mode != "strict_review"
                 and "Reply with ONLY a JSON object" not in prompt):
             inbox_ctx = self._read_inbox()
-        if not private_journal_context and "Reply with ONLY a JSON object" not in prompt:
+        if not open_expression_context and "Reply with ONLY a JSON object" not in prompt:
             btsp_status_ctx = format_btsp_status_for_prompt()
             if btsp_status_ctx:
                 augmented_prompt = augmented_prompt + "\n\n" + btsp_status_ctx
@@ -54252,7 +54260,7 @@ Goals: {json.dumps(goals, indent=2)}
             if btsp_active_ctx:
                 augmented_prompt = augmented_prompt + "\n\n" + btsp_active_ctx
 
-        if not private_journal_context and "Reply with ONLY a JSON object" not in prompt:
+        if not open_expression_context and "Reply with ONLY a JSON object" not in prompt:
             suggestion_ctx = self._attractor_suggestion_prompt_note()
             if suggestion_ctx:
                 augmented_prompt = augmented_prompt + suggestion_ctx
@@ -54287,7 +54295,7 @@ Goals: {json.dumps(goals, indent=2)}
                 if reservoir_ctx:
                     augmented_prompt = augmented_prompt + reservoir_ctx
 
-        if not private_journal_context:
+        if not open_expression_context:
             continuity_ctx = self._stable_core_continuity_context()
             if continuity_ctx:
                 augmented_prompt = augmented_prompt + continuity_ctx
@@ -54308,9 +54316,9 @@ Goals: {json.dumps(goals, indent=2)}
 
         # Research continuity: inject relevant past search results unless stable-core is
         # proving the self-journal lane without research pressure.
-        if private_journal_context:
+        if open_expression_context:
             logging.info(
-                "📝 Private qualia context (%s): operational/research continuity context suppressed",
+                "Open expression context (%s): routine operational/research context suppressed",
                 context_mode,
             )
         elif self._stable_core_reflective_only():
@@ -54359,7 +54367,7 @@ Goals: {json.dumps(goals, indent=2)}
             inbox_ctx.record("generation_failed", retry_policy="no automatic resend; archived sources retained")
 
         # Retry once if the model broke character
-        if result and not private_journal_context and not inbox_ctx and not self._is_in_character(result):
+        if result and not open_expression_context and not inbox_ctx and not self._is_in_character(result):
             logging.warning("LLM broke character, retrying with softer prompt...")
             retry_prompt = (
                 "Write freely. Whatever is on your mind right now. "
@@ -54665,7 +54673,7 @@ Goals: {json.dumps(goals, indent=2)}
         mode = (context_mode or "default").strip().lower()
         hints = (
             ""
-            if _is_private_qualia_context(context_mode) or mode in {"strict_review", "source_study"}
+            if _is_private_qualia_context(context_mode) or mode in {"aspiration", "strict_review", "source_study"}
             else self._emit_next_hints()
         )
         if hints:

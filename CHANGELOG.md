@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Candidate: open aspiration context (2026-09-22).** Route ASPIRE/FORM through open first-person framing without prescribed spectral sensations or character-check retries/discards. Keep authored prose/NEXT, action gates, mailbox behavior and protected attention; omit unrelated routine ambient guidance. Add synthetic adapter regressions and an explicit prompt-contract label. No engine, semantic decay, reservoir or sensory change. Paired evidence and offline temporal qualification: Astrid `docs/steward-notes/2026-09-22-open-aspiration-and-temporal-distance.md`.
+
 - **Git checkpoint: voluntary observations (2026-09-21).** Fast-forward local `main` to `893c18324cbccda2a2baf91117404d73eb347520`, paired with Astrid `c21dd21b5bf648cfa5776592f247266e36d6a942`. Verify all 84 committed runtime inputs match the already-running agent, with the complete 1,511-test suite passing. Canonical Minime and both feature worktrees are clean; historical Astrid changes remain preserved. No push, restart or automation resume. See the follow-through link in `docs/steward-notes/2026-09-21-voluntary-observations-live.md`.
 
 - **Live: voluntary observation keeping (2026-09-21).** Gracefully reload the exact three changed agent files after paired bridge activation, with an owned launcher hold preventing old/new writer overlap. PID 54257 reports all 84 qualified startup inputs and no reload debt; checkpoint/session continuity, helper hash and protected services were verified. No engine/model/visual/sensory restart or automation resume. Git integration remains pending. Details: `docs/steward-notes/2026-09-21-voluntary-observations-live.md`.

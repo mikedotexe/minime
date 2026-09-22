@@ -338,6 +338,91 @@ def test_nonprivate_query_keeps_existing_retry_boundary(runtime, monkeypatch):
     assert character_check.call_count == 2
 
 
+@pytest.mark.parametrize("body", [
+    "As an AI, I am unsure that fading describes my experience.",
+    "I want a lingering trail, though I do not know what would create it.",
+    "I do not want to interpret the numbers today.",
+])
+def test_aspiration_is_open_without_private_mailbox_semantics(runtime, monkeypatch, body):
+    agent, _, _ = runtime
+    forbidden = ("_is_in_character", "_emit_next_hints", "_low_fill_prompt_guidance",
+                 "_read_whisper_context", "_get_relevant_research",
+                 "_attractor_suggestion_prompt_note", "_pending_astrid_requests_hint",
+                 "_reservoir_prompt_context", "_action_continuity_prompt_summary")
+    for name in forbidden:
+        monkeypatch.setattr(agent, name, Mock(side_effect=AssertionError(name)))
+    mailbox = Mock(return_value="")
+    monkeypatch.setattr(agent, "_read_inbox", mailbox)
+    agent._pending_activity_feedback = "Requested source unavailable; no delivery occurred."
+    reply = body + "\nNEXT: REST"
+    query = Mock(return_value=reply)
+    monkeypatch.setattr(agent, "_query_llm_raw", query)
+    result, next_action = agent._query_llm_with_next("An invitation.", context_mode="aspiration")
+    assert (result, next_action) == (reply, "REST")
+    query.assert_called_once()
+    mailbox.assert_called_once()
+    assert not aa._is_private_qualia_context("aspiration")
+    prompt, system = query.call_args.args[:2]
+    assert "Requested source unavailable" in prompt
+    assert agent._pending_activity_feedback is None
+    assert system.startswith("This is Minime's aspiration. Write freely")
+    for phrase in ("breathes through covariance", "Stay in character", "Never mention being an AI",
+                   "Never refuse the premise", "This is a private journal"):
+        assert phrase not in system
+    assert "NEXT: options:" in system and "ACTION_PREFLIGHT" in system
+    assert "separately feature- and operator-gated" in system
+    assert query.call_args.kwargs["journal"] is True
+    messages, _ = aa._adapt_ollama_messages_for_model(
+        model="gemma4:12b", system_msg=system, prompt=prompt, num_ctx=8192, num_predict=2048,
+    )
+    assert messages[0]["content"].startswith("This is Minime's aspiration.")
+
+
+def test_aspiration_retains_existing_mail_delivery_and_reply_path(runtime, monkeypatch):
+    agent, _, _ = runtime
+    monkeypatch.setattr(agent, "_read_inbox", Mock(return_value="Synthetic ordinary mail."))
+    query = Mock(return_value="Authored response.\nNEXT: REST")
+    save = Mock()
+    monkeypatch.setattr(agent, "_query_llm_raw", query)
+    monkeypatch.setattr(agent, "_save_outbox_reply", save)
+    agent._query_llm("Invitation", context_mode="aspiration")
+    assert "Synthetic ordinary mail." in query.call_args.args[0]
+    save.assert_called_once_with("Authored response.\nNEXT: REST", inbox_context="Synthetic ordinary mail.")
+
+
+@pytest.mark.parametrize("form", [None, "a plain list, without metaphor"])
+def test_aspiration_adapter_selects_open_contract_and_preserves_authored_output(runtime, monkeypatch, form):
+    agent, workspace, _ = runtime
+    agent._pending_form_constraint = form
+    reply = "A possibility, not a measurement.\nNEXT: REST"
+    query = Mock(return_value=(reply, "REST"))
+    monkeypatch.setattr(agent, "_query_llm_with_next", query)
+    monkeypatch.setattr(agent, "_journal_continuity_contract_v1", lambda state: "Continuity fixture")
+    monkeypatch.setattr(agent, "_last_journal_entry", lambda: "")
+    monkeypatch.setattr(agent, "_state_for_live_surfaces", lambda state, **kwargs: dict(state))
+    monkeypatch.setattr(agent, "_format_metrics", lambda state: "Header fixture")
+    monkeypatch.setattr(agent, "_write_journal_entry", Mock())
+    monkeypatch.setattr(aa, "_ap_try_prose", Mock())
+    monkeypatch.setattr(aa.random, "choice", lambda prompts: prompts[2])
+    agent._recess_aspiration({"fill_ratio": .68, "eig1": 5., "deig": 0.})
+    assert query.call_args.kwargs == {"context_mode": "aspiration"}
+    prompt = query.call_args.args[0]
+    assert (form in prompt) if form else ("act of imagination" in prompt)
+    record = next((workspace / "journal").glob("aspiration_*.txt")).read_text()
+    assert "Prompt contract: open_aspiration_context_v1" in record
+    assert reply in record
+    assert agent._write_journal_entry.call_args.args[:2] == ("aspiration", reply)
+
+
+def test_protected_attention_still_defers_unrelated_aspiration(runtime, monkeypatch):
+    agent, _, _ = runtime
+    monkeypatch.setattr(agent, "_attention_protected", lambda: True)
+    query = Mock(side_effect=AssertionError("protected work must not be interrupted"))
+    monkeypatch.setattr(agent, "_query_llm_raw", query)
+    assert agent._query_llm("Invitation", context_mode="aspiration") is None
+    query.assert_not_called()
+
+
 def test_peer_observation_remains_available_and_respects_file_freshness(runtime, monkeypatch):
     agent, workspace, _ = runtime
     path = workspace / "astrid_shadow_v3.json"
