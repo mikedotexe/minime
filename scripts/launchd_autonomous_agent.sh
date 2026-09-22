@@ -9,6 +9,14 @@ FOCUSED_MODE="${FOCUSED_MODE:-false}"
 
 cd "$PROJECT_DIR"
 
+# Paired reader upgrades hold replacement admission while the old writer drains.
+# Any existing entry, including a dangling symlink, fails closed. Only the
+# coordinating restart wrapper removes its own durable hold.
+HOLD_PATH="$PROJECT_DIR/workspace/runtime/agent-launch-hold.json"
+while [ -e "$HOLD_PATH" ] || [ -L "$HOLD_PATH" ]; do
+    sleep 1
+done
+
 launchctl_env() {
     local key="$1"
     local value

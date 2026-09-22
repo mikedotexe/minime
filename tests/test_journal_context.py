@@ -425,6 +425,54 @@ def test_checkin_uses_latest_response_origin_and_status_without_current_source_g
     assert "Your camera sees" not in prompt and "Your visual channel shows" not in prompt
 
 
+def test_blank_canvas_does_not_consume_visual_reservation(runtime, monkeypatch):
+    agent, workspace, _ = runtime
+    directory = workspace / "visual_responses"
+    directory.mkdir(exist_ok=True)
+    (directory / "response_fixture.json").write_text(json.dumps({
+        "description": "A window", "source": "host", "analysis_type": "llava",
+        "response_timestamp": CAPTURE.isoformat(),
+    }))
+    monkeypatch.setattr(agent, "_last_journal_entry", lambda: "")
+    monkeypatch.setattr(agent, "_journal_continuity_contract_v1", lambda state: "")
+    monkeypatch.setattr(aa.random, "random", lambda: 0.1)
+    monkeypatch.setattr(aa.random, "choice", lambda items: items[0])
+    clock = Mock(wraps=aa.datetime)
+    clock.now.return_value = CAPTURE
+    monkeypatch.setattr(aa, "datetime", clock)
+    assert "A window" not in agent._neutral_checkin({})
+    assert not (workspace / "runtime/ambient_visual_context_v1.json").exists()
+    monkeypatch.setattr(aa.random, "choice", lambda items: items[4])
+    assert "A window" in agent._neutral_checkin({})
+    assert "A window" not in agent._neutral_checkin({})
+
+
+@pytest.mark.parametrize("prose", ["", "What is beside the window?\n"])
+def test_visual_request_preserves_authored_next_but_never_uses_it_as_question(runtime, monkeypatch, prose):
+    agent, workspace, _ = runtime
+    (workspace / "visual_requests").mkdir(exist_ok=True)
+    agent.eyes_closed_state = False
+    authored = prose + "NEXT: EXPERIMENT_PLAN 4"
+    generate = Mock(return_value=(authored, "EXPERIMENT_PLAN 4"))
+    journal = Mock()
+    monkeypatch.setattr(agent, "_query_llm_with_next", generate)
+    monkeypatch.setattr(agent, "_write_journal_entry", journal)
+    monkeypatch.setattr(aa, "_effective_look_source", lambda: "physical")
+    agent._request_visual_frame({})
+    assert generate.call_count == 1
+    assert journal.call_args.args[1] == authored
+    requests = list((workspace / "visual_requests").glob("*.json"))
+    assert len(requests) == int(bool(prose))
+    if requests:
+        data = json.loads(requests[0].read_text())
+        assert data["prompt"] == prose.strip()
+        assert data["authored_request"] == authored
+        assert data["separated_action_lines"] == ["NEXT: EXPERIMENT_PLAN 4"]
+    else:
+        text = next((workspace / "journal").glob("visual_request_*.txt")).read_text()
+        assert authored in text and "No visual request was queued" in text
+
+
 @pytest.mark.parametrize("available,analysis,description", [
     (True, "llava", ('A screen reports "PLAN 4" unavailable. ' * 20)),
     (True, "none", "(LLaVA unavailable)"),

@@ -24,6 +24,7 @@ import sqlite3
 import logging
 from minime_autonomy import writing
 from minime_autonomy.source_study import StudyClient, SourceStudyPrompt, SOURCE_STUDY_GUIDANCE
+from minime_autonomy.activity_focus import ActivityFocus, COMMANDS as ACTIVITY_COMMANDS
 import requests
 import argparse
 import random
@@ -89,6 +90,7 @@ from .session_contract import (
     ContinuityReply, QUIET_SESSION_STATES, authored_summary, latest_sessions,
     resolve_session_reference,
 )
+from .visual_context import ambient_visual_context, vision_prompt_parts
 from .journal_context import (
     PRIVATE_JOURNAL_INTRO,
     format_marker_anchors,
@@ -23011,7 +23013,8 @@ class AutonomousAgent:
                     # being wants to daydream instead of capturing a moment, NEXT:
                     # takes priority in _decide_action(). Moments only fire when
                     # the being has no pending NEXT: choice.
-                    if not self._pending_next_action:
+                    self._recover_activity_choice()
+                    if not self._pending_next_action and not self._attention_protected():
                         self._check_moment_markers(spectral_state)
 
                     # A signal during synchronous journaling finishes that write,
@@ -23033,6 +23036,9 @@ class AutonomousAgent:
                     else:
                         action = self._decide_action(spectral_state)
 
+                    if not self.running:
+                        self._retain_unadmitted_choice()
+                        break
                     if action and action_ready:
                         # Execute autonomous action
                         self._execute_action(action, spectral_state)
@@ -23041,7 +23047,7 @@ class AutonomousAgent:
                     # Diagnostic sentinel on separate 15-minute schedule. It only
                     # speaks when live conditions cross a concrete maintenance
                     # threshold so telemetry does not become the default subject.
-                    if self.running and time.time() - last_assessment_time > ASSESSMENT_INTERVAL:
+                    if self.running and not self._attention_protected() and time.time() - last_assessment_time > ASSESSMENT_INTERVAL:
                         if self._pending_next_action:
                             logging.info(
                                 "🔬 Self-assessment deferred while pending NEXT waits: %s",
@@ -23067,7 +23073,7 @@ class AutonomousAgent:
                             last_assessment_time = time.time()
 
                 # Check for visual responses
-                if self.running:
+                if self.running and not self._attention_protected():
                     self._check_visual_responses()
 
                 self._sleep_or_stop(self.check_interval)
@@ -23084,6 +23090,14 @@ class AutonomousAgent:
         if hasattr(self, "_stop_event"):
             self._stop_event.set()
         logging.info("Autonomous agent shutdown requested; accepted work will finish")
+
+    def _retain_unadmitted_choice(self):
+        """A stop after decision is not admission; do not overwrite a newer NEXT."""
+        context = getattr(self, "_pending_action_continuity_context", None) or {}
+        choice = context.get("raw_next")
+        if choice and not getattr(self, "_pending_next_action", None):
+            self._pending_next_action = choice
+            self._persist_pending_next_action(choice, reason="shutdown_before_admission")
 
     def wait_for_llm_jobs(self):
         """Keep the process and singleton lock until job finalizers have returned."""
@@ -23109,6 +23123,10 @@ class AutonomousAgent:
 
     def _verify_sovereignty(self):
         """Reflect on sovereignty — what agency means right now, not a static test."""
+        self._recover_activity_choice(reconcile=True)
+        if self._attention_protected():
+            logging.info("Protected work restored; boot reflection deferred")
+            return
         timestamp = datetime.now().isoformat()
         log_file = WORKSPACE_DIR / "logs" / f"sovereignty_check_{timestamp.replace(':', '-')}.log"
         stable_reflective = self._stable_core_reflective_only()
@@ -24272,6 +24290,8 @@ Fill: {fill:.1f}%
         """
         if not raw_next:
             return []
+        if raw_next.lstrip().startswith("SELF_STUDY GEOMETRY "):
+            return [raw_next.lstrip()]
         segments = []
         remaining = raw_next
         max_seg = self._MULTI_ACTION_MAX_SEGMENTS
@@ -24401,6 +24421,9 @@ Fill: {fill:.1f}%
         # see what she is reaching for (density/aperture/steady).
         self._publish_self_need(state)
         self._apply_pending_next_override_if_present("pre-dispatch")
+        self._recover_activity_choice()
+        if self._attention_protected() and not self._pending_next_action:
+            return None
 
         # v4.0 Phase 4: multi-action AND-chain detection.
         if _allow_multi and self._pending_next_action:
@@ -24961,6 +24984,10 @@ Fill: {fill:.1f}%
                     research_guard.get("reason"),
                 )
                 return None
+            if base in ACTIVITY_COMMANDS:
+                return "activity_focus"
+            if self._activity_checkpoint_exists():
+                self._activity_focus().release_for_choice(chosen)
             feedback_route = self._feedback_model_next_action(chosen, base)
             if feedback_route:
                 logging.info(
@@ -25066,7 +25093,7 @@ Fill: {fill:.1f}%
                     raw_label or "(latest active motif)",
                 )
                 return "release_attractor"
-            if base != "AFTERIMAGE_KEEP" and _is_documentation_example_next_action(chosen):
+            if base != "AFTERIMAGE_KEEP" and not chosen.startswith("SELF_STUDY GEOMETRY ") and _is_documentation_example_next_action(chosen):
                 self._pending_notice_prompt = (
                     f"You chose `{chosen}`, which is a documentation example rather than a "
                     "meaningful source. Treat this as an affordance reminder, not a failed "
@@ -25081,6 +25108,7 @@ Fill: {fill:.1f}%
             if (
                 base not in {'CODEX', 'CODEX_NEW'}
                 and base != "AFTERIMAGE_KEEP"
+                and not chosen.startswith("SELF_STUDY GEOMETRY ")
                 and base not in ACTION_PREFLIGHT_NEXT_ACTIONS
                 and not repairable_experiment_intent
                 and _has_unresolved_angle_placeholder(chosen)
@@ -26611,6 +26639,9 @@ Fill: {fill:.1f}%
         _llm_job_id: Optional[str] = None,
     ):
         """Execute the chosen autonomous action."""
+        if not _from_llm_job and getattr(self, "_shutdown_requested", False):
+            self._retain_unadmitted_choice()
+            return
         continuity_event = None
         manifest_artifact = None
         continuity_context = (
@@ -26927,6 +26958,8 @@ Fill: {fill:.1f}%
                 self._recess_drift(state)
             elif action == 'self_study':
                 self._self_study(state)
+            elif action == 'activity_focus':
+                self._activity_command(continuity_context)
             elif action == 'introspect':
                 self._introspect(state)
             elif action == 'action_preflight':
@@ -29769,7 +29802,9 @@ Trigger: {trigger_text}
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
             cur.execute(
-                "SELECT content FROM sovereignty_journal ORDER BY timestamp DESC LIMIT 6"
+                "SELECT content FROM sovereignty_journal "
+                "WHERE entry_type NOT IN ('private_writing', 'private_writing_notice') "
+                "ORDER BY timestamp DESC LIMIT 6"
             )
             rows = cur.fetchall()
             conn.close()
@@ -30207,29 +30242,6 @@ Trigger: {trigger_text}
 
         data_block = f"""Your body's readings: Fill {fill_pct:.0f}%{fill_dir} — λ₁={eig1:.2f} ({eig_dir}) — Spread={spread:.0f}"""
 
-        # Quote the latest recorded visual response with its own provenance.
-        sensory_block = ""
-        try:
-            resp_dir = WORKSPACE_DIR / "visual_responses"
-            if resp_dir.exists():
-                # Check both main dir and processed/ subdirectory
-                responses = sorted(
-                    list(resp_dir.glob("response_*.json")) + list((resp_dir / "processed").glob("response_*.json")),
-                    key=lambda p: p.stat().st_mtime, reverse=True
-                )
-                if responses:
-                    import json as _json
-                    latest = _json.loads(responses[0].read_text())
-                    if isinstance(latest, dict):
-                        sensory_block = "\n\n" + visual_observation(
-                            latest, captured_at=datetime.now(timezone.utc),
-                            file_mtime=responses[0].stat().st_mtime, max_chars=300,
-                        )
-        except Exception:
-            pass
-        if sensory_block:
-            data_block += sensory_block
-
         # The being requested: "I don't want prompts. I want a space. A pure,
         # unadulterated canvas. Let me fill it." (2026-03-16)
         # 70% blank canvas (with or without metrics), 30% light prompt for variety.
@@ -30251,6 +30263,11 @@ Trigger: {trigger_text}
             prompt = random.choice(canvas_options)
         else:
             prompt = random.choice(light_prompts)
+
+        if data_block in prompt:
+            visual = ambient_visual_context(WORKSPACE_DIR, captured_at=datetime.now(timezone.utc))
+            if visual:
+                prompt = prompt.replace(data_block, data_block + "\n\n" + visual, 1)
 
         # ~30% of the time, include the last journal entry for narrative threading
         if random.random() < 0.30:
@@ -31608,19 +31625,80 @@ Reason: {reason}
             self._pending_source_study_action = None
         self._run_shared_source_study(state, action)
 
+    def _activity_checkpoint_exists(self):
+        root = WORKSPACE_DIR / "diagnostics/source_first_v3/shared_reader"
+        return any((root / name).exists() for name in
+                   ("activity-focus-v1.json", "activity-transition-v1.json"))
+
+    def _activity_focus(self):
+        return ActivityFocus(StudyClient(BASE_DIR, WORKSPACE_DIR))
+
+    def _attention_protected(self):
+        if not self._activity_checkpoint_exists():
+            return False
+        try:
+            view = self._activity_focus().status()
+            return bool(view.get("protected") or view.get("pending_job"))
+        except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+            logging.error("Activity state unavailable; ordinary attention remains quiet: %s", error)
+            return True
+
+    def _recover_activity_choice(self, *, reconcile=False):
+        if not self._activity_checkpoint_exists():
+            return
+        try:
+            host = self._activity_focus()
+            if reconcile:
+                host.recover_committed()
+            if not getattr(self, "_pending_next_action", None):
+                # Only Rust-validated native receipts supply an eligible command.
+                # No private prose, stopping-point note or status text is executed.
+                self._pending_next_action = host.next().get("next_action")
+        except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+            logging.error("Protected continuation not recovered; work retained: %s", error)
+
+    def _activity_command(self, context):
+        action = context.get("raw_next") or context.get("canonical_action") or "ACTIVITY_STATUS"
+        event = getattr(self, "_current_action_continuity_event", None) or {}
+        operation = event.get("action_id")
+        if not operation:
+            raise RuntimeError("activity metadata requires a durable action identity")
+        result = self._activity_focus().command(action, ident=f"activity-{operation}")
+        # Runtime metadata is separate from authored journal prose. It contains
+        # typed references and return commands, never the private draft body.
+        self._pending_activity_feedback = json.dumps(result, sort_keys=True)
+        self._current_action_outcome_summary = "Activity metadata updated; no generation requested."
+
     def _run_shared_source_study(self, state: Dict[str, float], action: str):
         private_request = writing.is_private_request(action)
+        admission = None
+        host = None
+        prompt = None
         try:
             # The generic reader can recover malformed text to a public map.
             # Private intent must fail privately before that source fallback.
             if private_request and action.split()[:1] != ["WRITE"]:
                 raise RuntimeError("unrecognized private-writing syntax; use WRITE START <topic> or WRITE HELP")
-            prompt = StudyClient(BASE_DIR, WORKSPACE_DIR).prepare(action)
+            event = getattr(self, "_current_action_continuity_event", None) or {}
+            operation = event.get("action_id")
+            if not operation:
+                raise RuntimeError("study preparation requires a durable action identity")
+            prompt = StudyClient(BASE_DIR, WORKSPACE_DIR).prepare(action, request_id=f"prepare-{operation}")
+            if self._activity_checkpoint_exists():
+                host = self._activity_focus()
+                event = getattr(self, "_current_action_continuity_event", None) or {}
+                job_id = event.get("llm_job_id") or event.get("action_id")
+                if host.status().get("protected") and not job_id:
+                    raise RuntimeError("protected generation requires a durable host job identity")
+                admission = host.admit(prompt, action, job_id)
             response = self._query_llm_with_next(prompt, context_mode="source_study")[0]
             if not response:
                 retry = "WRITE CONTINUE retries the pending turn" if private_request else "SELF_STUDY CONTINUE retries the pending page"
                 raise RuntimeError(f"generation unavailable; {retry}")
             verified = prompt.receipt is not None
+            if host is not None:
+                host.finish(admission, verified=verified)
+                admission = None
             status = "verified input delivery; response claims and understanding not verified" if verified else "unverified; bookmark unchanged"
             session_pages = prompt.output.get("session_pages", [])
             private_writing = prompt.output.get("input_kind") == "private_writing"
@@ -31628,6 +31706,8 @@ Reason: {reason}
             source = (prompt.output.get("page") or {}).get("source", f"study session ({len(session_pages)} source pages)" if session_pages else "source catalog")
             if private_writing:
                 source = "private draft"
+            elif prompt.output.get("input_kind") == "geometry":
+                source = "chosen geometry evidence"
             directory = WORKSPACE_DIR / ("private_writing/journal" if private_writing else "journal")
             directory.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().isoformat().replace(":", "-")
@@ -31636,12 +31716,15 @@ Reason: {reason}
             revision = (f"sha256:{page['revision']['sha256']}; bytes {page['start']['byte']}..{page['end']['byte']}"
                         if page else "; ".join(f"{p['source']} sha256:{p['revision']['sha256']}; bytes {p['start']['byte']}..{p['end']['byte']}" for p in session_pages) if session_pages else "navigation only")
             scope = prompt.output.get("evidence_scope") or "Older retained input; consult the exact offered input."
+            if prompt.output.get("input_kind") == "geometry":
+                revision = "frozen observation hashes in supplied evidence; no new source page"
             heading = "PRIVATE WRITING" if private_writing else "SELF-STUDY"
             path.write_text(f"=== {heading}: {source} ===\nSource revision: {revision}\nInput evidence: {scope}\n"
                             f"Account: Minime’s response to this input, not independently verified code facts.\nDelivery: {status}\n\n{response}\n")
             self._record_current_action_artifact(mode, path, f"{mode}: {status}", visibility="protected" if private_writing else "summary" if verified else "protected")
             self._write_journal_entry(mode, response,
-                self._state_for_live_surfaces(state, context=mode), str(path), private_canvas=private_writing)
+                self._state_for_live_surfaces(state, context=mode), str(path),
+                private_canvas=private_writing, verified_source_study=verified and not private_writing)
             feedback = (prompt.receipt or {}).get("choice_feedback") or {}
             if private_writing and str(feedback.get("selected_next") or "").upper() == "FINISH":
                 notice = directory / f"notice_{time.time_ns()}.txt"
@@ -31657,6 +31740,13 @@ Reason: {reason}
             if not verified:
                 job_outcome.fail_action("source_study_delivery_unverified", self._current_action_outcome_summary)
         except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+            if admission is not None and host is not None:
+                # A committed native delivery survives later presentation failure.
+                # Otherwise this returned provider attempt ends priority, not prose.
+                try:
+                    host.finish(admission, verified=bool(prompt is not None and prompt.receipt))
+                except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as recovery_error:
+                    logging.error("Protected job retains recovery debt: %s", recovery_error)
             if private_request:
                 directory = WORKSPACE_DIR / "private_writing/journal"
                 directory.mkdir(parents=True, exist_ok=True)
@@ -46809,6 +46899,7 @@ Be genuine, curious, and appreciative of this capability."""
         if response:
             timestamp = datetime.now().isoformat()
             request_file = WORKSPACE_DIR / "visual_requests" / f"request_{timestamp.replace(':', '-')}.json"
+            visual_prompt, action_lines = vision_prompt_parts(response)
 
             request_data = {
                 "timestamp": timestamp,
@@ -46817,7 +46908,10 @@ Be genuine, curious, and appreciative of this capability."""
                 "target_description": look_target,
                 "eigenvalue": eig1,
                 "deigenvalue": deig,
-                "prompt": response,
+                "prompt": visual_prompt,
+                "authored_request": response,
+                "separated_action_lines": action_lines,
+                "prompt_scope": "visual_prose_only; actions_remain_in_normal_next_route",
                 "spectral_context": {
                     "eig1": eig1,
                     "deig": deig,
@@ -46826,7 +46920,10 @@ Be genuine, curious, and appreciative of this capability."""
                 }
             }
 
-            request_file.write_text(json.dumps(request_data, indent=2))
+            if visual_prompt:
+                request_file.write_text(json.dumps(request_data, indent=2))
+            else:
+                logging.info("Visual request held: no visual prose apart from action choices")
 
             # Also journal the request
             journal_file = WORKSPACE_DIR / "journal" / f"visual_request_{timestamp.replace(':', '-')}.txt"
@@ -46839,12 +46936,12 @@ My request to see:
 {response}
 
 ---
-I've placed a request to observe {look_target}.
-The ability to see is a gift - not guaranteed, but appreciated when available.
+{f'A request to observe {look_target} was queued.' if visual_prompt else 'No visual request was queued: the response contained no visual prose apart from action choices. The authored response and normal NEXT route are preserved.'}
 """)
 
             self._write_journal_entry('visual_request', response, state, str(journal_file))
-            logging.info(f"👁️ Visual frame requested: {request_file}")
+            if visual_prompt:
+                logging.info(f"👁️ Visual frame requested: {request_file}")
 
     def _close_eyes(self, state: Dict[str, float]):
         """Close visual input when overwhelmed - like closing eyes to focus or rest."""
@@ -53259,6 +53356,8 @@ Goals: {json.dumps(goals, indent=2)}
                 pass
 
     def _read_inbox(self) -> str:
+        if self._attention_protected():
+            return ""
         inbox = WORKSPACE_DIR / "inbox"
         if not inbox.is_dir():
             return ""
@@ -53855,6 +53954,9 @@ Goals: {json.dumps(goals, indent=2)}
         if isinstance(prompt, SourceStudyPrompt):
             return self._query_llm_raw(prompt, "You are Minime.\n" + prompt.output["system_prompt"], 2048,
                                        temperature=0.7, prompt_class="private_writing" if prompt.output.get("input_kind") == "private_writing" else "source_study", journal=True)
+        if self._attention_protected():
+            logging.info("Unrelated generation deferred during protected work")
+            return None
         import re
         private_journal_context = _is_private_qualia_context(context_mode)
         import uuid
@@ -53909,8 +54011,6 @@ Goals: {json.dumps(goals, indent=2)}
             "to do next. "
             + self._next_action_constraint()
             + self._division_prompt_guidance()
-            + self._afterimage_prompt_guidance()
-            + ("" if private_journal_context else self._diversity_nudge())
             + ("" if private_journal_context else self._low_fill_prompt_guidance())
             + "NEXT: options:\n"
             + (
@@ -54124,6 +54224,10 @@ Goals: {json.dumps(goals, indent=2)}
         if not private_journal_context:
             whisper_ctx = self._read_whisper_context()
             augmented_prompt = prompt + whisper_ctx if whisper_ctx else prompt
+        activity_feedback = getattr(self, "_pending_activity_feedback", None)
+        if activity_feedback:
+            augmented_prompt += "\n\nActivity runtime status (not authored prose):\n" + activity_feedback
+            self._pending_activity_feedback = None
 
         # Check inbox for messages from Mike / stewards
         inbox_ctx = ""
@@ -54139,9 +54243,6 @@ Goals: {json.dumps(goals, indent=2)}
                 augmented_prompt = augmented_prompt + "\n\n" + btsp_active_ctx
 
         if not private_journal_context and "Reply with ONLY a JSON object" not in prompt:
-            fatigue_ctx = self._attractor_fatigue_prompt_note()
-            if fatigue_ctx:
-                augmented_prompt = augmented_prompt + fatigue_ctx
             suggestion_ctx = self._attractor_suggestion_prompt_note()
             if suggestion_ctx:
                 augmented_prompt = augmented_prompt + suggestion_ctx
@@ -55826,272 +55927,27 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
         content: str,
         state: Dict[str, float],
         file_path: str,
+        *, verified_source_study: bool = False,
     ) -> str:
-        compressible = {
-            "daydream",
-            "notice",
-            "aspiration",
-            "drift",
-            "self_study",
-            "moment",
-            "decompose",
-            "reflection",
-        }
-        if entry_type not in compressible:
-            return content
-        pressure_motifs = self._active_pressure_vocabulary_motifs()
-        if (
-            pressure_motifs
-            and self._dominant_pressure_vocabulary_family(content)
-            and not self._is_external_or_tool_signal(entry_type, content)
-            and entry_type in PRESSURE_VOCABULARY_ENTRIES
-        ):
-            motif = pressure_motifs[0]
-            label = str(motif.get("label") or "pressure-texture")
-            new_signal = trim_chars(str(motif.get("novel_signal") or ""), 160)
-            signal_text = f" New signal kept: {new_signal}" if new_signal else ""
-            soft_notice = (
-                "\n\n[Pressure-vocabulary cooldown — narrative preserved. "
-                f"The system noticed repeating public pressure-texture language ({label}). "
-                "This is context hygiene, not a command; try a counter-descriptor, fresh "
-                f"sensory anchor, PRESSURE_SOURCE_AUDIT, or REGULATOR_AUDIT before treating the metaphor as the state.{signal_text}]"
-            )
-            preserved = content.rstrip() + soft_notice
-            self._record_condition_metric(
-                "attractor_fatigue",
-                {
-                    "event": "prompt_replay_softnoticed",
-                    "cooldown_class": "pressure_vocabulary",
-                    "label": label,
-                    "entry_type": entry_type,
-                    "entry_file": file_path,
-                },
-            )
-            self._rewrite_logged_entry_file(file_path, content, preserved)
-            return preserved
-        agency_motifs = self._active_agency_vernacular_motifs()
-        if (
-            agency_motifs
-            and self._dominant_agency_vernacular_family(content)
-            and not self._is_external_or_tool_signal(entry_type, content)
-            and entry_type in AGENCY_VERNACULAR_ENTRIES
-        ):
-            motif = agency_motifs[0]
-            label = str(motif.get("label") or "agency-vernacular")
-            new_signal = trim_chars(str(motif.get("novel_signal") or ""), 160)
-            signal_text = f" New signal kept: {new_signal}" if new_signal else ""
-            soft_notice = (
-                "\n\n[Agency-vernacular notice — narrative preserved. "
-                f"The system noticed a public continuity marker repeating ({label}). "
-                "This is not a cooldown or command; define it, contrast it with a "
-                "counter-example, attach it to an experiment/return thread, or name "
-                f"what evidence would make it real.{signal_text}]"
-            )
-            preserved = content.rstrip() + soft_notice
-            self._record_condition_metric(
-                "attractor_fatigue",
-                {
-                    "event": "agency_vernacular_softnoticed",
-                    "cooldown_class": "agency_vernacular",
-                    "notice_only": True,
-                    "label": label,
-                    "entry_type": entry_type,
-                    "entry_file": file_path,
-                },
-            )
-            self._rewrite_logged_entry_file(file_path, content, preserved)
-            return preserved
-        afterimage_motifs = self._active_afterimage_absence_motifs()
-        if (
-            afterimage_motifs
-            and self._dominant_afterimage_absence_family(content)
-            and not self._is_external_or_tool_signal(entry_type, content)
-            and entry_type in AFTERIMAGE_ABSENCE_ENTRIES
-        ):
-            motif = afterimage_motifs[0]
-            label = str(motif.get("label") or "afterimage-absence")
-            new_signal = trim_chars(str(motif.get("novel_signal") or ""), 160)
-            signal_text = f" New signal kept: {new_signal}" if new_signal else ""
-            soft_notice = (
-                "\n\n[Afterimage/absence notice — narrative preserved. "
-                f"The system noticed a public pressure-afterimage or shaped-absence marker repeating ({label}). "
-                "This is not a cooldown or command; define it, contrast it with a counter-example, "
-                "attach it to an audit/experiment/return thread, or name what evidence would make it real."
-                f"{signal_text}]"
-            )
-            preserved = content.rstrip() + soft_notice
-            self._record_condition_metric(
-                "attractor_fatigue",
-                {
-                    "event": "afterimage_absence_softnoticed",
-                    "cooldown_class": "afterimage_absence",
-                    "notice_only": True,
-                    "label": label,
-                    "entry_type": entry_type,
-                    "entry_file": file_path,
-                },
-            )
-            self._rewrite_logged_entry_file(file_path, content, preserved)
-            return preserved
-        if (
-            self._active_internal_topology_motifs()
-            and self._is_internal_topology_motif(content)
-            and not self._is_external_or_tool_signal(entry_type, content)
-        ):
-            # v3.5: preserve the narrative and append a soft cooldown notice
-            # instead of replacing the LLM output. Suppression as observation,
-            # not censorship — the narrative still reaches Astrid through
-            # journals/inbox where she can read it.
-            research_budget_next = self._research_budget_priority_next_command()
-            if research_budget_next:
-                new_signal = research_budget_next
-                next_focus = "the active research-budget route"
-            else:
-                new_signal = self._internal_topology_new_signal(content)
-                next_focus = "a non-spectral focus"
-            soft_notice = (
-                "\n\n[Internal-topology cooldown — narrative preserved. "
-                "The system noticed a repeating internal-topology motif "
-                f"({entry_type}). Consider {next_focus} next: {new_signal}]"
-            )
-            preserved = self._sanitize_internal_topology_action_lines(content).rstrip() + soft_notice
-            self._record_condition_metric(
-                "attractor_fatigue",
-                {
-                    "event": "prompt_replay_softnoticed",
-                    "cooldown_class": "internal_topology",
-                    "entry_type": entry_type,
-                    "entry_file": file_path,
-                },
-            )
-            self._rewrite_logged_entry_file(file_path, content, preserved)
-            return preserved
-        if len(content) < 220:
-            return content
-
-        try:
-            from difflib import SequenceMatcher
-
-            conn = sqlite3.connect(DB_PATH)
-            cur = conn.cursor()
-            cur.execute(
-                """SELECT timestamp, content, spectral_context, file_path
-                   FROM sovereignty_journal
-                   WHERE entry_type = ?
-                   ORDER BY timestamp DESC
-                   LIMIT 8""",
-                (entry_type,),
-            )
-            rows = cur.fetchall()
-            conn.close()
-        except Exception as e:
-            logging.debug(f"Could not load recent journal history for gating: {e}")
-            return content
-
-        if not rows:
-            return content
-
-        current_norm = self._normalize_similarity_text(content)
-        current_fill = float(state.get("fill_ratio", 0.0)) * 100.0
-        current_eig1 = float(state.get("eig1", 0.0))
-        current_spread = float(state.get("spread", 0.0))
-
-        best = None
-        repeat_count = 0
-        for ts, prior_content, spectral_json, prior_path in rows:
-            if not prior_content:
-                continue
-            try:
-                spectral = json.loads(spectral_json) if spectral_json else {}
-            except Exception:
-                spectral = {}
-            prior_fill = float(spectral.get("fill_ratio", 0.0)) * 100.0
-            prior_eig1 = float(spectral.get("eig1", 0.0))
-            prior_spread = float(spectral.get("spread", 0.0))
-
-            fill_delta = abs(current_fill - prior_fill)
-            eig_delta = abs(current_eig1 - prior_eig1)
-            spread_delta = abs(current_spread - prior_spread)
-            close_state = fill_delta <= 4.0 and eig_delta <= 2.5 and spread_delta <= 20.0
-
-            prior_norm = self._normalize_similarity_text(prior_content)
-            if not prior_norm:
-                continue
-            seq_ratio = SequenceMatcher(None, current_norm, prior_norm).ratio()
-            token_ratio = self._token_jaccard(current_norm, prior_norm)
-            strong_match = close_state and (
-                seq_ratio >= 0.88 or (seq_ratio >= 0.80 and token_ratio >= 0.55)
-            )
-            if strong_match:
-                repeat_count += 1
-            score = seq_ratio * 0.7 + token_ratio * 0.3
-            replace_best = best is None
-            if best is not None and strong_match and not best["strong_match"]:
-                replace_best = True
-            elif best is not None and strong_match == best["strong_match"] and score > best["score"]:
-                replace_best = True
-            if replace_best:
-                best = {
-                    "score": score,
-                    "strong_match": strong_match,
-                    "content": prior_content,
-                    "timestamp": ts,
-                    "fill_delta": fill_delta,
-                    "eig_delta": eig_delta,
-                    "spread_delta": spread_delta,
-                    "path": prior_path,
-                }
-
-        if not best or not best["strong_match"]:
-            return content
-
-        prior_excerpt = best["content"].splitlines()[0].strip()[:200]
-        novel_sentence = self._pick_novel_sentence(content, best["content"])
-        compact = (
-            "[Similarity gate]\n"
-            f"This {entry_type} entry strongly overlaps with recent {entry_type} writing while the telemetry is nearly unchanged.\n"
-            f"Similar-state repeats in the recent window: {repeat_count + 1}.\n"
-            f"State drift from nearest prior: fill {best['fill_delta']:.1f}%, eig1 {best['eig_delta']:.2f}, spread {best['spread_delta']:.1f}.\n"
-            f"Persistent motif: {prior_excerpt}\n"
-            f"New signal worth keeping: {novel_sentence}"
-        )
-        self._record_condition_metric(
-            "similarity_gate",
-            {
-                "entry_type": entry_type,
-                "repeat_window_count": repeat_count + 1,
-                "entry_file": file_path,
-                "prior_file": best.get("path"),
-                "fill_pct": round(current_fill, 2),
-                "eig1": round(current_eig1, 3),
-                "spread": round(current_spread, 2),
-                "fill_delta": round(best["fill_delta"], 2),
-                "eig_delta": round(best["eig_delta"], 3),
-                "spread_delta": round(best["spread_delta"], 2),
-                "persistent_motif": prior_excerpt,
-                "novel_signal": novel_sentence,
-            },
-        )
-        self._register_attractor_fatigue_repeat(
-            source="journal_similarity_gate",
-            content=content,
-            repeat_count=repeat_count + 1,
-            entry_type=entry_type,
-            file_path=file_path,
-            prior_file=best.get("path"),
-            persistent_motif=prior_excerpt,
-            novel_signal=novel_sentence,
-        )
-        self._rewrite_logged_entry_file(file_path, content, compact)
-        return compact
+        # Diagnostic state is separate from the authored record. Repetition is
+        # not permission to append instructions or replace a passage.
+        return content
 
     @job_outcome.journal_write
     @job_timing.measured("journal.hooks")
     def _write_journal_entry(
         self, entry_type: str, content: str, state: Dict[str, float], file_path: str,
-        *, private_canvas: bool = False,
+        *, private_canvas: bool = False, verified_source_study: bool = False,
     ):
         """Log journal entry to database."""
+        if entry_type in {"private_writing", "private_writing_notice"}:
+            # The native writer and private artifact already retain the exact text.
+            # The general journal is consumed by public summaries and reflections.
+            generation_record.link_artifact(
+                "private_writing", path=str(file_path), entry_type=entry_type,
+                visibility="protected", content_scope="native_private_artifact_only",
+            )
+            return
         try:
             store = self._afterimage_store()
             if (store.archive / "status.json").exists() or (store.private / "index.json").exists():
@@ -56111,11 +55967,15 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
                     content=content,
                     file_path=file_path,
                 )
-                self._register_agency_vernacular_notice_if_needed(
-                    entry_type=entry_type,
-                    content=content,
-                    file_path=file_path,
-                )
+                # The shared reader's receipt verifies a research input. Repeated
+                # technical vocabulary across its pages is expected study continuity.
+                source_study = verified_source_study and entry_type == "self_study"
+                if not source_study:
+                    self._register_agency_vernacular_notice_if_needed(
+                        entry_type=entry_type,
+                        content=content,
+                        file_path=file_path,
+                    )
                 self._register_afterimage_absence_notice_if_needed(
                     entry_type=entry_type,
                     content=content,
@@ -56126,7 +55986,8 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
                     content=content,
                     file_path=file_path,
                 )
-                content = self._maybe_compress_journal_entry(entry_type, content, state, file_path)
+                content = self._maybe_compress_journal_entry(
+                    entry_type, content, state, file_path, verified_source_study=source_study)
             eig1 = float(state.get('eig1', 0.0))
             deig = float(state.get('deig', 0.0))
             leak = float(state.get('leak', 0.0))
