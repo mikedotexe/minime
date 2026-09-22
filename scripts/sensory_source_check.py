@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Sensory source check — current camera/mic source state for minime.
 
-Reports whether minime is currently receiving REAL camera/mic input or
-host-sensory-generated SYNTHETIC input, plus the supporting evidence
-(client-side status files, last-frame age, RMS, etc).
+Reports recorded camera/mic source selection, sender status and engine lane
+freshness on their separate clocks. These snapshots do not establish which
+physical samples were applied to ESN or covariance.
 
 Useful for:
 - Empirical USB unplug/replug testing (`--watch 2` shows live transitions)
@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 import time
@@ -32,6 +33,11 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+try:
+    from .sensory_check_evidence import intake_state, nonnegative_number, record_clock
+except ImportError:  # Direct CLI invocation.
+    from sensory_check_evidence import intake_state, nonnegative_number, record_clock
 
 WORKSPACE = Path("/Users/v/other/minime/workspace")
 RUNTIME = WORKSPACE / "runtime"
@@ -46,8 +52,8 @@ HEALTH_PATH = WORKSPACE / "health.json"
 SENSORY_SOURCE_STALE_SECONDS = 10
 CAMERA_STATUS_STALE_SECONDS = 10
 MIC_STATUS_STALE_SECONDS = 5
-ENGINE_AV_FRESH_WINDOW_MS = 2000  # MUST match Rust AV_ENGINE_FRESH_WINDOW_MS in minime/src/main.rs (asserted in SensoryCheckTests)
-DEFAULT_AUDIO_CHUNK_INTERVAL_MS = 500.0
+ENGINE_AV_FRESH_WINDOW_MS = 2000  # Checked against runtime/semantic_modality.rs.
+ENGINE_STATUS_STALE_MS = 5000
 SPARSE_ADMIT_ATTENTION_MULTIPLIER = 3.0
 
 
@@ -56,7 +62,8 @@ def _safe_load_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     if not path.is_file():
         return None, f"file not found: {path}"
     try:
-        return json.loads(path.read_text()), None
+        data = json.loads(path.read_text())
+        return (data, None) if isinstance(data, dict) else (None, "status must be a JSON object")
     except Exception as e:
         return None, f"failed to parse: {e}"
 
@@ -71,12 +78,8 @@ def _file_age_seconds(path: Path) -> float | None:
 
 
 def _ms_to_seconds(ms: int | float | None) -> float | None:
-    if ms is None:
-        return None
-    try:
-        return float(ms) / 1000.0
-    except (TypeError, ValueError):
-        return None
+    value = nonnegative_number(ms)
+    return value / 1000.0 if value is not None else None
 
 
 def _fmt_age(seconds: float | None, stale_threshold: float | None = None) -> str:
@@ -100,23 +103,8 @@ def _as_mapping(value: Any) -> dict[str, Any]:
 
 
 def _as_positive_float(value: Any) -> float | None:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    if parsed > 0:
-        return parsed
-    return None
-
-
-def _as_positive_int(value: Any) -> int | None:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    if parsed > 0:
-        return parsed
-    return None
+    parsed = nonnegative_number(value)
+    return parsed if parsed is not None and parsed > 0 else None
 
 
 def _stable_core_sensory_budget(spectral: dict[str, Any] | None) -> dict[str, Any]:
@@ -130,7 +118,8 @@ def _runtime_sensory_budget(
 ) -> dict[str, Any]:
     budget = dict(_stable_core_sensory_budget(spectral))
     health_sensory = _as_mapping(_as_mapping(health).get("sensory"))
-    budget.update({key: value for key, value in health_sensory.items() if value is not None})
+    # An explicitly unknown health field must not revive an older spectral value.
+    budget.update(health_sensory)
     return budget
 
 
@@ -150,7 +139,7 @@ def _client_expected_interval_ms(lane: str, client: dict[str, Any]) -> float | N
     chunk_duration = _as_positive_float(client.get("chunk_duration_s"))
     if chunk_duration is not None:
         return chunk_duration * 1000.0
-    return DEFAULT_AUDIO_CHUNK_INTERVAL_MS
+    return None
 
 
 def _live_intake_state(
@@ -159,21 +148,7 @@ def _live_intake_state(
     health: dict[str, Any] | None,
 ) -> dict[str, Any]:
     budget = _runtime_sensory_budget(spectral, health)
-    divisor = _as_positive_int(budget.get(f"live_{lane}_divisor"))
-    enabled = budget.get(f"live_{lane}_enabled")
-    admit_fraction = _as_positive_float(budget.get("admit_fraction"))
-    if isinstance(enabled, bool):
-        live_enabled = enabled
-    elif divisor is None:
-        live_enabled = None
-    else:
-        live_enabled = divisor > 0
-    return {
-        "divisor": divisor,
-        "enabled": live_enabled,
-        "reason": budget.get("live_intake_reason"),
-        "admit_fraction": admit_fraction,
-    }
+    return intake_state(budget, lane)
 
 
 def _expected_engine_interval_ms(
@@ -186,9 +161,10 @@ def _expected_engine_interval_ms(
     if client_interval is None:
         return None
     live_intake = _live_intake_state(lane, spectral, health)
-    divisor = live_intake.get("divisor") or 1
-    admit_fraction = live_intake.get("admit_fraction") or 1.0
-    return client_interval * float(divisor) / max(float(admit_fraction), 0.01)
+    if live_intake["state"] != "enabled":
+        return None
+    estimate = client_interval * live_intake["divisor"] / live_intake["admit_fraction"]
+    return estimate if math.isfinite(estimate) else None
 
 
 def _classify_lane_freshness(
@@ -199,19 +175,36 @@ def _classify_lane_freshness(
     modalities: dict[str, Any],
     client: dict[str, Any],
     source_record: dict[str, Any],
+    clocks: dict[str, dict[str, Any]],
+    intake_evidence: str,
 ) -> dict[str, Any]:
     source_payload = _as_mapping(source_record.get(lane))
     engine_source = modalities.get(f"{lane}_source")
-    engine_age_ms = modalities.get(f"{lane}_age_ms")
+    engine_age_at_snapshot_ms = nonnegative_number(modalities.get(f"{lane}_age_ms"))
+    engine_age_ms = (
+        engine_age_at_snapshot_ms + clocks["spectral"]["age_ms"]
+        if engine_age_at_snapshot_ms is not None
+        and clocks["spectral"]["state"] in {"current", "stale"} else None
+    )
     engine_class = modalities.get(f"{lane}_freshness_class")
-    client_healthy = bool(client.get("healthy")) if client else None
-    client_connected = bool(client.get("connected")) if client else None
-    client_age_ms = _lane_client_age_ms(lane, client) if client else None
+    client_healthy = client.get("healthy") if isinstance(client.get("healthy"), bool) else None
+    client_connected = client.get("connected") if isinstance(client.get("connected"), bool) else None
+    client_clock = clocks["camera" if lane == "video" else "mic"]
+    client_age_at_snapshot_ms = _lane_client_age_ms(lane, client)
+    client_age_ms = (
+        client_age_at_snapshot_ms + client_clock["age_ms"]
+        if client_age_at_snapshot_ms is not None
+        and client_clock["state"] in {"current", "stale"} else None
+    )
     grace_s = client.get("frame_health_grace_secs") if lane == "video" else client.get("chunk_health_grace_secs")
     fps = client.get("fps") if lane == "video" else None
     expected_interval_ms = _client_expected_interval_ms(lane, client)
-    live_intake = _live_intake_state(lane, spectral, health)
-    expected_engine_interval_ms = _expected_engine_interval_ms(lane, client, spectral, health)
+    live_intake = _live_intake_state(lane, spectral, health) if intake_evidence == "current" else intake_state({}, lane)
+    expected_engine_interval_ms = (
+        _expected_engine_interval_ms(lane, client, spectral, health)
+        if intake_evidence == "current" and client_clock["state"] == "current" else None
+    )
+    grace_s = nonnegative_number(grace_s)
     expected_engine_grace_ms = None
     if expected_engine_interval_ms is not None:
         expected_engine_grace_ms = expected_engine_interval_ms + (
@@ -227,6 +220,7 @@ def _classify_lane_freshness(
     engine_stale = (
         str(engine_source or "") in {"stale", "absent"}
         or str(engine_class or "") == "stale_beyond_engine_window"
+        or (engine_age_ms is not None and engine_age_ms > ENGINE_AV_FRESH_WINDOW_MS)
     )
     engine_missing = engine_source is None and engine_class is None and engine_age_ms is None
     client_recent = (
@@ -235,18 +229,37 @@ def _classify_lane_freshness(
         and client_age_ms <= float(grace_s) * 1000.0
     )
 
-    if str(engine_class or "") in {"fresh_sample", "held_within_engine_window"}:
-        status = "engine_fresh_or_held"
-        reason = "engine freshness class is fresh or held within the current AV window"
-    elif source_payload.get("source") == "host" or client.get("fallback_expected") is True:
-        status = "expected_host_fallback"
-        reason = str(source_payload.get("reason") or client.get("last_error") or "host fallback expected")
-    elif engine_missing:
+    fallback_expected = (
+        clocks["sensory"]["state"] == "current" and source_payload.get("source") == "host"
+    ) or (client_clock["state"] == "current" and client.get("fallback_expected") is True)
+
+    if engine_missing:
         status = "missing_engine_status"
         reason = "engine modality status unavailable"
-    elif client_healthy and client_connected and engine_stale and live_intake.get("enabled") is False:
+    elif clocks["spectral"]["state"] != "current":
+        status = "unverified_engine_clock"
+        reason = "engine snapshot clock is " + clocks["spectral"]["state"]
+    elif live_intake["state"] in {"disabled", "zero_probability"}:
         status = "live_intake_suppressed"
-        reason = str(live_intake.get("reason") or "stable-core live intake is suppressed")
+        reason = "recorded live intake is " + live_intake["state"]
+    elif engine_age_ms is None:
+        status = "unknown_engine_age"
+        reason = "source class alone cannot establish sample freshness"
+    elif not engine_stale and engine_source == "synthetic":
+        status = "engine_synthetic_recent"
+        reason = "recent synthetic lane evidence does not establish physical input"
+    elif not engine_stale and str(engine_class or "") in {"fresh_sample", "held_within_engine_window"}:
+        status = "engine_fresh_or_held"
+        reason = "lane evidence is within the AV window; ESN application is not established"
+    elif not client:
+        status = "missing_client_status"
+        reason = "client status file missing"
+    elif client_clock["state"] != "current":
+        status = "unverified_client_clock"
+        reason = "client status clock is " + client_clock["state"]
+    elif fallback_expected:
+        status = "expected_host_fallback"
+        reason = "host fallback is expected; this is not an engine application receipt"
     elif (
         client_healthy
         and client_connected
@@ -256,8 +269,8 @@ def _classify_lane_freshness(
         and expected_engine_attention_ms is not None
         and float(engine_age_ms) <= expected_engine_attention_ms
     ):
-        status = "held_within_expected_live_intake_window"
-        reason = "client is healthy and engine lane is stale within the expected live-intake cadence"
+        status = "engine_stale_within_conditional_cadence"
+        reason = "stale lane; conditional cadence estimate is not evidence of holding or delivery"
     elif (
         client_healthy
         and client_connected
@@ -268,7 +281,7 @@ def _classify_lane_freshness(
         and float(engine_age_ms) > expected_engine_attention_ms
     ):
         status = "healthy_client_engine_overdue"
-        reason = "client is healthy but engine lane is stale beyond expected live-intake cadence"
+        reason = "stale lane beyond three conditional mean intervals; not a guaranteed deadline"
     elif (
         lane == "video"
         and client_healthy
@@ -282,12 +295,12 @@ def _classify_lane_freshness(
     elif client_healthy and client_connected and client_recent and engine_stale:
         status = "healthy_client_engine_stale_mismatch"
         reason = "client is healthy/recent while engine reports the lane stale or absent"
-    elif client:
+    elif client_healthy is False or client_connected is False:
         status = "client_unhealthy_or_disconnected"
         reason = str(client.get("last_error") or client.get("state") or "client unhealthy")
     else:
-        status = "missing_client_status"
-        reason = "client status file missing"
+        status = "unresolved_lane_evidence"
+        reason = "available evidence cannot establish current delivery or client failure"
 
     return {
         "lane": lane,
@@ -295,18 +308,28 @@ def _classify_lane_freshness(
         "reason": reason,
         "engine_source": engine_source,
         "engine_age_ms": engine_age_ms,
+        "engine_age_at_snapshot_ms": engine_age_at_snapshot_ms,
+        "engine_clock": clocks["spectral"],
+        "applied_to_esn": None,
+        "applied_to_covariance": None,
         "engine_freshness_class": engine_class,
         "engine_fresh_window_ms": ENGINE_AV_FRESH_WINDOW_MS,
         "client_healthy": client_healthy,
         "client_connected": client_connected,
         "client_state": client.get("state") if client else None,
         "client_age_ms": client_age_ms,
+        "client_age_at_snapshot_ms": client_age_at_snapshot_ms,
+        "client_clock": client_clock,
+        "fallback_expected": fallback_expected,
         "target_fps": fps,
         "expected_interval_ms": expected_interval_ms,
         "live_intake_divisor": live_intake.get("divisor"),
         "live_intake_enabled": live_intake.get("enabled"),
         "live_intake_reason": live_intake.get("reason"),
         "admit_fraction": live_intake.get("admit_fraction"),
+        "live_intake_state": live_intake["state"],
+        "intake_evidence": intake_evidence,
+        "cadence_assumptions": "constant sender interval, divisor and independent admission probability; not a delivery guarantee",
         "expected_engine_interval_ms": expected_engine_interval_ms,
         "expected_engine_grace_ms": expected_engine_grace_ms,
         "expected_engine_attention_ms": expected_engine_attention_ms,
@@ -322,7 +345,29 @@ def build_sensory_freshness_v1(
     camera: dict[str, Any] | None,
     mic: dict[str, Any] | None,
     sensory: dict[str, Any] | None,
+    observed_at_ms: float | None = None,
 ) -> dict[str, Any]:
+    now = time.time() * 1000 if observed_at_ms is None else observed_at_ms
+    if nonnegative_number(now) is None:
+        raise ValueError("observation time must be finite and nonnegative")
+    clocks = {
+        name: record_clock(_as_mapping(record), name, now, limit)
+        for name, record, limit in (
+            ("spectral", spectral, ENGINE_STATUS_STALE_MS),
+            ("health", health, ENGINE_STATUS_STALE_MS),
+            ("camera", camera, CAMERA_STATUS_STALE_SECONDS * 1000),
+            ("mic", mic, MIC_STATUS_STALE_SECONDS * 1000),
+            ("sensory", sensory, SENSORY_SOURCE_STALE_SECONDS * 1000),
+        )
+    }
+    intake_evidence = "current"
+    if clocks["spectral"]["state"] != "current" or (health and clocks["health"]["state"] != "current"):
+        intake_evidence = "unverified_snapshot_clock"
+    if health:
+        spectral_session = _as_mapping(_as_mapping(spectral).get("provenance")).get("session_id")
+        health_session = _as_mapping(health.get("provenance")).get("session_id")
+        if spectral_session is None or spectral_session != health_session:
+            intake_evidence = "unverified_session_alignment"
     modalities = _as_mapping(_as_mapping(spectral).get("modalities"))
     source_record = _as_mapping(sensory)
     lanes = {
@@ -333,6 +378,8 @@ def build_sensory_freshness_v1(
             modalities=modalities,
             client=_as_mapping(camera),
             source_record=source_record,
+            clocks=clocks,
+            intake_evidence=intake_evidence,
         ),
         "audio": _classify_lane_freshness(
             lane="audio",
@@ -341,24 +388,22 @@ def build_sensory_freshness_v1(
             modalities=modalities,
             client=_as_mapping(mic),
             source_record=source_record,
+            clocks=clocks,
+            intake_evidence=intake_evidence,
         ),
     }
     actionable = [
         row
         for row in lanes.values()
-        if row["status"]
-        in {
-            "healthy_low_fps_cadence_mismatch",
-            "healthy_client_engine_stale_mismatch",
-            "healthy_client_engine_overdue",
-            "client_unhealthy_or_disconnected",
-            "missing_client_status",
-        }
+        if row["status"] not in {"engine_fresh_or_held", "engine_synthetic_recent", "expected_host_fallback", "live_intake_suppressed"}
     ]
     return {
         "schema_version": 1,
-        "policy": "sensory_freshness_v1",
-        "status": "watch" if actionable else "ok",
+        "policy": "sensory_freshness_evidence_v2",
+        "status": "watch" if actionable else "classified",
+        "observed_at_ms": now,
+        "snapshot_clocks": clocks,
+        "scope": "non_atomic_status_snapshots_not_consumer_application_receipts",
         "engine_fresh_window_ms": ENGINE_AV_FRESH_WINDOW_MS,
         "actionable_count": len(actionable),
         "lanes": lanes,
@@ -366,13 +411,13 @@ def build_sensory_freshness_v1(
 
 
 def collect() -> dict[str, Any]:
-    """Read all three status files and synthesize a single state report."""
-    now = time.time()
+    """Read five independent snapshots; never treat file mtime as sample time."""
     sensory, sensory_err = _safe_load_json(SENSORY_SOURCE_PATH)
     camera, camera_err = _safe_load_json(CAMERA_STATUS_PATH)
     mic, mic_err = _safe_load_json(MIC_STATUS_PATH)
     spectral, spectral_err = _safe_load_json(SPECTRAL_STATE_PATH)
     health, health_err = _safe_load_json(HEALTH_PATH)
+    now = time.time()
 
     sensory_file_age = _file_age_seconds(SENSORY_SOURCE_PATH)
     camera_file_age = _file_age_seconds(CAMERA_STATUS_PATH)
@@ -381,16 +426,19 @@ def collect() -> dict[str, Any]:
     # Sensory source's internal updated_at_ms — should be very recent
     # (host-sensory writes on every refresh tick, ~50ms cadence).
     sensory_internal_age = None
-    if sensory and "updated_at_ms" in sensory:
-        sensory_internal_age = now - (sensory["updated_at_ms"] / 1000.0)
+    sensory_timestamp_s = _ms_to_seconds(_as_mapping(sensory).get("updated_at_ms"))
+    if sensory_timestamp_s is not None:
+        sensory_internal_age = now - sensory_timestamp_s
 
     # Last-frame / last-chunk ages from the client's own clocks.
     camera_frame_age = None
-    if camera and "last_frame_age_ms" in camera:
-        camera_frame_age = _ms_to_seconds(camera["last_frame_age_ms"])
+    freshness = build_sensory_freshness_v1(
+        spectral=spectral, health=health, camera=camera, mic=mic, sensory=sensory,
+        observed_at_ms=now * 1000,
+    )
+    camera_frame_age = _ms_to_seconds(freshness["lanes"]["video"]["client_age_ms"])
     mic_chunk_age = None
-    if mic and "last_chunk_age_ms" in mic:
-        mic_chunk_age = _ms_to_seconds(mic["last_chunk_age_ms"])
+    mic_chunk_age = _ms_to_seconds(freshness["lanes"]["audio"]["client_age_ms"])
 
     return {
         "now": now,
@@ -410,13 +458,7 @@ def collect() -> dict[str, Any]:
         "spectral_err": spectral_err,
         "health": health,
         "health_err": health_err,
-        "sensory_freshness_v1": build_sensory_freshness_v1(
-            spectral=spectral,
-            health=health,
-            camera=camera,
-            mic=mic,
-            sensory=sensory,
-        ),
+        "sensory_freshness_v1": freshness,
     }
 
 
@@ -425,7 +467,7 @@ def render_markdown(report: dict[str, Any]) -> str:
     ts = datetime.fromtimestamp(report["now"]).strftime("%Y-%m-%d %H:%M:%S")
     out.append(f"=== Sensory source check ({ts}) ===\n")
 
-    # Sensory source (the truth file written by host-sensory)
+    # Host-sensory source selection is not a consumer application receipt.
     sensory = report["sensory"]
     if sensory is None:
         out.append(f"sensory_source.json: ERROR — {report['sensory_err']}\n")
@@ -444,7 +486,7 @@ def render_markdown(report: dict[str, Any]) -> str:
                 tag = "Host (synthetic)"
             else:
                 tag = src
-            healthy_str = "healthy" if healthy else "UNHEALTHY"
+            healthy_str = "healthy" if healthy is True else "UNHEALTHY" if healthy is False else "unknown"
             return f"{tag} [physical {healthy_str}; reason: {reason}]"
 
         out.append(f"AUDIO source: {_src_label(audio)}")
@@ -463,8 +505,8 @@ def render_markdown(report: dict[str, Any]) -> str:
     else:
         c = report["camera"]
         flags = (
-            "healthy" if c.get("healthy") else "UNHEALTHY",
-            "connected" if c.get("connected") else "DISCONNECTED",
+            "healthy" if c.get("healthy") is True else "UNHEALTHY" if c.get("healthy") is False else "health unknown",
+            "connected" if c.get("connected") is True else "DISCONNECTED" if c.get("connected") is False else "connection unknown",
         )
         out.append(
             f"  state={c.get('state', '?')}, {' / '.join(flags)}, "
@@ -488,8 +530,8 @@ def render_markdown(report: dict[str, Any]) -> str:
     else:
         m = report["mic"]
         flags = (
-            "healthy" if m.get("healthy") else "UNHEALTHY",
-            "connected" if m.get("connected") else "DISCONNECTED",
+            "healthy" if m.get("healthy") is True else "UNHEALTHY" if m.get("healthy") is False else "health unknown",
+            "connected" if m.get("connected") is True else "DISCONNECTED" if m.get("connected") is False else "connection unknown",
         )
         rms = m.get("rms")
         rms_str = f"{rms:.4f}" if isinstance(rms, (int, float)) else "?"
@@ -510,7 +552,7 @@ def render_markdown(report: dict[str, Any]) -> str:
 
     freshness = report.get("sensory_freshness_v1")
     if isinstance(freshness, dict):
-        out.append("ENGINE freshness truth:")
+        out.append("ENGINE lane evidence (independent status snapshots, not application receipts):")
         lanes = freshness.get("lanes") if isinstance(freshness.get("lanes"), dict) else {}
         for lane in ("video", "audio"):
             row = lanes.get(lane) if isinstance(lanes.get(lane), dict) else {}
@@ -518,6 +560,11 @@ def render_markdown(report: dict[str, Any]) -> str:
                 f"  {lane}: status={row.get('status', '?')}, "
                 f"engine={row.get('engine_source', '?')}/{row.get('engine_freshness_class', '?')}, "
                 f"age={row.get('engine_age_ms', '?')}ms"
+            )
+            out.append(
+                f"    intake={row.get('live_intake_state', '?')}; "
+                f"clock={row.get('engine_clock', {}).get('state', '?')}; "
+                f"{row.get('reason', '')}"
             )
         out.append("")
 
@@ -543,16 +590,25 @@ def watch_mode(interval: float) -> int:
 
 
 class SensoryCheckTests(unittest.TestCase):
+    def fixture_report(self, **records: Any) -> dict[str, Any]:
+        # Old classification fixtures are explicitly contemporaneous, not live data.
+        for kind, record in records.items():
+            if record and kind in {"spectral", "health"}:
+                record["provenance"] = {"wall_clock_unix_ms": 100_000, "session_id": 1}
+            elif record:
+                record["updated_at_ms" if kind == "sensory" else "ts_ms"] = 100_000
+        return build_sensory_freshness_v1(**records, observed_at_ms=100_000)
+
     def test_engine_av_fresh_window_matches_rust_const(self) -> None:
         """ENGINE_AV_FRESH_WINDOW_MS must equal the Rust engine's
-        AV_ENGINE_FRESH_WINDOW_MS (minime/src/main.rs): both classify the SAME
+        AV_ENGINE_FRESH_WINDOW_MS (runtime/semantic_modality.rs): both classify the SAME
         freshness window, so silent drift would misclassify lanes on one side."""
-        main_rs = Path(__file__).resolve().parent.parent / "minime" / "src" / "main.rs"
+        main_rs = Path(__file__).resolve().parent.parent / "minime" / "src" / "runtime" / "semantic_modality.rs"
         m = re.search(
             r"const AV_ENGINE_FRESH_WINDOW_MS:\s*u64\s*=\s*([0-9_]+)",
             main_rs.read_text(encoding="utf-8"),
         )
-        self.assertIsNotNone(m, "AV_ENGINE_FRESH_WINDOW_MS not found in minime/src/main.rs")
+        self.assertIsNotNone(m, "AV_ENGINE_FRESH_WINDOW_MS not found in runtime/semantic_modality.rs")
         rust_val = int(m.group(1).replace("_", ""))
         self.assertEqual(
             rust_val,
@@ -579,7 +635,7 @@ class SensoryCheckTests(unittest.TestCase):
         self.assertIsNone(_ms_to_seconds("invalid"))
 
     def test_sensory_freshness_flags_low_fps_camera_cadence(self) -> None:
-        report = build_sensory_freshness_v1(
+        report = self.fixture_report(
             spectral={
                 "modalities": {
                     "video_source": "stale",
@@ -609,7 +665,7 @@ class SensoryCheckTests(unittest.TestCase):
         )
 
     def test_sensory_freshness_holds_inside_live_intake_cadence(self) -> None:
-        report = build_sensory_freshness_v1(
+        report = self.fixture_report(
             spectral={
                 "modalities": {
                     "audio_source": "stale",
@@ -634,14 +690,14 @@ class SensoryCheckTests(unittest.TestCase):
             },
             sensory={"audio": {"source": "physical", "physical_healthy": True, "reason": "mic healthy"}},
         )
-        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["status"], "watch")
         row = report["lanes"]["audio"]
-        self.assertEqual(row["status"], "held_within_expected_live_intake_window")
+        self.assertEqual(row["status"], "healthy_client_engine_stale_mismatch")
         self.assertEqual(row["live_intake_divisor"], 12)
-        self.assertEqual(row["expected_engine_interval_ms"], 6000.0)
+        self.assertIsNone(row["expected_engine_interval_ms"])
 
     def test_sensory_freshness_accounts_for_admit_fraction(self) -> None:
-        report = build_sensory_freshness_v1(
+        report = self.fixture_report(
             spectral={
                 "modalities": {
                     "audio_source": "stale",
@@ -663,18 +719,19 @@ class SensoryCheckTests(unittest.TestCase):
                 "connected": True,
                 "state": "streaming",
                 "last_chunk_age_ms": 0,
+                "chunk_interval_ms": 500,
                 "chunk_health_grace_secs": 5.0,
             },
             sensory={"audio": {"source": "physical", "physical_healthy": True, "reason": "mic healthy"}},
         )
         row = report["lanes"]["audio"]
-        self.assertEqual(report["status"], "ok")
-        self.assertEqual(row["status"], "held_within_expected_live_intake_window")
+        self.assertEqual(report["status"], "watch")
+        self.assertEqual(row["status"], "engine_stale_within_conditional_cadence")
         self.assertEqual(row["admit_fraction"], 0.12)
         self.assertEqual(row["expected_engine_interval_ms"], 50000.0)
 
     def test_sensory_freshness_flags_healthy_client_engine_overdue(self) -> None:
-        report = build_sensory_freshness_v1(
+        report = self.fixture_report(
             spectral={
                 "modalities": {
                     "audio_source": "stale",
@@ -685,6 +742,7 @@ class SensoryCheckTests(unittest.TestCase):
                     "sensory_budget": {
                         "live_audio_enabled": True,
                         "live_audio_divisor": 12,
+                        "admit_fraction": 1.0,
                         "live_intake_reason": "full_presence_admitted",
                     }
                 },
@@ -695,6 +753,7 @@ class SensoryCheckTests(unittest.TestCase):
                 "connected": True,
                 "state": "streaming",
                 "last_chunk_age_ms": 0,
+                "chunk_interval_ms": 500,
                 "chunk_health_grace_secs": 5.0,
             },
             sensory={"audio": {"source": "physical", "physical_healthy": True, "reason": "mic healthy"}},
@@ -705,8 +764,8 @@ class SensoryCheckTests(unittest.TestCase):
         )
 
     def test_sensory_freshness_keeps_expected_host_fallback_separate(self) -> None:
-        report = build_sensory_freshness_v1(
-            spectral={"modalities": {"video_source": "absent"}},
+        report = self.fixture_report(
+            spectral={"modalities": {"video_source": "absent", "video_age_ms": 5000}},
             camera={
                 "healthy": False,
                 "connected": False,

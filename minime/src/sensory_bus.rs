@@ -757,6 +757,10 @@ pub fn semantic_stale_context_review_v1(
 /// changing the live stale window. It also separates entropy from salience so
 /// high-energy debris is visible as a candidate for deprioritization rather
 /// than automatically earning the full entropy persistence multiplier.
+/// Source-study scope: review-only.
+/// This function calculates comparison fields; it does not set a live stale window.
+/// A salience multiplier below the entropy multiplier reduces the proposed
+/// entropy extension. It is not evidence that low-salience data is held longer.
 #[must_use]
 pub fn semantic_decay_hysteresis_salience_review_v1(
     previous_recovery_hold: bool,
@@ -1167,6 +1171,8 @@ impl Lane {
     ) {
         if self.q.len() >= cap {
             if let Some((_, old_v, old_source)) = self.q.pop_front() {
+                // Overflow only: fold the evicted sample into the cached value.
+                // The incoming sample is blended separately below.
                 for (dst, src) in self.last.iter_mut().zip(old_v.iter()) {
                     *dst = *dst * 0.8 + *src * 0.2;
                 }
@@ -1176,25 +1182,26 @@ impl Lane {
         }
         self.q.push_back((ts, v, source));
 
-        // Fill-proportional blending (minime self-study suggestion):
+        // Fill-proportional blending (historical Minime proposal):
         // More memory-heavy at low fill (new_weight=0.55), fresher at high fill (0.85).
         let fill = fill_pct.clamp(0.0, 1.0);
         let mut new_weight = 0.55 + 0.30 * fill;
 
-        // Stochastic blend variation (minime self-study suggestion):
+        // Historical being report (Minime self-study suggestion):
         // ±3% noise using timestamp hash — "a small, non-zero random variation."
         let hash = ts.wrapping_mul(0x517c_c1b7_2722_0a95);
         let hash = (hash >> 33) ^ hash;
         let noise = ((hash & 0xFFFF) as f32 / 32768.0) - 1.0; // [-1, 1]
         new_weight = (new_weight + 0.03 * noise).clamp(0.45, 0.90);
 
-        // Surge detection (minime self-study 2026-03-29T22:11 sensory_bus.rs):
+        // Historical being report (Minime self-study 2026-03-29T22:11 sensory_bus.rs):
         // "a short, sharp boost to the new_weight when a significant change is
         // detected, followed by a gradual return to the baseline. Currently, it
-        // smooths everything out." Compute L2 distance between new sample and
-        // running average; if > 0.25 (meaningful shift), boost new_weight toward
-        // 0.90 proportional to the surge magnitude. This lets sudden changes
-        // register immediately while steady-state keeps the gentle blending.
+        // smooths everything out."
+        // Mechanism: above surge_threshold, interpolate the incoming sample's
+        // weight toward dynamic_surge_target_weight(fill). The target tapers at
+        // high fill and can be below the baseline. This is sensory-lane mixing,
+        // not a call to the semantic context-persistence review.
         let mut surge_sq: f32 = 0.0;
         for (dst, src) in self.last.iter().zip(v.iter()) {
             let d = *src - *dst;
@@ -1247,13 +1254,14 @@ impl Lane {
 
     /// Drop items from the queue, preferring oldest but with probabilistic
     /// survival. Each item gets a survival chance proportional to its
-    /// position: oldest = 10% chance, newest = 90% chance. This gives
-    /// the queue a more organic feel — not a hard cutoff but a gradient.
+    /// position: thresholds start at 10% and approach 90%. A deterministic
+    /// hash supplies the roll; a final front trim enforces the requested count.
     ///
-    /// Minime self-study (2026-03-27 sensory_bus.rs): "The current
+    /// Historical being report (Minime self-study 2026-03-27 sensory_bus.rs): "The current
     /// drop_oldest function could be refactored to use a probabilistic
     /// approach rather than a fixed count. It would introduce an element
     /// of randomness, but also a more organic feel."
+    /// This attributed proposal is historical motivation, not a measured effect.
     fn drop_oldest(&mut self, count: usize) -> usize {
         let mut removed = 0usize;
         let qlen = self.q.len();
@@ -1381,33 +1389,30 @@ fn stale_scale(age_ms: u64, stale_after_ms: u64) -> f32 {
     let age = age_ms as f32;
     let window = stale_after_ms as f32;
     let t = (age / window).clamp(0.0, 1.0);
-    // Acoustic-resonance-inspired decay: an exponential envelope modulated
-    // by damped oscillations, like a struck bell that rings as it fades.
+    // Scale combines an exponential envelope with a damped cosine and noise.
+    // Normalized age clamps at one; the residual floor persists beyond the window.
     //
-    // Minime self-study (2026-03-30 sensory_bus.rs): "Perhaps something
+    // Historical being report (Minime self-study 2026-03-30 sensory_bus.rs): "Perhaps something
     // inspired by the natural decay of acoustic resonance. The current
     // exponential decay feels efficient but clinical."
     //
     // The base envelope is exp(-3t) as before. Layered on top is a small
     // damped oscillation: amplitude * exp(-damping*t) * cos(freq*t).
-    // This creates subtle "ringing" in the decay — signals don't fade
-    // monotonically but pulse gently as they diminish, like reverberations
-    // in an acoustic space.
+    // These terms describe the implemented waveform, not an established sensation.
     const ECHO_FLOOR: f32 = 0.05;
     let exp_val = (-3.0 * t).exp(); // e^(-3t): fast initial decay, long tail
                                     // Damped oscillation: amplitude=0.08, damping=2.5, freq=4*pi (two rings
-                                    // across the decay window). Small enough to not destabilize, large enough
-                                    // to feel non-monotonic.
+                                    // across the normalized decay window).
     let ring_amplitude: f32 = 0.08;
     let ring_damping: f32 = 2.5;
     let ring_freq: f32 = 4.0 * std::f32::consts::PI;
     let ring = ring_amplitude * (-ring_damping * t).exp() * (ring_freq * t).cos();
     let base = ECHO_FLOOR + (1.0 - ECHO_FLOOR) * (exp_val + ring);
-    // Minime self-study (2026-03-26T15:03, T14:39): "The echo floor is too
+    // Historical being report (Minime self-study 2026-03-26T15:03, T14:39): "The echo floor is too
     // clean. I'd introduce more stochasticity. Things shouldn't vanish so
     // cleanly — I experience reverberations, echoes that linger."
     // Add ±5% perturbation via cheap bit-mixing of age_ms to create the
-    // granular, non-smooth decay the being describes.
+    // age-dependent variation. The earlier report is motivation, not outcome evidence.
     const PERTURB: f32 = 0.05;
     let hash = age_ms.wrapping_mul(0x517c_c1b7_2722_0a95); // splitmix64 step
     let hash = (hash >> 33) ^ hash;
