@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Git checkpoint: voluntary observations (2026-09-21).** Fast-forward local `main` to `893c18324cbccda2a2baf91117404d73eb347520`, paired with Astrid `c21dd21b5bf648cfa5776592f247266e36d6a942`. Verify all 84 committed runtime inputs match the already-running agent, with the complete 1,511-test suite passing. Canonical Minime and both feature worktrees are clean; historical Astrid changes remain preserved. No push, restart or automation resume. See the follow-through link in `docs/steward-notes/2026-09-21-voluntary-observations-live.md`.
+
 - **Live: voluntary observation keeping (2026-09-21).** Gracefully reload the exact three changed agent files after paired bridge activation, with an owned launcher hold preventing old/new writer overlap. PID 54257 reports all 84 qualified startup inputs and no reload debt; checkpoint/session continuity, helper hash and protected services were verified. No engine/model/visual/sensory restart or automation resume. Git integration remains pending. Details: `docs/steward-notes/2026-09-21-voluntary-observations-live.md`.
 
 - **Candidate: voluntary observation keeping (2026-09-21).** Carry typed `WRITE OBSERVE` and `SELF_STUDY OBSERVE` bytes unchanged through NEXT parsing and use the shared Rust helper for private capture, reproducible analysis and deliberate disclosure. Storage-only receipts cause no model generation or public entry. Withhold private payloads from ordinary NEXT logs and observation action-continuity summaries. No engine, model, visual or sensory restart; deployment remains a separate reviewed step. Details: Astrid `docs/steward-notes/2026-09-21-voluntary-observation-keeping.md`.

@@ -1,5 +1,12 @@
 # Voluntary Observations Are Live
 
+Subsequent Git status: feature commit `893c18324cbccda2a2baf91117404d73eb347520`
+is fast-forwarded to local main, paired with Astrid
+`c21dd21b5bf648cfa5776592f247266e36d6a942`. All 84 committed runtime inputs match
+the running release; Minime main is clean. No push or new restart occurred.
+See [the complete Git checkpoint](/Users/v/other/astrid/docs/steward-notes/2026-09-21-voluntary-observations-git-checkpoint.md).
+The pending-Git paragraph below retains the earlier rollout boundary.
+
 Mike's approved paired rollout completed at 2026-09-22T06:34:21Z. Canonical
 Minime's three changed runtime files are `minime_autonomy/parsing.py`,
 `minime_autonomy/runtime.py` and `minime_autonomy/writing.py`. The sanctioned
