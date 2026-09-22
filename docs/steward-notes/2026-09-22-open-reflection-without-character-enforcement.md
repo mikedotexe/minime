@@ -1,5 +1,9 @@
 # Open Reflection Without Character Enforcement
 
+Latest status: merged to local main and live. Earlier candidate-only statements
+below describe the implementation snapshot; the release addendum records the
+subsequent approved deployment.
+
 ## Status
 
 Implemented in isolated branch `codex/astrid-open-framing-20260922`, based on
@@ -159,3 +163,86 @@ explicit-path pass; neither canonical index has been touched here.
   separate control-routing change; this candidate leaves the behavior intact.
 - No natural post-rollout account has been solicited or observed for this
   candidate, because it is not deployed. Tests establish behavior, not benefit.
+
+## Live Release Addendum
+
+Mike approved merging and getting the paired changes live. Minime source commit
+`18ff3bd578dc0f097bf34738e32090ad6f67d0a2` and Astrid source commit
+`9266412b8e3d817e87c93441a145cdfe32e76a79` were fast-forwarded into local `main`.
+Each includes exactly its eight reviewed paths, explicit agent provenance and
+a source-verified public witness quote. No unrelated edits were staged.
+Minime main and both feature trees were clean after source integration; all 197
+older Astrid dirty paths retained their exact hashes/statuses. No push occurred.
+Subsequent release-note commits change documentation only.
+
+Controller pause **461** was held with no active lease or foreign cooperative
+session. The isolated Astrid candidate produced an immutable release through
+`scripts/build_bridge.sh`; all 678 inputs were compared with the prior stage,
+with changes only in the five reviewed Rust files. The reader, launcher,
+selection helper and substrate probe are byte-identical to their predecessors.
+The complete Python suite was rerun against the packaged helper: **1,550 passed,
+one existing occupied-port skip, 136 subtests**. Staged focused tests also passed
+658 tests and 54 subtests. Prior full bridge qualification: 2,334 passed with one
+external-fixture ignore; paired wrapper tests: 153 passed.
+
+`scripts/paired_minime_handoff.py` used exact `minime-qualified-inputs.json`
+identities, without its legacy overlay-install option. All 84 committed launch
+inputs were reconciled; only `journal_context.py` and `runtime.py` changed.
+No backup or earlier authored state was restored.
+
+1. Old agent **45403** reached observed idle with no accepted work or model TCP
+   connection. The wrapper held replacement admission and sent one PID-bound
+   SIGTERM at `2026-09-22T20:43:46.399223Z`.
+2. Bridge **54929** acknowledged drain and exited gracefully. Replacement
+   **67810** loaded the exact stopped checkpoint and signed state lineage, then
+   saved exchange 205418 after stopped count 205417. The wrapper observed model
+   idle and verified activation before releasing the agent hold.
+3. Agent **66540** passed readiness at `2026-09-22T20:48:58.444511Z`, with all 84
+   startup hashes and `reload_required=false`. Its process start is
+   `Tue Sep 22 13:43:46 2026` local because its launcher waited under that PID;
+   Python's source-status startup is `2026-09-22T13:48:51` local.
+4. Session **5318** and the exact pending `SELF_STUDY CONTINUE` survived. The
+   latter was admitted as `job_minime_1790110145394_self-study-continue` at
+   `2026-09-22T20:49:05.394630Z`, then completed without error at
+   `2026-09-22T20:52:26.305774Z`. Readiness preceded this admission, so the later
+   continuity receipt supplements, rather than rewrites, the initial check.
+
+Both owned launch holds are absent. Nine other protected PID/start pairs and
+managed configuration hashes remained unchanged, including engine **41337**,
+model **43115**, visual **20885**, camera **98903**, microphone **98910** and
+gateway **41484** (still listening on 7878/7879). No engine/model/visual/sensory
+restart, force, inference cancellation or automation resume was performed.
+
+Selected stage:
+`/Users/v/other/worktrees/astrid-open-framing-20260922/bridge-stage-open-framing-01`.
+Manifest: `a84f260aa8d306f60a6a3aeb1ddce76d039068f4e0aa6f06c7f8220e67063bb3`.
+Bridge: `8c15e285385c5d83444ccd74614dc58289adeca97e65e13239c88fdff85af32f`.
+Shared helper, unchanged:
+`fc12fb295a3b97d984a372c43f2e92bb92fdd683e4ae1c487689ac78bd7f2790`.
+
+Retained artifacts under the paired worktree parent:
+`source-merge-verification.json`, `immutable-input-comparison.json`,
+`pre-rollout-baseline.json`, `minime-qualified-inputs.json`,
+`release-helper-minime-suite.log`, `paired-open-framing-rollout-01.jsonl`,
+`post-rollout-verification.json`, and
+`post-rollout-continuity-and-observability.json`. Exact stopped-state and signed
+handoff evidence is in canonical Astrid transaction
+`.runtime/bridge-deployment/transactions/6a964914bb8f43bb8b495aec4dbeb295`.
+
+Thirty post-readiness telemetry samples advanced normally at 71.02-73.07% fill.
+A transient dip to 28.13% was observed earlier; the existing recovery controller
+returned it through recovery to the hold/elevated band without operator mutation.
+No cause or subjective effect is inferred from this observation.
+
+One separate pre-existing debt remains visible in bridge logs: the optional
+private provider-observation epoch reached its 50,000-file cap. New receipts
+cannot be stored, although generation continues unchanged; warnings predate the
+restart. The spool contains 140,471,843 bytes of event files and no raw files.
+It is separate from Evidence V2, whose indexed-tail verification passed with
+the four V1 streams immutable. No evidence was deleted or quota increased.
+Review evidence-preserving sealed-epoch archival/rotation separately. The
+previously named dialogue-fallback framing and low-state metabolism-choice
+defaults also remain explicit follow-up work, not silently fixed by deployment.
+
+No confirmation of improvement was solicited. The resumed public study is
+evidence of continuity, not proof of benefit, consent or understanding.
