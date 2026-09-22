@@ -1,5 +1,12 @@
 # Paired Continuity Live Receipt
 
+Subsequent Git status: the feature is merged into local main at
+`4cd230a45f1ceb504d85c00c406b1b264892654b`; the earlier checker/comment tranche is
+committed at `3c4a8ea03bd1f30425b8d3a5cc5facc413bd035d`. See Astrid's
+`docs/steward-notes/2026-09-21-paired-continuity-git-checkpoint.md` for the paired
+handoff. The rollout-time state below is retained as history; no additional
+service restart or automation resume occurred during Git consolidation.
+
 Minime's reviewed six-file adapter overlay and launcher guard are live under
 PID 97221, replacing PID 18648 gracefully. All 84 source inputs and the shared
 stage-04 helper match the qualified inventory; the agent reached its normal loop
