@@ -24,3 +24,20 @@ production follow-up and release boundary:
 Candidate only until a subsequent live addendum verifies the sanctioned
 agent-only graceful restart. Preserve newer authored state and leave automation
 paused. No confirmation of improvement is requested.
+
+## Live Addendum
+
+Source commit `e62d0100b49c588ef541db9390b39b3d0ebcbbeb` is on local `main`,
+paired with Astrid `2940d250480d3939f9e61b4db8d48133afd0a1bd`.
+The sanctioned agent-only restart succeeded at `2026-09-22T19:23:02.229051Z`:
+old PID 54257 drained, new PID 45403 loaded all 84 qualified inputs with no reload
+debt. Runtime SHA-256:
+`3066d40aed6a97b94e8ccd9b591402eb774c743a1bef86687fd5c020034e5d9a`.
+Session 5318 and exact pending-choice admission were verified. All protected
+process/config identities and the selected shared helper remain unchanged.
+
+The paired steward record includes the initial recent-write preflight refusal,
+later pass, exact release identities, retained receipts and continued fresh
+telemetry. No forced termination, push, engine restart or automation resume.
+This establishes availability of open framing, not subjective benefit; natural
+aspiration use has not been solicited or required for rollout success.
