@@ -1,4 +1,50 @@
-# Telemetry-Optional Expression: Minime Candidate
+# Telemetry-Optional Expression: Minime
+
+## Live Release Verified
+
+The approved paired graceful transition completed successfully at
+**2026-09-23T19:19:18.741349Z**. Minime implementation commit
+`0334d28ded194f501b9fc50b4df750bf8f683b04` and paired Astrid commit
+`4e530bbd93122bb38addb1a4415780c23813a555` are on their canonical local mains.
+The historical candidate sections below remain as the earlier qualification
+record. Final documentation and remote pushes are verified separately.
+
+- Agent **66540** exited at a verified idle boundary. Replacement **51695**
+  waited behind an owned launch hold until bridge **52403** restored its exact
+  stopped checkpoint and saved a fresh exchange. No force or backup restoration
+  was used. Both holds are now absent.
+- The replacement's Python startup is **2026-09-23T12:17:15** local. All **86**
+  qualified startup source hashes match and `reload_required=false`; normal loop
+  readiness is verified. Session **5318** survives, cycle 41659 advances to 41660,
+  and no interrupted job was recovered. No pending NEXT existed at shutdown;
+  no pending-action resumption is inferred.
+- Shared helper selection resolves to the immutable
+  `bridge-stage-expression-01/helpers/astrid-source-study` under the artifact
+  root below, SHA-256
+  `9d9905543d47ec183300949c6a3508d99fef5e3b7ed41f0141ab3f3b7043ea15`.
+  The complete Python suite passed again against this helper: **1572 passed,
+  one existing skip, 138 subtests**. Shared-reader tests: 272; bridge all-target
+  tests: 2345, one existing ignore. Strict Clippy, formatting, domain boundaries
+  and affected deployment/controller/evidence qualification pass.
+- Engine, model, visual, camera, microphone and other protected processes retain
+  their exact PID/start identities; managed configuration and native kernel are
+  unchanged. Ports/readiness and fresh engine health are verified, with the
+  existing 68% fill target. No control mutation or automation resume occurred.
+- Protection against accepting incomplete source/private-draft delivery remains.
+  Ordinary public length-limited output retention does not override that policy.
+  The allowance is opportunity, not a quota or proof of longer/felt-better writing.
+
+Full hashes, exact source/path reconciliation, retained unsuccessful attempts and
+receipt links are in the paired Astrid note's **Live Release Verified** section.
+Local `paired-handoff-01.jsonl` SHA-256:
+`bf66a7a25ebbcafcb23c1f556918a64df9379bd8f4d4ed70de0b9c07b70214ae`.
+`live-after.json` SHA-256:
+`b04260f9986cd86394581e07a689017d54008bb3ff5cd3ac592ceacf15d4b884`.
+Packaged-helper Python log SHA-256:
+`9fa7e28b8888cc3a74fdc156e5dda08774f5206097d8f243a498fe0d084c2028`.
+Pause generation **466** remains; older worktrees and the separate
+influence-feedback candidate are untouched. No private prose was used as a
+fixture or requested as rollout evidence.
 
 ## Approved Long-Form Follow-Through
 
