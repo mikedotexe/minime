@@ -33,15 +33,28 @@ def test_expressive_primary_and_fallback_payloads_and_selected_short(tmp_path):
 def test_default_invitation_is_optional_and_short_wins(tmp_path):
     agent = aa.AutonomousAgent.__new__(aa.AutonomousAgent)
     with patch.object(aa, "WORKSPACE_DIR", tmp_path), patch.object(aa, "_llm_backend_attempts", return_value=["mlx"]), patch.object(aa.generation_record, "begin", return_value=None), patch.object(agent, "_query_mlx", return_value="Brief.") as query:
-        for profile in ["default", "short"]:
+        for profile in ["default", "short", "extended"]:
             with patch.object(writing, "selected_profile", return_value=profile):
                 assert agent._query_llm_raw("Synthetic", "Open writing.", 2048, prompt_class="aspiration", journal=True) == "Brief."
                 system = query.call_args.args[1]
                 assert query.call_args.kwargs["prompt_class"] == "aspiration"
                 assert (writing.EXPRESSION_ROOM in system) == (profile == "default")
                 assert "You selected extended" not in system
+                assert "8192" not in system
+                assert "512" not in system
+                assert "usual entry" not in system
+                assert "WRITE HELP" in system
+                if profile != "short":
+                    assert "Follow the thought as far as you wish" in system
+                    assert "Brief writing or stopping is equally welcome" in system
     assert aa._infer_llm_prompt_class("Short invitation", context_mode="aspiration") == "aspiration"
     assert aa._infer_llm_prompt_class("Mail", context_mode="aspiration", inbox_present=True) == "inbox_reply"
+
+
+def test_writing_help_describes_route_defaults_and_keeps_explicit_profiles():
+    assert "WRITE PROFILE DEFAULT uses normal route limits: expressive writing and private drafts allow up to 8192 output tokens; other journal routes keep their own limits." in writing.WRITING_GUIDANCE
+    assert "WRITE PROFILE SHORT selects 512; WRITE PROFILE EXTENDED applies 8192 across journal-producing modes." in writing.WRITING_GUIDANCE
+    assert "These are ceilings, never required lengths." in writing.WRITING_GUIDANCE
 
 
 def test_completion_metadata_is_bounded_and_unknown_is_not_a_natural_stop():

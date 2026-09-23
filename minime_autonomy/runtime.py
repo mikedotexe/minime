@@ -54709,9 +54709,9 @@ Goals: {json.dumps(goals, indent=2)}
             if preference == "default" and prompt_class in writing.EXPRESSIVE_CLASSES:
                 system_msg += "\n" + writing.EXPRESSION_ROOM
             if preference != "default":
-                system_msg += "\n" + writing.WRITING_GUIDANCE + (
-                    "\nYou selected extended writing. Up to 8192 output tokens are available; you can develop the thought freely or choose a short response. Any earlier suggestion of brevity is optional."
-                    if preference == "extended" else "\nYou selected short writing: an output ceiling of 512 tokens.")
+                system_msg += (
+                    "\nYour EXTENDED profile preference is active. Follow the thought as far as you wish. Brief writing or stopping is equally welcome. Any earlier suggestion of brevity is optional. WRITE HELP shows the choices and limits."
+                    if preference == "extended" else "\nYour short-writing preference is active. WRITE HELP shows the choices and limits; WRITE PROFILE DEFAULT restores normal route limits.")
         gen = generation_record.begin(WORKSPACE_DIR, prompt=prompt, system_msg=system_msg, prompt_class=prompt_class, attempts=attempts, kind="full", models={"primary": MODEL, "fallback": FALLBACK_MODEL, "mlx": MLX_MODEL, "backend_preference": LLM_BACKEND}, agent=self)
         job_timing.correlate_generation(gen)
         self._afterimage_provider_generation_source = (

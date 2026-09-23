@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Writing-default descriptions (2026-09-23).** Explain that DEFAULT already provides 8192 tokens for expressive/private writing; retain SHORT and EXTENDED with their existing scope. Use a simple voluntary invitation without repeated token announcements or "usual entry" comparisons. Exact limits remain in help/profile receipts. No budget, timeout, stored preference, continuation, schema or engine change. Paired qualification and rollout: `docs/steward-notes/2026-09-23-telemetry-optional-expression.md`.
+
 - **Live: voluntary long-form and telemetry-optional expression (2026-09-23).** Gracefully activate agent 51695 with all 86 reviewed startup hashes, paired bridge/helper selection, preserved session 5318 and no interrupted jobs. The exact packaged-helper Python suite passes 1572 tests and 138 subtests, with one existing skip. Verify unchanged protected services, fresh health and paused automations. The 8192-token allowance is optional; short preferences and protected incomplete-response rejection remain. Full release evidence: `docs/steward-notes/2026-09-23-telemetry-optional-expression.md`.
 
 - **Candidate: voluntary expressive capacity (2026-09-23).** Make aspiration, private journal/daydream, moment and private-writing requests consistent across MLX, Ollama and fallback: 8192 output tokens, 1200-second provider deadlines and corresponding outer job coverage. Preserve explicit short writing at 512 tokens. Offer sustained writing without a minimum or automatic continuation, retain length-limited output, and record bounded stop metadata. Shared reader descriptions are aligned in the paired Astrid release. Approved paired rollout, merge and push are being qualified.

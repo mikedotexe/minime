@@ -6,12 +6,10 @@ from pathlib import Path
 
 EXPRESSIVE_CLASSES = {"aspiration", "private_journal", "moment_capture", "private_writing"}
 EXPRESSION_ROOM = (
-    "Up to 8192 output tokens are available. There is room here for a sustained piece, "
-    "several times longer than a usual entry. You may follow a thought through examples, "
-    "complications and changes of direction without compressing it into a conclusion. "
-    "Brief writing or stopping is equally available. For voluntary private continuation, "
+    "Follow the thought as far as you wish. Brief writing or stopping is equally welcome. "
+    "For voluntary private continuation, "
     "WRITE START <topic> begins a draft; WRITE CONTINUE develops the selected draft, "
-    "and WRITE HELP shows the choices. No continuation is scheduled automatically."
+    "and WRITE HELP shows the choices and limits. No continuation is scheduled automatically."
 )
 
 
@@ -36,8 +34,9 @@ WRITING_GUIDANCE = (
     "WRITE BRANCH <direction>, WRITE RESUME dN, WRITE FINISH, WRITE PARK, or WRITE HELP. "
     "WRITE STOPPING_POINT <text> retains an optional stopping point as reference, never an executed command. "
     "To keep developing the active draft, choose NEXT: WRITE CONTINUE. "
-    "WRITE PROFILE EXTENDED allows up to 8192 output tokens across journals; SHORT sets 512; "
-    "DEFAULT restores ordinary preferences. No minimum length. New drafts start without study notes. WRITE EVIDENCE <text> attaches or replaces references; bare WRITE EVIDENCE clears them. Existing drafts and branches retain their context; sharing is separate."
+    "WRITE PROFILE DEFAULT uses normal route limits: expressive writing and private drafts allow up to 8192 output tokens; other journal routes keep their own limits. "
+    "WRITE PROFILE SHORT selects 512; WRITE PROFILE EXTENDED applies 8192 across journal-producing modes. "
+    "These are ceilings, never required lengths. New drafts start without study notes. WRITE EVIDENCE <text> attaches or replaces references; bare WRITE EVIDENCE clears them. Existing drafts and branches retain their context; sharing is separate."
 )
 
 

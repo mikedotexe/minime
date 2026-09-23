@@ -1,5 +1,42 @@
 # Telemetry-Optional Expression: Minime
 
+## Final Wording Follow-Through
+
+Mike approved correcting profile descriptions and simplifying ordinary writing
+invitations. DEFAULT already supplies 8192 tokens for expressive/private writing;
+other route defaults, SHORT at 512 and explicit EXTENDED across journal routes
+retain their existing semantics. Ordinary invitations now say: "Follow the
+thought as far as you wish. Brief writing or stopping is equally welcome."
+Exact ceilings remain in help/private profile receipts, not repeated encouragement
+to make every piece unusually long. No budget, timeout, stored preference,
+continuation, schema, acceptance or engine policy changes.
+
+Synthetic tests cover all three profile invitations and verify unchanged primary
+and fallback request budgets. Paired shared-reader and bridge qualification,
+source identities and sanctioned rollout receipts are recorded in the sibling
+Astrid note. Artifacts use the `wording-` prefix under the existing paired root.
+Pause 467 preserves the automation pause. Final Python qualification passes
+1573 tests and 138 subtests, with one existing skip; paired bridge 2346 (one
+existing ignore), reader 272, operational 175 plus 41 subtests, strict Clippy,
+formatting, domain and epistemic/projector checks pass. Exact logs and tested
+source hashes are bound by `wording-qualification.json` at the artifact root,
+SHA-256 `0f8ba46a2a2eb80ca0bf0b05b15966bd8c09b5d48c55659e7128011c1ff36766`.
+
+Merge and rollout are held for clarification about a new Claude session in the
+shared Astrid checkout. Both main trees remain clean, but absence of dirty files
+is not coordination with that session. No Git mutation or service signal was
+performed for this follow-through; all changes remain in the owned worktrees.
+Revalidate exact sources, live identities and maintenance generation after
+coordination, before using the sanctioned paired handoff. The prior live release
+below remains running unchanged.
+
+Mike subsequently confirmed that Claude is planning and analyzing hypotheses,
+and approved our merge and rollout. Canonical mains remain clean and match remote
+tips; the tested implementation is unchanged and pause 467 has no active lease.
+The prior hold is now cleared for explicit-path Git integration and the sanctioned
+paired transition. Activation evidence follows separately; this clearance alone
+does not establish that the new wording is live.
+
 ## Live Release Verified
 
 The approved paired graceful transition completed successfully at
