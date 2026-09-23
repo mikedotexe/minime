@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- **Live: writing-default descriptions (2026-09-23).** Gracefully activate agent 89591 with the paired immutable bridge/helper after 1573 packaged-helper Python tests and 138 subtests pass. Verify all 86 startup hashes, pending-choice selection, session continuity and unchanged protected services. Exact release identities and boundaries are in the paired September 23 steward note.
 - **Writing-default descriptions (2026-09-23).** Explain that DEFAULT already provides 8192 tokens for expressive/private writing; retain SHORT and EXTENDED with their existing scope. Use a simple voluntary invitation without repeated token announcements or "usual entry" comparisons. Exact limits remain in help/profile receipts. No budget, timeout, stored preference, continuation, schema or engine change. Paired qualification and rollout: `docs/steward-notes/2026-09-23-telemetry-optional-expression.md`.
 
 - **Live: voluntary long-form and telemetry-optional expression (2026-09-23).** Gracefully activate agent 51695 with all 86 reviewed startup hashes, paired bridge/helper selection, preserved session 5318 and no interrupted jobs. The exact packaged-helper Python suite passes 1572 tests and 138 subtests, with one existing skip. Verify unchanged protected services, fresh health and paused automations. The 8192-token allowance is optional; short preferences and protected incomplete-response rejection remain. Full release evidence: `docs/steward-notes/2026-09-23-telemetry-optional-expression.md`.

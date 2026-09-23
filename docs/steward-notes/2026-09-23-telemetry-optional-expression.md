@@ -1,5 +1,39 @@
 # Telemetry-Optional Expression: Minime
 
+## Wording Release Verified
+
+The approved paired wording release completed at **2026-09-23T20:33:43.654616Z**.
+This supersedes the coordination hold below. Source commits are Minime
+`8d7d2c91fd32caab4550cebd6465b204092d5ac5` and Astrid
+`5499493bb828b971ff57bbe1182a15b2c3d8889c`, fast-forwarded into local main.
+Only release documentation follows them.
+
+- The exact immutable helper passed the complete Python suite: **1573 tests and
+  138 subtests**, one existing skip. Both changed launch inputs (`runtime.py`,
+  `writing.py`) are bound to the qualified inventory; all 86 startup hashes match.
+- After self-study work completed and an idle window was verified, the sanctioned
+  wrapper gracefully stopped agent 51695. New agent **89591** began its held
+  launcher at **13:29:08** local and Python at **13:33:37**, after bridge 90650
+  passed acknowledged drain, signed checkpoint lineage, fresh-exchange and
+  model-idle checks. No forced termination or interrupted-job recovery occurred.
+- Session **5318** remains; cycle **41711 advances to 41712**. The pre-stop pending
+  choice hash matches the post-start cleared record with reason `honored`. This
+  proves selection, not completed execution. No private text is copied.
+- Both adapters select the new packaged reader; `reload_required=false`, normal
+  loop readiness passes and both launch holds are gone. All other protected
+  service identities/configuration and the kernel are unchanged. Model health
+  endpoints return 200; 89 fresh health samples range **70.59-73.06% fill**.
+
+Full identities and numerical boundaries are in the paired Astrid note. Local
+artifacts remain under `/Users/v/other/worktrees/expressive-context-20260923`:
+`wording-paired-handoff.jsonl`, `wording-live-after.json`,
+`wording-release-helper-python.log` and `wording-rollout-artifact-hashes.json`.
+The live verification SHA-256 is
+`92b500e30f9a52d0e27a260a604405f3c513ff9b7e2620a097546973d00fa6b2`.
+Final Git receipts follow in `wording-git-closeout.json`. No reservoir change or
+subjective improvement is inferred. Pause 467 and previously paused automations
+remain in place; historical worktrees are preserved.
+
 ## Final Wording Follow-Through
 
 Mike approved correcting profile descriptions and simplifying ordinary writing
