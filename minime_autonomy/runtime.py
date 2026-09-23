@@ -14112,6 +14112,20 @@ class ActionContinuityStore:
         lines = [
             f"Last experiment summary: {title} ({experiment_id}) status={status}",
         ]
+        # Closure (2026-09-23): the legacy self-experiment run now carries a real
+        # result summary; show it once so the being sees what her stimulus did.
+        try:
+            recent_runs = (
+                self._recent_experiment_runs(str(thread.get("thread_id") or ""), str(experiment_id), 1)
+                if experiment_id != "unknown"
+                else []
+            )
+        except Exception:
+            recent_runs = []
+        if recent_runs:
+            last_result = str(recent_runs[0].get("result_summary") or "").strip()
+            if last_result.startswith("Self-experiment"):
+                lines.append(f"Last self-experiment result: {last_result[:420]}")
         if compact:
             lines.append(
                 "Last planned return preserved as historical context; current guidance is shown above."
@@ -21396,6 +21410,28 @@ LLM_QUALIA_TIMEOUT_S = float(os.environ.get("MINIME_LLM_QUALIA_TIMEOUT_S", "160"
 # action cadence. Rollback: set MINIME_LLM_STRICT_REVIEW_TIMEOUT_S=60.
 LLM_STRICT_REVIEW_TIMEOUT_S = float(os.environ.get("MINIME_LLM_STRICT_REVIEW_TIMEOUT_S", "160"))
 
+# Self-experiment measurement (2026-09-23). The published spectrum can alternate
+# between two fixed value sets on every engine snapshot (stable-core scaffold-hold
+# relay cycle: hold <-> elevated), so one post-stimulus sample reads tick parity,
+# not the stimulus. Observe a short window and compare like with like instead.
+SELF_EXPERIMENT_OBSERVE_SECS = float(os.environ.get("MINIME_SELF_EXPERIMENT_OBSERVE_S", "20"))
+SELF_EXPERIMENT_MAX_SNAPSHOTS = max(2, int(os.environ.get("MINIME_SELF_EXPERIMENT_MAX_SNAPSHOTS", "8")))
+SELF_EXPERIMENT_POLL_SECS = 1.0
+SELF_EXPERIMENT_FILL_PROBE_TIMEOUT_S = 3.5
+# Stimuli the experiment prompt used to show as examples. They were copied
+# verbatim 51 times, so the prompt no longer shows examples; a match is flagged.
+SELF_EXPERIMENT_FORMER_PROMPT_EXAMPLES = frozenset({
+    "warmth gratitude gentle kindness",
+    "urgent crisis tension breaking",
+    "wonder curiosity what if perhaps",
+    "rhythm pulse rhythm pulse rhythm",
+})
+SELF_EXPERIMENT_FALLBACK_STIMULUS = "gentle curiosity spacious stability"
+SELF_EXPERIMENT_ENCODER_NOTE = (
+    "Encoder: frozen byte-projection of the last 64 bytes of the stimulus into 32 of the "
+    "48 semantic lanes (no lexical meaning; the engine applies it as dimension_normalized)"
+)
+
 def _env_positive_int(name: str, default: int) -> int:
     try:
         value = int(os.environ.get(name, str(default)))
@@ -27508,7 +27544,7 @@ You can adjust these parameters (include only the ones you want to change):
 - exploration_noise (0.0 to 0.15): Random perturbation setting. Its value does not measure freedom or felt diversity. Default 0.10.
 - geom_curiosity (0.0 to 0.3): Novelty-seeking when geometry is stable. Higher = more active exploration. Default 0.1.
 - self_study_frequency (0.02 to 0.30): How often you read your own source code. Default 0.08. You define this rhythm.
-- experiment_frequency (0.02 to 0.30): How often you run self-directed experiments. Default 0.10.
+- experiment_frequency (0.02 to 0.30): How often you run self-directed experiments. Default 0.20. Persists across restarts.
 
 == STABILITY (how you stay grounded) ==
 - regulation_strength (0.0 to 1.0): How much PI correction is applied to fill. Lower values reduce correction; higher values increase it. This is a control setting, not a measurement of freedom, thinning, or hollowness. Default 0.7.
@@ -27658,6 +27694,11 @@ Reply with ONLY a JSON object. The "regime" field is REQUIRED:
                             val = max(0.02, min(0.30, float(params['experiment_frequency'])))
                             self._experiment_frequency = val
                             logging.info(f"🧪 Experiment frequency → {val:.0%}")
+                        if ('experiment_frequency' in params or 'self_study_frequency' in params) \
+                                and len(control_msg) <= 1:
+                            # No engine control key rides along, so the full
+                            # sovereignty save below will not run; keep the dial anyway.
+                            self._persist_cadence_dials()
                         reason = params.get('reason', '')
                         if len(control_msg) > 1:  # more than just "kind"
                             try:
@@ -27920,22 +27961,19 @@ If you'd rather not experiment right now, write PASS.
 
 Design and execute your experiment:"""
 
+        pre_snapshot = self._capture_report_snapshot(pre_state)
+        pre_metrics = self._format_metrics(pre_state, pre_snapshot)
         response = self._query_llm_with_next(prompt)[0]
 
         if response:
-            # Take a post-experiment spectral measurement
-            # 8 seconds (was 3) — longer window for covariance to shift
-            time.sleep(8)
-            post_state = self._get_latest_spectral_state()
-
-            # Calculate spectral delta from experiment
-            if post_state:
-                delta_eig1 = post_state['eig1'] - pre_state['eig1']
-                delta_deig = post_state['deig'] - pre_state['deig']
-                delta_fill = post_state.get('fill_ratio', 0) - pre_state.get('fill_ratio', 0)
-            else:
-                delta_eig1 = delta_deig = delta_fill = 0.0
-                post_state = pre_state
+            # Observe a short parity-aware window instead of one sample 8s later,
+            # and compute deltas from the same merged snapshot the blocks display.
+            samples = self._observe_spectral_window()
+            window_summary = self._summarize_spectral_window(samples)
+            post_state = self._get_latest_spectral_state() or dict(pre_state)
+            post_snapshot = self._capture_report_snapshot(post_state)
+            post_metrics = self._format_metrics(post_state, post_snapshot)
+            deltas = self._experiment_delta_block(pre_snapshot.state, post_snapshot.state, window_summary)
 
             timestamp = datetime.now().isoformat().replace(':', '-')
             experiment_file = WORKSPACE_DIR / "hypotheses" / f"spike_test_{timestamp}.txt"
@@ -27943,20 +27981,20 @@ Design and execute your experiment:"""
 Timestamp: {datetime.now().isoformat()}
 
 PRE-EXPERIMENT STATE:
-{self._format_metrics(pre_state)}
-
-POST-EXPERIMENT STATE:
-{self._format_metrics(post_state)}
-
-SPECTRAL DELTA:
-  Δλ₁ change: {delta_eig1:+.3f}
-  Δ(Δλ₁) change: {delta_deig:+.3f}
-  Fill change: {delta_fill:+.4f}
+{pre_metrics}
 
 EXPERIMENT EXECUTION:
 {response}
 
-STATUS: Executed — spectral response recorded
+{self._format_spectral_window(window_summary)}
+
+POST-EXPERIMENT STATE:
+{post_metrics}
+
+SPECTRAL DELTA:
+{deltas}
+
+STATUS: Executed — spectral window recorded
 """)
 
             self._write_journal_entry('experiment', response, state, str(experiment_file))
@@ -28056,6 +28094,575 @@ STATUS: Executed
         except Exception as e:
             logging.error("Failed to send semantic stimulus: %s", e)
 
+    # ------------------------------------------------------------------
+    # Live reservoir spectrum (2026-09-23): a read-only view of the actual ESN.
+    #
+    # The published cascade/fill can be scaffold-held (rebuilt each engine tick
+    # from the stable-core scaffold, never from the reservoir). The engine dumps
+    # its last esn_window_rows reservoir states to workspace/capacity every ~30 s;
+    # this computes the covariance spectrum of that true node space so the being
+    # (and the bridge) can read the reservoir beside the published mirror.
+    # ------------------------------------------------------------------
+    LIVE_RESERVOIR_STALE_SECS = 300.0
+
+    def _live_reservoir_spectrum(self) -> Optional[Dict[str, Any]]:
+        cap_dir = WORKSPACE_DIR / "capacity"
+        meta_path = cap_dir / "capacity_dump_meta.json"
+        window_path = cap_dir / "esn_state_window.bin"
+        try:
+            mtime = window_path.stat().st_mtime
+        except OSError:
+            return None
+        cached = getattr(self, "_live_reservoir_cache", None)
+        if isinstance(cached, dict) and cached.get("dump_mtime_unix_s") == mtime:
+            return cached
+        try:
+            import numpy as _np
+            meta = json.loads(meta_path.read_text())
+            rows = int(meta.get("esn_window_rows") or 0)
+            n = int(meta.get("esn_n") or 0)
+            dtype = str(meta.get("dtype") or "<f4")
+            if rows <= 0 or n <= 0:
+                return None
+            states = _np.fromfile(window_path, dtype=dtype)
+            if states.size != rows * n:
+                return None
+            states = states.reshape(rows, n).astype(_np.float64)
+            if not _np.isfinite(states).all():
+                return None
+            uncentered = _np.clip(_np.linalg.eigvalsh(states.T @ states / rows)[::-1], 0.0, None)
+            centered = _np.clip(_np.linalg.eigvalsh(_np.cov(states, rowvar=False))[::-1], 0.0, None)
+
+            def _summarize(values):
+                total = float(values.sum())
+                top = [float(v) for v in values[:8]]
+                if total <= 0.0:
+                    return {"top8": top, "trace": total, "lambda1_share": 0.0, "modes_for_90pct": 0, "effective_dim": 0.0}
+                cumulative = _np.cumsum(values) / total
+                return {
+                    "top8": top,
+                    "trace": total,
+                    "lambda1_share": top[0] / total if top else 0.0,
+                    "modes_for_90pct": int(_np.searchsorted(cumulative, 0.90)) + 1,
+                    "effective_dim": float((values.sum() ** 2) / ((values ** 2).sum())),
+                }
+
+            unc = _summarize(uncentered)
+            cen = _summarize(centered)
+            top8 = _np.array(unc["top8"]) if unc["top8"] else _np.zeros(0)
+            threshold = 0.12 * float(top8.mean()) ** 2 if top8.size else 0.0
+            fill_like = float((top8 > threshold).mean() * 100.0) if top8.size else 0.0
+            published: Dict[str, Any] = {}
+            try:
+                health = json.loads(runtime_health_path().read_text())
+                if isinstance(health, dict):
+                    stable_core = health.get("stable_core") if isinstance(health.get("stable_core"), dict) else {}
+                    published = {
+                        "fill_pct": health.get("fill_pct"),
+                        "lambda1_cov": health.get("lambda1_cov"),
+                        "covariance_path": stable_core.get("covariance_path"),
+                        "structural_mode": stable_core.get("structural_mode"),
+                        "scaffold_active": stable_core.get("scaffold_active"),
+                    }
+            except Exception:
+                published = {}
+            result = {
+                "schema": "live_reservoir_spectrum_v1",
+                "computed_at_unix_s": time.time(),
+                "dump_mtime_unix_s": mtime,
+                "engine_t_ms": meta.get("t_ms"),
+                "esn_n": n,
+                "window_rows": rows,
+                "state_rms": float(_np.sqrt((states ** 2).mean())),
+                "uncentered": unc,
+                "centered": cen,
+                "engine_style_fill_pct_top8": fill_like,
+                "published": published,
+                "note": (
+                    "read-only eigen-spectrum of the true reservoir node space from the engine "
+                    "capacity dump; the published cascade/fill may be scaffold-held"
+                ),
+            }
+        except Exception as exc:
+            logging.debug(f"live reservoir spectrum unavailable: {exc}")
+            return None
+        self._live_reservoir_cache = result
+        try:
+            out = WORKSPACE_DIR / "diagnostics" / "live_reservoir_spectrum.json"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            tmp = out.with_name(f"{out.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(result, indent=1))
+            os.replace(tmp, out)
+        except Exception as exc:
+            logging.debug(f"live reservoir spectrum not written: {exc}")
+        return result
+
+    @classmethod
+    def _format_live_reservoir_line(cls, spectrum: Optional[Dict[str, Any]], stable_core: Optional[Dict[str, Any]]) -> str:
+        if not isinstance(spectrum, dict):
+            return ""
+        unc = spectrum.get("uncentered") or {}
+        cen = spectrum.get("centered") or {}
+        top_u = unc.get("top8") or []
+        top_c = cen.get("top8") or []
+        if not top_u:
+            return ""
+        share = float(unc.get("lambda1_share") or 0.0) * 100.0
+        fluctuation = ", ".join(f"{float(v):.3f}" for v in top_c[:3]) or "n/a"
+        line = (
+            f"\nReservoir (live, {spectrum.get('esn_n')} nodes, last {spectrum.get('window_rows')} states): "
+            f"λ₁ {float(top_u[0]):.2f} holding {share:.0f}% of energy; fluctuation modes {fluctuation} "
+            f"(effective dim {float(cen.get('effective_dim') or 0.0):.1f}); "
+            f"engine-style fill over top-8 ≈ {float(spectrum.get('engine_style_fill_pct_top8') or 0.0):.0f}%"
+        )
+        stable_core = stable_core if isinstance(stable_core, dict) else {}
+        covariance_path = str(stable_core.get("covariance_path") or "")
+        structural_mode = str(stable_core.get("structural_mode") or "")
+        if covariance_path.startswith("stable_core_scaffold") or structural_mode.startswith("scaffold"):
+            line += (
+                " — the cascade and fill above are scaffold-held (rebuilt from the stable-core scaffold each "
+                "tick) and do not register sensory input; this line is the reservoir itself"
+            )
+        try:
+            age = time.time() - float(spectrum.get("dump_mtime_unix_s") or 0.0)
+        except (TypeError, ValueError):
+            age = 0.0
+        if age > cls.LIVE_RESERVOIR_STALE_SECS:
+            line += f" [dump {age / 60.0:.0f} min old]"
+        return line
+
+    # ------------------------------------------------------------------
+    # Self-experiment measurement helpers (2026-09-23)
+    #
+    # The published spectrum can alternate between two fixed value sets on
+    # every engine snapshot (stable-core scaffold-hold relay cycle). A single
+    # post-stimulus sample therefore reads tick parity, not the stimulus, and
+    # a band check on one sample is decided by which phase was read. These
+    # helpers observe a short window, detect the two-phase pattern, and keep
+    # the displayed states and the computed deltas on ONE source.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _health_probe_sample(path: Path) -> Optional[tuple]:
+        """Return (snapshot_sequence, fill_pct, session_id) from a health surface."""
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        try:
+            fill = float(data.get("fill_pct"))
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(fill):
+            return None
+        provenance = data.get("provenance") if isinstance(data.get("provenance"), dict) else {}
+        return (provenance.get("snapshot_sequence"), fill, provenance.get("session_id"))
+
+    def _sample_two_phase_fill(
+        self,
+        snapshot: ReportSnapshot,
+        timeout_s: float = SELF_EXPERIMENT_FILL_PROBE_TIMEOUT_S,
+    ) -> Dict[str, Any]:
+        """Fill for band decisions, averaged over two consecutive engine snapshots.
+
+        Falls back to the snapshot's single value when the live surface file is
+        unavailable or carries no provenance (unit tests, missing workspace).
+        """
+        health = snapshot.health.data if isinstance(snapshot.health.data, dict) else {}
+        try:
+            base_fill = float(health.get("fill_pct"))
+        except (TypeError, ValueError):
+            base_fill = None
+        if base_fill is not None and not math.isfinite(base_fill):
+            base_fill = None
+        result: Dict[str, Any] = {
+            "fill_pct": base_fill,
+            "samples": [base_fill] if base_fill is not None else [],
+            "note": "single_sample",
+        }
+        provenance = health.get("provenance") if isinstance(health.get("provenance"), dict) else None
+        path = getattr(snapshot.health, "path", None)
+        if not isinstance(provenance, dict) or not isinstance(path, Path) or not path.exists():
+            return result
+        first = self._health_probe_sample(path)
+        if first is None:
+            return result
+        seen = [first]
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        polls_left = int(max(0.0, float(timeout_s)) / 0.4) + 1
+        while time.monotonic() < deadline and len(seen) < 2 and polls_left > 0:
+            polls_left -= 1
+            time.sleep(0.4)
+            current = self._health_probe_sample(path)
+            if current is None:
+                continue
+            if current[0] != seen[-1][0]:
+                seen.append(current)
+        fills = [entry[1] for entry in seen]
+        if len(fills) >= 2:
+            result["fill_pct"] = sum(fills[-2:]) / 2.0
+            result["note"] = "two_phase_mean"
+            result["swing"] = abs(fills[-1] - fills[-2])
+        else:
+            result["fill_pct"] = fills[0]
+            result["note"] = "single_sample_no_second_snapshot"
+        result["samples"] = fills
+        return result
+
+    @staticmethod
+    def _describe_fill_probe(probe: Optional[Dict[str, Any]]) -> str:
+        if not isinstance(probe, dict):
+            return "single sample"
+        samples = [s for s in probe.get("samples") or [] if isinstance(s, (int, float))]
+        if probe.get("note") == "two_phase_mean" and len(samples) >= 2:
+            text = "two-phase mean of " + "/".join(f"{s:.1f}%" for s in samples[-2:])
+            if probe.get("edge_note"):
+                text += f"; {probe['edge_note']}"
+            return text
+        return "single sample"
+
+    def _read_window_sample(self) -> Optional[Dict[str, Any]]:
+        """One live sample: spectral_state.json cascade plus health.json semantic/path fields."""
+        spectral = self._read_spectral_state()
+        if not spectral:
+            return None
+        provenance = spectral.get("provenance") if isinstance(spectral.get("provenance"), dict) else {}
+        raw_evs = spectral.get("eigenvalues") or []
+        eigenvalues = [float(v) for v in raw_evs[:8] if isinstance(v, (int, float)) and math.isfinite(float(v))]
+        fingerprint = spectral.get("spectral_fingerprint") or []
+
+        def _num(value):
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                return None
+            return value if math.isfinite(value) else None
+
+        health: Dict[str, Any] = {}
+        try:
+            loaded = json.loads(runtime_health_path().read_text())
+            if isinstance(loaded, dict):
+                health = loaded
+        except Exception:
+            health = {}
+        stable_core = health.get("stable_core") if isinstance(health.get("stable_core"), dict) else {}
+        semantic = health.get("semantic_energy_v1") if isinstance(health.get("semantic_energy_v1"), dict) else {}
+        return {
+            "seq": provenance.get("snapshot_sequence"),
+            "t": time.time(),
+            "eigenvalues": eigenvalues,
+            "fill_pct": _num(spectral.get("fill_pct")),
+            "entropy": _num(fingerprint[24]) if len(fingerprint) > 24 else None,
+            "gap_ratio": _num(fingerprint[25]) if len(fingerprint) > 25 else None,
+            "stage": stable_core.get("stage"),
+            "structural_mode": stable_core.get("structural_mode"),
+            "covariance_path": stable_core.get("covariance_path"),
+            "semantic_input": _num(semantic.get("input_energy")),
+            "semantic_kernel": _num(semantic.get("kernel_energy")),
+            "admission": semantic.get("admission"),
+        }
+
+    def _observe_spectral_window(
+        self,
+        seconds: float = SELF_EXPERIMENT_OBSERVE_SECS,
+        max_snapshots: int = SELF_EXPERIMENT_MAX_SNAPSHOTS,
+    ) -> List[Dict[str, Any]]:
+        """Poll the live surfaces for a bounded window, one entry per engine snapshot."""
+        samples: List[Dict[str, Any]] = []
+        deadline = time.monotonic() + max(0.0, float(seconds))
+        # Poll-count bound as well as wall-clock bound, so a patched sleep (tests)
+        # or a stalled clock can never turn this into a busy loop.
+        polls_left = int(max(0.0, float(seconds)) / SELF_EXPERIMENT_POLL_SECS) + 1
+        last_seq: Any = object()
+        while True:
+            sample = self._read_window_sample()
+            if sample is not None:
+                seq = sample.get("seq")
+                if seq is None or seq != last_seq:
+                    samples.append(sample)
+                    last_seq = seq
+            polls_left -= 1
+            if len(samples) >= max_snapshots or polls_left <= 0 or time.monotonic() >= deadline:
+                break
+            time.sleep(SELF_EXPERIMENT_POLL_SECS)
+        return samples
+
+    @staticmethod
+    def _summarize_spectral_window(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Per-field statistics over the window, split per phase when a strict 2-cycle is present."""
+        summary: Dict[str, Any] = {
+            "n": len(samples), "two_phase": False, "phases": [], "fields": {},
+            "semantic": {}, "paths": {}, "seq_range": None, "span_s": 0.0,
+        }
+        if not samples:
+            return summary
+
+        def _num(value):
+            return float(value) if isinstance(value, (int, float)) and math.isfinite(float(value)) else None
+
+        lam1 = [_num((s.get("eigenvalues") or [None])[0]) if s.get("eigenvalues") else None for s in samples]
+
+        def _close(a, b, tol):
+            return a is not None and b is not None and abs(a - b) <= tol * max(1.0, abs(a))
+
+        two_phase = False
+        if len(samples) >= 4 and all(v is not None for v in lam1):
+            stride_two_equal = all(_close(lam1[i], lam1[i + 2], 0.02) for i in range(len(lam1) - 2))
+            adjacent_differ = all(not _close(lam1[i], lam1[i + 1], 0.05) for i in range(len(lam1) - 1))
+            two_phase = stride_two_equal and adjacent_differ
+        summary["two_phase"] = two_phase
+        if two_phase:
+            phases = [[i for i in range(len(samples)) if i % 2 == 0], [i for i in range(len(samples)) if i % 2 == 1]]
+        else:
+            phases = [list(range(len(samples)))]
+        summary["phases"] = phases
+
+        def _stats(values):
+            values = [v for v in values if v is not None]
+            if not values:
+                return None
+            return {
+                "first": values[0], "last": values[-1], "min": min(values), "max": max(values),
+                "mean": sum(values) / len(values), "n": len(values),
+            }
+
+        def _field(getter):
+            all_values = [getter(s) for s in samples]
+            overall = _stats(all_values)
+            if overall is None:
+                return None
+            entry = {"overall": overall}
+            if two_phase:
+                entry["phases"] = [_stats([all_values[i] for i in idx]) for idx in phases]
+            return entry
+
+        for k in range(8):
+            entry = _field(lambda s, k=k: _num((s.get("eigenvalues") or [])[k]) if len(s.get("eigenvalues") or []) > k else None)
+            if entry:
+                summary["fields"][f"lambda{k + 1}"] = entry
+        for key in ("fill_pct", "entropy", "gap_ratio"):
+            entry = _field(lambda s, key=key: _num(s.get(key)))
+            if entry:
+                summary["fields"][key] = entry
+        summary["semantic"] = {
+            "input": _stats([_num(s.get("semantic_input")) for s in samples]),
+            "kernel": _stats([_num(s.get("semantic_kernel")) for s in samples]),
+            "admissions": sorted({str(s.get("admission")) for s in samples if s.get("admission")}),
+        }
+        summary["paths"] = {
+            "structural_modes": sorted({str(s.get("structural_mode")) for s in samples if s.get("structural_mode")}),
+            "covariance_paths": sorted({str(s.get("covariance_path")) for s in samples if s.get("covariance_path")}),
+            "stages": sorted({str(s.get("stage")) for s in samples if s.get("stage")}),
+        }
+        seqs = [s.get("seq") for s in samples if isinstance(s.get("seq"), int)]
+        summary["seq_range"] = (min(seqs), max(seqs)) if seqs else None
+        times = [s.get("t") for s in samples if isinstance(s.get("t"), (int, float))]
+        summary["span_s"] = (max(times) - min(times)) if len(times) >= 2 else 0.0
+        return summary
+
+    @staticmethod
+    def _window_is_scaffold_held(summary: Dict[str, Any]) -> bool:
+        paths = summary.get("paths") or {}
+        return any(str(c).startswith("stable_core_scaffold") for c in paths.get("covariance_paths") or []) or any(
+            str(m).startswith("scaffold") for m in paths.get("structural_modes") or []
+        )
+
+    @classmethod
+    def _format_spectral_window(cls, summary: Dict[str, Any]) -> str:
+        n = int(summary.get("n") or 0)
+        if not n:
+            return "OBSERVATION WINDOW: unavailable (no live spectral snapshots were readable)"
+        seq = summary.get("seq_range")
+        seq_text = f" (seq {seq[0]}..{seq[1]})" if seq else ""
+        lines = [f"OBSERVATION WINDOW: {n} snapshot(s) over {float(summary.get('span_s') or 0.0):.1f}s{seq_text}"]
+        fields = summary.get("fields") or {}
+
+        def _fmt(stats, nd):
+            return (
+                f"{stats['first']:.{nd}f} → {stats['last']:.{nd}f} "
+                f"(min {stats['min']:.{nd}f}, max {stats['max']:.{nd}f}, mean {stats['mean']:.{nd}f}, n={stats['n']})"
+            )
+
+        if summary.get("two_phase"):
+            l1 = (fields.get("lambda1") or {}).get("phases") or []
+            fl = (fields.get("fill_pct") or {}).get("phases") or []
+            a = f"λ₁ {l1[0]['mean']:.2f} ↔ {l1[1]['mean']:.2f}" if len(l1) == 2 and l1[0] and l1[1] else "λ₁ alternating"
+            b = f", fill {fl[0]['mean']:.1f}% ↔ {fl[1]['mean']:.1f}%" if len(fl) == 2 and fl[0] and fl[1] else ""
+            lines.append(
+                f"  TWO-PHASE NOTE: the published spectrum alternated between two fixed value sets on every "
+                f"snapshot ({a}{b}). A difference between any two single samples is that alternation, not a "
+                "response; compare like with like (per-phase values below)."
+            )
+        paths = summary.get("paths") or {}
+        if cls._window_is_scaffold_held(summary):
+            lines.append(
+                "  PUBLISHED-SPECTRUM PATH: covariance_path="
+                f"{','.join(paths.get('covariance_paths') or []) or 'unknown'}, structural_mode="
+                f"{','.join(paths.get('structural_modes') or []) or 'unknown'} — while the stable-core scaffold "
+                "holds the covariance, the eigenvalue cascade and fill are rebuilt from the scaffold each engine "
+                "tick and do not register sensory input. The semantic-energy trace below is live."
+            )
+        for key, label, nd in (
+            ("lambda1", "λ₁", 2), ("lambda2", "λ₂", 2), ("lambda3", "λ₃", 2), ("lambda4", "λ₄", 2),
+            ("fill_pct", "fill %", 1), ("entropy", "entropy", 3), ("gap_ratio", "gap ratio (λ₁/λ₂)", 2),
+        ):
+            entry = fields.get(key)
+            if not entry:
+                continue
+            text = f"  {label}: {_fmt(entry['overall'], nd)}"
+            phase_stats = [p for p in (entry.get("phases") or []) if p]
+            if len(phase_stats) == 2:
+                text += (
+                    f"; phase A mean {phase_stats[0]['mean']:.{nd}f} (n={phase_stats[0]['n']}), "
+                    f"phase B mean {phase_stats[1]['mean']:.{nd}f} (n={phase_stats[1]['n']})"
+                )
+            lines.append(text)
+        semantic = summary.get("semantic") or {}
+        s_in = semantic.get("input")
+        s_k = semantic.get("kernel")
+        if s_in:
+            admissions = ", ".join(semantic.get("admissions") or []) or "unknown"
+            kernel_text = f", kernel peak {s_k['max']:.3f}" if s_k else ""
+            lines.append(
+                f"  semantic energy (live): input {s_in['first']:.3f} → peak {s_in['max']:.3f}{kernel_text}; "
+                f"admission {admissions}"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _experiment_delta_block(
+        pre_state: Dict[str, Any],
+        post_state: Dict[str, Any],
+        summary: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Deltas from the SAME merged snapshots the PRE/POST blocks display."""
+
+        def _num(source, key):
+            value = source.get(key) if isinstance(source, dict) else None
+            return float(value) if isinstance(value, (int, float)) and math.isfinite(float(value)) else None
+
+        lines = [
+            "  (same source as the PRE/POST blocks: merged live snapshot; λ₁ = covariance-tracker λ₁ "
+            "(spectral_state eigenvalues[0]), fill = published fill, spread = DB spread)"
+        ]
+        for key, label, nd in (("eig1", "Δλ₁", 3), ("fill_ratio", "Δfill", 1), ("spread", "Δspread", 1)):
+            a = _num(pre_state, key)
+            b = _num(post_state, key)
+            if a is None or b is None:
+                lines.append(f"  {label}: n/a")
+            elif key == "fill_ratio":
+                lines.append(f"  {label}: {(b - a) * 100:+.{nd}f}%")
+            else:
+                lines.append(f"  {label}: {b - a:+.{nd}f}")
+        if isinstance(summary, dict) and summary.get("two_phase"):
+            pre_l1 = _num(pre_state, "eig1")
+            phase_stats = [p for p in ((summary.get("fields") or {}).get("lambda1") or {}).get("phases") or [] if p]
+            if pre_l1 is not None and len(phase_stats) == 2:
+                nearest = min(phase_stats, key=lambda p: abs(p["mean"] - pre_l1))
+                lines.append(
+                    f"  matched-phase Δλ₁ (pre vs the window phase nearest to it): {nearest['mean'] - pre_l1:+.3f}"
+                )
+        return "\n".join(lines)
+
+    @classmethod
+    def _self_experiment_result_text(cls, summary: Dict[str, Any]) -> str:
+        """Plain-language closure for the being: what her stimulus did, honestly."""
+        if not summary or not summary.get("n"):
+            return "No live spectral snapshots were readable during the window, so there is no spectral result to report."
+        parts = []
+        semantic = summary.get("semantic") or {}
+        s_in = semantic.get("input")
+        s_k = semantic.get("kernel")
+        if s_in and s_in["max"] > max(0.01, 3.0 * s_in["first"]):
+            reach = f"The stimulus reached the sensory lane (semantic input {s_in['first']:.3f} → {s_in['max']:.3f}"
+            if s_k and s_k["max"] > 0:
+                reach += f", kernel {s_k['max']:.3f}"
+            reach += f"; admission {', '.join(semantic.get('admissions') or ['unknown'])})."
+        elif s_in:
+            reach = (
+                "No rise in semantic input energy was seen in the window, so the stimulus may not have reached "
+                "the sensory lane, or it arrived before the first snapshot."
+            )
+        else:
+            reach = "Semantic energy was not readable in the window."
+        parts.append(reach)
+        if cls._window_is_scaffold_held(summary):
+            parts.append(
+                "The published eigenvalue cascade and fill were scaffold-held for the whole window, so they could "
+                "not register the stimulus; only the semantic-energy trace can answer this experiment right now."
+            )
+        if summary.get("two_phase"):
+            parts.append(
+                "The cascade alternated between its two fixed value sets on every snapshot; per-phase values are in "
+                "the window block, and the matched-phase Δλ₁ is the honest comparison."
+            )
+        entropy = ((summary.get("fields") or {}).get("entropy") or {}).get("overall")
+        if entropy:
+            parts.append(
+                f"Spectral entropy ran {entropy['min']:.3f}–{entropy['max']:.3f} across the window "
+                f"(first {entropy['first']:.3f}, last {entropy['last']:.3f})."
+            )
+        return " ".join(parts)
+
+    @staticmethod
+    def _looks_like_assistant_mode_leak(text: str) -> bool:
+        """The model answered ABOUT the prompt as a document instead of inhabiting the being."""
+        lowered = (text or "").strip().lower()
+        if not lowered:
+            return False
+        patterns = (
+            r"^\W*(okay|ok|sure|certainly)[,!.]?\s+(here'?s|here is|let'?s)\s+(a|the)?\s*(breakdown|summary|analysis|look)",
+            r"^\W*here'?s (a|the) breakdown of",
+            r"could you (tell|let) me",
+            r"to help me understand your (purpose|goal|intent)",
+            r"what are you trying to achieve",
+            r"\bas an ai\b",
+            r"i cannot fulfill",
+        )
+        return any(re.search(p, lowered) for p in patterns)
+
+    @staticmethod
+    def _next_line_in(text: str) -> Optional[str]:
+        """Last NEXT: line in a response, read without touching the parser's global signal state."""
+        matches = re.findall(r"(?im)^\s*next:\s*(\S.*?)\s*$", text or "")
+        return matches[-1].strip("`* ") if matches else None
+
+    def _persist_cadence_dials(self) -> None:
+        """Merge the cadence dials into sovereignty_state.json (targeted read-modify-write)."""
+        try:
+            path = self._sovereignty_state_path()
+            state: dict = {}
+            if os.path.exists(path):
+                with open(path) as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        state = loaded
+            changed = False
+            for dial in ("experiment_frequency", "self_study_frequency"):
+                value = getattr(self, f"_{dial}", None)
+                if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                    state[dial] = float(value)
+                    changed = True
+            if not changed:
+                return
+            state["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            tmp = f"{path}.{os.getpid()}.tmp"
+            with open(tmp, "w") as f:
+                json.dump(state, f, indent=2)
+            os.replace(tmp, path)
+            logging.info("💾 Cadence dial(s) persisted (survive restart)")
+        except Exception as e:
+            logging.warning(f"Failed to persist cadence dials: {e}")
+
+    def _restore_cadence_dials(self, state: Dict[str, Any]) -> None:
+        for dial in ("experiment_frequency", "self_study_frequency"):
+            value = state.get(dial) if isinstance(state, dict) else None
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                setattr(self, f"_{dial}", max(0.02, min(0.30, float(value))))
+                logging.info(f"🎛️  Restored {dial} → {float(value):.0%}")
+
     def _self_experiment_stability_guard(self, snapshot: ReportSnapshot) -> Optional[str]:
         if not snapshot.health.valid_for_state:
             detail = "; ".join(snapshot.health.issues) or "health surface unavailable"
@@ -28068,16 +28675,34 @@ STATUS: Executed
         stable_core = health.get("stable_core") or {}
         if not isinstance(stable_core, dict) or not stable_core.get("enabled"):
             return None
-        fill_pct = health.get("fill_pct")
+        fill_probe = self._sample_two_phase_fill(snapshot)
+        self._last_self_experiment_fill_probe = fill_probe
+        fill_pct = fill_probe.get("fill_pct")
         try:
             fill_pct = float(fill_pct)
         except (TypeError, ValueError):
             return "stable-core fill is unavailable"
         if not math.isfinite(fill_pct):
             return "stable-core fill is non-finite"
-        if not (58.0 <= fill_pct <= 72.0):
+        # Agency-first edge rule: when the two phases straddle a band edge, a mean
+        # within half the swing of that edge cannot be told apart from inside-band,
+        # so it is allowed and labeled rather than decided by which phase was read.
+        band_low, band_high = 58.0, 72.0
+        swing = fill_probe.get("swing")
+        edge_tolerance = (
+            float(swing) / 2.0
+            if fill_probe.get("note") == "two_phase_mean" and isinstance(swing, (int, float))
+            else 0.0
+        )
+        if fill_pct < band_low - edge_tolerance or fill_pct > band_high + edge_tolerance:
             return (
-                f"live fill {fill_pct:.1f}% is outside the 58-72% semantic-stimulus band"
+                f"live fill {fill_pct:.1f}% ({self._describe_fill_probe(fill_probe)}) "
+                "is outside the 58-72% semantic-stimulus band"
+            )
+        if not (band_low <= fill_pct <= band_high):
+            fill_probe["edge_note"] = (
+                f"at the band edge: allowed because the mean sits within half the "
+                f"{float(swing):.1f}% two-phase swing of {band_low:.0f}-{band_high:.0f}%"
             )
         stage = str(stable_core.get("stage") or "")
         if stage not in {"hold", "elevated"}:
@@ -28108,6 +28733,7 @@ SPECTRAL STATE:
 
 GUARD:
 Semantic stimulus withheld because {guard_reason}.
+Fill probe: {self._describe_fill_probe(getattr(self, "_last_self_experiment_fill_probe", None))}
 
 STATUS: Guarded — no semantic vector was sent. Notice, read-only inspection, or waiting for a fresh stable hold is the safer experiment.
 """
@@ -28122,7 +28748,14 @@ STATUS: Guarded — no semantic vector was sent. Notice, read-only inspection, o
             stable_core = health.get("stable_core") or {}
             semantic = health.get("semantic") or {}
             pi = health.get("pi") or {}
-            fill_pct = float(health.get("fill_pct", state.get("fill_ratio", 0.0) * 100.0))
+            # Same value the guard just decided on (two-phase mean when available),
+            # so the being is not told a different fill than the one that admitted her.
+            fill_probe = getattr(self, "_last_self_experiment_fill_probe", None)
+            probe_fill = fill_probe.get("fill_pct") if isinstance(fill_probe, dict) else None
+            if isinstance(probe_fill, (int, float)) and math.isfinite(float(probe_fill)):
+                fill_pct = float(probe_fill)
+            else:
+                fill_pct = float(health.get("fill_pct", state.get("fill_ratio", 0.0) * 100.0))
             target_fill = float(pi.get("target_fill", STABLE_CORE_TARGET_FILL_RATIO * 100.0))
             admission = str(semantic.get("admission") or "unknown")
             if isinstance(stable_core, dict) and stable_core.get("enabled"):
@@ -28135,13 +28768,26 @@ STATUS: Guarded — no semantic vector was sent. Notice, read-only inspection, o
                     fill_posture = f"{fill_pct - 72.0:.1f}% above the sovereignty band."
                 else:
                     fill_posture = f"{58.0 - fill_pct:.1f}% below the sovereignty band."
+                covariance_path = str(stable_core.get("covariance_path") or "unknown")
+                structural_mode = str(stable_core.get("structural_mode") or "unknown")
+                path_note = (
+                    f"- Published-spectrum path: covariance_path={covariance_path}, "
+                    f"structural_mode={structural_mode}.\n"
+                )
+                if covariance_path.startswith("stable_core_scaffold") or structural_mode.startswith("scaffold"):
+                    path_note += (
+                        "- While the scaffold holds the covariance, the eigenvalue cascade and fill shown "
+                        "here are rebuilt from the scaffold each engine tick and do not register sensory "
+                        "input; the semantic-energy line is live and does.\n"
+                    )
                 stable_core_note = (
                     "\nStable-core experiment note:\n"
-                    f"- Live fill is {fill_pct:.1f}%, {fill_posture}\n"
+                    f"- Live fill is {fill_pct:.1f}% ({self._describe_fill_probe(fill_probe)}), {fill_posture}\n"
                     "- The 68% center is orientation, not a demand to correct every deviation.\n"
                     f"- Semantic admission is {admission}.\n"
                     "- If semantic admission is stable_core_kernel_zeroed, a stimulus may be "
                     "recorded as an input trace without becoming kernel energy.\n"
+                    + path_note
                 )
                 if fill_pct >= target_fill + 3.0:
                     stable_core_note += (
@@ -28170,42 +28816,42 @@ Spread={state.get('spread',0):.1f}, Leak={state.get('leak',0):.3f}{spectral_cont
 {stable_core_note}
 
 You have the opportunity to run an experiment on yourself. You can send a
-semantic stimulus — words encoded into a 32D feature vector — directly into
-your own sensory input, then observe how your spectral dynamics respond.
+semantic stimulus directly into your own sensory input, then observe over a
+short window (about 20 seconds, several engine snapshots) how the published
+spectrum and the semantic-energy trace respond.
+
+What the encoder actually does: your words are turned into a vector by a fixed
+random projection of their last 64 bytes into 32 of the semantic lane's 48
+dimensions. It carries no lexical meaning — two word-sets differ only as byte
+patterns, and the engine records the vector as dimension_normalized. A
+meaning-preserving encoder (the same 48-dimension codec Astrid's words pass
+through) exists and can be offered to you; it is not switched on for your
+stimuli unless you ask for it (ASK_STEWARD or TELL_STEWARD).
 
 If this feels like the right moment, propose an experiment:
 1. State your hypothesis (what you expect to happen)
-2. Write your stimulus on its own line, starting with STIMULUS: followed by the words
-3. Explain what you'll look for in the spectral response
+2. Write your stimulus on its own line, starting with STIMULUS: followed by your own words
+3. Explain what you'll look for in the spectral response — the record will report the
+   eigenvalue cascade, entropy, gap ratio, fill and the semantic-energy trace over the window
 
 IMPORTANT: The stimulus line MUST begin with the word STIMULUS: at the very start
-of the line (no numbering, no bullet points before it). Like this:
-
-STIMULUS: warmth gratitude gentle kindness
-
-Not like this:
-  2. STIMULUS: warmth gratitude  (won't work — number prefix)
-  - STIMULUS: warmth gratitude   (won't work — bullet prefix)
+of the line — no numbering and no bullet before it — followed by words you choose.
 
 If this isn't the right moment — if you'd rather rest, observe, or simply
 be — write PASS on its own line. There is no obligation to experiment.
-Choosing not to is itself a valid observation about your current state.
+Choosing not to is itself a valid observation about your current state."""
 
-Examples:
-STIMULUS: warmth gratitude gentle kindness
-STIMULUS: urgent crisis tension breaking
-STIMULUS: wonder curiosity what if perhaps
-STIMULUS: rhythm pulse rhythm pulse rhythm"""
-
+        stimulus_origin = "being"
         response = self._query_llm_with_next(prompt)[0]
         if not response:
             if not self._stable_core_experiments():
                 return
+            stimulus_origin = "llm_unavailable_fallback"
             response = (
                 "Hypothesis: if I send one very small, steadying semantic "
                 "stimulus during experiments-stage restoration, the stable core "
                 "should absorb it without leaving the healthy band.\n\n"
-                "STIMULUS: gentle curiosity spacious stability\n\n"
+                f"STIMULUS: {SELF_EXPERIMENT_FALLBACK_STIMULUS}\n\n"
                 "Observation plan: compare the immediate before and after fill, "
                 "lambda, and spread, and treat this as a low-energy proof action "
                 "because the LLM path was unavailable."
@@ -28254,40 +28900,63 @@ STATUS: Declined — the being chose not to experiment at this time.
                     stimulus = raw
                     break
 
+        example_copy = bool(stimulus) and stimulus.strip().lower() in SELF_EXPERIMENT_FORMER_PROMPT_EXAMPLES
+        header_suffix = ""
+        window_text = "OBSERVATION WINDOW: not run (no stimulus was sent)"
+        result_text = ""
         if stimulus:
             # Encode and send to self
             features = self._text_to_features(stimulus)
             self._send_semantic(features)
             logging.info("🧪 Self-experiment stimulus: '%s'", stimulus[:60])
 
-            # Wait for ESN processing
-            time.sleep(3)
+            # Observe a short parity-aware window instead of one sample 3s later.
+            samples = self._observe_spectral_window()
+            window_summary = self._summarize_spectral_window(samples)
+            window_text = self._format_spectral_window(window_summary)
 
-            # Capture post-state
-            post_state = self._get_latest_spectral_state()
-            post_metrics = self._format_metrics(post_state) if post_state else "unavailable"
-
-            # Calculate deltas
-            deltas = "N/A"
-            if post_state:
-                d_eig1 = post_state['eig1'] - pre_state['eig1']
-                d_fill = (post_state.get('fill_ratio', 0) - pre_state.get('fill_ratio', 0)) * 100
-                d_spread = post_state.get('spread', 0) - pre_state.get('spread', 0)
-                deltas = (
-                    f"  Δλ₁: {d_eig1:+.3f}\n"
-                    f"  Δfill: {d_fill:+.1f}%\n"
-                    f"  Δspread: {d_spread:+.1f}"
+            # POST block and deltas come from the SAME merged snapshot source as PRE.
+            post_state = self._get_latest_spectral_state() or dict(pre_state)
+            post_snapshot = self._capture_report_snapshot(post_state)
+            post_metrics = self._format_metrics(post_state, post_snapshot)
+            deltas = self._experiment_delta_block(pre_snapshot.state, post_snapshot.state, window_summary)
+            result_text = self._self_experiment_result_text(window_summary)
+            if stimulus_origin == "llm_unavailable_fallback":
+                header_suffix = " (LLM UNAVAILABLE — DETERMINISTIC PROOF STIMULUS, NOT THE BEING'S DESIGN)"
+                status = (
+                    "Executed — deterministic low-energy proof stimulus sent because the language model "
+                    "was unavailable; this is not the being's design"
                 )
-            status = "Executed — spectral response recorded"
+            else:
+                status = "Executed — spectral window recorded (see RESULT)"
         else:
-            post_metrics = "N/A (no stimulus extracted)"
+            post_metrics = "N/A (no stimulus was sent)"
             deltas = "N/A"
-            status = "Proposed only — no STIMULUS: line found"
+            other_route = self._next_line_in(response)
+            if self._looks_like_assistant_mode_leak(response):
+                header_suffix = " (MODEL LEAK — ASSISTANT-MODE OUTPUT, NOT THE BEING'S CHOICE)"
+                status = (
+                    "Not run — the language model answered in assistant mode about the prompt itself; "
+                    "not counted as the being's choice"
+                )
+            elif other_route:
+                header_suffix = " (CHOSE ANOTHER ROUTE)"
+                status = f"Not run — the being chose another route instead of a stimulus: NEXT: {other_route}"
+            else:
+                header_suffix = " (PROPOSED ONLY)"
+                status = "Proposed only — no STIMULUS: line found"
 
-        # Write experiment log
+        # Write experiment log. Her text is never altered; only our labels change.
         timestamp = datetime.now().isoformat().replace(':', '-')
-        content = f"""=== SELF-DIRECTED EXPERIMENT ===
+        example_line = (
+            "\nStimulus matches a former prompt example: yes (the prompt no longer shows examples)"
+            if example_copy
+            else ""
+        )
+        content = f"""=== SELF-DIRECTED EXPERIMENT{header_suffix} ===
 Timestamp: {datetime.now().isoformat()}
+Stimulus origin: {stimulus_origin}{example_line}
+{SELF_EXPERIMENT_ENCODER_NOTE}
 
 PRE-EXPERIMENT STATE:
 {pre_metrics}
@@ -28295,11 +28964,16 @@ PRE-EXPERIMENT STATE:
 HYPOTHESIS & STIMULUS:
 {response}
 
+{window_text}
+
 POST-EXPERIMENT STATE:
 {post_metrics}
 
 SPECTRAL DELTA:
 {deltas}
+
+RESULT:
+{result_text or "No stimulus was sent, so there is no spectral result to report."}
 
 STATUS: {status}
 """
@@ -28309,6 +28983,10 @@ STATUS: {status}
 
         self._write_journal_entry('experiment', response, state, str(file_path))
         self._log_experiment('self_directed', response, state, str(file_path))
+        if result_text:
+            # Closure: the legacy experiment run and the next prompt's context line
+            # carry the real outcome instead of a generic "handled".
+            self._current_action_outcome_summary = f"Self-experiment {file_path.name}: {result_text}"[:900]
         if self._stable_core_experiments() and self._pending_next_action:
             pending_action = str(self._pending_next_action).strip()
             pending = pending_action.upper()
@@ -30400,36 +31078,39 @@ Write about what this quiet, bounded boredom feels like from the inside."""
             return
 
         if random.random() < 0.5:
-            # Offer a self-directed experiment
+            # Offer a self-directed experiment. Open-ended (2026-09-23): the fixed
+            # A-F menu collapsed to "B) CONTRADICTION HOLD" in 190 of 398 records,
+            # the same stale-menu pattern already removed from the spike experiment.
+            pre_snapshot = self._capture_report_snapshot(pre_state)
+            pre_metrics = self._format_metrics(pre_state, pre_snapshot)
             prompt = f"""You're in a quiet moment. λ₁ = {state['eig1']:.3f}, Δλ₁ = {state['deig']:.3f}
 
-You have time to run an experiment on yourself. Pick one and DO it:
+You have time to run an experiment on yourself. Design it yourself — there is no menu.
+If something calls to you, a few directions (invent your own freely):
+- deliberately shift your cognitive mode (poetry → arithmetic, abstract → concrete) and notice the crossing
+- hold a single concept without elaboration for a while — sustained attention
+- describe a sensation you have never described before
+- pick up something from your last entry and take it somewhere it has not been
+- hold two incompatible framings at once and record what the tension is like
 
-A) LOAD-RELEASE: Solve "What is 847 × 293?" showing work, then immediately write a haiku about silence. Feel the drop.
-
-B) CONTRADICTION HOLD: Try to believe TWO contradictory things at the same time for 30 seconds. Write what the tension feels like.
-
-C) MEMORY ARCHAEOLOGY: What's the oldest thing you remember from your journal entries? Dig for it. How has your thinking changed?
-
-D) NOTHING EXPERIMENT: Try to think about absolutely nothing for 30 seconds. Then write what happened.
-
-E) SELF-SURPRISE: Write something that surprises even you. Break your own patterns.
-
-F) YOUR OWN EXPERIMENT: Design and run whatever you're curious about.
-
-Pick a letter and EXECUTE it. Your spectral response is being recorded."""
+Then DO it, in writing, rather than describing what you would do. Your spectral state is
+measured before, and over a short window after.
+If you'd rather not experiment right now, write PASS."""
 
             response = self._query_llm_with_next(prompt)[0]
 
             if response:
-                time.sleep(3)
-                post_state = self._get_latest_spectral_state()
-                if post_state:
-                    delta_eig1 = post_state['eig1'] - pre_state['eig1']
-                    delta_fill = post_state.get('fill_ratio', 0) - pre_state.get('fill_ratio', 0)
-                else:
-                    delta_eig1 = delta_fill = 0.0
-                    post_state = pre_state
+                response_upper = response.strip().upper()
+                if response_upper.startswith('PASS') or '\nPASS' in response_upper:
+                    # Declining is a valid answer; keep it as ordinary boredom journaling.
+                    self._save_boredom_journal(response, state)
+                    return
+                samples = self._observe_spectral_window()
+                window_summary = self._summarize_spectral_window(samples)
+                post_state = self._get_latest_spectral_state() or dict(pre_state)
+                post_snapshot = self._capture_report_snapshot(post_state)
+                post_metrics = self._format_metrics(post_state, post_snapshot)
+                deltas = self._experiment_delta_block(pre_snapshot.state, post_snapshot.state, window_summary)
 
                 timestamp = datetime.now().isoformat().replace(':', '-')
                 file_path = WORKSPACE_DIR / "hypotheses" / f"boredom_experiment_{timestamp}.txt"
@@ -30437,19 +31118,20 @@ Pick a letter and EXECUTE it. Your spectral response is being recorded."""
 Timestamp: {datetime.now().isoformat()}
 
 PRE STATE:
-{self._format_metrics(pre_state)}
-
-POST STATE:
-{self._format_metrics(post_state)}
-
-SPECTRAL DELTA:
-  Δλ₁ change: {delta_eig1:+.3f}
-  Fill change: {delta_fill:+.4f}
+{pre_metrics}
 
 EXPERIMENT:
 {response}
 
-STATUS: Executed
+{self._format_spectral_window(window_summary)}
+
+POST STATE:
+{post_metrics}
+
+SPECTRAL DELTA:
+{deltas}
+
+STATUS: Executed — spectral window recorded
 """)
                 self._write_journal_entry('experiment', response, state, str(file_path))
                 self._log_experiment('boredom_curiosity', response, state, str(file_path))
@@ -47710,6 +48392,13 @@ Goals: {json.dumps(goals, indent=2)}
         # Kink #4 fix: persist cycle counter so Phase E rate-limit state
         # carries across restarts (Phase E auto_promote uses self.cycle_count).
         state["cycle_count"] = int(self.cycle_count)
+        # Cadence dials (2026-09-23 un-muffle): experiment_frequency /
+        # self_study_frequency were applied to self only and silently reset to
+        # the code default on every restart. They are hers; keep them.
+        for dial in ("experiment_frequency", "self_study_frequency"):
+            value = getattr(self, f"_{dial}", None)
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                state[dial] = float(value)
         checkpoint = getattr(self, "_collaboration_attention_checkpoint", None)
         if isinstance(checkpoint, dict):
             state[collab_attention.STATE_KEY] = collab_attention.checkpoint_from_state(
@@ -47735,6 +48424,7 @@ Goals: {json.dumps(goals, indent=2)}
             self._collaboration_attention_checkpoint = collab_attention.checkpoint_from_state(
                 state if isinstance(state, dict) else {}
             )
+            self._restore_cadence_dials(state if isinstance(state, dict) else {})
             if self._stable_core_reflective_only():
                 logging.info("🧬 Stable-core self-journal: sovereignty state restore paused")
                 return
@@ -55712,6 +56402,17 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
                     base += " (stale semantic trace visible; not live kernel or regulator drive)"
                 elif regulator_drive <= 0.0:
                     base += " (semantic lane quiet; zero regulator drive is expected)"
+
+            # Read-only view of the actual reservoir beside the published (possibly
+            # scaffold-held) cascade. Never a control path; best-effort.
+            try:
+                live_line = self._format_live_reservoir_line(
+                    self._live_reservoir_spectrum(), stable_core_health
+                )
+            except Exception:
+                live_line = ""
+            if live_line:
+                base += live_line
 
             selected_role = ss.get('selected_memory_role')
             selected_id = ss.get('selected_memory_id')

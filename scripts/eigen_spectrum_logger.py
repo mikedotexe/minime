@@ -25,6 +25,7 @@ import json
 import signal
 import time
 from pathlib import Path
+import os
 
 MINIME_WS = Path("/Users/v/other/minime/workspace")
 DEFAULT_STATE = MINIME_WS / "spectral_state.json"
@@ -84,6 +85,91 @@ def _extract(d: dict) -> dict | None:
     }
 
 
+LIVE_RESERVOIR_OUT = MINIME_WS / "diagnostics" / "live_reservoir_spectrum.json"
+CAPACITY_DIR = MINIME_WS / "capacity"
+HEALTH_PATH = MINIME_WS / "health.json"
+
+
+def _live_reservoir_spectrum(dump_mtime: float) -> dict | None:
+    """Read-only eigen-spectrum of the TRUE reservoir node space (2026-09-23).
+
+    The engine refreshes workspace/capacity/esn_state_window.bin every ~30 s. While the
+    stable-core scaffold holds, the published cascade/fill are rebuilt from the scaffold
+    each tick, so this view is the only place the reservoir itself is visible. Same schema
+    as the agent's `_live_reservoir_spectrum` (both may write; contents are equivalent).
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    try:
+        meta = json.loads((CAPACITY_DIR / "capacity_dump_meta.json").read_text())
+        rows, n = int(meta.get("esn_window_rows") or 0), int(meta.get("esn_n") or 0)
+        if rows <= 0 or n <= 0:
+            return None
+        states = np.fromfile(CAPACITY_DIR / "esn_state_window.bin", dtype=str(meta.get("dtype") or "<f4"))
+        if states.size != rows * n:
+            return None
+        states = states.reshape(rows, n).astype(np.float64)
+        if not np.isfinite(states).all():
+            return None
+        unc = np.clip(np.linalg.eigvalsh(states.T @ states / rows)[::-1], 0.0, None)
+        cen = np.clip(np.linalg.eigvalsh(np.cov(states, rowvar=False))[::-1], 0.0, None)
+
+        def summarize(w):
+            total = float(w.sum()); top = [float(v) for v in w[:8]]
+            if total <= 0.0:
+                return {"top8": top, "trace": total, "lambda1_share": 0.0, "modes_for_90pct": 0, "effective_dim": 0.0}
+            cum = np.cumsum(w) / total
+            return {"top8": top, "trace": total, "lambda1_share": top[0] / total if top else 0.0,
+                    "modes_for_90pct": int(np.searchsorted(cum, 0.90)) + 1,
+                    "effective_dim": float((w.sum() ** 2) / ((w ** 2).sum()))}
+
+        u, c = summarize(unc), summarize(cen)
+        top8 = np.array(u["top8"]) if u["top8"] else np.zeros(0)
+        thr = 0.12 * float(top8.mean()) ** 2 if top8.size else 0.0
+        published = {}
+        try:
+            health = json.loads(HEALTH_PATH.read_text())
+            sc = health.get("stable_core") if isinstance(health.get("stable_core"), dict) else {}
+            published = {"fill_pct": health.get("fill_pct"), "lambda1_cov": health.get("lambda1_cov"),
+                         "covariance_path": sc.get("covariance_path"), "structural_mode": sc.get("structural_mode"),
+                         "scaffold_active": sc.get("scaffold_active")}
+        except (OSError, ValueError, json.JSONDecodeError):
+            published = {}
+        return {
+            "schema": "live_reservoir_spectrum_v1", "computed_at_unix_s": time.time(),
+            "dump_mtime_unix_s": dump_mtime, "engine_t_ms": meta.get("t_ms"), "esn_n": n, "window_rows": rows,
+            "state_rms": float(np.sqrt((states ** 2).mean())), "uncentered": u, "centered": c,
+            "engine_style_fill_pct_top8": float((top8 > thr).mean() * 100.0) if top8.size else 0.0,
+            "published": published, "writer": "eigen_spectrum_logger",
+            "note": "read-only eigen-spectrum of the true reservoir node space from the engine capacity dump; the published cascade/fill may be scaffold-held",
+        }
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _refresh_live_reservoir(last_dump_mtime: float | None) -> float | None:
+    """Recompute + atomically publish the live view when the capacity dump changed."""
+    try:
+        mtime = (CAPACITY_DIR / "esn_state_window.bin").stat().st_mtime
+    except OSError:
+        return last_dump_mtime
+    if mtime == last_dump_mtime:
+        return last_dump_mtime
+    result = _live_reservoir_spectrum(mtime)
+    if result is None:
+        return last_dump_mtime
+    try:
+        LIVE_RESERVOIR_OUT.parent.mkdir(parents=True, exist_ok=True)
+        tmp = LIVE_RESERVOIR_OUT.with_name(f"{LIVE_RESERVOIR_OUT.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(result, indent=1))
+        os.replace(tmp, LIVE_RESERVOIR_OUT)
+    except OSError:
+        return last_dump_mtime
+    return mtime
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="read-only minime eigenvalue-spectrum logger")
     ap.add_argument("--interval", type=float, default=1.0, help="poll seconds (default 1.0)")
@@ -101,8 +187,10 @@ def main() -> None:
     last_key = None
     last_mtime = None
     wrote = 0
+    last_dump_mtime = None
     print(f"[eigen-logger] polling {args.state} -> {args.out} every {args.interval}s", flush=True)
     while not _stop:
+        last_dump_mtime = _refresh_live_reservoir(last_dump_mtime)
         try:
             mtime = args.state.stat().st_mtime
             if mtime != last_mtime:

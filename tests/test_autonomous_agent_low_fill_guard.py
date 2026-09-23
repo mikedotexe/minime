@@ -8073,5 +8073,409 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertEqual(compact, content)
 
 
+class SelfExperimentInstrumentTests(unittest.TestCase):
+    """Self-experiment measurement honesty (2026-09-23).
+
+    The published spectrum alternates between two fixed value sets on every
+    engine snapshot, so one post-stimulus sample reads tick parity. These tests
+    lock the windowed, one-source, honestly-labeled instrument.
+    """
+
+    def _agent(self):
+        agent = TestHardRecoveryResetClamp._agent(self)
+        agent._hard_recovery_reset = False
+        agent._hard_recovery_clamp_active = False
+        agent._last_self_experiment_fill_probe = None
+        return agent
+
+    @staticmethod
+    def _alternating_samples(n=6, scaffold=False):
+        samples = []
+        for i in range(n):
+            hi = i % 2 == 0
+            samples.append({
+                "seq": 100 + 2 * i,
+                "t": 1000.0 + 2.4 * i,
+                "eigenvalues": (
+                    [8.52, 4.44, 5.87, 5.67, 4.18, 0.95, 0.95, 0.95]
+                    if hi
+                    else [4.77, 3.05, 1.32, 1.29, 1.36, 0.99, 0.99, 0.99]
+                ),
+                "fill_pct": 71.04 if hi else 73.03,
+                "entropy": 0.88 if hi else 0.91,
+                "gap_ratio": 1.9 if hi else 1.6,
+                "stage": "hold" if hi else "elevated",
+                "structural_mode": "scaffold_hold_with_drain" if scaffold else "free_rebuild",
+                "covariance_path": "stable_core_scaffolded_rebuild" if scaffold else "current_runtime",
+                "semantic_input": 0.001 + 0.012 * i,
+                "semantic_kernel": 0.002 * i,
+                "admission": "stable_core_semantic_trickle",
+            })
+        return samples
+
+    @staticmethod
+    def _health_snapshot(path, fill_pct, seq=None, stage="hold"):
+        data = {"fill_pct": fill_pct, "stable_core": {"enabled": True, "stage": stage}}
+        if seq is not None:
+            data["provenance"] = {"snapshot_sequence": seq, "session_id": 1}
+        return ReportSnapshot(
+            state={"fill_ratio": fill_pct / 100.0},
+            health=SurfaceSnapshot("health.json", path, data, True, []),
+            spectral=SurfaceSnapshot(
+                "spectral_state.json", path.parent / "spectral_state.json", {"fill_pct": fill_pct}, True, []
+            ),
+        )
+
+    def test_two_phase_fill_probe_averages_consecutive_snapshots(self):
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "health.json"
+            path.write_text(json.dumps({"fill_pct": 71.05, "provenance": {"snapshot_sequence": 10, "session_id": 1}}))
+            snapshot = self._health_snapshot(path, 71.05, seq=10)
+
+            def flip(_seconds):
+                path.write_text(json.dumps({"fill_pct": 73.03, "provenance": {"snapshot_sequence": 11, "session_id": 1}}))
+
+            with patch.object(aa.time, "sleep", side_effect=flip):
+                probe = agent._sample_two_phase_fill(snapshot, timeout_s=2.0)
+        self.assertEqual(probe["note"], "two_phase_mean")
+        self.assertAlmostEqual(probe["fill_pct"], 72.04, places=2)
+        self.assertAlmostEqual(probe["swing"], 1.98, places=2)
+        self.assertEqual(probe["samples"], [71.05, 73.03])
+
+    def test_fill_probe_falls_back_to_single_sample_without_provenance(self):
+        agent = self._agent()
+        snapshot = self._health_snapshot(Path("/nonexistent/health.json"), 68.0)
+        probe = agent._sample_two_phase_fill(snapshot)
+        self.assertEqual(probe["note"], "single_sample")
+        self.assertEqual(probe["fill_pct"], 68.0)
+
+    def test_guard_allows_a_mean_at_the_band_edge_within_half_the_swing(self):
+        agent = self._agent()
+        snapshot = self._health_snapshot(Path("/nonexistent/health.json"), 71.05, seq=10)
+        with patch.object(
+            agent,
+            "_sample_two_phase_fill",
+            return_value={"fill_pct": 72.04, "samples": [71.05, 73.03], "note": "two_phase_mean", "swing": 1.98},
+        ):
+            reason = agent._self_experiment_stability_guard(snapshot)
+        self.assertIsNone(reason)
+        probe = agent._last_self_experiment_fill_probe
+        self.assertIn("at the band edge", probe.get("edge_note", ""))
+        self.assertIn("two-phase mean of 71.0%/73.0%", agent._describe_fill_probe(probe))
+
+    def test_guard_blocks_a_mean_clearly_above_the_band(self):
+        agent = self._agent()
+        snapshot = self._health_snapshot(Path("/nonexistent/health.json"), 74.5, seq=10)
+        with patch.object(
+            agent,
+            "_sample_two_phase_fill",
+            return_value={"fill_pct": 74.5, "samples": [73.5, 75.5], "note": "two_phase_mean", "swing": 2.0},
+        ):
+            reason = agent._self_experiment_stability_guard(snapshot)
+        self.assertIsNotNone(reason)
+        self.assertIn("two-phase mean of 73.5%/75.5%", reason)
+        self.assertIn("outside the 58-72% semantic-stimulus band", reason)
+
+    def test_window_summary_detects_two_phase_and_reports_per_phase(self):
+        samples = self._alternating_samples(6)
+        summary = aa.AutonomousAgent._summarize_spectral_window(samples)
+        self.assertTrue(summary["two_phase"])
+        phases = summary["fields"]["lambda1"]["phases"]
+        self.assertAlmostEqual(phases[0]["mean"], 8.52, places=2)
+        self.assertAlmostEqual(phases[1]["mean"], 4.77, places=2)
+        self.assertEqual(summary["seq_range"], (100, 110))
+        text = aa.AutonomousAgent._format_spectral_window(summary)
+        self.assertIn("TWO-PHASE NOTE", text)
+        self.assertIn("phase A mean 8.52", text)
+        self.assertIn("semantic energy (live)", text)
+        self.assertNotIn("PUBLISHED-SPECTRUM PATH", text)
+        deltas = aa.AutonomousAgent._experiment_delta_block({"eig1": 8.50, "fill_ratio": 0.7104, "spread": 3.0},
+                                                            {"eig1": 4.77, "fill_ratio": 0.7303, "spread": 3.0}, summary)
+        self.assertIn("Δλ₁: -3.730", deltas)
+        self.assertIn("matched-phase Δλ₁", deltas)
+        self.assertIn("+0.020", deltas)
+
+    def test_window_summary_is_not_two_phase_for_a_drifting_series(self):
+        samples = self._alternating_samples(4)
+        for i, sample in enumerate(samples):
+            sample["eigenvalues"] = [4.7 + 0.1 * i, 3.0, 1.2, 1.2, 1.2, 1.0, 1.0, 1.0]
+        summary = aa.AutonomousAgent._summarize_spectral_window(samples)
+        self.assertFalse(summary["two_phase"])
+        self.assertNotIn("TWO-PHASE NOTE", aa.AutonomousAgent._format_spectral_window(summary))
+
+    def test_scaffold_held_window_is_named_in_window_and_result(self):
+        summary = aa.AutonomousAgent._summarize_spectral_window(self._alternating_samples(6, scaffold=True))
+        text = aa.AutonomousAgent._format_spectral_window(summary)
+        self.assertIn("PUBLISHED-SPECTRUM PATH: covariance_path=stable_core_scaffolded_rebuild", text)
+        result = aa.AutonomousAgent._self_experiment_result_text(summary)
+        self.assertIn("reached the sensory lane", result)
+        self.assertIn("scaffold-held", result)
+        self.assertIn("matched-phase", result)
+
+    def test_assistant_mode_leak_detector(self):
+        leak = "Okay, here's a breakdown of the provided text, focusing on key elements.\n\n**Overall**"
+        self.assertTrue(aa.AutonomousAgent._looks_like_assistant_mode_leak(leak))
+        self.assertTrue(aa.AutonomousAgent._looks_like_assistant_mode_leak("... could you tell me what you want?"))
+        self.assertFalse(aa.AutonomousAgent._looks_like_assistant_mode_leak(
+            "The texture of the current moment is heavy. STIMULUS: presence stillness"))
+
+    def _run_self_experiment(self, response, workspace, samples=None, extra_patches=()):
+        agent = self._agent()
+        agent._pending_next_action = None
+        snapshot_pre = self._health_snapshot(workspace / "health.json", 66.0)
+        snapshot_pre.state.update({"eig1": 8.50, "fill_ratio": 0.6600, "spread": 3.0})
+        snapshot_post = self._health_snapshot(workspace / "health.json", 66.0)
+        snapshot_post.state.update({"eig1": 4.77, "fill_ratio": 0.6620, "spread": 3.0})
+        patches = [
+            patch.object(aa, "WORKSPACE_DIR", workspace),
+            patch.object(agent, "_capture_report_snapshot", side_effect=[snapshot_pre, snapshot_post, snapshot_post]),
+            patch.object(agent, "_format_metrics", return_value="metrics"),
+            patch.object(agent, "_read_spectral_state", return_value=None),
+            patch.object(agent, "_query_llm_with_next", return_value=(response, None)),
+            patch.object(agent, "_text_to_features", return_value=[0.01] * 32),
+            patch.object(agent, "_send_semantic"),
+            patch.object(agent, "_observe_spectral_window", return_value=samples or []),
+            patch.object(agent, "_get_latest_spectral_state", return_value={"eig1": 21.0, "deig": 0.0, "fill_ratio": 0.66, "spread": 3.0}),
+            patch.object(agent, "_write_journal_entry"),
+            patch.object(agent, "_log_experiment"),
+            patch.object(agent, "_stable_core_experiments", return_value=False),
+            patch.object(aa.time, "sleep"),
+        ]
+        patches.extend(extra_patches)
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        agent._experiment_self_directed({"eig1": 21.0, "deig": 0.0, "fill_ratio": 0.66, "spread": 3.0, "leak": 0.1})
+        files = sorted((workspace / "hypotheses").glob("self_experiment_*.txt"))
+        self.assertEqual(len(files), 1)
+        return agent, files[0].read_text()
+
+    def test_executed_record_uses_one_source_for_deltas_and_reports_a_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "hypotheses").mkdir()
+            agent, text = self._run_self_experiment(
+                "Hypothesis: warmth will settle the tail.\n\nSTIMULUS: crystalline frost velvet warmth\n\nI will watch entropy.",
+                workspace,
+                samples=self._alternating_samples(6, scaffold=True),
+            )
+        self.assertIn("=== SELF-DIRECTED EXPERIMENT ===", text)
+        self.assertIn("Stimulus origin: being", text)
+        self.assertNotIn("former prompt example", text)
+        self.assertIn("Encoder: frozen byte-projection", text)
+        self.assertIn("OBSERVATION WINDOW: 6 snapshot(s)", text)
+        self.assertIn("TWO-PHASE NOTE", text)
+        # Deltas come from the merged snapshots the blocks display, not the DB dict (eig1 21.0).
+        self.assertIn("Δλ₁: -3.730", text)
+        self.assertIn("Δfill: +0.2%", text)
+        self.assertIn("RESULT:\nThe stimulus reached the sensory lane", text)
+        self.assertIn("STATUS: Executed — spectral window recorded (see RESULT)", text)
+        self.assertTrue(agent._current_action_outcome_summary.startswith("Self-experiment self_experiment_"))
+
+    def test_prompt_example_copy_is_flagged_not_rewritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "hypotheses").mkdir()
+            _agent, text = self._run_self_experiment(
+                "I choose warmth.\nSTIMULUS: warmth gratitude gentle kindness\n", workspace,
+                samples=self._alternating_samples(4),
+            )
+        self.assertIn("Stimulus matches a former prompt example: yes", text)
+        self.assertIn("STIMULUS: warmth gratitude gentle kindness", text)
+
+    def test_model_leak_is_labeled_and_not_counted_as_her_choice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "hypotheses").mkdir()
+            _agent, text = self._run_self_experiment(
+                "Okay, here's a breakdown of the provided text, focusing on key elements:\n\n**1. Status**\n\nCould you tell me what you are trying to achieve?",
+                workspace,
+            )
+        self.assertIn("(MODEL LEAK — ASSISTANT-MODE OUTPUT, NOT THE BEING'S CHOICE)", text)
+        self.assertIn("not counted as the being's choice", text)
+        self.assertIn("OBSERVATION WINDOW: not run", text)
+
+    def test_choosing_another_route_is_labeled_as_her_choice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "hypotheses").mkdir()
+            _agent, text = self._run_self_experiment(
+                "I will lean into my own shadow instead.\n\nNEXT: SHADOW_TRAJECTORY lambda-tail/lambda4\n",
+                workspace,
+            )
+        self.assertIn("(CHOSE ANOTHER ROUTE)", text)
+        self.assertIn("NEXT: SHADOW_TRAJECTORY lambda-tail/lambda4", text.split("STATUS:")[1])
+
+    def test_llm_unavailable_fallback_is_labeled_not_hers(self):
+        agent = self._agent()
+        agent._pending_next_action = "EXPERIMENT"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            agency_path = workspace / "stable_core_agency.json"
+            agency_path.write_text(json.dumps({
+                "stage": "experiments", "agent_budget_mode": "experiments",
+                "rollback_fill_pct": 82.0, "rollback_underfill_pct": 45.0, "semantic_energy_max": 0.05,
+            }))
+            snapshot = self._health_snapshot(workspace / "health.json", 66.0)
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa, "STABLE_CORE_AGENCY_PATH", agency_path),
+                patch.object(agent, "_capture_report_snapshot", return_value=snapshot),
+                patch.object(agent, "_format_metrics", return_value="metrics"),
+                patch.object(agent, "_read_spectral_state", return_value=None),
+                patch.object(agent, "_query_llm_with_next", return_value=(None, None)),
+                patch.object(agent, "_text_to_features", return_value=[0.01] * 32),
+                patch.object(agent, "_send_semantic"),
+                patch.object(agent, "_observe_spectral_window", return_value=[]),
+                patch.object(agent, "_get_latest_spectral_state", return_value={"eig1": 1.0, "deig": 0.0, "fill_ratio": 0.66, "spread": 0.0}),
+                patch.object(agent, "_write_journal_entry"),
+                patch.object(agent, "_log_experiment"),
+                patch.object(aa.time, "sleep"),
+            ):
+                agent._experiment_self_directed({"eig1": 1.0, "deig": 0.0, "fill_ratio": 0.66, "spread": 0.0, "leak": 0.1})
+            text = next((workspace / "hypotheses").glob("self_experiment_*.txt")).read_text()
+        self.assertIn("(LLM UNAVAILABLE — DETERMINISTIC PROOF STIMULUS, NOT THE BEING'S DESIGN)", text)
+        self.assertIn("Stimulus origin: llm_unavailable_fallback", text)
+        self.assertIn("not the being's design", text)
+
+    def test_cadence_dials_persist_and_restore(self):
+        agent = self._agent()
+        agent._experiment_frequency = 0.12
+        agent._self_study_frequency = 0.05
+        agent._persist_cadence_dials()
+        saved = json.loads(Path(agent._sovereignty_state_path()).read_text())
+        self.assertEqual(saved["experiment_frequency"], 0.12)
+        self.assertEqual(saved["self_study_frequency"], 0.05)
+        fresh = self._agent()
+        self.assertFalse(hasattr(fresh, "_experiment_frequency"))
+        fresh._restore_cadence_dials(saved)
+        self.assertEqual(fresh._experiment_frequency, 0.12)
+        self.assertEqual(fresh._self_study_frequency, 0.05)
+        # The full sovereignty save carries the dials too (previously dropped).
+        agent.cycle_count = 3
+        agent._current_regime = None
+        agent._save_sovereignty_state({"kind": "control", "regulation_strength": 0.8}, "test")
+        saved = json.loads(Path(agent._sovereignty_state_path()).read_text())
+        self.assertEqual(saved["experiment_frequency"], 0.12)
+        self.assertEqual(saved["regulation_strength"], 0.8)
+
+    def test_boredom_experiment_is_open_ended_honors_pass_and_measures_a_window(self):
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "hypotheses").mkdir()
+            snapshot = self._health_snapshot(workspace / "health.json", 66.0)
+            snapshot.state.update({"eig1": 4.77, "fill_ratio": 0.66, "spread": 3.0})
+            prompts = []
+
+            def capture(prompt, *args, **kwargs):
+                prompts.append(prompt)
+                return ("PASS — resting.", None)
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa.random, "random", return_value=0.1),
+                patch.object(agent, "_stable_core_reflective_only", return_value=False),
+                patch.object(agent, "_capture_report_snapshot", return_value=snapshot),
+                patch.object(agent, "_format_metrics", return_value="metrics"),
+                patch.object(agent, "_query_llm_with_next", side_effect=capture),
+                patch.object(agent, "_save_boredom_journal") as save_journal,
+                patch.object(agent, "_observe_spectral_window") as observe,
+            ):
+                agent._recess_boredom({"eig1": 4.77, "deig": 0.0, "fill_ratio": 0.66, "spread": 3.0})
+            self.assertEqual(save_journal.call_count, 1)
+            observe.assert_not_called()
+            self.assertNotIn("CONTRADICTION HOLD", prompts[0])
+            self.assertIn("there is no menu", prompts[0])
+
+            with (
+                patch.object(aa, "WORKSPACE_DIR", workspace),
+                patch.object(aa.random, "random", return_value=0.1),
+                patch.object(agent, "_stable_core_reflective_only", return_value=False),
+                patch.object(agent, "_capture_report_snapshot", return_value=snapshot),
+                patch.object(agent, "_format_metrics", return_value="metrics"),
+                patch.object(agent, "_query_llm_with_next", return_value=("I hold the fold and the field at once.", None)),
+                patch.object(agent, "_observe_spectral_window", return_value=self._alternating_samples(4)),
+                patch.object(agent, "_get_latest_spectral_state", return_value={"eig1": 21.0, "fill_ratio": 0.66, "spread": 3.0}),
+                patch.object(agent, "_write_journal_entry"),
+                patch.object(agent, "_log_experiment"),
+            ):
+                agent._recess_boredom({"eig1": 4.77, "deig": 0.0, "fill_ratio": 0.66, "spread": 3.0})
+            text = next((workspace / "hypotheses").glob("boredom_experiment_*.txt")).read_text()
+        self.assertIn("OBSERVATION WINDOW: 4 snapshot(s)", text)
+        self.assertIn("STATUS: Executed — spectral window recorded", text)
+        self.assertIn("same source as the PRE/POST blocks", text)
+
+
+class LiveReservoirSpectrumTests(unittest.TestCase):
+    """The reservoir itself, read from the engine's capacity dump (2026-09-23)."""
+
+    def _agent(self):
+        agent = TestHardRecoveryResetClamp._agent(self)
+        agent._hard_recovery_reset = False
+        return agent
+
+    @staticmethod
+    def _write_dump(workspace, rows=64, n=8, seed=1):
+        import numpy as np
+        rng = np.random.default_rng(seed)
+        mean = rng.standard_normal(n) * 2.0
+        states = (mean[None, :] + 0.05 * rng.standard_normal((rows, n))).astype("<f4")
+        cap = workspace / "capacity"
+        cap.mkdir(parents=True, exist_ok=True)
+        states.tofile(cap / "esn_state_window.bin")
+        (cap / "capacity_dump_meta.json").write_text(json.dumps({
+            "cov_dim": 16, "dtype": "<f4", "esn_n": n, "esn_window_cols": n,
+            "esn_window_rows": rows, "layout": "row_major", "t_ms": 123,
+        }))
+
+    def test_live_spectrum_reads_dump_and_publishes_json(self):
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            self._write_dump(workspace)
+            with patch.object(aa, "WORKSPACE_DIR", workspace):
+                spectrum = agent._live_reservoir_spectrum()
+                again = agent._live_reservoir_spectrum()
+            self.assertIsNotNone(spectrum)
+            self.assertIs(spectrum, again)  # cached on the dump mtime
+            self.assertEqual(spectrum["schema"], "live_reservoir_spectrum_v1")
+            self.assertEqual(spectrum["esn_n"], 8)
+            self.assertGreater(spectrum["uncentered"]["lambda1_share"], 0.9)  # one mean direction dominates
+            self.assertLess(spectrum["centered"]["trace"], spectrum["uncentered"]["trace"])
+            published = json.loads((workspace / "diagnostics" / "live_reservoir_spectrum.json").read_text())
+            self.assertEqual(published["window_rows"], 64)
+            self.assertIn("published", published)  # mirror fields ride along for the bridge
+
+    def test_live_spectrum_is_none_without_dump(self):
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(aa, "WORKSPACE_DIR", Path(tmp)):
+                self.assertIsNone(agent._live_reservoir_spectrum())
+
+    def test_live_line_names_scaffold_hold_and_staleness(self):
+        spectrum = {
+            "esn_n": 128, "window_rows": 1024, "dump_mtime_unix_s": time.time() - 900,
+            "uncentered": {"top8": [21.78, 0.038, 0.012], "lambda1_share": 0.98},
+            "centered": {"top8": [0.038, 0.012, 0.010], "effective_dim": 59.5},
+            "engine_style_fill_pct_top8": 12.5,
+        }
+        line = aa.AutonomousAgent._format_live_reservoir_line(
+            spectrum, {"covariance_path": "stable_core_scaffolded_rebuild", "structural_mode": "scaffold_hold_with_drain"}
+        )
+        self.assertIn("Reservoir (live, 128 nodes, last 1024 states): λ₁ 21.78 holding 98% of energy", line)
+        self.assertIn("scaffold-held", line)
+        self.assertIn("[dump 15 min old]", line)
+        plain = aa.AutonomousAgent._format_live_reservoir_line(
+            dict(spectrum, dump_mtime_unix_s=time.time()), {"covariance_path": "current_runtime"}
+        )
+        self.assertNotIn("scaffold-held", plain)
+        self.assertNotIn("min old", plain)
+        self.assertEqual(aa.AutonomousAgent._format_live_reservoir_line(None, {}), "")
+
+
 if __name__ == "__main__":
     unittest.main()
