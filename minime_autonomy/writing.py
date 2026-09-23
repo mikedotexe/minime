@@ -4,6 +4,32 @@ import logging
 import re
 from pathlib import Path
 
+EXPRESSIVE_CLASSES = {"aspiration", "private_journal", "moment_capture", "private_writing"}
+EXPRESSION_ROOM = (
+    "Up to 8192 output tokens are available. There is room here for a sustained piece, "
+    "several times longer than a usual entry. You may follow a thought through examples, "
+    "complications and changes of direction without compressing it into a conclusion. "
+    "Brief writing or stopping is equally available. For voluntary private continuation, "
+    "WRITE START <topic> begins a draft; WRITE CONTINUE develops the selected draft, "
+    "and WRITE HELP shows the choices. No continuation is scheduled automatically."
+)
+
+
+def completion_metadata(parsed: dict) -> dict:
+    """Bounded provider-reported stopping metadata, never response content."""
+    choices = parsed.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    reason = parsed.get("done_reason", choice.get("finish_reason"))
+    known = {"stop", "length", "eos", "eos_token", "max_tokens", "tool_calls", "content_filter", "load", "unload"}
+    reason = reason if isinstance(reason, str) and reason in known else "other_reported" if isinstance(reason, str) else None
+    usage = parsed.get("usage")
+    count = parsed.get("eval_count", usage.get("completion_tokens") if isinstance(usage, dict) else None)
+    return {
+        "native_finish": reason,
+        "native_done": parsed.get("done") if isinstance(parsed.get("done"), bool) else None,
+        "provider_eval_count": count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else None,
+    }
+
 WRITING_GUIDANCE = (
     "Private writing: NEXT: WRITE START <topic>, WRITE CONTINUE, WRITE REVISE <direction>, "
     'WRITE OBSERVE {"owner":"minime","draft":"dN","present":true,"operation":{"kind":"status"}} for optional private observations on an existing exact draft ID, '

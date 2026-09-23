@@ -101,9 +101,12 @@ def test_decision_routes_saved_syntax_and_sharing_separately(tmp_path):
 
 
 @pytest.mark.parametrize("method,mode", [("_recess_daydream", "daydream"), ("_journal_rest_reflection", "daydream")])
-def test_ordinary_generation_calls_identify_cue_lane(method, mode):
+def test_ordinary_generation_calls_identify_cue_lane(method, mode, tmp_path):
     agent = aa.AutonomousAgent.__new__(aa.AutonomousAgent)
+    snapshot = aa.capture_report_snapshot(state={}, session_id=1, base_dir=tmp_path, workspace_dir=tmp_path)
     with patch.object(agent, "_neutral_checkin", return_value="canvas"), \
+         patch.object(agent, "_capture_report_snapshot", return_value=snapshot), \
+         patch.object(agent, "_last_journal_entry", return_value=""), \
          patch.object(agent, "_journal_continuity_contract_v1", return_value=""), \
          patch.object(agent, "_query_llm_with_next", return_value=(None, None)) as query:
         getattr(agent, method)({})

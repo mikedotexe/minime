@@ -41,7 +41,7 @@ def test_real_ollama_and_mlx_payloads_use_expanded_budget():
         assert post.call_args.kwargs["json"]["max_tokens"] == 4096
         assert agent._query_ollama("journal", "system", 2048, prompt_class="private_journal", journal=True) == "Brief."
         options = post.call_args.kwargs["json"]["options"]
-        assert options["num_predict"] == 4096
-        assert options["num_ctx"] >= 10240
+        assert options["num_predict"] == 8192
+        assert options["num_ctx"] >= 65536
         assert agent._query_ollama("machine", "system", 2048) == "Brief."
         assert post.call_args.kwargs["json"]["options"]["num_predict"] == aa.OLLAMA_NUM_PREDICT_CAP

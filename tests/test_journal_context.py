@@ -319,7 +319,8 @@ def test_private_query_preserves_uncertainty_and_skips_mood_and_contact_hints(ru
     assert system.startswith(PRIVATE_JOURNAL_INTRO)
     assert "Never mention being an AI" not in system
     assert "NEXT: options:" in system
-    assert "TUNE_ASTRID" in system  # Affordance remains; it is not an unsolicited message.
+    assert "CAPABILITY_STATUS <action>" in system  # Detailed actions remain explicitly discoverable.
+    assert "TUNE_ASTRID" not in system  # Peer controls are not an ambient expressive invitation.
     for method in forbidden.values():
         method.assert_not_called()
     messages, _ = aa._adapt_ollama_messages_for_model(
@@ -387,7 +388,11 @@ def test_reflection_routes_leave_measurement_interpretation_open(runtime, monkey
     getattr(agent, route)({"eig1": eig1, "fill_ratio": .68})
     query.assert_called_once()
     prompt = query.call_args.args[0]
-    assert OPEN_OBSERVATION_INVITATION in prompt
+    if route == "_journal_rest_reflection":
+        assert "Choose a subject" in prompt
+        assert "CURRENT STATE:" not in prompt
+    else:
+        assert OPEN_OBSERVATION_INVITATION in prompt
     for phrase in ("You're carrying", "runtime feels understimulated", "breathing room",
                    "properly rested", "what would make you feel more alive", "begin from felt"):
         assert phrase not in prompt
@@ -540,16 +545,18 @@ def test_aspiration_adapter_selects_open_contract_and_preserves_authored_output(
     monkeypatch.setattr(agent, "_journal_continuity_contract_v1", lambda state: "Continuity fixture")
     monkeypatch.setattr(agent, "_last_journal_entry", lambda: "")
     monkeypatch.setattr(agent, "_state_for_live_surfaces", lambda state, **kwargs: dict(state))
-    monkeypatch.setattr(agent, "_format_metrics", lambda state: "Header fixture")
+    monkeypatch.setattr(agent, "_format_metrics", lambda state, **kwargs: "Header fixture")
     monkeypatch.setattr(agent, "_write_journal_entry", Mock())
     monkeypatch.setattr(aa, "_ap_try_prose", Mock())
     monkeypatch.setattr(aa.random, "choice", lambda prompts: prompts[2])
     agent._recess_aspiration({"fill_ratio": .68, "eig1": 5., "deig": 0.})
     assert query.call_args.kwargs == {"context_mode": "aspiration"}
     prompt = query.call_args.args[0]
-    assert (form in prompt) if form else ("act of imagination" in prompt)
+    assert (form in prompt) if form else ("imagine or explore" in prompt)
     record = next((workspace / "journal").glob("aspiration_*.txt")).read_text()
-    assert "Prompt contract: open_aspiration_context_v1" in record
+    metadata = json.loads(next((workspace / "journal_metadata").glob("aspiration_*.json")).read_text())
+    assert metadata["invitation"]["contract"] == "telemetry_optional_expression_v1"
+    assert "Header fixture" not in record
     assert reply in record
     assert agent._write_journal_entry.call_args.args[:2] == ("aspiration", reply)
 

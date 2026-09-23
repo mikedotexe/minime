@@ -249,7 +249,7 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
             self.assertIn("Returnable journal", prompt)
             self.assertIn("Earlier claim: fill pressure softened near lambda4", prompt)
 
-    def test_direct_pressure_uses_private_canvas_and_rest_keeps_journal_contract(self):
+    def test_direct_pressure_and_rest_do_not_require_a_continuity_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
             db_path = Path(tmp) / "minime.db"
@@ -290,8 +290,9 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
             self.assertIn(aa.ACTION_TAIL_MARKER, pressure_text)
             self.assertIn("I feel a warm private hum.", pressure_text)
             self.assertIn("NEXT: REST", pressure_text)
-            self.assertIn("Journal continuity contract v1", rest_prompt)
-            self.assertIn("Decision:", rest_prompt)
+            self.assertNotIn("Journal continuity contract v1", rest_prompt)
+            self.assertNotIn("Decision:", rest_prompt)
+            self.assertIn("Choose a subject", rest_prompt)
 
     def test_query_llm_private_journal_context_skips_operational_context(self):
         with tempfile.TemporaryDirectory() as tmp:

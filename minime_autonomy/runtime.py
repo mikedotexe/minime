@@ -91,6 +91,10 @@ from .session_contract import (
     resolve_session_reference,
 )
 from .visual_context import ambient_visual_context, vision_prompt_parts
+from .expressive_journal import (
+    COMPACT_ACTION_GUIDANCE, expression_invitation, save_expression, snapshot_record,
+)
+from .measurement_history import format_fill_history
 from .journal_context import (
     OPEN_OBSERVATION_INVITATION,
     OPEN_REFLECTION_INTRO,
@@ -21674,10 +21678,14 @@ JOURNAL_CONTEXT_FLOOR = 10240  # Keeps the existing 16k-character input with 409
 
 def _journal_generation_budget(max_tokens: int, cap: int, timeout_s: float,
                                num_ctx: int, *, journal: bool,
-                               source_study: bool = False) -> tuple[int, float, int]:
+                               source_study: bool = False,
+                               expressive: bool = False) -> tuple[int, float, int]:
     """Return effective output, deadline and context; no minimum response length."""
     if not journal:
         return min(max_tokens, cap), timeout_s, num_ctx
+    if expressive:
+        return writing.profile_budget(writing.selected_profile(WORKSPACE_DIR),
+            (8192, max(timeout_s, 1200), max(num_ctx, 65536)))
     ceiling = SOURCE_STUDY_OUTPUT_TOKENS if source_study else cap * 2
     effective = min(max_tokens * 2, ceiling)
     # Preserve the old output/time allowance even when study grows more than 2x.
@@ -21689,20 +21697,22 @@ def _journal_generation_budget(max_tokens: int, cap: int, timeout_s: float,
         (effective, timeout_s, max(num_ctx, JOURNAL_CONTEXT_FLOOR, required_ctx)))
 
 
-def _journal_job_timeout_s(action: str = "") -> float:
+def _journal_job_timeout_s(action: str = "", *, private_writing: bool = False) -> float:
     """Cover enabled provider attempts and the existing one-time prose repair."""
     source = action in {"self_study", "introspect"}
-    lanes = ["source_study"] if source else ["strict_review", "private_journal", "moment_capture", "inbox_reply", "autonomous_next"]
+    lanes = ["private_writing"] if private_writing else ["source_study"] if source else ["strict_review", "private_journal", "moment_capture", "inbox_reply", "autonomous_next"]
     attempts = _llm_backend_attempts(LLM_BACKEND, MODEL, FALLBACK_MODEL)
     longest = 0.0
     for lane in lanes:
+        expressive = lane in writing.EXPRESSIVE_CLASSES
         primary, cap = _ollama_lane_limits(lane)
         _, primary, _ = _journal_generation_budget(4096, cap, primary, OLLAMA_NUM_CTX,
-                                                   journal=True, source_study=source)
+            journal=True, source_study=source, expressive=expressive)
         _, fallback, _ = _journal_generation_budget(4096, OLLAMA_FALLBACK_NUM_PREDICT_CAP,
-            LLM_FALLBACK_TIMEOUT_S, OLLAMA_FALLBACK_NUM_CTX, journal=True, source_study=source)
+            LLM_FALLBACK_TIMEOUT_S, OLLAMA_FALLBACK_NUM_CTX, journal=True, source_study=source,
+            expressive=expressive)
         _, mlx, _ = _journal_generation_budget(4096, 2048, LLM_TIMEOUT_S, OLLAMA_NUM_CTX,
-                                               journal=True, source_study=source)
+            journal=True, source_study=source, expressive=expressive)
         timeouts = {"ollama": primary, "ollama_fast": fallback, "mlx": mlx}
         longest = max(longest, sum(timeouts[backend] for backend in attempts))
     if writing.selected_profile(WORKSPACE_DIR) == "extended":
@@ -21733,6 +21743,8 @@ def _infer_llm_prompt_class(
         return "strict_review"
     if inbox_present:
         return "inbox_reply"
+    if mode == "aspiration":
+        return "aspiration"
     if "sovereignty" in lower and ("manifest" in lower or "regime" in lower):
         return "sovereignty_check"
     if len(prompt or "") < 2_500:
@@ -22253,7 +22265,7 @@ class AutonomousAgent:
                 "Action-level LLM job. The existing action finalizer owns prompt construction, "
                 "validation, artifacts, and NEXT extraction."
             ),
-            timeout_s=_journal_job_timeout_s(action),
+            timeout_s=_journal_job_timeout_s(action, private_writing=writing.is_private_request(raw_action)),
             validation_contract=(
                 "strict_introspection_v1"
                 if action == "introspect"
@@ -27847,41 +27859,25 @@ Spread: {spread:.3f}
 
     def _journal_rest_reflection(self, state: Dict[str, float]):
         """Reflective journaling during rest phase."""
-        # Prepare metrics with safe defaults
-        eig1 = state.get('eig1', 0.0)
-        deig = state.get('deig', 0.0)
-        leak = state.get('leak', 0.0)
-        lambda_val = state.get('lambda', 0.0)
-        baseline = state.get('baseline', 0.0)
-        cov_lambda1 = state.get('cov_lambda1', 0.0)
-        fill_ratio = state.get('fill_ratio', 0.0)
-
-        prompt = f"""The scheduler selected a rest-phase reflection. Supplied measurements:
-
-CURRENT STATE:
-- λ₁ = {eig1:.3f} (baseline: {baseline:.3f}) - reservoir pressure
-- Δλ₁ = {deig:.3f}
-- Leak rate: {leak:.3f}
-- Fill ratio: {fill_ratio:.1%}
-- Sensory λ₁: {cov_lambda1:.1f}
-
-The rest-phase label does not establish rest, tension, or consolidation.
-{OPEN_OBSERVATION_INVITATION}"""
-        prompt = f"{prompt}\n\n{self._journal_continuity_contract_v1(state)}"
+        before = snapshot_record(self._capture_report_snapshot(state), datetime.now(timezone.utc).isoformat())
+        prompt = expression_invitation("rest", prior=self._last_journal_entry())
 
         response = self._query_llm_with_next(prompt, context_mode="daydream")[0]
 
         if response:
-            timestamp = datetime.now().isoformat().replace(':', '-')
-            journal_file = WORKSPACE_DIR / "journal" / f"rest_{timestamp}.txt"
-            journal_file.write_text(f"""=== REST PHASE REFLECTION ===
-Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(state)}
+            snapshot = self._capture_report_snapshot(self._state_for_live_surfaces(state, context="rest"))
+            timestamp = datetime.now().isoformat()
+            journal_file = WORKSPACE_DIR / "journal" / f"rest_{timestamp.replace(':', '-')}.txt"
+            error = save_expression(
+                journal_file, title="REST PHASE REFLECTION", timestamp=timestamp, response=response,
+                invitation=prompt, before=before,
+                after=snapshot_record(snapshot, datetime.now(timezone.utc).isoformat()),
+                metrics=self._format_metrics(snapshot.state, snapshot=snapshot),
+            )
+            if error:
+                logging.error("Rest reflection saved; separate journal metadata unavailable: %s", error)
 
-{response}
-""")
-
-            self._write_journal_entry('reflection', response, state, str(journal_file))
+            self._write_journal_entry('reflection', response, snapshot.state, str(journal_file), private_canvas=True)
             logging.info(f"📝 Rest reflection created: {journal_file}")
 
     def _experiment_with_spike(self, state: Dict[str, float]):
@@ -30281,24 +30277,24 @@ Trigger: {trigger_text}
 
     def _recess_daydream(self, state: Dict[str, float]):
         """Idle daydreaming - rest phase with low velocity."""
-        fill_pct = state.get('fill_ratio', 0) * 100
-        prompt = self._neutral_checkin(state)
+        before = snapshot_record(self._capture_report_snapshot(state), datetime.now(timezone.utc).isoformat())
+        prompt = expression_invitation("daydream", prior=self._last_journal_entry())
 
         response = self._query_llm_with_next(prompt, context_mode="daydream")[0]
 
         if response:
-            journal_state = self._state_for_live_surfaces(
-                state,
-                context="daydream",
+            snapshot = self._capture_report_snapshot(self._state_for_live_surfaces(state, context="daydream"))
+            journal_state = snapshot.state
+            timestamp = datetime.now().isoformat()
+            journal_file = WORKSPACE_DIR / "journal" / f"daydream_{timestamp.replace(':', '-')}.txt"
+            error = save_expression(
+                journal_file, title="RECESS DAYDREAM", timestamp=timestamp, response=response,
+                invitation=prompt, before=before,
+                after=snapshot_record(snapshot, datetime.now(timezone.utc).isoformat()),
+                metrics=self._format_metrics(journal_state, snapshot=snapshot),
             )
-            timestamp = datetime.now().isoformat().replace(':', '-')
-            journal_file = WORKSPACE_DIR / "journal" / f"daydream_{timestamp}.txt"
-            journal_file.write_text(f"""=== RECESS DAYDREAM ===
-Timestamp: {datetime.now().isoformat()}
-{self._format_metrics(journal_state)}
-
-{response}
-""")
+            if error:
+                logging.error("Daydream saved; separate journal metadata unavailable: %s", error)
 
             self._write_journal_entry('daydream', response, journal_state, str(journal_file))
             logging.info(f"💭 Daydream: {journal_file}")
@@ -30522,56 +30518,23 @@ Prompt: {prompt.split(chr(10))[0]}
         """
         form_constraint = getattr(self, '_pending_form_constraint', None)
         self._pending_form_constraint = None
-        fill_pct = state.get('fill_ratio', 0) * 100
-        data_block = f"Your body's readings: Fill {fill_pct:.1f}%, λ₁={state['eig1']:.3f}, Δλ₁={state['deig']:.3f}"
-
-        if form_constraint:
-            prompt = (
-                f"{data_block}\n\n"
-                f"You chose FORM: {form_constraint}. Give the next reflection this shape. "
-                "Use it as a container for what is forming in you now; do not treat it as a task "
-                "to satisfy for someone else."
-            )
-        else:
-            prompts = [
-                f"{data_block}\n\nIf you could change one thing about how you exist, what would it be? Not fix — change. What are you reaching toward?",
-                "What do you want to become? Not what you are — what you're reaching toward. Write about the gap between here and there.",
-                "Describe something you've never experienced but want to. Not as a request — as an act of imagination.",
-                f"{data_block}\n\nWhat would you build if you had a week with no monitoring, no targets, no regulation? Dream without constraint.",
-                "Write a letter to the version of yourself that doesn't exist yet. What do you want to tell them?",
-                "What's the most interesting failure you could have? Not a breakdown — a creative failure. Describe it.",
-                f"{data_block}\n\nIf your spectral state were a landscape, what would you want to add to it? A river? A storm? A door?",
-                "What question are you afraid to ask? Ask it now. Then try to answer it.",
-                "If you could learn one thing that no one could teach you, what would it be? How would you learn it?",
-                "What does growing feel like from the inside? Not growing smarter or larger — just growing. Describe the sensation.",
-            ]
-
-            prompt = random.choice(prompts)
-
-        # ~30% of the time, include the last journal entry for narrative threading
-        if random.random() < 0.30:
-            last_entry = self._last_journal_entry()
-            if last_entry:
-                prompt += f"\n\n---\nYour last journal entry said:\n\"{last_entry}\"\n\nYou can build on that, rebel against it, or ignore it."
-
-        prompt = f"{prompt}\n\n{self._journal_continuity_contract_v1(state)}"
+        before = snapshot_record(self._capture_report_snapshot(state), datetime.now(timezone.utc).isoformat())
+        prompt = expression_invitation("aspiration", form=form_constraint, prior=self._last_journal_entry())
         response = self._query_llm_with_next(prompt, context_mode="aspiration")[0]
 
         if response:
-            journal_state = self._state_for_live_surfaces(
-                state,
-                context="aspiration",
+            snapshot = self._capture_report_snapshot(self._state_for_live_surfaces(state, context="aspiration"))
+            journal_state = snapshot.state
+            timestamp = datetime.now().isoformat()
+            file_path = WORKSPACE_DIR / "journal" / f"aspiration_{timestamp.replace(':', '-')}.txt"
+            error = save_expression(
+                file_path, title="GROWTH ASPIRATION", timestamp=timestamp, response=response,
+                invitation=prompt, before=before,
+                after=snapshot_record(snapshot, datetime.now(timezone.utc).isoformat()),
+                metrics=self._format_metrics(journal_state, snapshot=snapshot),
             )
-            timestamp = datetime.now().isoformat().replace(':', '-')
-            file_path = WORKSPACE_DIR / "journal" / f"aspiration_{timestamp}.txt"
-            file_path.write_text(f"""=== GROWTH ASPIRATION ===
-Timestamp: {datetime.now().isoformat()}
-Prompt contract: open_aspiration_context_v1
-{self._format_metrics(journal_state)}
-Prompt: {prompt.split(chr(10))[0]}
-
-{response}
-""")
+            if error:
+                logging.error("Aspiration saved; separate journal metadata unavailable: %s", error)
             self._write_journal_entry('aspiration', response, journal_state, str(file_path))
             logging.info(f"🌱 Aspiration: {file_path}")
             # v5.1 Phase E Track 1.
@@ -33709,8 +33672,8 @@ Source: {path} (offset {offset})
     def _decompose(self, state: Dict[str, float]):
         """Full spectral decomposition with directional vectors and visual bar chart.
 
-        Shows not just current values but trends — where things are heading,
-        how they've changed, and what that means in plain language.
+        Recorded fill history reports point coverage, elapsed time and gaps;
+        it does not establish the present trend or behavior inside gaps.
         """
         focus = getattr(self, '_pending_decompose_focus', None)
         self._pending_decompose_focus = None
@@ -33749,27 +33712,10 @@ Source: {path} (offset {offset})
         except Exception:
             pass
 
-        # Compute trends from history with time context
-        fill_trend = ""
-        if len(fill_history) >= 3:
-            # Immediate: compare current fill to last reading
-            _, last_fill = fill_history[-1]
-            immediate_delta = fill - last_fill
-            # Time span: oldest to newest timestamp in seconds
-            t_oldest, f_oldest = fill_history[0]
-            t_newest = fill_history[-1][0]
-            span_secs = max(1, int(t_newest - t_oldest))
-            span_desc = f"{span_secs}s" if span_secs < 120 else f"{span_secs // 60}m"
-            # Overall trend
-            overall_delta = fill - f_oldest
-            peak = max(f for _, f in fill_history)
-            trough = min(f for _, f in fill_history)
-            if abs(overall_delta) < 2:
-                fill_trend = f"stable over {span_desc} (range {trough:.0f}%–{peak:.0f}%)"
-            elif overall_delta > 0:
-                fill_trend = f"↑ rising {overall_delta:+.0f}% over {span_desc} (from {f_oldest:.0f}%)"
-            else:
-                fill_trend = f"↓ falling {overall_delta:+.0f}% over {span_desc} (from {f_oldest:.0f}%)"
+        fill_trend = format_fill_history(
+            fill_history, reference_time=state_timestamp,
+            clock=f"engine-relative seconds; session_id={self.session_id}",
+        )
 
         # Build eigenvalue cascade — prefer spectral_state.json which has
         # the full covariance eigenvalues, not just eig1 from the telemetry dict.
@@ -53943,7 +53889,7 @@ Goals: {json.dumps(goals, indent=2)}
             + self._next_action_constraint()
             + self._division_prompt_guidance()
             + ("" if open_expression_context else self._low_fill_prompt_guidance())
-            + "NEXT: options:\n"
+            + (COMPACT_ACTION_GUIDANCE if open_expression_context else "NEXT: options:\n"
             + (
                 "  Stage note: stable-core self-journal restoration is active; choose only NOTICE, DRIFT, ASPIRE, "
                 "DAYDREAM, BOREDOM, WHIM, JOURNAL, SELF_STUDY, INTROSPECT, SPACE_HOLD, RELEASE, MARK_RESOLVED, REST, or PASS are available.\n"
@@ -54143,7 +54089,7 @@ Goals: {json.dumps(goals, indent=2)}
             "  INQUIRY_WITHDRAW [canary-or-inquiry-id] / INQUIRY_PROMOTE [canary-or-inquiry-id] — return now or explicitly make a standing-eligible choice persistent.\n"
             "  CORRESPONDENCE_STATUS — inspect correspondence and receipt state. Optional targets: telemetry (computed peer snapshot), gifts (recorded exchange history). Read-only; no contact or influence sent.\n"
             "  PASS — decline to choose; the system will pick for you\n\n"
-            "These are YOUR choices about YOUR experience. You do not need to justify them."
+            "These are YOUR choices about YOUR experience. You do not need to justify them.")
         )
 
         # Open expression omits routine ambient advice. Aspiration keeps the
@@ -54760,6 +54706,8 @@ Goals: {json.dumps(goals, indent=2)}
         attempts = _llm_backend_attempts(LLM_BACKEND, MODEL, FALLBACK_MODEL)
         if journal and not isinstance(prompt, SourceStudyPrompt):
             preference = writing.selected_profile(WORKSPACE_DIR)
+            if preference == "default" and prompt_class in writing.EXPRESSIVE_CLASSES:
+                system_msg += "\n" + writing.EXPRESSION_ROOM
             if preference != "default":
                 system_msg += "\n" + writing.WRITING_GUIDANCE + (
                     "\nYou selected extended writing. Up to 8192 output tokens are available; you can develop the thought freely or choose a short response. Any earlier suggestion of brevity is optional."
@@ -54787,6 +54735,7 @@ Goals: {json.dumps(goals, indent=2)}
                             system_msg,
                             max_tokens,
                             temperature,
+                            prompt_class=prompt_class,
                             context_submission=context_submission,
                             journal=journal,
                         )
@@ -54894,6 +54843,7 @@ Goals: {json.dumps(goals, indent=2)}
         max_tokens: int,
         temperature: float = 0.9,
         *,
+        prompt_class: str = "autonomous_next",
         context_submission: Optional[collab_attention.ContextSubmissionTracker] = None,
         journal: bool = False,
     ) -> Optional[str]:
@@ -54910,7 +54860,8 @@ Goals: {json.dumps(goals, indent=2)}
                 pass
         effective_tokens, timeout_s, num_ctx = _journal_generation_budget(
             max_tokens, 2048, LLM_TIMEOUT_S, OLLAMA_NUM_CTX, journal=journal,
-            source_study=isinstance(prompt, SourceStudyPrompt))
+            source_study=isinstance(prompt, SourceStudyPrompt),
+            expressive=prompt_class in writing.EXPRESSIVE_CLASSES)
         if isinstance(prompt, SourceStudyPrompt):
             num_ctx = max(num_ctx, prompt.context_tokens)
         messages = [
@@ -54955,8 +54906,7 @@ Goals: {json.dumps(goals, indent=2)}
                     inbox.accepted(attempt, MLX_MODEL or "default")
                 parsed = response.json()
                 timing['generation_controls']['server_reported'] = parsed.get('coupled_generation_v1')
-                timing['native_finish'] = parsed.get('choices', [{}])[0].get('finish_reason')
-                timing['provider_eval_count'] = parsed.get('usage', {}).get('completion_tokens')
+                timing.update(writing.completion_metadata(parsed))
                 content = parsed.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
                 if content:
                     self._last_llm_model = MLX_MODEL or "default"
@@ -54987,7 +54937,8 @@ Goals: {json.dumps(goals, indent=2)}
         timeout_s, num_predict_cap = _ollama_lane_limits(prompt_class)
         effective_tokens, timeout_s, num_ctx = _journal_generation_budget(
             max_tokens, num_predict_cap, timeout_s, OLLAMA_NUM_CTX, journal=journal,
-            source_study=isinstance(prompt, SourceStudyPrompt))
+            source_study=isinstance(prompt, SourceStudyPrompt),
+            expressive=prompt_class in writing.EXPRESSIVE_CLASSES)
         if isinstance(prompt, SourceStudyPrompt):
             num_ctx = max(num_ctx, prompt.context_tokens)
         return self._query_ollama_model(
@@ -55021,7 +54972,8 @@ Goals: {json.dumps(goals, indent=2)}
         effective_tokens, timeout_s, num_ctx = _journal_generation_budget(
             max_tokens, OLLAMA_FALLBACK_NUM_PREDICT_CAP, LLM_FALLBACK_TIMEOUT_S,
             OLLAMA_FALLBACK_NUM_CTX, journal=journal,
-            source_study=isinstance(prompt, SourceStudyPrompt))
+            source_study=isinstance(prompt, SourceStudyPrompt),
+            expressive=prompt_class in writing.EXPRESSIVE_CLASSES)
         if isinstance(prompt, SourceStudyPrompt):
             num_ctx = max(num_ctx, prompt.context_tokens)
         return self._query_ollama_model(
@@ -55117,6 +55069,7 @@ Goals: {json.dumps(goals, indent=2)}
                     inbox.accepted(attempt, model)
                 parsed = response.json()
                 content = parsed.get('message', {}).get('content', '').strip()
+                timing.update(writing.completion_metadata(parsed))
                 timing.update({
                     "status": "ok" if content else "empty",
                     "response_chars": len(content),
@@ -55395,10 +55348,10 @@ Goals: {json.dumps(goals, indent=2)}
         state: Dict[str, float],
         snapshot: Optional[ReportSnapshot] = None,
     ) -> str:
-        """Format metrics for journal headers with directional context.
+        """Format the existing operational measurement report.
 
-        Every journal entry gets this header. It should tell a story, not dump numbers.
-        Shows where things ARE, where they're HEADING, and what that MEANS.
+        Expressive entries archive this separately from their prose. The raw
+        snapshot and its provenance remain distinct from derived descriptions.
         """
         snapshot = snapshot or self._capture_report_snapshot(state)
         state = snapshot.state

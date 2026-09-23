@@ -101,9 +101,13 @@ def test_assembled_prompts_keep_authored_text_without_ambient_peer_state(agent, 
                    "when Astrid is reaching", "lend it", "may lend you density in return",
                    "Astrid is waiting", "[Gift exchange"):
         assert phrase not in text
-    assert "LEND_APERTURE" in system
-    assert "Computed eligibility is not a peer-authored request" in system
-    assert "CORRESPONDENCE_STATUS" in text and "telemetry (computed peer snapshot)" in text
+    if mode in {"default", "strict_review"}:
+        assert "LEND_APERTURE" in system
+        assert "Computed eligibility is not a peer-authored request" in system
+        assert "CORRESPONDENCE_STATUS" in text and "telemetry (computed peer snapshot)" in text
+    else:
+        assert "CAPABILITY_STATUS <action>" in system
+        assert "LEND_APERTURE" not in system
     if mode == "default":
         reader.assert_called_once()
         assert source in text
