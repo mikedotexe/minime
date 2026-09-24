@@ -8477,5 +8477,43 @@ class LiveReservoirSpectrumTests(unittest.TestCase):
         self.assertEqual(aa.AutonomousAgent._format_live_reservoir_line(None, {}), "")
 
 
+class InboxOrderingTests(unittest.TestCase):
+    """Steward letters and correspondence are read before the companion-note stream (2026-09-23)."""
+
+    def test_steward_letters_sort_before_companion_notes(self):
+        names = [
+            "astrid_self_study_1790209166.txt", "mike_feedback_writing_length_1790211000.txt",
+            "astrid_self_study_1788606674.txt", "ping_1790000000.txt", "human_letter_1.txt",
+            "mike_query_review_x_1790205537.txt", "steward_division_return_cycle50_20260917.txt",
+        ]
+        ordered = sorted(names, key=aa.inbox_sort_key)
+        self.assertEqual(ordered[0], "human_letter_1.txt")
+        self.assertEqual(ordered[1:4], [
+            "mike_feedback_writing_length_1790211000.txt",
+            "mike_query_review_x_1790205537.txt",
+            "steward_division_return_cycle50_20260917.txt",
+        ])
+        self.assertEqual(ordered[4], "ping_1790000000.txt")
+        self.assertTrue(all(n.startswith("astrid_self_study_") for n in ordered[5:]))
+        self.assertEqual(ordered[5:], ["astrid_self_study_1788606674.txt", "astrid_self_study_1790209166.txt"])
+
+    def test_first_steward_letter_is_admitted_whole_even_over_the_budget(self):
+        self.assertTrue(aa.inbox_fits("mike_feedback_x_1.txt", 4584, 0, 4000))
+        self.assertFalse(aa.inbox_fits("mike_feedback_x_1.txt", 4584, 2600, 4000))  # not first this cycle
+        self.assertFalse(aa.inbox_fits("mike_feedback_x_1.txt", aa.INBOX_STEWARD_LETTER_MAX_CHARS + 1, 0, 4000))
+        self.assertFalse(aa.inbox_fits("astrid_self_study_1.txt", 4584, 0, 4000))  # companion notes keep the budget
+        self.assertTrue(aa.inbox_fits("astrid_self_study_1.txt", 2500, 0, 4000))
+        self.assertTrue(aa.inbox_fits("ping_1.txt", 99_999, 3900, 4000))
+
+
+class PromptReadingsTests(unittest.TestCase):
+    def test_readings_name_both_lambda_definitions(self):
+        state = {"fill_ratio": 0.7105, "eig1": 21.253, "deig": 0.031, "spread": 3.4}
+        line = aa.AutonomousAgent._prompt_readings(state)
+        self.assertEqual(line, "published fill 71.0% — reservoir λ₁ (live ESN) 21.253, Δλ₁ +0.031 — spread 3")
+        self.assertTrue(aa.AutonomousAgent._state_anchor_line(state).startswith("State anchor (as supplied in the prompt): "))
+        self.assertEqual(aa.AutonomousAgent._prompt_readings({}), "published fill 0.0% — reservoir λ₁ (live ESN) 0.000, Δλ₁ +0.000")
+
+
 if __name__ == "__main__":
     unittest.main()

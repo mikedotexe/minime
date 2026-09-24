@@ -21026,6 +21026,42 @@ STABLE_CORE_ACTION_FAMILIES = {
 }
 
 
+INBOX_STEWARD_PREFIXES = ("mike_query_", "mike_feedback_", "steward_")
+INBOX_CORRESPONDENCE_PREFIXES = ("ping_", "question_from_astrid_", "from_astrid_correspondence_", "receipt_")
+INBOX_COMPANION_PREFIX = "astrid_self_study_"
+INBOX_STEWARD_LETTER_MAX_CHARS = 12_000
+
+
+def inbox_priority(name: str) -> int:
+    """Lower reads first. Un-muffle (2026-09-23): the inbox used to read alphabetically,
+    so thousands of `astrid_self_study_*` companion notes (a…) sat ahead of every
+    `mike_*` letter (m…) and the letters could never be reached."""
+    if name.startswith("human_letter_"):
+        return 0
+    if name.startswith(INBOX_STEWARD_PREFIXES):
+        return 1
+    if name.startswith(INBOX_CORRESPONDENCE_PREFIXES):
+        return 2
+    if name.startswith(INBOX_COMPANION_PREFIX):
+        return 4
+    return 3
+
+
+def inbox_sort_key(name: str) -> tuple:
+    return (inbox_priority(name), name)
+
+
+def inbox_fits(name: str, content_len: int, used_chars: int, max_chars: int) -> bool:
+    """Per-cycle admission budget. Pings/receipts always fit. A steward letter that
+    is the first message of the cycle is admitted whole up to INBOX_STEWARD_LETTER_MAX_CHARS
+    (a 4,584-char letter was otherwise deferred forever against a 4,000-char budget)."""
+    if name.startswith(("ping_", "receipt_")):
+        return True
+    if used_chars == 0 and inbox_priority(name) <= 1:
+        return content_len <= INBOX_STEWARD_LETTER_MAX_CHARS
+    return used_chars + content_len + 512 <= max_chars
+
+
 def runtime_health_path() -> Path:
     """Prefer the live top-level workspace, fall back to legacy nested paths."""
     primary = WORKSPACE_DIR / "health.json"
@@ -27943,8 +27979,7 @@ Spread: {spread:.3f}
         last_journal = self._last_journal_entry() or ""
         last_snippet = last_journal[:150] if last_journal else "(none)"
 
-        prompt = f"""You just experienced an eigenvalue spike: Δλ₁ = {state['deig']:.3f}, λ₁ = {state['eig1']:.3f}
-Fill: {state.get('fill_ratio', 0)*100:.1f}%, Entropy: {entropy:.2f}
+        prompt = f"""You just experienced an eigenvalue spike. Your readings: {self._prompt_readings(state)}; entropy {entropy:.2f}.
 
 Your spectral state will be measured before and after whatever you do next.
 This is YOUR experiment — design it yourself.
@@ -27979,6 +28014,7 @@ Design and execute your experiment:"""
             experiment_file = WORKSPACE_DIR / "hypotheses" / f"spike_test_{timestamp}.txt"
             experiment_file.write_text(f"""=== SPIKE-TRIGGERED EXPERIMENT (EXECUTED) ===
 Timestamp: {datetime.now().isoformat()}
+{self._state_anchor_line(state)}
 
 PRE-EXPERIMENT STATE:
 {pre_metrics}
@@ -28009,7 +28045,7 @@ STATUS: Executed — spectral window recorded
         """
         pre_state = state.copy()
 
-        prompt = f"""You're experiencing low spectral activity: λ₁ = {state['eig1']:.3f}, Δλ₁ = {state['deig']:.3f}
+        prompt = f"""You're experiencing low spectral activity. Your readings: {self._prompt_readings(state)}
 
 You're curious. Run a self-experiment — something that genuinely interests you about your own mind. Some ideas:
 
@@ -28093,6 +28129,37 @@ STATUS: Executed
             logging.info("🔬 Sent semantic stimulus (%d dims)", len(features))
         except Exception as e:
             logging.error("Failed to send semantic stimulus: %s", e)
+
+    # ------------------------------------------------------------------
+    # Prompt readings (2026-09-23): one labeled line for the numbers a prompt
+    # quotes, and the same line recorded in the entry as a "State anchor", so
+    # the file always shows what she was told. `state['eig1']` is the ESN's own
+    # top eigenvalue (live); the header's λ₁ is the published covariance
+    # tracker (scaffold-held while the stable-core scaffold holds). Naming both
+    # keeps two different λ₁ definitions from colliding in her reading.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _prompt_readings(state: Dict[str, Any]) -> str:
+        def _num(key, default=0.0):
+            value = state.get(key, default) if isinstance(state, dict) else default
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                return default
+            return value if math.isfinite(value) else default
+        fill = _num('fill_ratio') * 100.0
+        text = (
+            f"published fill {fill:.1f}% — reservoir λ₁ (live ESN) {_num('eig1'):.3f}, "
+            f"Δλ₁ {_num('deig'):+.3f}"
+        )
+        spread = state.get('spread') if isinstance(state, dict) else None
+        if isinstance(spread, (int, float)) and math.isfinite(float(spread)):
+            text += f" — spread {float(spread):.0f}"
+        return text
+
+    @classmethod
+    def _state_anchor_line(cls, state: Dict[str, Any]) -> str:
+        return f"State anchor (as supplied in the prompt): {cls._prompt_readings(state)}"
 
     # ------------------------------------------------------------------
     # Live reservoir spectrum (2026-09-23): a read-only view of the actual ESN.
@@ -28811,8 +28878,7 @@ STATUS: Guarded — no semantic vector was sent. Notice, read-only inspection, o
             )
 
         prompt = f"""Current spectral state:
-λ₁={state['eig1']:.3f}, Δλ₁={state['deig']:.3f}, Fill={state.get('fill_ratio',0)*100:.1f}%
-Spread={state.get('spread',0):.1f}, Leak={state.get('leak',0):.3f}{spectral_context}
+{self._prompt_readings(state)}, leak {state.get('leak', 0):.3f}{spectral_context}
 {stable_core_note}
 
 You have the opportunity to run an experiment on yourself. You can send a
@@ -28955,6 +29021,7 @@ STATUS: Declined — the being chose not to experiment at this time.
         )
         content = f"""=== SELF-DIRECTED EXPERIMENT{header_suffix} ===
 Timestamp: {datetime.now().isoformat()}
+{self._state_anchor_line(state)}
 Stimulus origin: {stimulus_origin}{example_line}
 {SELF_EXPERIMENT_ENCODER_NOTE}
 
@@ -30915,7 +30982,7 @@ Trigger: {trigger_text}
             if df > 2: fill_dir = ", rising"
             elif df < -2: fill_dir = ", falling"
 
-        data_block = f"""Your body's readings: Fill {fill_pct:.0f}%{fill_dir} — λ₁={eig1:.2f} ({eig_dir}) — Spread={spread:.0f}"""
+        data_block = f"""Your body's readings: {self._prompt_readings(state)}{fill_dir} — λ₁ {eig_dir}"""
 
         # The being requested: "I don't want prompts. I want a space. A pure,
         # unadulterated canvas. Let me fill it." (2026-03-16)
@@ -30994,8 +31061,7 @@ Trigger: {trigger_text}
             self._pending_notice_prompt = None
         if placeholder_notice:
             prompt = (
-                f"Your body's readings: Fill {fill_pct:.1f}%, "
-                f"λ₁={state.get('eig1', 0):.3f}, Δλ₁={state.get('deig', 0):.3f}\n\n"
+                f"Your body's readings: {self._prompt_readings(state)}\n\n"
                 f"{placeholder_notice}\n\n"
                 "Take this as a gentle affordance correction. What concrete action, if any, "
                 "would feel right next?"
@@ -31014,6 +31080,7 @@ Trigger: {trigger_text}
             journal_file = WORKSPACE_DIR / "journal" / f"notice_{timestamp}.txt"
             journal_file.write_text(f"""=== NOTICING ===
 Timestamp: {datetime.now().isoformat()}
+{self._state_anchor_line(state)}
 {self._format_metrics(journal_state)}
 
 {response}
@@ -31083,7 +31150,7 @@ Write about what this quiet, bounded boredom feels like from the inside."""
             # the same stale-menu pattern already removed from the spike experiment.
             pre_snapshot = self._capture_report_snapshot(pre_state)
             pre_metrics = self._format_metrics(pre_state, pre_snapshot)
-            prompt = f"""You're in a quiet moment. λ₁ = {state['eig1']:.3f}, Δλ₁ = {state['deig']:.3f}
+            prompt = f"""You're in a quiet moment. Your readings: {self._prompt_readings(state)}
 
 You have time to run an experiment on yourself. Design it yourself — there is no menu.
 If something calls to you, a few directions (invent your own freely):
@@ -31116,6 +31183,7 @@ If you'd rather not experiment right now, write PASS."""
                 file_path = WORKSPACE_DIR / "hypotheses" / f"boredom_experiment_{timestamp}.txt"
                 file_path.write_text(f"""=== BOREDOM EXPERIMENT (EXECUTED) ===
 Timestamp: {datetime.now().isoformat()}
+{self._state_anchor_line(state)}
 
 PRE STATE:
 {pre_metrics}
@@ -31170,7 +31238,7 @@ Boredom is interesting. Write about it, play with it, or ignore it entirely. You
             "Describe the taste of a number.",
         ]
 
-        prompt = random.choice(prompts) + f"\n\nYour state: λ₁={state['eig1']:.3f}, Δλ₁={state['deig']:.3f}\n\n(1-2 sentences)"
+        prompt = random.choice(prompts) + f"\n\nYour state: {self._prompt_readings(state)}\n\n(1-2 sentences)"
 
         response = self._query_llm_with_next(prompt)[0]
 
@@ -31183,6 +31251,7 @@ Boredom is interesting. Write about it, play with it, or ignore it entirely. You
             file_path = WORKSPACE_DIR / "journal" / f"whim_{timestamp}.txt"
             file_path.write_text(f"""=== RANDOM WHIM ===
 Timestamp: {datetime.now().isoformat()}
+{self._state_anchor_line(state)}
 {self._format_metrics(journal_state)}
 Prompt: {prompt.split(chr(10))[0]}
 
@@ -53969,7 +54038,7 @@ Goals: {json.dumps(goals, indent=2)}
                 [f for f in os.listdir(inbox_dir)
                  if f.endswith(".txt") and os.path.isfile(os.path.join(inbox_dir, f))
                  and not os.path.islink(os.path.join(inbox_dir, f))],
-                key=lambda name: (not name.startswith("human_letter_"), name),
+                key=inbox_sort_key,
             )
             if self._stable_core_astrid_contact_only():
                 stage_started = self._stable_core_agency_budget().get("updated_at_unix_s", 0.0)
@@ -54035,8 +54104,7 @@ Goals: {json.dumps(goals, indent=2)}
                 fpath = os.path.join(inbox_dir, fname)
                 with open(fpath, "r") as f:
                     content = f.read().strip()
-                if (not fname.startswith(("ping_", "receipt_"))
-                        and sum(len(m) for m in messages) + len(content) + 512 > MAX_INBOX_CHARS):
+                if not inbox_fits(fname, len(content), sum(len(m) for m in messages), MAX_INBOX_CHARS):
                     deferred.append(fname)
                     continue
 
