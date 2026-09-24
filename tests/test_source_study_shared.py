@@ -11,6 +11,24 @@ from minime_autonomy.source_study import StudyClient, selected_reader
 BINARY = Path(os.environ.get("ASTRID_SOURCE_STUDY_BIN", str(Path(__file__).resolve().parents[2] / "astrid/target/debug/astrid-source-study")))
 
 class SharedSourceStudyTests(unittest.TestCase):
+    def test_explicit_review_preserves_active_inquiry_through_real_wire_adapter(self):
+        self.client.prepare("SELF_STUDY QUESTION NEW Retained question?")
+        self.client.prepare("SELF_STUDY QUESTION PARK q1")
+        self.client.prepare("SELF_STUDY QUESTION NEW Unrelated active question?")
+        state_path = self.client.workspace / "diagnostics/source_first_v3/shared_reader/reader-v1.json"
+        before = json.loads(state_path.read_bytes())
+        prompt = self.client.prepare("SELF_STUDY QUESTION REVIEW q1", request_id="review-1")
+        self.assertEqual(prompt.output["input_kind"], "inquiry_review")
+        self.assertIsNone(prompt.output.get("question_id"))
+        self.assertIn("Retained question?", prompt)
+        self.assertNotIn("Unrelated active question?", prompt)
+        self.assertEqual(prompt.output, self.client.prepare("SELF_STUDY QUESTION REVIEW q1", request_id="review-1").output)
+        messages, _ = prompt.messages(prompt.output["system_prompt"], 16000)
+        response = Mock(status_code=200, text=json.dumps({"message": {"content": "STUDY_NOTE: Not a saved revision.\nNEXT: REST"}, "done": True}))
+        prompt.post(Mock(return_value=response), "fake", {"messages": messages}, 1)
+        prompt.accepted()
+        self.assertEqual(before["questions"], json.loads(state_path.read_bytes())["questions"])
+
     def test_durable_preparation_identity_survives_lost_ack(self):
         action = "SELF_STUDY QUESTION NEW Synthetic question?"
         first = self.client.prepare(action, request_id="action-1")

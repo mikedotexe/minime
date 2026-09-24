@@ -129,9 +129,13 @@ def test_mlx_primary_can_fail_over_to_ollama_then_fast_lane():
     ]
 
 
-def test_qualia_lanes_get_higher_ollama_cap_and_timeout():
-    # Private-qualia lanes (minime's felt voice) get more token room AND
-    # proportionally more wall-clock, so her qualia isn't truncated.
+def test_qualia_lanes_get_higher_ollama_cap_and_timeout(monkeypatch):
+    # Isolate this default-ratio fixture from operator environment overrides.
+    # A ceiling/deadline is not evidence that a completion was untruncated.
+    monkeypatch.setattr(aa, "LLM_TIMEOUT_S", 60.0)
+    monkeypatch.setattr(aa, "LLM_QUALIA_TIMEOUT_S", 160.0)
+    monkeypatch.setattr(aa, "OLLAMA_NUM_PREDICT_CAP", 768)
+    monkeypatch.setattr(aa, "OLLAMA_QUALIA_NUM_PREDICT_CAP", 2048)
     for prompt_class in ("moment_capture", "private_journal"):
         assert aa._ollama_lane_limits(prompt_class) == (
             aa.LLM_QUALIA_TIMEOUT_S,
@@ -141,8 +145,7 @@ def test_qualia_lanes_get_higher_ollama_cap_and_timeout():
     assert aa.LLM_QUALIA_TIMEOUT_S > aa.LLM_TIMEOUT_S
     assert aa.OLLAMA_QUALIA_NUM_PREDICT_CAP == 2048
     assert aa.LLM_QUALIA_TIMEOUT_S == 160
-    # The qualia pair preserves the proven 768/60s tokens-per-second budget ratio,
-    # so Gemma-4 timeout exposure is unchanged despite the larger cap.
+    # Nominal token/time ratios match; this does not measure provider latency.
     baseline_timeout_s = 60.0
     assert abs(
         aa.OLLAMA_QUALIA_NUM_PREDICT_CAP / aa.LLM_QUALIA_TIMEOUT_S
@@ -169,18 +172,26 @@ def test_inbox_reply_lane_gets_extended_timeout_and_cap():
     )
 
 
-def test_strict_review_lane_gets_extended_timeout_global_cap():
-    # INTROSPECT / self-study lane (minime's highest-signal feedback surface). The
-    # sectioned review takes 50-78s on the gemma4 primary; at the 60s global timeout
-    # ~half timed out and fell to a 3-char gemma3:4b stub, collapsing her self-study
-    # to a "thin output notice". It gets the same 160s headroom as the other
-    # voice-bearing lanes, keeping the global token cap (the review fits in 768), so
-    # timeout exposure is strictly reduced, not traded for extra token budget.
+def test_strict_review_lane_gets_extended_timeout_global_cap(monkeypatch):
+    # The legacy strict-review route is separate from the shared source-study
+    # adapter. Check configured routing, not current model latency or fit.
+    monkeypatch.setattr(aa, "LLM_TIMEOUT_S", 60.0)
+    monkeypatch.setattr(aa, "LLM_STRICT_REVIEW_TIMEOUT_S", 160.0)
+    monkeypatch.setattr(aa, "OLLAMA_NUM_PREDICT_CAP", 768)
     assert aa._ollama_lane_limits("strict_review") == (
         aa.LLM_STRICT_REVIEW_TIMEOUT_S,
         aa.OLLAMA_NUM_PREDICT_CAP,
     )
     assert aa.LLM_STRICT_REVIEW_TIMEOUT_S > aa.LLM_TIMEOUT_S
+
+
+def test_lane_routing_preserves_independent_timeout_overrides(monkeypatch):
+    monkeypatch.setattr(aa, "LLM_TIMEOUT_S", 310.0)
+    monkeypatch.setattr(aa, "LLM_STRICT_REVIEW_TIMEOUT_S", 90.0)
+    monkeypatch.setattr(aa, "LLM_QUALIA_TIMEOUT_S", 70.0)
+    assert aa._ollama_lane_limits("autonomous_next")[0] == 310.0
+    assert aa._ollama_lane_limits("strict_review")[0] == 90.0
+    assert aa._ollama_lane_limits("moment_capture")[0] == 70.0
 
 
 def test_source_navigation_survives_middle_compaction_within_existing_budget():
