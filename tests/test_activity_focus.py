@@ -135,6 +135,7 @@ def test_question_source_changes_require_explicit_reselection(client):
         status(client, 103)
     assert not status(client, 104)["protected"]
     selected = client.prepare("SELF_STUDY QUESTION q1")
-    assert "fixture has two functions" in selected
+    assert "fixture has two functions" not in selected
+    assert "fixture has two functions" in client.prepare("SELF_STUDY NOTE")
     fresh = client.prepare("SELF_STUDY OPEN astrid/crates/fixture/src/lib.rs 1")
     assert "replacement" in fresh

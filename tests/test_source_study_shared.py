@@ -102,7 +102,8 @@ class SharedSourceStudyTests(unittest.TestCase):
         resumed = self.client.prepare("SELF_STUDY CONTINUE")
         self.assertEqual(next_page.output["page"], resumed.output["page"])
         self.assertIn("Which Action calls entry?", resumed)
-        self.assertIn("Trace the entry point.", resumed)
+        self.assertNotIn("Trace the entry point.", resumed)
+        self.assertIn("Trace the entry point.", self.client.prepare("SELF_STUDY NOTE"))
         self.assertNotIn("Which Action calls entry?", resumed.output["system_prompt"])
         self.assertIn('No matches for the exact literal query "entry;"', self.client.prepare("SELF_STUDY FIND entry;"))
 

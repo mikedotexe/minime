@@ -32315,11 +32315,11 @@ Reason: {reason}
         return "\n\nOne prior research note (summary only):\n" + "\n".join(parts)
 
     def _source_study_action_for_introspect(self, raw_next: str) -> Optional[str]:
-        """Choose a bounded source route; never use it to open workspace artifacts."""
+        """Separate open reflection from explicit source or workspace inspection."""
         target, offset = self._parse_introspect_next_request(raw_next)
         target = self._canonicalize_introspect_target(target)
         if not target:
-            return "SELF_STUDY"
+            return "INTROSPECT"
         resolved, _ = self._resolve_introspect_target(target)
         if resolved and Path(resolved["path"]).resolve().is_relative_to(WORKSPACE_DIR.resolve()):
             return None
@@ -32424,10 +32424,13 @@ Reason: {reason}
             status = "verified input delivery; response claims and understanding not verified" if verified else "unverified; bookmark unchanged"
             session_pages = prompt.output.get("session_pages", [])
             private_writing = prompt.output.get("input_kind") == "private_writing"
-            mode = "private_writing" if private_writing else "self_study"
+            reflection = prompt.output.get("input_kind") == "reflection"
+            mode = "private_writing" if private_writing else "introspect" if reflection else "self_study"
             source = (prompt.output.get("page") or {}).get("source", f"study session ({len(session_pages)} source pages)" if session_pages else "source catalog")
             if private_writing:
                 source = "private draft"
+            elif reflection:
+                source = "open reflection"
             elif prompt.output.get("input_kind") == "geometry":
                 source = "chosen geometry evidence"
             directory = WORKSPACE_DIR / ("private_writing/journal" if private_writing else "journal")
@@ -32440,13 +32443,15 @@ Reason: {reason}
             scope = prompt.output.get("evidence_scope") or "Older retained input; consult the exact offered input."
             if prompt.output.get("input_kind") == "geometry":
                 revision = "frozen observation hashes in supplied evidence; no new source page"
-            heading = "PRIVATE WRITING" if private_writing else "SELF-STUDY"
+            elif reflection:
+                revision = "not applicable; no source or measurements supplied"
+            heading = "PRIVATE WRITING" if private_writing else "INTROSPECTION" if reflection else "SELF-STUDY"
             path.write_text(f"=== {heading}: {source} ===\nSource revision: {revision}\nInput evidence: {scope}\n"
                             f"Account: Minime’s response to this input, not independently verified code facts.\nDelivery: {status}\n\n{response}\n")
             self._record_current_action_artifact(mode, path, f"{mode}: {status}", visibility="protected" if private_writing else "summary" if verified else "protected")
             self._write_journal_entry(mode, response,
                 self._state_for_live_surfaces(state, context=mode), str(path),
-                private_canvas=private_writing, verified_source_study=verified and not private_writing)
+                private_canvas=private_writing, verified_source_study=verified and not private_writing and not reflection)
             feedback = (prompt.receipt or {}).get("choice_feedback") or {}
             if private_writing and str(feedback.get("selected_next") or "").upper() == "FINISH":
                 notice = directory / f"notice_{time.time_ns()}.txt"
@@ -32458,7 +32463,7 @@ Reason: {reason}
                 self._record_current_action_artifact(
                     "private_writing_notice", notice,
                     "Private writing choice needs explicit command recovery.", visibility="protected")
-            self._current_action_outcome_summary = f"Source study {source}: {status}."
+            self._current_action_outcome_summary = f"{heading.title()} {source}: {status}."
             if not verified:
                 job_outcome.fail_action("source_study_delivery_unverified", self._current_action_outcome_summary)
         except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
@@ -32494,7 +32499,7 @@ Reason: {reason}
             path = Path(resolved["path"]).resolve()
             artifact = path.is_relative_to(WORKSPACE_DIR.resolve())
         if not artifact:
-            action = (f"SELF_STUDY OPEN {target} {line_offset + 1}" if explicit_offset else f"SELF_STUDY RESUME {target}") if target else "SELF_STUDY"
+            action = (f"SELF_STUDY OPEN {target} {line_offset + 1}" if explicit_offset else f"SELF_STUDY RESUME {target}") if target else "INTROSPECT"
             self._run_shared_source_study(state, action)
             return
 

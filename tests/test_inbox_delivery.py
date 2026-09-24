@@ -242,7 +242,8 @@ def test_unknown_or_ambiguous_envelopes_have_no_return_route(tmp_path, source):
 
 def test_reader_defers_oversized_letter_without_archiving(agent):
     path, _ = seed_inbox()
-    path.write_text(letter(body="full " * 2000))
+    # The existing first-letter allowance is 12,000 characters, not 4,000.
+    path.write_text(letter(body="full " * 3000))
     assert agent._read_inbox() == ""
     assert path.exists()
     assert not (path.parent / "read" / path.name).exists()

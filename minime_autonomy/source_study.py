@@ -19,7 +19,7 @@ SOURCE_STUDY_GUIDANCE = (
     "SELF_STUDY QUESTION manages your study inquiries; SELF_STUDY RELATE follows one exact symbol, SELF_STUDY SESSION reads chosen pages together, and SELF_STUDY TRACE LAST inspects retained delivery. "
     "Use SELF_STUDY FIND <literal text>, SELF_STUDY OPEN repository/path [one-based line], "
     "SELF_STUDY RESUME repository/path, or SELF_STUDY CONTINUE. Choose exact paths from the map/search; "
-    "if a target is unknown, use SELF_STUDY MAP. Source INTROSPECT is the same budget-free reader "
+    "if a target is unknown, use SELF_STUDY MAP. Bare INTROSPECT is open reflection, without automatic source, telemetry or saved study notes. SELF_STUDY NOTE opens your retained note and revision history. Source-targeted INTROSPECT is the same budget-free reader "
     "(legacy offsets start at 0); preserved workspace artifacts keep their research policy. "
     "A recovery map is navigation, not delivery of the requested source. "
     "SELF_STUDY CONTINUE reads the next code page; READ_MORE is a separate saved-document reader. "

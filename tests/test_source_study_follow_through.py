@@ -96,6 +96,70 @@ def test_source_entry_completes_under_paused_experiment_and_dispatches_its_next(
     assert store.research_budget_guard_assessment("READ_MORE", STATE) is not None
 
 
+def test_bare_introspection_uses_reflection_without_advancing_source_or_saving_study_claims(study_agent):
+    agent, store, client, offers = study_agent
+    # Reflection retains the existing INTROSPECT experiment-budget policy.
+    assert store.research_budget_guard_assessment("INTROSPECT", STATE) is not None
+    store.create_thread("Open reflection outside an experiment")
+    agent._pending_next_action = "INTROSPECT"
+    assert agent._decide_action(dict(STATE)) == "self_study"
+    context = dict(agent._pending_action_continuity_context)
+    assert context["source_study_action"] == "INTROSPECT"
+    event = store.begin_action("INTROSPECT", "INTROSPECT", "self_study", "self_study", dict(STATE), source="next")
+    agent._execute_action("self_study", dict(STATE), _from_llm_job=True,
+                          _precreated_continuity_context=context, _precreated_continuity_event=event)
+    assert offers[0].output["input_kind"] == "reflection"
+    assert "RECALLED ACCOUNT" not in offers[0]
+    assert "TECHNICAL_" not in offers[0]
+    assert "studying your system" not in offers[0].output["system_prompt"]
+    journals = list((aa.WORKSPACE_DIR / "journal").glob("introspect_*.txt"))
+    assert len(journals) == 1 and "=== INTROSPECTION: open reflection ===" in journals[0].read_text()
+    state = json.loads((aa.WORKSPACE_DIR / "diagnostics/source_first_v3/shared_reader/reader-v1.json").read_text())
+    assert not state["bookmarks"]
+    assert not state["notebook"]["question"]
+    assert agent._pending_next_action == "SELF_STUDY MAP minime"
+
+
+def test_note_revision_uses_actual_reader_delivery_and_remains_voluntary(study_agent, monkeypatch):
+    agent, _, client, offers = study_agent
+    output_text = ["STUDY_NOTE: Earlier assumption.\nNEXT: REST"]
+
+    def provider(prompt, **kwargs):
+        offers.append(prompt)
+        text = output_text[0]
+        messages, _ = aa._adapt_ollama_messages_for_model(
+            model="gemma4:12b", system_msg=prompt.output["system_prompt"], prompt=prompt,
+            num_ctx=8192, num_predict=768)
+        response = Mock(status_code=200, text=json.dumps({"message": {"content": text}, "done": True}))
+        prompt.post(Mock(return_value=response), "fake", {"messages": messages}, 1)
+        prompt.accepted()
+        return text
+
+    monkeypatch.setattr(agent, "_query_llm", provider)
+    source = "minime/minime_autonomy/runtime.py"
+    path = client.workspace / "diagnostics/source_first_v3/shared_reader/reader-v1.json"
+    agent._current_action_continuity_event = {"action_id": "note-original"}
+    agent._run_shared_source_study(dict(STATE), f"SELF_STUDY OPEN {source} 1")
+    saved = json.loads(path.read_text())["notebook"]["note"]
+    output_text[0] = "STUDY_REVISE: " + json.dumps({
+        "prior": saved["response_sha256"], "text": "I qualify my earlier interpretation.",
+        "source": source, "line": 2}) + "\nNEXT: REST"
+    agent._current_action_continuity_event = {"action_id": "note-revised"}
+    agent._run_shared_source_study(dict(STATE), f"SELF_STUDY OPEN {source} 1")
+    assert "Earlier assumption." not in offers[-1]
+    state = json.loads(path.read_text())
+    assert state["notebook"]["note_history"][1]["previous"] == saved
+    assert state["notebook"]["note_history"][1]["counterevidence"]["line"] == 2
+    assert state["notebook"]["note"]["text"] == "I qualify my earlier interpretation."
+    output_text[0] = "NEXT: REST"
+    agent._current_action_continuity_event = {"action_id": "note-opened"}
+    agent._run_shared_source_study(dict(STATE), "SELF_STUDY NOTE")
+    assert offers[-1].output["input_kind"] == "notebook"
+    assert "Earlier assumption." in offers[-1]
+    assert "I qualify my earlier interpretation." in offers[-1]
+    assert not json.loads(path.read_text())["questions"]["entries"]
+
+
 def test_artifact_and_external_routes_keep_research_policy(study_agent):
     agent, store, _, offers = study_agent
     artifact = aa.WORKSPACE_DIR / "journal/return.txt"
