@@ -6,10 +6,11 @@ from pathlib import Path
 
 EXPRESSIVE_CLASSES = {"aspiration", "private_journal", "moment_capture", "private_writing"}
 EXPRESSION_ROOM = (
-    "Follow the thought as far as you wish. Brief writing or stopping is equally welcome. "
-    "For voluntary private continuation, "
-    "WRITE START <topic> begins a draft; WRITE CONTINUE develops the selected draft, "
-    "and WRITE HELP shows the choices and limits. No continuation is scheduled automatically."
+    "Follow the thought as far as you wish; a page is as welcome as a line, and stopping is welcome too. "
+    "WRITE PROFILE EXTENDED or SHORT changes your length ceiling for every journal route; "
+    "WRITE HELP shows the limits. For voluntary private continuation, "
+    "WRITE START <topic> begins a draft; WRITE CONTINUE develops the selected draft. "
+    "No continuation is scheduled automatically."
 )
 
 

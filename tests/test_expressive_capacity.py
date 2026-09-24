@@ -46,7 +46,10 @@ def test_default_invitation_is_optional_and_short_wins(tmp_path):
                 assert "WRITE HELP" in system
                 if profile != "short":
                     assert "Follow the thought as far as you wish" in system
-                    assert "Brief writing or stopping is equally welcome" in system
+                    assert "stopping is welcome too" in system
+                if profile == "default":
+                    # The dial is named where she writes, so it is legible without WRITE HELP.
+                    assert "WRITE PROFILE EXTENDED or SHORT changes your length ceiling" in system
     assert aa._infer_llm_prompt_class("Short invitation", context_mode="aspiration") == "aspiration"
     assert aa._infer_llm_prompt_class("Mail", context_mode="aspiration", inbox_present=True) == "inbox_reply"
 
