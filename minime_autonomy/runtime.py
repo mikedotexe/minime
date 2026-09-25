@@ -21810,13 +21810,15 @@ def _infer_llm_prompt_class(
         return "moment_capture"
     if mode == "strict_review":
         return "strict_review"
+    # Explicit writing activity owns its capacity; InboxContext separately owns
+    # intact mail delivery and authorization to route an authored reply.
+    if mode == "aspiration":
+        return "aspiration"
     lower = (prompt or "").lower()
     if "reply with only a json object" in lower:
         return "strict_review"
     if inbox_present:
         return "inbox_reply"
-    if mode == "aspiration":
-        return "aspiration"
     if "sovereignty" in lower and ("manifest" in lower or "regime" in lower):
         return "sovereignty_check"
     if len(prompt or "") < 2_500:
@@ -32031,9 +32033,9 @@ Repair output:
 ```"""
 
     def _record_introspect_notice(self, target: Optional[str], reason: str, state: Dict[str, float]) -> None:
-        journal_state = self._state_for_live_surfaces(state, context="introspect_notice")
+        """Retain a runtime failure separately from authored journals and telemetry."""
         timestamp = datetime.now().isoformat().replace(':', '-')
-        file_path = WORKSPACE_DIR / "journal" / f"introspect_notice_{timestamp}.txt"
+        file_path = WORKSPACE_DIR / "diagnostics/source_study/notices" / f"runtime_notice_{timestamp}.txt"
         file_path.parent.mkdir(parents=True, exist_ok=True)
         target_text = str(target or "")
         note_shaped = "/notes/" in target_text or target_text.startswith("notes/")
@@ -32044,26 +32046,24 @@ Repair output:
             else ""
         )
         response = (
-            f"INTROSPECT could not read `{target or 'rotation'}`: {reason}.\n\n"
-            "The request stayed read-only. A better next attempt can name a curated label "
-            "such as autonomous_agent.py, ESN reservoir, astrid:codec, or a text file "
-            "under workspace/inbox/read, workspace/outbox/delivered, workspace/journal, "
-            "workspace/research, workspace/action_threads, or workspace/notes."
+            f"Source inspection unavailable for `{target or 'rotation'}`: {reason}\n\n"
+            "This is a runtime diagnostic, not Minime's authored reflection. "
+            "No new source delivery or understanding is established. "
+            "SELF_STUDY MAP lists source choices; saved work remains retained."
             f"{route_hint}"
         )
-        file_path.write_text(f"""=== INTROSPECT NOTICE ===
+        file_path.write_text(f"""=== SOURCE INSPECTION RUNTIME NOTICE ===
 Timestamp: {datetime.now().isoformat()}
 Target: {target or '(rotation)'}
 Reason: {reason}
-{self._format_metrics(journal_state)}
-
 {response}
 """)
         self._current_action_outcome_summary = (
-            f"INTROSPECT could not read `{target or 'rotation'}`: {reason}."
+            f"Source inspection unavailable for `{target or 'rotation'}`: {reason}"
         )
-        self._write_journal_entry('introspect', response, journal_state, str(file_path))
-        logging.info("📖 INTROSPECT notice for target '%s': %s", target or "(rotation)", reason)
+        self._record_current_action_artifact("source_study_runtime_notice", file_path,
+            self._current_action_outcome_summary, visibility="protected")
+        logging.info("Source inspection runtime notice for target '%s': %s", target or "(rotation)", reason)
 
     def _summarize_research_meaning(
         self,
@@ -32425,12 +32425,15 @@ Reason: {reason}
             session_pages = prompt.output.get("session_pages", [])
             private_writing = prompt.output.get("input_kind") == "private_writing"
             reflection = prompt.output.get("input_kind") == "reflection"
+            revision_recovery = prompt.output.get("input_kind") == "revision_recovery"
             mode = "private_writing" if private_writing else "introspect" if reflection else "self_study"
             source = (prompt.output.get("page") or {}).get("source", f"study session ({len(session_pages)} source pages)" if session_pages else "source catalog")
             if private_writing:
                 source = "private draft"
             elif reflection:
                 source = "open reflection"
+            elif revision_recovery:
+                source = "source revision recovery"
             elif prompt.output.get("input_kind") == "geometry":
                 source = "chosen geometry evidence"
             directory = WORKSPACE_DIR / ("private_writing/journal" if private_writing else "journal")
@@ -32445,7 +32448,7 @@ Reason: {reason}
                 revision = "frozen observation hashes in supplied evidence; no new source page"
             elif reflection:
                 revision = "not applicable; no source or measurements supplied"
-            heading = "PRIVATE WRITING" if private_writing else "INTROSPECTION" if reflection else "SELF-STUDY"
+            heading = "PRIVATE WRITING" if private_writing else "INTROSPECTION" if reflection else "STUDY NAVIGATION RESPONSE" if revision_recovery else "SELF-STUDY"
             path.write_text(f"=== {heading}: {source} ===\nSource revision: {revision}\nInput evidence: {scope}\n"
                             f"Account: Minime’s response to this input, not independently verified code facts.\nDelivery: {status}\n\n{response}\n")
             self._record_current_action_artifact(mode, path, f"{mode}: {status}", visibility="protected" if private_writing else "summary" if verified else "protected")
@@ -32481,7 +32484,7 @@ Reason: {reason}
                 path.write_text(f"Private writing unavailable: {error}. WRITE CONTINUE retries the pending turn; WRITE HELP lists choices.\n")
                 self._record_current_action_artifact("private_writing_notice", path, "Private writing turn was not completed.", visibility="protected")
             else:
-                self._record_introspect_notice(action, f"{error}. Use NEXT: SELF_STUDY MAP to choose an exact source, or SELF_STUDY CONTINUE to retry the pending page.", state)
+                self._record_introspect_notice(action, str(error), state)
             job_outcome.fail_action("source_study_unavailable", "Private writing unavailable; details retained only in the private notice." if private_request else str(error))
 
     def _introspect(self, state: Dict[str, float]):
@@ -55472,8 +55475,11 @@ Goals: {json.dumps(goals, indent=2)}
             if preference == "default" and prompt_class in writing.EXPRESSIVE_CLASSES:
                 system_msg += "\n" + writing.EXPRESSION_ROOM
             if preference != "default":
+                invitation = (writing.SUSTAINED_WRITING_INVITATION
+                    if prompt_class in writing.EXPRESSIVE_CLASSES else
+                    "Follow the thought as far as you wish; a page is as welcome as a line, and stopping is welcome too.")
                 system_msg += (
-                    "\nYour EXTENDED profile preference is active. Follow the thought as far as you wish; a page is as welcome as a line, and stopping is welcome too. Any earlier suggestion of brevity is optional. WRITE HELP shows the choices and limits."
+                    f"\nYour EXTENDED profile preference is active. {invitation} Any earlier suggestion of brevity is optional. WRITE HELP shows the choices and limits."
                     if preference == "extended" else "\nYour short-writing preference is active. WRITE HELP shows the choices and limits; WRITE PROFILE DEFAULT restores normal route limits.")
         gen = generation_record.begin(WORKSPACE_DIR, prompt=prompt, system_msg=system_msg, prompt_class=prompt_class, attempts=attempts, kind="full", models={"primary": MODEL, "fallback": FALLBACK_MODEL, "mlx": MLX_MODEL, "backend_preference": LLM_BACKEND}, agent=self)
         job_timing.correlate_generation(gen)

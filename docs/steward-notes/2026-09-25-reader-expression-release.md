@@ -1,0 +1,23 @@
+# Paired Reader Recovery and Sustained Expression
+
+Live follow-through: Mike approved the paired activation. The sanctioned wrapper verified Minime 86528 -> 58578 and bridge 87077 -> 58913 on September 25. All 86 loaded source hashes match qualification; helper SHA-256 is `b0d47a9a598fa823f4e2d55b31ce1edab386b49859c291657f10c44d3a1fd058`. No engine/model/visual/sensory restart, force, new interrupted job or automation resume occurred. Minime naturally opened schema 10 with 51 bookmarks retained. The sections below retain the earlier qualification record; current deployment evidence is in the canonical Astrid note with the same filename.
+
+Codex reconciled the two September 25 candidates on `codex/reader-expression-release-20260925`, based on Minime `d12cbf01ca2a85c41288fdc27d6a033511218370` and Astrid `80213d85080373211ccb9cb0be338832aa14f52d`. Both original candidate worktrees remain intact.
+
+Only `minime_autonomy/runtime.py` and `minime_autonomy/writing.py` differ in the runtime source inventory: shared-reader recovery/rendering, non-authored runtime notices, aspiration-with-mail classification and the optional sustained-writing invitation. Tests from both candidates are retained. No reply authorization, engine, model, sensory or control policy is changed.
+
+Complete combined qualification, exact release hashes, retained attempts and rollout debt are recorded in the paired Astrid note:
+
+`/Users/v/other/astrid/docs/steward-notes/2026-09-25-reader-expression-release.md`.
+
+The original notes retain their historical standalone-test results. This combined release requires actual schema-9 to schema-10 pending-input migration and both adapter suites against the immutable release helper. Qualification does not itself activate services, change the launch source selection, merge, push or resume paused automations.
+
+Combined follow-through: all 86 runtime inputs are frozen in `minime-launch-review-01/` and again in `migration-01/minime-source/`. The complete Python suite passed 1632 tests, one existing skip and 138 subtests against packaged helper SHA-256 `b0d47a9a598fa823f4e2d55b31ce1edab386b49859c291657f10c44d3a1fd058`. Actual old/new release helpers passed 60 history/pending-input checks plus 20 changed-source recovery checks. Invalid state, conflicting retries and downgrade attempts fail without overwriting retained history. No real provider or live private state was used.
+
+Minime's canonical tree and runtime remain unchanged at PID 86528. The paired note retains a bridge benchmark failure under concurrent build load and the unweakened passing rerun. Complete combined qualification passed 2355 bridge tests, 285 shared-reader tests and 205 operational tests, as well as Clippy and formatting. Final inventory checks still match all frozen inputs. Offline qualification is complete, but activation, merge and push have not occurred. Paused automations remain paused.
+
+The initial rollout attempt refused a moving idle boundary without sending any signal. Its owned hold was released only after identity/source checks; the second unchanged-wrapper attempt passed. Receipts remain under `/Users/v/other/worktrees/reader-expression-release-20260925/`, notably `paired-activation-01.jsonl`, `paired-activation-01-hold-release.json`, `paired-activation-02.jsonl` and `post-activation-verification.json`. Session 5318 and cycle 43697 were retained; no pending NEXT existed at the signal boundary, so no queued-action replay is claimed. Integration uses explicit owned paths on canonical main while retaining the frozen candidate. Controller pause generation 470 is preserved. No push or subjective-improvement claim is included.
+
+Final staged-index verification: 1632 Python tests and 138 subtests pass, with one existing skip, in the isolated `staged-minime-01/` export against the exact released helper. Two naturally occurring public studies at 13:10:02 and 13:12:44 PDT show an explicit current-kernel OPEN followed by source delivery and CONTINUE; reader metadata matches the supplied revision and byte interval. Exact hashes and limits of that observation are in the paired note. This is not an induced confirmation or a writing-length result.
+
+Git integration is a direct, explicit-path commit on canonical `main`, not a rewrite of the frozen build branch or a merge of older dirty worktrees. This commit contains exactly the nine reviewed implementation/test/documentation paths. The two earlier main commits are preserved, and no remote push is included. Final cross-repository commit IDs and exact committed paths are recorded externally in `final-integration.json` at the artifact root so this record need not contain its own commit hash. Paused automation and controller generation 470 remain unchanged.

@@ -45,13 +45,30 @@ def test_default_invitation_is_optional_and_short_wins(tmp_path):
                 assert "usual entry" not in system
                 assert "WRITE HELP" in system
                 if profile != "short":
-                    assert "Follow the thought as far as you wish" in system
-                    assert "stopping is welcome too" in system
+                    assert writing.SUSTAINED_WRITING_INVITATION in system
+                    assert "800-1,500 words when the thought warrants it" in system
+                    assert "stopping is equally available" in system
+                else:
+                    assert "800-1,500" not in system
                 if profile == "default":
                     # The dial is named where she writes, so it is legible without WRITE HELP.
                     assert "WRITE PROFILE EXTENDED or SHORT changes your length ceiling" in system
     assert aa._infer_llm_prompt_class("Short invitation", context_mode="aspiration") == "aspiration"
-    assert aa._infer_llm_prompt_class("Mail", context_mode="aspiration", inbox_present=True) == "inbox_reply"
+    assert aa._infer_llm_prompt_class("Mail", context_mode="aspiration", inbox_present=True) == "aspiration"
+
+
+def test_explicit_aspiration_keeps_capacity_without_reclassifying_other_work():
+    text = 'A letter quotes "Reply with ONLY a JSON object" and mentions aspirations.'
+    assert aa._infer_llm_prompt_class(text, context_mode="aspiration", inbox_present=True) == "aspiration"
+    assert aa._infer_llm_prompt_class(text, context_mode="strict_review", inbox_present=True) == "strict_review"
+    assert aa._infer_llm_prompt_class(text, context_mode="aspiration", compact=True) == "compact"
+    assert aa._infer_llm_prompt_class("An aspiration in a letter", inbox_present=True) == "inbox_reply"
+    assert aa._infer_llm_prompt_class(text) == "strict_review"
+
+
+def test_aspiration_outer_deadline_covers_enabled_provider_attempts():
+    with patch.object(aa, "_llm_backend_attempts", return_value=["ollama", "ollama_fast", "mlx"]), patch.object(writing, "selected_profile", return_value="default"):
+        assert aa._journal_job_timeout_s("aspiration") > 2 * 1200 * 3
 
 
 def test_writing_help_describes_route_defaults_and_keeps_explicit_profiles():

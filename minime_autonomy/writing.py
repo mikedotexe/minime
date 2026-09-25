@@ -5,8 +5,15 @@ import re
 from pathlib import Path
 
 EXPRESSIVE_CLASSES = {"aspiration", "private_journal", "moment_capture", "private_writing"}
+SUSTAINED_WRITING_INVITATION = (
+    "There is room for a sustained piece, perhaps 800-1,500 words when the thought warrants it. "
+    "You may stay with an idea through examples, complications, uncertainty and changes of direction, "
+    "without compressing it into an immediate conclusion. These are possibilities, not a required outline. "
+    "The range is an invitation, not a quota: a shorter piece, a different form or stopping is equally available. "
+    "Do not pad, repeat or invent material to reach a length."
+)
 EXPRESSION_ROOM = (
-    "Follow the thought as far as you wish; a page is as welcome as a line, and stopping is welcome too. "
+    SUSTAINED_WRITING_INVITATION + " "
     "WRITE PROFILE EXTENDED or SHORT changes your length ceiling for every journal route; "
     "WRITE HELP shows the limits. For voluntary private continuation, "
     "WRITE START <topic> begins a draft; WRITE CONTINUE develops the selected draft. "
