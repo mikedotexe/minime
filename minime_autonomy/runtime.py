@@ -24,6 +24,8 @@ import sqlite3
 import logging
 from minime_autonomy import writing
 from minime_autonomy.source_study import StudyClient, SourceStudyPrompt, SOURCE_STUDY_GUIDANCE
+from minime_autonomy.study_feedback import StudyFeedback, delivery_origin
+from uuid import uuid4
 from minime_autonomy.activity_focus import ActivityFocus, COMMANDS as ACTIVITY_COMMANDS
 import requests
 import argparse
@@ -95,6 +97,7 @@ from .expressive_journal import (
     COMPACT_ACTION_GUIDANCE, expression_invitation, save_expression, snapshot_record,
 )
 from .measurement_history import format_fill_history
+from .moment_context import select_recent_markers, selection_note, pressure_classifier_context
 from .journal_context import (
     OPEN_OBSERVATION_INVITATION,
     OPEN_REFLECTION_INTRO,
@@ -22479,6 +22482,8 @@ class AutonomousAgent:
                 self._llm_job_worker_active = False
 
     def _record_skipped_next_action(self, raw_next: str, base: str, state: Dict[str, float], status: str = "skipped") -> None:
+        self._study_action_outcome("skipped", "The host skipped one action. This does not close an inquiry or prevent a later choice.",
+                                   context=getattr(self, "_pending_action_continuity_context", None))
         try:
             store = self._continuity_store()
             event = store.begin_action(
@@ -24535,7 +24540,7 @@ Fill: {fill:.1f}%
         if self._pending_next_action:
             chosen = self._pending_next_action
             self._pending_next_action = None
-            self._persist_pending_next_action(
+            study_choice_id = self._persist_pending_next_action(
                 None,
                 reason="honored",
                 expected_action=chosen,
@@ -24906,6 +24911,14 @@ Fill: {fill:.1f}%
 
             base = chosen.split()[0].upper().rstrip(':')
             self._set_action_continuity_context(chosen, base)
+            if study_choice_id:
+                self._pending_action_continuity_context["study_choice_id"] = study_choice_id
+            if base == "QUESTION":
+                # Ask the reader for state-aware rejection/recovery. It never
+                # executes a bare QUESTION or guesses a qN from a hash.
+                self._pending_source_study_action = chosen
+                self._pending_action_continuity_context["source_study_action"] = chosen
+                return "self_study"
             navigation_recovery = None
             if base in {"RELATE", "SEARCH", "RESEARCH"}:
                 try:
@@ -27283,6 +27296,8 @@ Fill: {fill:.1f}%
             )
             if continuity_event:
                 continuity_event["outcome_summary"] = outcome_summary
+            self._study_action_outcome("completed", "Host action finished; reader effects, if any, are recorded separately. This does not verify response claims.",
+                                       context=continuity_context)
             manifest_path = self._write_action_manifest(action, state, continuity_event)
             if manifest_path and continuity_event:
                 manifest_artifact = {
@@ -27361,6 +27376,8 @@ Fill: {fill:.1f}%
 
         except Exception as e:
             logging.error(f"Action execution failed: {e}")
+            self._study_action_outcome("failed", "Host action execution failed; no unrecorded reader or source effect is inferred.",
+                                       context=continuity_context)
             job_outcome.fail_action(str(e), f"Action `{action}` failed: {e}")
             if continuity_event:
                 try:
@@ -27881,6 +27898,9 @@ Reply with ONLY a JSON object. The "regime" field is REQUIRED:
 
 Prompt captured at (UTC): {captured_at.isoformat()}
 {state_anchor}"""
+        classifier_context = pressure_classifier_context(state.get("pressure_source_v1"))
+        if classifier_context:
+            prompt += f"\n{classifier_context}"
         prompt = f"{prompt}\n\n{self._journal_continuity_contract_v1(state, private_canvas=True)}"
 
         response = self._query_llm_with_next(
@@ -27908,10 +27928,11 @@ Prompt captured at (UTC): {captured_at.isoformat()}
             action_tail_section = f"\n{ACTION_TAIL_MARKER}\n{action_tail or '(none)'}\n"
             journal_file.write_text(f"""=== SPECTRAL PRESSURE JOURNAL ===
 Timestamp: {written_at.isoformat()}
-Prompt contract: private_journal_context_v3
+Prompt contract: private_journal_context_v4
 Prompt captured at (UTC): {captured_at.isoformat()}
 Metrics below describe the supplied pre-generation state, not the writing time.
 {state_anchor}
+{classifier_context}
 
 RESERVOIR DYNAMICS:
 λ₁: {eig1:.3f} (baseline: {baseline:.3f})
@@ -32342,6 +32363,18 @@ Reason: {reason}
             self._pending_source_study_action = None
         self._run_shared_source_study(state, action)
 
+    def _study_action_outcome(self, status, detail, *, context=None, input_id=None, reader=False):
+        context = context or getattr(self, "_current_action_continuity_context", None) or {}
+        ident = context.get("study_choice_id")
+        if not ident:
+            return
+        event = getattr(self, "_current_action_continuity_event", None) or {}
+        try:
+            StudyFeedback(WORKSPACE_DIR).outcome(ident, status, detail,
+                action_id=event.get("action_id"), input_id=input_id, reader=reader)
+        except (OSError, ValueError) as error:
+            logging.warning("Study action outcome unavailable: %s", error)
+
     def _activity_checkpoint_exists(self):
         root = WORKSPACE_DIR / "diagnostics/source_first_v3/shared_reader"
         return any((root / name).exists() for name in
@@ -32401,6 +32434,14 @@ Reason: {reason}
             if not operation:
                 raise RuntimeError("study preparation requires a durable action identity")
             prompt = StudyClient(BASE_DIR, WORKSPACE_DIR).prepare(action, request_id=f"prepare-{operation}")
+            kind = prompt.output.get("input_kind")
+            outcome = "rejected" if kind == "recovery" else "needs_choice" if kind in {"end_of_file", "revision_recovery"} else "reader_prepared"
+            detail = ("Reader rejected the request; no substitute command was executed." if outcome == "rejected" else
+                      "Reader supplied no new source page; choose an explicit continuation, another activity or REST." if outcome == "needs_choice" else
+                      "Reader operation prepared successfully; generation and source delivery are separate outcomes.")
+            if kind == "questions" and action.split()[1:3] == ["QUESTION", "RESOLVE"]:
+                outcome, detail = "applied", "The selected numbered inquiry was marked resolved by its author; this is not verified understanding."
+            self._study_action_outcome(outcome, detail, input_id=prompt.output.get("navigation_id") or (prompt.output.get("page") or {}).get("id"), reader=True)
             if not prompt.output.get("generation_requested", True):
                 # The Rust preparation receipt is already durable in the owner store.
                 # Do not promote its private contents into ambient context or public logs.
@@ -32426,12 +32467,15 @@ Reason: {reason}
             private_writing = prompt.output.get("input_kind") == "private_writing"
             reflection = prompt.output.get("input_kind") == "reflection"
             revision_recovery = prompt.output.get("input_kind") == "revision_recovery"
-            mode = "private_writing" if private_writing else "introspect" if reflection else "self_study"
+            decision = prompt.output.get("input_kind") == "end_of_file"
+            mode = "private_writing" if private_writing else "introspect" if reflection else "study_decision" if decision else "self_study"
             source = (prompt.output.get("page") or {}).get("source", f"study session ({len(session_pages)} source pages)" if session_pages else "source catalog")
             if private_writing:
                 source = "private draft"
             elif reflection:
                 source = "open reflection"
+            elif decision:
+                source = "continuation decision at end of source"
             elif revision_recovery:
                 source = "source revision recovery"
             elif prompt.output.get("input_kind") == "geometry":
@@ -32454,7 +32498,7 @@ Reason: {reason}
             self._record_current_action_artifact(mode, path, f"{mode}: {status}", visibility="protected" if private_writing else "summary" if verified else "protected")
             self._write_journal_entry(mode, response,
                 self._state_for_live_surfaces(state, context=mode), str(path),
-                private_canvas=private_writing, verified_source_study=verified and not private_writing and not reflection)
+                private_canvas=private_writing, verified_source_study=verified and not private_writing and not reflection and not decision)
             feedback = (prompt.receipt or {}).get("choice_feedback") or {}
             if private_writing and str(feedback.get("selected_next") or "").upper() == "FINISH":
                 notice = directory / f"notice_{time.time_ns()}.txt"
@@ -32470,6 +32514,7 @@ Reason: {reason}
             if not verified:
                 job_outcome.fail_action("source_study_delivery_unverified", self._current_action_outcome_summary)
         except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+            self._study_action_outcome("failed", "Study generation or delivery did not complete; any earlier reader outcome remains recorded separately.")
             if admission is not None and host is not None:
                 # A committed native delivery survives later presentation failure.
                 # Otherwise this returned provider attempt ends priority, not prose.
@@ -32723,32 +32768,21 @@ Pressure source: {pressure_source}
     def _check_moment_markers(self, state: Dict[str, float]) -> bool:
         """Journal selected recorded events with a frozen pre-generation snapshot."""
         try:
+            snapshot = deepcopy(capture_report_snapshot(
+                state=deepcopy(state),
+                session_id=self.session_id,
+                base_dir=BASE_DIR,
+                workspace_dir=WORKSPACE_DIR,
+            ))
+            journal_state = snapshot.state
+            captured_at = datetime.fromtimestamp(time.time(), timezone.utc)
             conn = sqlite3.connect(DB_PATH)
-            cur = conn.cursor()
-            cur.execute("PRAGMA table_info(moment_markers)")
-            marker_columns = {str(row[1]) for row in cur.fetchall()}
-            created_at_select = (
-                "created_at_unix"
-                if "created_at_unix" in marker_columns
-                else "NULL AS created_at_unix"
-            )
-            cur.execute(
-                f"""SELECT id, marker_type, description, spectral_context,
-                          timestamp, {created_at_select}
-                   FROM moment_markers
-                   WHERE session_id = ? AND consumed = 0
-                   ORDER BY timestamp DESC LIMIT 3""",
-                (self.session_id,),
-            )
-            marker_keys = (
-                "id",
-                "marker_type",
-                "description",
-                "spectral_context",
-                "timestamp",
-                "created_at_unix",
-            )
-            markers = [dict(zip(marker_keys, row)) for row in cur.fetchall()]
+            try:
+                markers = select_recent_markers(conn, self.session_id,
+                    recorded_now=captured_at.timestamp(), engine_now=journal_state.get("timestamp"))
+            except Exception:
+                conn.close()
+                raise
 
             if not markers:
                 conn.close()
@@ -32779,23 +32813,13 @@ Pressure source: {pressure_source}
             # Mark as consumed immediately to avoid duplicates
             marker_ids = [m["id"] for m in markers]
             placeholders = ','.join('?' * len(marker_ids))
-            cur.execute(
+            conn.execute(
                 f"UPDATE moment_markers SET consumed = 1 WHERE id IN ({placeholders})",
                 marker_ids,
             )
             conn.commit()
             conn.close()
 
-            # Freeze guarded measurements and header before generation; never
-            # attach later telemetry to prose written from an earlier snapshot.
-            snapshot = deepcopy(capture_report_snapshot(
-                state=deepcopy(state),
-                session_id=self.session_id,
-                base_dir=BASE_DIR,
-                workspace_dir=WORKSPACE_DIR,
-            ))
-            journal_state = snapshot.state
-            captured_at = datetime.fromtimestamp(time.time(), timezone.utc)
             fill = journal_state.get("fill_ratio")
             fill_frame = (
                 self._current_fill_frame_label(float(fill) * 100)
@@ -32803,11 +32827,13 @@ Pressure source: {pressure_source}
                 else "unknown"
             )
             state_anchor = format_prompt_state(journal_state, fill_frame=fill_frame)
-            moments_text = format_marker_anchors(markers, captured_at=captured_at)
+            moments_text = format_marker_anchors(markers, captured_at=captured_at,
+                                                 engine_now=journal_state.get("timestamp"))
             metrics_text = self._format_metrics(journal_state, snapshot=snapshot)
             prompt = moment_prompt(
                 captured_at=captured_at, state_anchor=state_anchor, markers_text=moments_text
             )
+            prompt += "\n\n" + selection_note()
 
             response = self._query_llm_with_next(
                 prompt,
@@ -32823,10 +32849,11 @@ Pressure source: {pressure_source}
                 marker_types = [m["marker_type"] for m in markers]
                 file_path.write_text(f"""=== MOMENT CAPTURE ===
 Timestamp: {written_at.isoformat()}
-Prompt contract: private_moment_context_v3
+Prompt contract: private_moment_context_v4
 Prompt captured at (UTC): {captured_at.isoformat()}
 Timestamp above is journal writing time, not the measurement or event time.
 Markers: {', '.join(marker_types)}
+{selection_note()}
 Prompt-state anchor (supplied to model):
 {state_anchor}
 
@@ -48373,7 +48400,8 @@ Goals: {json.dumps(goals, indent=2)}
         action: Optional[str],
         reason: str,
         expected_action: Optional[str] = None,
-    ) -> None:
+        study_origin: Optional[dict] = None,
+    ) -> Optional[str]:
         """Keep persisted NEXT: state in sync with the in-memory queue."""
         if not hasattr(self, "session_id"):
             return
@@ -48398,6 +48426,8 @@ Goals: {json.dumps(goals, indent=2)}
                     )
                     return
 
+            previous_action = state.get("pending_next_action")
+            previous_selection_id = state.get("pending_next_selection_id")
             now = time.strftime("%Y-%m-%dT%H:%M:%S")
             state["session_id"] = self.session_id
             state["pending_next_action_updated_at"] = now
@@ -48416,6 +48446,10 @@ Goals: {json.dumps(goals, indent=2)}
                 pass
 
             if action:
+                selection_id = (previous_selection_id if action == previous_action and "choice" not in reason
+                                else uuid4().hex) or uuid4().hex
+                state["pending_next_selection_id"] = selection_id
+                self._pending_next_selection_id = selection_id
                 state["pending_next_action"] = action
                 state["pending_next_action_status"] = "pending"
                 choice_envelope = getattr(self, "_pending_choice_envelope_v1", None)
@@ -48424,6 +48458,9 @@ Goals: {json.dumps(goals, indent=2)}
                 else:
                     state.pop("choice_envelope_v1", None)
             else:
+                selection_id = None
+                state.pop("pending_next_selection_id", None)
+                self._pending_next_selection_id = None
                 removed = state.pop("pending_next_action", None)
                 state.pop("choice_envelope_v1", None)
                 state["pending_next_action_status"] = "cleared"
@@ -48432,11 +48469,16 @@ Goals: {json.dumps(goals, indent=2)}
 
             with open(state_path, "w") as f:
                 json.dump(state, f, indent=2)
+            receipt_id = StudyFeedback(WORKSPACE_DIR).transition(
+                action, previous=expected_action or previous_action, reason=reason, origin=study_origin,
+                selection_id=selection_id, previous_selection_id=previous_selection_id,
+            )
             logging.info(
                 "🎯 Pending NEXT state %s: %s",
                 state["pending_next_action_status"],
                 writing.diagnostic_action(action or expected_action or "(none)"),
             )
+            return receipt_id
         except Exception as e:
             logging.warning(f"Failed to persist pending NEXT state: {e}")
 
@@ -48457,6 +48499,7 @@ Goals: {json.dumps(goals, indent=2)}
         # Persist pending NEXT: action so it survives restart.
         if self._pending_next_action:
             state["pending_next_action"] = self._pending_next_action
+            state["pending_next_selection_id"] = getattr(self, "_pending_next_selection_id", None)
             state["pending_next_action_status"] = "pending"
             state["pending_next_action_updated_at"] = state["timestamp"]
             state["pending_next_action_update_reason"] = "sovereignty state save"
@@ -48520,6 +48563,7 @@ Goals: {json.dumps(goals, indent=2)}
             # Restore pending NEXT: action only when it belongs to this session.
             if (same_session or fresh_pending_next) and "pending_next_action" in state:
                 self._pending_next_action = state["pending_next_action"]
+                self._pending_next_selection_id = state.get("pending_next_selection_id")
                 choice_envelope = state.get("choice_envelope_v1")
                 self._pending_choice_envelope_v1 = (
                     dict(choice_envelope) if isinstance(choice_envelope, dict) else None
@@ -55106,6 +55150,7 @@ Goals: {json.dumps(goals, indent=2)}
         *,
         reason: str,
         choice_envelope: Optional[Dict[str, Any]] = None,
+        study_origin: Optional[dict] = None,
     ) -> str:
         base_action = next_action.split()[0].upper().rstrip(":")
         if self._attractor_suggestion_decision_ambiguous(base_action, cleaned):
@@ -55146,7 +55191,7 @@ Goals: {json.dumps(goals, indent=2)}
         else:
             self._pending_choice_envelope_v1 = None
         self._recent_next_actions.append(base_action)
-        self._persist_pending_next_action(next_action, reason=reason)
+        self._persist_pending_next_action(next_action, reason=reason, study_origin=study_origin)
         logging.info("Being chose NEXT: %s", writing.diagnostic_action(next_action))
         return next_action
 
@@ -55388,6 +55433,10 @@ Goals: {json.dumps(goals, indent=2)}
         if next_action:
             choice_options = ({"choice_envelope": private_choice_envelope}
                               if private_choice_envelope is not None else {})
+            if isinstance(prompt, SourceStudyPrompt):
+                origin = delivery_origin(prompt, action_text)
+                if origin:
+                    choice_options["study_origin"] = origin
             next_action = self._record_llm_next_action_choice(
                 next_action,
                 cleaned,

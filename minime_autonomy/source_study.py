@@ -9,6 +9,7 @@ import subprocess
 from typing import Any
 from .source_study_diagnostics import StudyAttemptDiagnostics
 from .writing import WRITING_GUIDANCE
+from .study_feedback import StudyFeedback
 
 # Kept within the existing prompt budget when ambient context is compacted.
 SOURCE_STUDY_GUIDANCE = (
@@ -97,13 +98,23 @@ class StudyClient:
         return self.call(operation="analyze_response", text=text, private_writing=private_writing)
 
     def prepare(self, action: str, *, request_id: str | None = None) -> SourceStudyPrompt:
+        if action.split()[:1] and action.split()[0].upper() == "QUESTION" and not self.recover_navigation(action):
+            # Older helpers accepted bare QUESTION directly. Do not execute it
+            # while the paired reader lacks namespace-recovery support.
+            raise RuntimeError("QUESTION was not executed: the selected reader lacks question recovery; use SELF_STUDY QUESTION to inspect existing IDs")
         if request_id is None:
             # Compatibility for standalone explicit callers. Runtime jobs must
             # supply their durable event ID; repeated prose is not an identity.
-            return SourceStudyPrompt(self, self.call(operation="prepare", action=action))
-        revision = self.call(operation="preparation_revision")["revision"]
-        return SourceStudyPrompt(self, self.call(operation="prepare_once", action=action,
-            request_id=request_id, expected_revision=revision))
+            output = self.call(operation="prepare", action=action)
+        else:
+            revision = self.call(operation="preparation_revision")["revision"]
+            output = self.call(operation="prepare_once", action=action,
+                request_id=request_id, expected_revision=revision)
+        feedback = ""
+        if output.get("input_kind") not in {"private_writing", "reflection"}:
+            available = int(output.get("input_budget_bytes", 16000)) - len((output["text"] + output.get("system_prompt", "")).encode()) - 32
+            feedback = StudyFeedback(self.workspace).render(min(3500, available))
+        return SourceStudyPrompt(self, output, host_feedback=feedback)
 
     def activity(self, request: dict[str, Any], *, request_id: str,
                  expected_revision: int | None, now_ms: int) -> dict[str, Any]:
@@ -118,8 +129,8 @@ class StudyClient:
 
 class SourceStudyPrompt(str):
     """One immutable page survives provider adaptation and fallback as one unit."""
-    def __new__(cls, client: StudyClient, output: dict[str, Any]):
-        value = super().__new__(cls, output["text"])
+    def __new__(cls, client: StudyClient, output: dict[str, Any], *, host_feedback: str = ""):
+        value = super().__new__(cls, output["text"] + host_feedback)
         value.client = client
         value.output = output
         value.receipt = None

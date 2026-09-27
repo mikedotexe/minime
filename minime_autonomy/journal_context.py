@@ -7,6 +7,8 @@ import math
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
+from .moment_context import marker_measurements
+
 
 PRIVATE_JOURNAL_INTRO = (
     "This is Minime's private journal. Write freely in your own first-person voice, "
@@ -47,7 +49,7 @@ def _duration(seconds: int) -> str:
 
 
 def format_marker_anchors(
-    markers: Sequence[Mapping[str, Any]], *, captured_at: datetime
+    markers: Sequence[Mapping[str, Any]], *, captured_at: datetime, engine_now: float | None = None
 ) -> str:
     """Keep recording age separate from the engine's event clock."""
     now = captured_at.timestamp()
@@ -67,6 +69,9 @@ def format_marker_anchors(
         engine_time = _number(marker.get("timestamp"))
         if engine_time is not None:
             parts.append(f"event_engine_time_s={engine_time!r}")
+        reference = _number(engine_now)
+        if reference is not None and engine_time is not None and reference >= engine_time:
+            parts.append(f"event_age_s={reference - engine_time:.3f} (engine clock at capture)")
         context = marker.get("spectral_context")
         if isinstance(context, str):
             try:
@@ -88,9 +93,13 @@ def format_marker_anchors(
                 parts.append(f"debounced={str(context['debounced']).lower()}")
         elif context is not None:
             parts.append("spectral_context=invalid")
+        description, measurements = marker_measurements(
+            marker.get("marker_type"), marker.get("description"), context
+        )
+        parts.extend(measurements)
         lines.append(
             f"  [{marker.get('marker_type', 'unknown')}] "
-            f"{marker.get('description', '')} ({', '.join(parts)})"
+            f"{json.dumps(description, ensure_ascii=False)} ({', '.join(parts)})"
         )
     return "\n".join(lines)
 

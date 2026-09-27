@@ -402,13 +402,14 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
                    marker_type TEXT,
                    description TEXT,
                    spectral_context TEXT,
-                   consumed INTEGER DEFAULT 0
+                   consumed INTEGER DEFAULT 0,
+                   created_at_unix INTEGER
                 )"""
             )
             conn.execute(
                 """INSERT INTO moment_markers
-                   (session_id, timestamp, marker_type, description, spectral_context, consumed)
-                   VALUES (?, ?, ?, ?, ?, 0)""",
+                   (session_id, timestamp, marker_type, description, spectral_context, consumed, created_at_unix)
+                   VALUES (?, ?, ?, ?, ?, 0, 1018)""",
                 (
                     1,
                     1.0,
@@ -435,11 +436,12 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
             with (
                 patch.object(aa, "WORKSPACE_DIR", workspace),
                 patch.object(aa, "DB_PATH", db_path),
+                patch.object(aa.time, "time", return_value=1100.0),
                 patch.object(agent, "_query_llm_with_next", side_effect=fake_query),
                 patch.object(aa, "_ap_try_spectral"),
                 patch.object(aa, "_ap_try_prose"),
             ):
-                handled = agent._check_moment_markers(dict(STATE))
+                handled = agent._check_moment_markers(dict(STATE, timestamp=90.0))
 
             self.assertTrue(handled)
             self.assertEqual(captured["context_mode"], "qualia_moment")
@@ -447,7 +449,7 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
             self.assertIn("Private journal moment.", captured["prompt"])
             self.assertIn("Historical event records", captured["prompt"])
             self.assertIn("present effects unknown", captured["prompt"])
-            self.assertIn("record_age=unknown", captured["prompt"])
+            self.assertIn("record_age=82s ago", captured["prompt"])
             self.assertIn("lambda1_esn=4.700", captured["prompt"])
             self.assertIn("lambda1_cov=4.700", captured["prompt"])
             self.assertIn("current_fill_frame=inside stable-core band", captured["prompt"])
@@ -459,7 +461,7 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
             text = moment_files[0].read_text()
             self.assertIn(aa.GENERATED_JOURNAL_MARKER, text)
             self.assertIn(aa.ACTION_TAIL_MARKER, text)
-            self.assertIn("record_age=unknown", text)
+            self.assertIn("record_age=82s ago", text)
             self.assertIn("lambda1_esn=4.700", text)
             self.assertIn("The old hum returns", text)
             self.assertIn("NEXT: NOTICE", text)
@@ -514,6 +516,7 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
                 return ("Now there is a recovered edge.\nNEXT: JOURNAL", "JOURNAL")
 
             state = dict(STATE)
+            state["timestamp"] = 90.0
             state["fill_ratio"] = 0.726
             state["eig1"] = 7.98
             with (

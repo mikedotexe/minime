@@ -226,6 +226,7 @@ def runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(aa, "DB_PATH", db)
     monkeypatch.setattr(aa, "_ap_try_spectral", Mock())
     monkeypatch.setattr(aa, "_ap_try_prose", Mock())
+    monkeypatch.setattr(aa.time, "time", lambda: CAPTURE.timestamp())
     with sqlite3.connect(db) as conn:
         conn.execute("""CREATE TABLE sovereignty_journal (
             session_id INTEGER, timestamp REAL, entry_type TEXT,
@@ -235,7 +236,7 @@ def runtime(tmp_path, monkeypatch):
             marker_type TEXT, description TEXT, spectral_context TEXT,
             consumed INTEGER DEFAULT 0, created_at_unix INTEGER)""")
         conn.execute("""INSERT INTO moment_markers VALUES
-            (1, 1, 88, 'spectral_spike', 'Fixture event', '{}', 0, 1018)""")
+            (1, 1, 88, 'spectral_spike', 'Fixture event', '{}', 0, 19918)""")
     agent = aa.AutonomousAgent(1, check_interval=999, recess_mode=True)
     agent.SHARED_COLLAB_DIR = tmp_path / "shared"
     return agent, workspace, db
@@ -276,7 +277,7 @@ def test_moment_freezes_prompt_header_and_database_before_generation(runtime, mo
     assert "lambda1_cov=4.700" in captured["prompt"]
     assert "Astrid" not in captured["prompt"]
     text = next((workspace / "journal").glob("moment_*.txt")).read_text()
-    assert "private_moment_context_v3" in text
+    assert "private_moment_context_v4" in text
     assert "Fill %: 68.0%" in text
     assert "90.0%" not in text
     assert "Header-only telemetry" in text
@@ -893,9 +894,9 @@ def test_private_entry_adapter_has_one_anchor_and_one_short_invitation(runtime, 
         assert "Current continuity projection:" not in prompt
     else:
         assert prior not in prompt
-        assert "record_age=18982s ago" in prompt
+        assert "record_age=82s ago" in prompt
     text = next((workspace / "journal").glob(f"{route}_*.txt")).read_text()
-    contract = "private_journal_context_v3" if route == "pressure" else "private_moment_context_v3"
+    contract = "private_journal_context_v4" if route == "pressure" else "private_moment_context_v4"
     assert f"Prompt contract: {contract}" in text
     assert body in text
     assert "NEXT: REST" in text
