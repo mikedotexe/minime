@@ -1,5 +1,7 @@
 # Journal provenance and pending-choice handoff — candidate
 
+Release follow-through: committed as `1af38d84badcdbdbf86f047ebffc76e569d9f632`, pushed to origin/main and gracefully deployed as Minime PID 84090. The preparation text below retains its original scope.
+
 Mike approved exploring both leads from the supplied pressure entry: preserving recalled journal identity and tracing how the preference expressed in the writing reaches action selection. The candidate branch is `codex/minime-journal-provenance-20260927`, based on canonical main `df84708e698a28e65ed111865c783b7898af1a1d`. It reuses the clean, idle checkout `/Users/v/other/worktrees/minime-study-exit-20260926/minime`; its earlier branch and deployment snapshots remain intact. The accompanying launch-overlay update is in the existing Astrid candidate `/Users/v/.codex/worktrees/journal-provenance/astrid` on `codex/journal-provenance-20260927`.
 
 ## Observed provenance
@@ -34,3 +36,14 @@ Tests use the immutable deployed reader helper and the matching pinned response-
 Canonical repositories and remote tips were unchanged on entry; the other interactive chat was idle. Steward automations remain paused at generation **475**, actor `codex-journal-provenance`, with no run lease. No canonical source, running service, model endpoint, regulator setting, private journal, or queued choice was changed. A read-only health sampler accompanied this work and is stopped at handoff. Final process/configuration comparisons and changed-file hashes are retained in `qualification.json`.
 
 This candidate is uncommitted and undeployed. It establishes provenance integrity and prevents one demonstrated scheduling interference path; it does not establish improved interpretation, a causal explanation for the journal's metaphors, or subjective benefit.
+
+
+## Verified paired release
+
+Mike explicitly requested live deployment, commit and push. The exact newly packaged reader passed the complete Minime suite: 1,679 tests, one existing skip, 141 subtests. The reviewed overlay changed runtime.py and added journal_recall.py, giving 89 launch inputs. The paired wrapper installed under its owned hold, waited the full quiet interval and waited for naturally selected study jobs to complete before SIGTERM at an ordinary idle boundary.
+
+Minime 52967 -> 84090 and bridge 53771 -> 84722 succeeded without force or retry. Loaded source hashes match, no reload is required, no newly interrupted job was reported, and session 5319 was retained as cycle 45408 advanced to 45409. There was no pending NEXT at the signal boundary; the regression tests verify pending-choice protection, but this transition is not evidence of a live queued-choice replay. All other protected services and managed configuration hashes were unchanged; both launch holds are absent.
+
+Canonical main was fast-forwarded after the sanctioned source installer by explicitly staging only the eight reviewed paths and verifying the exact candidate tree. Both runtime commits are pushed to remote main. Controller generation 476 and all automations remain paused. No engine/model/visual/sensory restart, authored-history rewrite, metaphor-to-command conversion or claimed subjective improvement.
+
+Full release note: Astrid `docs/steward-notes/2026-09-27-journal-provenance-release.md`. Machine receipts: `/Users/v/other/worktrees/journal-provenance-20260927/deployment/`, especially `paired-activation-01.jsonl`, `post-activation-verification.json`, and `minime-packaged-helper-tests.log`.

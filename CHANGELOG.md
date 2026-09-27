@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Live: journal provenance and queued-choice repair (2026-09-27).** Deploy Minime 84090 with all 89 source inputs verified alongside bridge 84722; preserve session/checkpoint continuity and protected services. The packaged-reader suite passes 1,679 tests, one skip and 141 subtests. Runtime commit `1af38d8` is on origin/main. Receipts and limits: `docs/steward-notes/2026-09-27-journal-provenance-and-handoff.md`.
+
 - **Candidate: historical journal identity and pending-choice protection (2026-09-27).** Preserve the recalled database row, recording time, type, stored file reference and content hash outside the existing excerpt budget; retain that identity in private journal context v5. Defer periodic regulation reflection while an explicit NEXT awaits dispatch, preserving proportional regulation. Actual generation/dispatch evidence and qualification: `docs/steward-notes/2026-09-27-journal-provenance-and-handoff.md`.
 
 - **Live: study exit and moment freshness (2026-09-27).** Complete the user-approved paired graceful handoff to agent 52967 and bridge 53771. Verify all 88 loaded source inputs, retained session/cycle and exact restored JOURNAL choice, no new interrupted job and unchanged protected services. The corrected packaged-helper suite passes 1,666 tests, one skip and 140 subtests. Both reviewed commits are on local main; no push or automation resume. Exact receipts: Astrid `docs/steward-notes/2026-09-27-study-moment-release.md`.
