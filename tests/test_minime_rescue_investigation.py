@@ -28,13 +28,19 @@ from minime_rescue_investigation import (  # noqa: E402
 )
 
 
+class FixtureInvestigationContext(InvestigationContext):
+    @property
+    def bridge_log_path(self) -> Path:
+        return self.project_dir / "logs" / "bridge.log"
+
+
 def build_context(base_dir: Path) -> InvestigationContext:
     project_dir = base_dir / "project"
     rescue_worktree = base_dir / "rescue"
     (project_dir / "workspace").mkdir(parents=True, exist_ok=True)
     (project_dir / "logs").mkdir(parents=True, exist_ok=True)
     (rescue_worktree / "minime" / "target" / "release").mkdir(parents=True, exist_ok=True)
-    return InvestigationContext(project_dir=project_dir, rescue_worktree=rescue_worktree)
+    return FixtureInvestigationContext(project_dir=project_dir, rescue_worktree=rescue_worktree)
 
 
 def seed_live_db(path: Path) -> None:

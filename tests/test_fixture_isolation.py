@@ -1,10 +1,20 @@
 """Exercise isolation decisions directly; never attempt an actual live operation."""
 
 import pytest
+from pathlib import Path
 
 import autonomous_agent as aa
 from minime_autonomy import envelope_registry as er
 from tests.conftest import LIVE_ROOTS, _deny_live_writes
+
+
+@pytest.mark.parametrize("path", ["/tmp/bridge.log", str(Path("/tmp/bridge.log").resolve())])
+def test_guard_rejects_external_live_bridge_log(path):
+    # Exercise the audit decision directly; never attempt an actual live write.
+    with pytest.raises(RuntimeError, match="test attempted live write"):
+        _deny_live_writes("open", (path, "w", 0))
+    with pytest.raises(RuntimeError, match="test attempted live filesystem mutation"):
+        _deny_live_writes("os.remove", (path, -1))
 
 
 def test_peer_shared_research_and_review_defaults_are_private():

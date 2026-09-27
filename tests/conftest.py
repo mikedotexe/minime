@@ -12,6 +12,7 @@ LIVE_ROOTS = tuple(Path(p) for p in (
     "/Users/v/other/neural-triple-reservoir", "/Users/v/other/shared",
     "/Users/v/other/research", "/Users/v/other/autoresearch",
 ))
+LIVE_FILES = (Path("/tmp/bridge.log").resolve(),)
 
 
 def _live_path(value, dir_fd=None):
@@ -25,8 +26,9 @@ def _live_path(value, dir_fd=None):
             parent = os.readlink(f"/proc/self/fd/{dir_fd}")
         path = Path(os.fsdecode(parent)) / path
     path = path.resolve()
-    return (not {"__pycache__", ".pytest_cache"}.intersection(path.parts)
-            and any(path.is_relative_to(root) for root in LIVE_ROOTS))
+    return (path in LIVE_FILES or (
+        not {"__pycache__", ".pytest_cache"}.intersection(path.parts)
+        and any(path.is_relative_to(root) for root in LIVE_ROOTS)))
 
 
 def _deny_live_writes(event, args):
