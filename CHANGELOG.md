@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Live: study exit and moment freshness (2026-09-27).** Complete the user-approved paired graceful handoff to agent 52967 and bridge 53771. Verify all 88 loaded source inputs, retained session/cycle and exact restored JOURNAL choice, no new interrupted job and unchanged protected services. The corrected packaged-helper suite passes 1,666 tests, one skip and 140 subtests. Both reviewed commits are on local main; no push or automation resume. Exact receipts: Astrid `docs/steward-notes/2026-09-27-study-moment-release.md`.
+
 - **Test isolation (2026-09-27).** Redirect the rescue-bundle fixture into its temporary project and protect the live `/tmp/bridge.log` path, including its resolved alias, in the process-wide test guard. The existing fixture had truncated that diagnostic log during qualification; the earlier history is not claimed recoverable. Protected service identities remained unchanged. Focused isolation/rescue tests: 31 passed; full packaged-helper suite after repair: 1,666 passed, one skip, 140 subtests. Runtime source is unchanged by this correction.
 
 - **Moment freshness and measurement context (2026-09-27, candidate).** Select automatic moments only from this session's unconsumed events within 15 minutes in both recording and captured engine clocks. Retain old, future-dated and clock-unknown records without consuming them. Render fill rates separately from endpoint changes parsed from rounded crossing records, and explain pressure classifier scores without treating them as context or memory capacity. Preserve free journal output. See `docs/steward-notes/2026-09-27-moment-freshness.md`; no live activation.

@@ -56,3 +56,10 @@ Live activation remains separate. Because this checkout also contains the earlie
 
 
 September 27 release follow-through: Mike subsequently authorized commit and paired graceful deployment. Astrid `docs/steward-notes/2026-09-27-study-moment-release.md` records release preparation and transition receipts. Earlier qualification descriptions retain their original temporal scope.
+
+
+## Approved live result
+
+The paired source is committed on canonical main (`9c87c76`), with a separate test-isolation correction (`6e3238d`). The first sanctioned handoff succeeded: Minime 4137 -> 52967 and bridge 3991 -> 53771, both graceful, all 88 agent startup source hashes exact and reload_required=false. Session 5319 / cycle 45319 were restored; the queued JOURNAL action matches its pre-signal SHA-256 and was restored and honored naturally. Protected engine/model/visual/sensory services remained unchanged and automations remain paused. No push.
+
+The original rescue-bundle test fixture wrote to production `/tmp/bridge.log` despite temporary project roots, truncating diagnostic history during qualification. This corrects the earlier broad no-live-write assertion; no recovery of lost history is claimed. The fixture now uses a temporary project log, and the audit guard also protects the external production log and resolved alias. The corrected full suite against the exact packaged helper passes 1,666 tests, one existing skip and 140 subtests. Exact transition, test and incident receipts are in Astrid `docs/steward-notes/2026-09-27-study-moment-release.md` and the sibling `deployment` evidence directory. Runtime source is unchanged by the fixture correction. Deployment success establishes transport/readiness/continuity, not improved interpretation or experience.
