@@ -820,16 +820,21 @@ def test_on_demand_influence_response_rejects_future_and_stale_clocks(runtime, m
 
 
 def test_pressure_journal_keeps_original_state_and_unforced_self_history(runtime, monkeypatch):
-    agent, workspace, _ = runtime
+    agent, workspace, db = runtime
     state = {"fill_ratio": .68, "eig1": 4.7, "pressure_source_v1": {"quality": "computed_fixture"}}
     original = deepcopy(state)
-    monkeypatch.setattr(agent, "_last_journal_entry", lambda: "I wrote about Astrid earlier.")
+    with sqlite3.connect(db) as conn:
+        conn.execute("INSERT INTO sovereignty_journal (timestamp, entry_type, content) VALUES (?, ?, ?)",
+                     (19_900, "reflection", "I wrote about Astrid earlier."))
     prompts = []
 
     def generate(prompt, **kwargs):
         prompts.append(prompt)
         state["fill_ratio"] = .90
         state["pressure_source_v1"]["quality"] = "later_label"
+        with sqlite3.connect(db) as conn:
+            conn.execute("INSERT INTO sovereignty_journal (timestamp, entry_type, content) VALUES (?, ?, ?)",
+                         (20_001, "reflection", "A different record arrived during generation."))
         return "I have nothing new to report.\nNEXT: REST", "REST"
 
     monkeypatch.setattr(agent, "_query_llm_with_next", generate)
@@ -845,6 +850,10 @@ def test_pressure_journal_keeps_original_state_and_unforced_self_history(runtime
     assert saved.call_args.kwargs["private_canvas"] is True
     text = next((workspace / "journal").glob("pressure_*.txt")).read_text()
     assert "68.0%" in text and "90.0%" not in text
+    metadata = json.loads(next(line.removeprefix("Recall provenance: ") for line in text.splitlines()
+                               if line.startswith("Recall provenance: ")))
+    assert metadata["row_id"] == 1 and metadata["recorded_at_unix_s"] == 19_900
+    assert json.dumps(metadata, ensure_ascii=False, sort_keys=True) in prompts[0]
 
 
 @pytest.mark.parametrize("route", ["pressure", "moment"])
@@ -855,7 +864,9 @@ def test_private_entry_adapter_has_one_anchor_and_one_short_invitation(runtime, 
     prior = "Earlier I chose an unrelated subject."
     body = "I am writing about an ordinary memory.\nIt need not involve measurements."
     reply = body + "\nNEXT: REST"
-    monkeypatch.setattr(agent, "_last_journal_entry", lambda: prior)
+    with sqlite3.connect(db) as conn:
+        conn.execute("INSERT INTO sovereignty_journal (timestamp, entry_type, content) VALUES (?, ?, ?)",
+                     (19_900, "reflection", prior))
     clock = Mock(wraps=datetime)
     clock.now.return_value = CAPTURE
     monkeypatch.setattr(aa, "datetime", clock)
@@ -896,12 +907,17 @@ def test_private_entry_adapter_has_one_anchor_and_one_short_invitation(runtime, 
         assert prior not in prompt
         assert "record_age=82s ago" in prompt
     text = next((workspace / "journal").glob(f"{route}_*.txt")).read_text()
-    contract = "private_journal_context_v4" if route == "pressure" else "private_moment_context_v4"
+    contract = "private_journal_context_v5" if route == "pressure" else "private_moment_context_v4"
     assert f"Prompt contract: {contract}" in text
     assert body in text
     assert "NEXT: REST" in text
+    if route == "pressure":
+        metadata = json.loads(next(line.removeprefix("Recall provenance: ") for line in text.splitlines()
+                                   if line.startswith("Recall provenance: ")))
+        assert metadata["row_id"] == 1
+        assert json.dumps(metadata, ensure_ascii=False, sort_keys=True) in assembled
     with sqlite3.connect(db) as conn:
-        saved = conn.execute("SELECT content FROM sovereignty_journal").fetchone()[0]
+        saved = conn.execute("SELECT content FROM sovereignty_journal ORDER BY timestamp DESC LIMIT 1").fetchone()[0]
     assert saved == body
 
 

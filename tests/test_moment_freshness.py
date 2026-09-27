@@ -130,5 +130,5 @@ def test_pressure_journal_delivers_classifier_meaning_and_preserves_authored_res
     assert '"mode_packing": 0.61' in prompt
     with sqlite3.connect(db) as conn:
         assert conn.execute('SELECT content FROM sovereignty_journal').fetchone()[0] == body
-    assert 'private_journal_context_v4' in next((workspace/'journal').glob('pressure_*.txt')).read_text()
+    assert 'private_journal_context_v5' in next((workspace/'journal').glob('pressure_*.txt')).read_text()
     assert pressure_classifier_context(None) == ''

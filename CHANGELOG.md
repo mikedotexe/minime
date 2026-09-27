@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Candidate: historical journal identity and pending-choice protection (2026-09-27).** Preserve the recalled database row, recording time, type, stored file reference and content hash outside the existing excerpt budget; retain that identity in private journal context v5. Defer periodic regulation reflection while an explicit NEXT awaits dispatch, preserving proportional regulation. Actual generation/dispatch evidence and qualification: `docs/steward-notes/2026-09-27-journal-provenance-and-handoff.md`.
+
 - **Live: study exit and moment freshness (2026-09-27).** Complete the user-approved paired graceful handoff to agent 52967 and bridge 53771. Verify all 88 loaded source inputs, retained session/cycle and exact restored JOURNAL choice, no new interrupted job and unchanged protected services. The corrected packaged-helper suite passes 1,666 tests, one skip and 140 subtests. Both reviewed commits are on local main; no push or automation resume. Exact receipts: Astrid `docs/steward-notes/2026-09-27-study-moment-release.md`.
 
 - **Test isolation (2026-09-27).** Redirect the rescue-bundle fixture into its temporary project and protect the live `/tmp/bridge.log` path, including its resolved alias, in the process-wide test guard. The existing fixture had truncated that diagnostic log during qualification; the earlier history is not claimed recoverable. Protected service identities remained unchanged. Focused isolation/rescue tests: 31 passed; full packaged-helper suite after repair: 1,666 passed, one skip, 140 subtests. Runtime source is unchanged by this correction.

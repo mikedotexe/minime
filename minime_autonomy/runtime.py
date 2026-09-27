@@ -98,6 +98,7 @@ from .expressive_journal import (
 )
 from .measurement_history import format_fill_history
 from .moment_context import select_recent_markers, selection_note, pressure_classifier_context
+from .journal_recall import latest_journal_recall, render_journal_recall
 from .journal_context import (
     OPEN_OBSERVATION_INVITATION,
     OPEN_REFLECTION_INTRO,
@@ -27525,7 +27526,13 @@ Fill: {fill:.1f}%
             self._last_pi_sovereignty_hint_tick = None
         self._sovereignty_counter += 1
 
-        if self._sovereignty_counter % 5 == 0:
+        reflection_due = self._sovereignty_counter % 5 == 0
+        pending_choice = bool(getattr(self, "_pending_next_action", None))
+        if reflection_due and pending_choice:
+            logging.info("Scheduled regulation reflection deferred: explicit NEXT awaits dispatch")
+        # This optional generation can emit another NEXT. Preserve the queued
+        # choice; proportional regulation below still runs on every cycle.
+        if reflection_due and not pending_choice:
             last_journal = self._last_journal_entry()
             # Closed-loop feedback: show consequences of last sovereignty adjustment
             consequences = ""
@@ -27901,7 +27908,8 @@ Prompt captured at (UTC): {captured_at.isoformat()}
         classifier_context = pressure_classifier_context(state.get("pressure_source_v1"))
         if classifier_context:
             prompt += f"\n{classifier_context}"
-        prompt = f"{prompt}\n\n{self._journal_continuity_contract_v1(state, private_canvas=True)}"
+        recall = self._last_journal_recall()
+        prompt = f"{prompt}\n\n{render_journal_recall(recall)}"
 
         response = self._query_llm_with_next(
             prompt,
@@ -27928,11 +27936,12 @@ Prompt captured at (UTC): {captured_at.isoformat()}
             action_tail_section = f"\n{ACTION_TAIL_MARKER}\n{action_tail or '(none)'}\n"
             journal_file.write_text(f"""=== SPECTRAL PRESSURE JOURNAL ===
 Timestamp: {written_at.isoformat()}
-Prompt contract: private_journal_context_v4
+Prompt contract: private_journal_context_v5
 Prompt captured at (UTC): {captured_at.isoformat()}
 Metrics below describe the supplied pre-generation state, not the writing time.
 {state_anchor}
 {classifier_context}
+Recall provenance: {json.dumps(recall.metadata() if recall else None, ensure_ascii=False, sort_keys=True)}
 
 RESERVOIR DYNAMICS:
 λ₁: {eig1:.3f} (baseline: {baseline:.3f})
@@ -30558,34 +30567,18 @@ Trigger: {trigger_text}
 
         return lookup.get(clean)
 
-    def _last_journal_entry(self) -> str:
-        """Read the most recent sovereignty_journal entry for narrative continuity.
-
-        Returns the content of the last entry (truncated to 400 chars) or empty string.
-        """
+    def _last_journal_recall(self):
+        """Retain row identity alongside the selected historical body."""
         try:
-            conn = sqlite3.connect(DB_PATH)
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT content FROM sovereignty_journal "
-                "WHERE entry_type NOT IN ('private_writing', 'private_writing_notice') "
-                "ORDER BY timestamp DESC LIMIT 6"
-            )
-            rows = cur.fetchall()
-            conn.close()
-            for row in rows:
-                if not row or not row[0]:
-                    continue
-                content = row[0].strip()
-                if content.startswith("[Similarity gate]") or content.startswith("## Ongoing issue"):
-                    continue
-                if len(content) > 400:
-                    content = content[:400] + "..."
-                return content
-            return ""
+            return latest_journal_recall(DB_PATH)
         except Exception as e:
             logging.debug(f"Could not read last journal entry: {e}")
-            return ""
+            return None
+
+    def _last_journal_entry(self) -> str:
+        """Compatibility text-only recall for existing non-private callers."""
+        recall = self._last_journal_recall()
+        return recall.excerpt() if recall else ""
 
     def _journal_continuity_contract_v1(
         self,
@@ -30596,13 +30589,7 @@ Trigger: {trigger_text}
         """Advisory continuity shape for journal prompts; never gates saving."""
         state_line = ""
         if private_canvas:
-            prior = trim_chars(" ".join((self._last_journal_entry() or "").split()), 420) or (
-                "(no recent own-journal excerpt available)"
-            )
-            return (
-                "Optional own-journal context (historical; legacy system annotations may be present):\n"
-                f"{prior}"
-            ).strip()
+            return render_journal_recall(self._last_journal_recall())
         thread_summary = ""
         try:
             thread_summary = self._action_continuity_prompt_summary() or ""
