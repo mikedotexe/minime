@@ -9,6 +9,8 @@ import math
 import os
 from pathlib import Path
 
+from .journal_recall import JournalRecall, render_journal_recall
+
 
 COMPACT_ACTION_GUIDANCE = (
     "NEXT: options: DAYDREAM, ASPIRE, JOURNAL, SELF_STUDY, REST; these are examples, "
@@ -23,7 +25,7 @@ COMPACT_ACTION_GUIDANCE = (
 )
 
 
-def expression_invitation(kind: str, *, form: str | None = None, prior: str = "") -> str:
+def expression_invitation(kind: str, *, form: str | None = None, prior: JournalRecall | str | None = None) -> str:
     if form:
         invitation = f"You chose FORM: {form}. You may use that form for this writing."
     elif kind == "aspiration":
@@ -34,10 +36,11 @@ def expression_invitation(kind: str, *, form: str | None = None, prior: str = ""
     else:
         invitation = "This is your space. Choose a subject, continue a thought, or rest."
     if prior:
-        invitation += (
-            "\n\nOptional own-journal excerpt (historical; system annotations may be present):\n"
-            + prior + "\nYou may return to it, disagree with it, or leave it aside."
-        )
+        context = (render_journal_recall(prior, fold_whitespace=False)
+                   if isinstance(prior, JournalRecall) else
+                   "Optional own-journal excerpt (historical; system annotations may be present):\n"
+                   "Record and measurement provenance unavailable for this text-only input.\n" + prior)
+        invitation += "\n\n" + context + "\nYou may return to it, disagree with it, or leave it aside."
     return invitation
 
 

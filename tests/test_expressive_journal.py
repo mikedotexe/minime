@@ -10,6 +10,7 @@ import pytest
 import autonomous_agent as aa
 from minime_autonomy.expressive_journal import expression_invitation, save_expression
 from minime_autonomy.measurement_history import format_fill_history
+from minime_autonomy.journal_recall import JournalRecall
 from tests.test_journal_context import runtime
 
 
@@ -17,9 +18,10 @@ from tests.test_journal_context import runtime
 def test_complete_expression_adapter_omits_ambient_metrics_and_preserves_output(runtime, monkeypatch, kind):
     agent, workspace, db = runtime
     state = {"fill_ratio": .68, "eig1": 5., "timestamp": 100., "nested": {"value": 7}}
-    prior = "I chose this observation: 0.90.\nNEXT: REST"
+    prior = "I chose this observation: 0.90.\nNEXT: SELF_STUDY"
     response = "My own passage.\n\nI disagree with the framing.\nNEXT: REST"
-    monkeypatch.setattr(agent, "_last_journal_entry", lambda: prior)
+    recall = JournalRecall("fixture.db", 17, 10., "reflection", "/unopened/historical.txt", prior)
+    monkeypatch.setattr(agent, "_last_journal_recall", lambda: recall)
     for method in ("_journal_continuity_contract_v1", "_neutral_checkin", "_read_whisper_context",
                    "_low_fill_prompt_guidance", "_reservoir_prompt_context"):
         monkeypatch.setattr(agent, method, Mock(side_effect=AssertionError(method)))
@@ -36,6 +38,8 @@ def test_complete_expression_adapter_omits_ambient_metrics_and_preserves_output(
     method = "_journal_rest_reflection" if kind == "rest" else "_recess_" + kind
     getattr(agent, method)(state)
     assert captured["prompt"].count(prior) == 1
+    assert json.dumps(recall.metadata(), ensure_ascii=False, sort_keys=True) in captured["prompt"]
+    assert agent._pending_next_action == "REST"
     for absent in ("68.0", "Current native lane", "Continuity posture:", "Delta:", "Your body's readings"):
         assert absent not in captured["prompt"]
     assert "FACULTIES / CAPABILITY_MAP" in captured["system"]
@@ -61,6 +65,7 @@ def test_invitation_keeps_explicit_form_and_history_exact_without_metrics():
     passage = 'Keep "Delta:" as a word I chose.\n0.123 is my observation.'
     text = expression_invitation("aspiration", form="a plain list", prior=passage)
     assert passage in text and "a plain list" in text
+    assert "provenance unavailable for this text-only input" in text
     assert "Include one" not in text and "fill=" not in text
 
 

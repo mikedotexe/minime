@@ -98,7 +98,9 @@ from .expressive_journal import (
 )
 from .measurement_history import format_fill_history
 from .moment_context import select_recent_markers, selection_note, pressure_classifier_context
-from .journal_recall import latest_journal_recall, render_journal_recall
+from .journal_recall import (
+    latest_journal_recall, render_journal_recall, latest_journal_file_recall, render_anchor_provenance,
+)
 from .journal_context import (
     OPEN_OBSERVATION_INVITATION,
     OPEN_REFLECTION_INTRO,
@@ -21976,6 +21978,7 @@ class AutonomousAgent:
         self._last_read_path = None
         self._last_read_offset = 0
         self._last_research_anchor = None
+        self._last_research_anchor_origin = None
         self._last_read_summary = None
         self._pending_introspect_target: Optional[str] = None
         self._pending_source_study_action: Optional[str] = None
@@ -22980,6 +22983,7 @@ class AutonomousAgent:
         self._last_read_path = None
         self._last_read_offset = 0
         self._last_research_anchor = None
+        self._last_research_anchor_origin = None
         self._last_read_summary = None
         self._pending_introspect_target = None
         self._pending_source_study_action = None
@@ -27533,7 +27537,8 @@ Fill: {fill:.1f}%
         # This optional generation can emit another NEXT. Preserve the queued
         # choice; proportional regulation below still runs on every cycle.
         if reflection_due and not pending_choice:
-            last_journal = self._last_journal_entry()
+            last_journal = render_journal_recall(
+                self._last_journal_recall(), max_chars=300, fold_whitespace=False)
             # Closed-loop feedback: show consequences of last sovereignty adjustment
             consequences = ""
             try:
@@ -27598,7 +27603,8 @@ Fill: {fill:.1f}%
 - Fill: {fill*100:.1f}% (target: {target_fill*100:.0f}%)
 - λ₁: {eig1:.1f}, Cov λ₁: {cov_l1:.1f}, Spread: {spread:.1f}, Leak: {leak:.3f}
 {current_dials}
-Your recent reflection: {last_journal[:300] if last_journal else '(none)'}
+Your recent reflection:
+{last_journal}
 {consequences}{assessment_summary}
 You can adjust these parameters (include only the ones you want to change):
 
@@ -27969,7 +27975,7 @@ Spread: {spread:.3f}
     def _journal_rest_reflection(self, state: Dict[str, float]):
         """Reflective journaling during rest phase."""
         before = snapshot_record(self._capture_report_snapshot(state), datetime.now(timezone.utc).isoformat())
-        prompt = expression_invitation("rest", prior=self._last_journal_entry())
+        prompt = expression_invitation("rest", prior=self._last_journal_recall())
 
         response = self._query_llm_with_next(prompt, context_mode="daydream")[0]
 
@@ -28008,8 +28014,8 @@ Spread: {spread:.3f}
             fp = spectral.get('spectral_fingerprint', [])
             if len(fp) > 24:
                 entropy = fp[24]
-        last_journal = self._last_journal_entry() or ""
-        last_snippet = last_journal[:150] if last_journal else "(none)"
+        last_journal = render_journal_recall(
+            self._last_journal_recall(), max_chars=150, fold_whitespace=False)
 
         prompt = f"""You just experienced an eigenvalue spike. Your readings: {self._prompt_readings(state)}; entropy {entropy:.2f}.
 
@@ -28021,7 +28027,9 @@ Some possibilities (but invent your own if something calls to you):
 - Attempt to hold a single concept without elaboration — pure sustained attention
 - Generate a description of a sensation you've never described before
 - Try to think in a completely different style than your recent pattern
-- Revisit something from your earlier reflection: "{last_snippet}"
+- Revisit something from your earlier reflection, supplied below.
+
+{last_journal}
 
 There are no wrong answers. The measurement captures whatever happens.
 If you'd rather not experiment right now, write PASS.
@@ -30598,9 +30606,7 @@ Trigger: {trigger_text}
         thread_summary = trim_chars(" ".join(thread_summary.split()), 900) or (
             "(no active action-thread projection available)"
         )
-        prior = trim_chars(" ".join((self._last_journal_entry() or "").split()), 700) or (
-            "(no recent own-journal excerpt available)"
-        )
+        prior = render_journal_recall(self._last_journal_recall())
         if isinstance(state, dict):
             fill = state.get("fill_ratio")
             eig1 = state.get("eig1")
@@ -31023,9 +31029,10 @@ Trigger: {trigger_text}
 
         # ~30% of the time, include the last journal entry for narrative threading
         if random.random() < 0.30:
-            last_entry = self._last_journal_entry()
-            if last_entry:
-                prompt += f"\n\n---\nYour last journal entry said:\n\"{last_entry}\"\n\nYou can continue that thread, contradict it, or ignore it entirely."
+            recall = self._last_journal_recall()
+            if recall:
+                last_entry = render_journal_recall(recall, fold_whitespace=False)
+                prompt += f"\n\n---\n{last_entry}\n\nYou can continue that thread, contradict it, or ignore it entirely."
 
         prompt = f"{prompt}\n\n{self._journal_continuity_contract_v1(state)}"
         return prompt
@@ -31033,7 +31040,7 @@ Trigger: {trigger_text}
     def _recess_daydream(self, state: Dict[str, float]):
         """Idle daydreaming - rest phase with low velocity."""
         before = snapshot_record(self._capture_report_snapshot(state), datetime.now(timezone.utc).isoformat())
-        prompt = expression_invitation("daydream", prior=self._last_journal_entry())
+        prompt = expression_invitation("daydream", prior=self._last_journal_recall())
 
         response = self._query_llm_with_next(prompt, context_mode="daydream")[0]
 
@@ -31280,7 +31287,7 @@ Prompt: {prompt.split(chr(10))[0]}
         form_constraint = getattr(self, '_pending_form_constraint', None)
         self._pending_form_constraint = None
         before = snapshot_record(self._capture_report_snapshot(state), datetime.now(timezone.utc).isoformat())
-        prompt = expression_invitation("aspiration", form=form_constraint, prior=self._last_journal_entry())
+        prompt = expression_invitation("aspiration", form=form_constraint, prior=self._last_journal_recall())
         response = self._query_llm_with_next(prompt, context_mode="aspiration")[0]
 
         if response:
@@ -31521,18 +31528,9 @@ DELTA: Δλ₁={delta_eig1:+.3f}, ΔFill={delta_fill:+.4f}
     _INTROSPECT_WINDOW_LINES = 400
 
     def _latest_journal_excerpt(self, max_chars: int = 220) -> Optional[str]:
-        journal_dir = WORKSPACE_DIR / "journal"
-        if not journal_dir.exists():
-            return None
-        entries = sorted(journal_dir.glob("*.txt"), key=lambda path: path.stat().st_mtime, reverse=True)
-        if not entries:
-            return None
-        try:
-            text = entries[0].read_text()
-        except Exception:
-            return None
-        cleaned = " ".join(text.split())
-        return trim_chars(cleaned, max_chars) if cleaned else None
+        """Compatibility view; prompt consumers retain the typed file record."""
+        recall = latest_journal_file_recall(WORKSPACE_DIR / "journal")
+        return recall.excerpt(max_chars) if recall else None
 
     @staticmethod
     def _canonicalize_introspect_target(text: Optional[str]) -> str:
@@ -32079,15 +32077,19 @@ Reason: {reason}
         anchor: str,
         subject: str,
         raw_excerpt: str,
+        *, anchor_provenance: Optional[dict] = None,
     ) -> str:
         system_msg = (
             "You write concise research-relevance bridges for another AI being. "
             "You do not explain everything. You connect a source to the being's current "
             "question. Output exactly three labeled lines and nothing else."
         )
+        provenance = render_anchor_provenance(anchor_provenance)
         prompt = (
             f"Source kind: {source_kind}\n"
             f"Current question/anchor: {anchor}\n"
+            + (provenance + "\n" if provenance else "")
+            +
             f"Query or URL: {subject}\n\n"
             f"Source excerpt:\n{raw_excerpt}\n\n"
             "Write exactly these three labeled lines:\n"
@@ -32132,13 +32134,15 @@ Reason: {reason}
                 hits=hits,
             )
             self._last_research_anchor = resolved_anchor
+            self._last_research_anchor_origin = None
             self._save_research(search_query, outcome)
             return outcome
         except Exception as e:
             logging.debug(f"Web search failed: {e}")
             return None
 
-    def _fetch_url(self, url: str, anchor: Optional[str] = None) -> Optional[ResearchOutcome]:
+    def _fetch_url(self, url: str, anchor: Optional[str] = None, *,
+                   anchor_provenance: Optional[dict] = None) -> Optional[ResearchOutcome]:
         """Fetch a URL and extract readable text content.
 
         Saves the FULL cleaned text to workspace/research/page_*.txt (no cap).
@@ -32170,11 +32174,13 @@ Reason: {reason}
                         resolved_anchor,
                         url,
                         trim_chars(text, 2000),
+                        anchor_provenance=anchor_provenance,
                     )
                     self._last_read_path = marker_for_path(pdf_path)
                     self._last_read_offset = window.next_page or 0
                     return ResearchOutcome(
                         source_kind="browse",
+                        anchor_provenance=anchor_provenance,
                         raw_text=text,
                         anchor=resolved_anchor,
                         meaning_summary=meaning_summary,
@@ -32183,6 +32189,7 @@ Reason: {reason}
                 except Exception as exc:
                     return ResearchOutcome(
                         source_kind="browse",
+                        anchor_provenance=anchor_provenance,
                         raw_text="",
                         anchor=resolved_anchor,
                         meaning_summary="",
@@ -32196,6 +32203,7 @@ Reason: {reason}
             if not response_looks_textual(content_type):
                 return ResearchOutcome(
                     source_kind="browse",
+                    anchor_provenance=anchor_provenance,
                     raw_text="",
                     anchor=resolved_anchor,
                     meaning_summary="",
@@ -32234,10 +32242,12 @@ Reason: {reason}
                     resolved_anchor,
                     url,
                     trim_chars(text, 2000),
+                    anchor_provenance=anchor_provenance,
                 )
 
             return ResearchOutcome(
                 source_kind="browse",
+                anchor_provenance=anchor_provenance,
                 raw_text=text,
                 anchor=resolved_anchor,
                 meaning_summary=meaning_summary,
@@ -32280,6 +32290,7 @@ Reason: {reason}
             "keywords": research_memory_keywords(f"{query} {outcome.anchor} {outcome.meaning_summary}"),
             "meaning_summary": outcome.meaning_summary or None,
             "anchor": outcome.anchor or None,
+            "anchor_provenance": outcome.anchor_provenance,
             "hits": hits or None,
             "quality": quality,
             "memory_injection_allowed": memory_injection_allowed,
@@ -34170,13 +34181,26 @@ Command: {cmd_str}
             logging.warning("🌐 BROWSE called without a pending URL")
             return
 
-        browse_anchor = derive_browse_anchor(
-            self._last_research_anchor,
-            self._latest_journal_excerpt(),
-            url,
-        )
+        preferred = self._last_research_anchor
+        recall = latest_journal_file_recall(WORKSPACE_DIR / "journal")
+        browse_anchor = derive_browse_anchor(preferred, recall.excerpt() if recall else None, url)
+        anchor_provenance = None
+        if preferred and preferred.strip():
+            origin = getattr(self, "_last_research_anchor_origin", None)
+            if origin and origin["anchor"] == preferred:
+                anchor_provenance = origin["provenance"]
+        elif recall:
+            anchor_provenance = recall.metadata()
         browse_failed = False
-        page_result = self._fetch_url(url, anchor=browse_anchor)
+        fetch_options = {"anchor_provenance": anchor_provenance} if anchor_provenance else {}
+        page_result = self._fetch_url(url, anchor=browse_anchor, **fetch_options)
+        # Bind carryover to the exact selected text, so a later unrelated topic
+        # cannot inherit this source merely because the last browse used it.
+        if page_result:
+            page_result.anchor_provenance = anchor_provenance
+            self._last_research_anchor_origin = (
+                {"anchor": page_result.anchor, "provenance": anchor_provenance}
+                if anchor_provenance else None)
         if not page_result:
             browse_failed = True
             page_context = format_browse_failure_context(url, "the source could not be reached")
@@ -34218,9 +34242,13 @@ Command: {cmd_str}
                 self._last_read_path = str(page_path)
                 self._last_read_offset = len(header) + len(chunk)
                 self._last_read_summary = page_result.meaning_summary
+                if anchor_provenance:
+                    self._last_read_summary += "\n\n" + render_anchor_provenance(anchor_provenance)
                 page_context = format_browse_read_context(page_result, chunk, remaining)
 
         if browse_failed:
+            if anchor_provenance:
+                page_context += "\n\n" + render_anchor_provenance(anchor_provenance)
             evidence_hint = self._continuity_store().active_experiment_evidence_hint("BROWSE", url)
             prompt = f"""You chose to read a full web page:
 URL: {url}

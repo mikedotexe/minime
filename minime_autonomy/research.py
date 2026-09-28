@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from .journal_recall import render_anchor_provenance
+
 
 @dataclass
 class ResearchHit:
@@ -21,6 +23,7 @@ class ResearchOutcome:
     hits: List[ResearchHit] = field(default_factory=list)
     url: Optional[str] = None
     soft_failure_reason: Optional[str] = None
+    anchor_provenance: Optional[dict] = None
 
     def succeeded(self) -> bool:
         return self.soft_failure_reason is None
@@ -351,7 +354,9 @@ def format_browse_read_context(outcome: ResearchOutcome, chunk: str, remaining: 
         if remaining is not None
         else ""
     )
-    return f"{header}\n\n{outcome.meaning_summary}\n\n{chunk}{continuation}"
+    provenance = render_anchor_provenance(outcome.anchor_provenance)
+    context = provenance + "\n\n" if provenance else ""
+    return f"{header}\n\n{context}{outcome.meaning_summary}\n\n{chunk}{continuation}"
 
 
 def format_read_more_context(offset: int, chunk: str, remaining: int, meaning_summary: Optional[str]) -> str:

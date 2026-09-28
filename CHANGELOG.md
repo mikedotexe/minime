@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Candidate: provenance through older recall consumers (2026-09-28).** Preserve database identity through regulation, spike, expression and continuity prompts without shrinking or rewriting their excerpts. Retain file/hash provenance through the journal-derived browsing topic, summarization, pagination and saved research; keep unknown measurement clocks explicit and action parsing unchanged. Qualification and activation boundary: `docs/steward-notes/2026-09-28-recall-consumers.md`.
+
 - **Live: journal provenance and queued-choice repair (2026-09-27).** Deploy Minime 84090 with all 89 source inputs verified alongside bridge 84722; preserve session/checkpoint continuity and protected services. The packaged-reader suite passes 1,679 tests, one skip and 141 subtests. Runtime commit `1af38d8` is on origin/main. Receipts and limits: `docs/steward-notes/2026-09-27-journal-provenance-and-handoff.md`.
 
 - **Candidate: historical journal identity and pending-choice protection (2026-09-27).** Preserve the recalled database row, recording time, type, stored file reference and content hash outside the existing excerpt budget; retain that identity in private journal context v5. Defer periodic regulation reflection while an explicit NEXT awaits dispatch, preserving proportional regulation. Actual generation/dispatch evidence and qualification: `docs/steward-notes/2026-09-27-journal-provenance-and-handoff.md`.

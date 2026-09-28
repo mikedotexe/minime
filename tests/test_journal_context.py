@@ -13,6 +13,7 @@ from unittest.mock import Mock
 import pytest
 
 import autonomous_agent as aa
+from minime_autonomy.journal_recall import JournalRecall
 from minime_autonomy.journal_context import (
     OPEN_OBSERVATION_INVITATION,
     OPEN_REFLECTION_INTRO,
@@ -544,7 +545,7 @@ def test_aspiration_adapter_selects_open_contract_and_preserves_authored_output(
     query = Mock(return_value=(reply, "REST"))
     monkeypatch.setattr(agent, "_query_llm_with_next", query)
     monkeypatch.setattr(agent, "_journal_continuity_contract_v1", lambda state: "Continuity fixture")
-    monkeypatch.setattr(agent, "_last_journal_entry", lambda: "")
+    monkeypatch.setattr(agent, "_last_journal_recall", lambda: None)
     monkeypatch.setattr(agent, "_state_for_live_surfaces", lambda state, **kwargs: dict(state))
     monkeypatch.setattr(agent, "_format_metrics", lambda state, **kwargs: "Header fixture")
     monkeypatch.setattr(agent, "_write_journal_entry", Mock())
@@ -618,7 +619,8 @@ def test_every_checkin_variant_omits_ambient_peer_data_but_keeps_own_history(run
     for method in ("_astrid_shadow_v3_line", "_last_influence_response_line", "_render_recent_gifts_cached"):
         monkeypatch.setattr(agent, method, Mock(side_effect=AssertionError("Ambient peer read")))
     monkeypatch.setattr(agent, "_action_continuity_prompt_summary", lambda: "An unrelated inquiry.")
-    monkeypatch.setattr(agent, "_last_journal_entry", lambda: "I chose to write to Astrid yesterday.")
+    monkeypatch.setattr(agent, "_last_journal_recall", lambda: JournalRecall(
+        "fixture.db", 17, None, "reflection", None, "I chose to write to Astrid yesterday."))
     monkeypatch.setattr(aa.random, "random", lambda: 0.1 if style == "canvas" else 0.8)
     for index in range(5 if style == "canvas" else 3):
         monkeypatch.setattr(aa.random, "choice", lambda items: items[index])
@@ -645,7 +647,7 @@ def test_checkin_uses_latest_response_origin_and_status_without_current_source_g
     os.utime(latest, (20_000, 20_000))
     monkeypatch.setattr(aa, "_current_modality_source", Mock(side_effect=AssertionError("Use recorded origin")))
     monkeypatch.setattr(agent, "_journal_continuity_contract_v1", lambda state: "")
-    monkeypatch.setattr(agent, "_last_journal_entry", lambda: "")
+    monkeypatch.setattr(agent, "_last_journal_recall", lambda: None)
     monkeypatch.setattr(aa.random, "random", lambda: 0.1)
     monkeypatch.setattr(aa.random, "choice", lambda items: items[4])
     clock = Mock(wraps=aa.datetime)
@@ -666,7 +668,7 @@ def test_blank_canvas_does_not_consume_visual_reservation(runtime, monkeypatch):
         "description": "A window", "source": "host", "analysis_type": "llava",
         "response_timestamp": CAPTURE.isoformat(),
     }))
-    monkeypatch.setattr(agent, "_last_journal_entry", lambda: "")
+    monkeypatch.setattr(agent, "_last_journal_recall", lambda: None)
     monkeypatch.setattr(agent, "_journal_continuity_contract_v1", lambda state: "")
     monkeypatch.setattr(aa.random, "random", lambda: 0.1)
     monkeypatch.setattr(aa.random, "choice", lambda items: items[0])
