@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Live: provenance through older recall consumers (2026-09-28).** Push source `4be737c` and gracefully replace the agent with PID 12214. All 89 loaded inputs match the qualified snapshot; session 5319 and the exact pending study continuation survive and the continuation reaches a handled receipt. Bridge 84722 and protected services are unchanged. Qualification: 1,692 tests, 141 subtests, one existing skip, plus 38 launch tests. Release follow-through: `docs/steward-notes/2026-09-28-recall-consumers.md`.
+
 - **Candidate: provenance through older recall consumers (2026-09-28).** Preserve database identity through regulation, spike, expression and continuity prompts without shrinking or rewriting their excerpts. Retain file/hash provenance through the journal-derived browsing topic, summarization, pagination and saved research; keep unknown measurement clocks explicit and action parsing unchanged. Qualification and activation boundary: `docs/steward-notes/2026-09-28-recall-consumers.md`.
 
 - **Live: journal provenance and queued-choice repair (2026-09-27).** Deploy Minime 84090 with all 89 source inputs verified alongside bridge 84722; preserve session/checkpoint continuity and protected services. The packaged-reader suite passes 1,679 tests, one skip and 141 subtests. Runtime commit `1af38d8` is on origin/main. Receipts and limits: `docs/steward-notes/2026-09-27-journal-provenance-and-handoff.md`.
