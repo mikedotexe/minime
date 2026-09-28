@@ -454,3 +454,116 @@ def test_write_choice_survives_real_action_routing_and_keeps_private_artifact(st
     assert journals and "Who calls entry?" in journals[0].read_text()
     assert not list((aa.WORKSPACE_DIR / "journal").glob("private_writing*"))
     assert "Who calls entry?" in client.prepare("WRITE CONTINUE")
+
+
+def _boundary_provider(monkeypatch, agent, offers, response_text):
+    def provider(prompt, **kwargs):
+        offers.append(prompt)
+        messages, _ = aa._adapt_ollama_messages_for_model(
+            model="gemma4:12b", system_msg=prompt.output["system_prompt"], prompt=prompt,
+            num_ctx=8192, num_predict=768)
+        response = Mock(status_code=200, text=json.dumps({"message": {"content": response_text}, "done": True}))
+        prompt.post(Mock(return_value=response), "fake", {"messages": messages}, 1)
+        prompt.accepted()
+        return response_text
+    monkeypatch.setattr(agent, "_query_llm", provider)
+
+
+@pytest.mark.parametrize("command", ["SELF_STUDY QUESTION", "SELF_STUDY QUESTION NEW Does the gate exist?"])
+def test_missing_next_records_nonselection_without_touching_pending_then_corrected_choice_dispatches(study_agent, monkeypatch, command):
+    from minime_autonomy.study_feedback import StudyFeedback
+    agent, store, client, offers = study_agent
+    _boundary_provider(monkeypatch, agent, offers, command)
+    agent._current_action_continuity_event = {"action_id": "unselected-question"}
+    agent._pending_next_action = "DAYDREAM"
+    agent._run_shared_source_study(dict(STATE), "QUESTION HOME")
+    assert agent._pending_next_action == "DAYDREAM"
+    assert "NEXT: SELF_STUDY QUESTION" in offers[-1].output["system_prompt"]
+    records = StudyFeedback(aa.WORKSPACE_DIR).load()["records"]
+    assert records[-1]["status"] == "unselected"
+    assert records[-1]["action"] == command
+    path = aa.WORKSPACE_DIR / "diagnostics/source_first_v3/shared_reader/reader-v1.json"
+    assert not json.loads(path.read_text())["questions"]["entries"]
+    _boundary_provider(monkeypatch, agent, offers, "NEXT: " + command)
+    agent._current_action_continuity_event = {"action_id": "corrected-question"}
+    agent._run_shared_source_study(dict(STATE), "SELF_STUDY MAP")
+    assert "unselected" in offers[-1]
+    assert agent._pending_next_action == command
+    assert agent._decide_action(dict(STATE)) == "self_study"
+    context = dict(agent._pending_action_continuity_context)
+    assert context["source_study_action"] == command
+    _boundary_provider(monkeypatch, agent, offers, "NEXT: REST")
+    agent._execute_action("self_study", dict(STATE), _from_llm_job=True,
+                          _precreated_continuity_context=context)
+    saved = json.loads(path.read_text())["questions"]
+    assert len(saved["entries"]) == int(" NEW " in command)
+    assert agent._pending_next_action == "REST"
+    assert agent._decide_action(dict(STATE)) is None
+
+
+def test_misplaced_finding_reaches_recovery_intact_without_fallback_or_update(study_agent, monkeypatch):
+    from minime_autonomy.parsing import parse_next_action
+    from minime_autonomy.study_feedback import StudyFeedback
+    agent, _, client, offers = study_agent
+    command = "STUDY_FINDING: minime/minime_autonomy/runtime.py:2 | A check and apply_identity_config (authorization)."
+    assert parse_next_action("NEXT: " + command)[0] == command
+    assert agent._split_multi_action(command) == [command]
+    assert agent._split_multi_action("REST AND " + command) == ["REST", command]
+    client.prepare("SELF_STUDY QUESTION NEW An existing question?")
+    path = aa.WORKSPACE_DIR / "diagnostics/source_first_v3/shared_reader/reader-v1.json"
+    before = json.loads(path.read_text())
+    _boundary_provider(monkeypatch, agent, offers, "NEXT: REST")
+    agent._record_llm_next_action_choice(command, "", reason="llm next choice")
+    assert agent._decide_action(dict(STATE)) == "self_study"
+    context = dict(agent._pending_action_continuity_context)
+    assert context["source_study_action"] == command
+    agent._execute_action("self_study", dict(STATE), _from_llm_job=True,
+                          _precreated_continuity_context=context)
+    assert len(offers) == 1
+    assert offers[0].output["input_kind"] == "recovery"
+    assert "Notebook update not applied" in offers[0]
+    assert "without NEXT:" in offers[0]
+    after = json.loads(path.read_text())
+    for field in ("questions", "notebook", "bookmarks"):
+        assert before[field] == after[field]
+    records = StudyFeedback(aa.WORKSPACE_DIR).load()["records"]
+    original = next(record for record in records if record["action"] == command)
+    assert original["reader_outcome"]["status"] == "rejected"
+    assert agent._pending_next_action == "REST"
+
+
+@pytest.mark.parametrize("choice", [
+    "SELF_STUDY QUESTION NEW Does foo_bar and baz_quux matter?",
+    "SELF_STUDY QUESTION RESOLVE q1 Unsure about foo_bar AND TURN_OFF",
+    "STUDY_QUESTION: Literal </s> and TURN_OFF",
+])
+def test_question_and_notebook_payloads_stay_whole(study_agent, choice):
+    from minime_autonomy.parsing import parse_next_action
+    agent = study_agent[0]
+    assert parse_next_action("NEXT: " + choice)[0] == choice
+    assert agent._split_multi_action(choice) == [choice]
+    assert parse_next_action("> NEXT: " + choice)[0] is None
+    assert parse_next_action("```text\nNEXT: " + choice + "\n```")[0] is None
+
+
+@pytest.mark.parametrize('alteration', ['returned_text', 'response_sha256', 'page_id'])
+def test_missing_next_feedback_requires_the_actual_delivery(study_agent, monkeypatch, alteration):
+    from minime_autonomy.study_feedback import StudyFeedback
+    agent, _, _, offers = study_agent
+    command = 'SELF_STUDY QUESTION'
+    _boundary_provider(monkeypatch, agent, offers, command)
+    provider = agent._query_llm
+
+    def altered_provider(prompt, **kwargs):
+        result = provider(prompt, **kwargs)
+        if alteration == 'returned_text':
+            return result + ' NEW different text'
+        prompt.receipt[alteration] = 'not-the-delivery'
+        return result
+
+    monkeypatch.setattr(agent, '_query_llm', altered_provider)
+    agent._current_action_continuity_event = {'action_id': 'unverified'}
+    agent._pending_next_action = 'DAYDREAM'
+    agent._run_shared_source_study(dict(STATE), 'SELF_STUDY MAP')
+    assert agent._pending_next_action == 'DAYDREAM'
+    assert not any(r['status'] == 'unselected' for r in StudyFeedback(aa.WORKSPACE_DIR).load()['records'])

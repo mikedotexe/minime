@@ -23,6 +23,22 @@ def normalize_action_arg(text: str) -> str:
     return trimmed
 
 
+def notebook_directive_action(action: str) -> bool:
+    """Recognize a misplaced notebook directive without interpreting its payload."""
+    return str(action or '').lstrip().upper().startswith((
+        'STUDY_NOTE:', 'STUDY_QUESTION:', 'STUDY_REVISE:',
+        'STUDY_FINDING:', 'STUDY_FINDING_DROP:', 'STUDY_RELATION:',
+    ))
+
+
+def has_study_payload(action: str) -> bool:
+    """Study prose and question arguments never form generic AND action chains."""
+    words = str(action or '').split(None, 2)
+    return notebook_directive_action(action) or bool(words and (
+        words[0].upper() == 'QUESTION' or (
+            words[0] == 'SELF_STUDY' and len(words) > 1 and words[1].upper() == 'QUESTION')))
+
+
 def first_sentence(raw_excerpt: str) -> str:
     for marker in [".", "!", "?"]:
         if marker in raw_excerpt:
@@ -691,7 +707,7 @@ def parse_next_action(text: str) -> tuple:
         stripped = lines[i].strip()
         if stripped.upper().startswith('NEXT:'):
             raw_next = lines[i].lstrip()[5:].lstrip()
-            if raw_next.upper().startswith("AFTERIMAGE_KEEP ") or raw_next.startswith(("SELF_STUDY GEOMETRY ", "SELF_STUDY OBSERVE ", "WRITE OBSERVE ")):
+            if has_study_payload(raw_next) or raw_next.upper().startswith("AFTERIMAGE_KEEP ") or raw_next.startswith(("SELF_STUDY GEOMETRY ", "SELF_STUDY OBSERVE ", "WRITE OBSERVE ")):
                 # The fragment is data, including trailing space and RESIDUE-like text.
                 cleaned = '\n'.join(lines[:i] + lines[i+1:]).strip()
                 return _parse_result(raw_next, cleaned)

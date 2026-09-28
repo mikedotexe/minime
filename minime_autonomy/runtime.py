@@ -24393,12 +24393,14 @@ Fill: {fill:.1f}%
         """
         if not raw_next:
             return []
-        if raw_next.lstrip().startswith(("SELF_STUDY GEOMETRY ", "SELF_STUDY OBSERVE ", "WRITE OBSERVE ")):
+        if has_study_payload(raw_next) or raw_next.lstrip().startswith(("SELF_STUDY GEOMETRY ", "SELF_STUDY OBSERVE ", "WRITE OBSERVE ")):
             return [raw_next.lstrip()]
         segments = []
         remaining = raw_next
         max_seg = self._MULTI_ACTION_MAX_SEGMENTS
         while len(segments) + 1 < max_seg:
+            if has_study_payload(remaining):
+                break
             lower = remaining.lower()
             search_from = 0
             found_at = None
@@ -24918,9 +24920,9 @@ Fill: {fill:.1f}%
             self._set_action_continuity_context(chosen, base)
             if study_choice_id:
                 self._pending_action_continuity_context["study_choice_id"] = study_choice_id
-            if base == "QUESTION":
+            if base == "QUESTION" or notebook_directive_action(chosen):
                 # Ask the reader for state-aware rejection/recovery. It never
-                # executes a bare QUESTION or guesses a qN from a hash.
+                # executes a misplaced directive or guesses a qN from a hash.
                 self._pending_source_study_action = chosen
                 self._pending_action_continuity_context["source_study_action"] = chosen
                 return "self_study"
@@ -55356,6 +55358,16 @@ Goals: {json.dumps(goals, indent=2)}
         action_text = response.action_text if isinstance(response, InboxGeneration) else response
         self._apply_footer_directives(action_text)
         next_action, cleaned = parse_next_action(action_text)
+        if next_action is None and isinstance(prompt, SourceStudyPrompt):
+            feedback = prompt.verified_choice_feedback(action_text)
+            origin = delivery_origin(prompt, action_text)
+            if origin and feedback.get("selection_kind") == "unselected_study_command":
+                commands = feedback.get("recovery_commands") or []
+                if len(commands) == 1:
+                    try:
+                        StudyFeedback(WORKSPACE_DIR).unselected(commands[0], origin)
+                    except (OSError, ValueError) as error:
+                        logging.warning("Unselected study command receipt unavailable: %s", error)
         private_choice_envelope = None
         # This shorthand belongs only to the current, verified private-writing
         # response. Keep its authored text and receipt; queue the explicit route.

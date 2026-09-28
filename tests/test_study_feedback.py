@@ -99,3 +99,18 @@ def test_origin_requires_the_current_wire_and_returned_response():
     assert delivery_origin(prompt, 'Another response.\nNEXT: REST') is None
     prompt._wire = (request, response + ' ')
     assert delivery_origin(prompt, 'NEXT: REST') is None
+
+
+def test_unselected_receipt_is_idempotent_and_preserves_pending_choice(tmp_path):
+    store = StudyFeedback(tmp_path)
+    selected = store.transition('SELF_STUDY MAP', origin=ORIGIN, selection_id='chosen')
+    before = store.load()['records'][0]
+    missing = {**ORIGIN, 'response_sha256': 'c' * 64}
+    ident = store.unselected('SELF_STUDY QUESTION', missing)
+    assert store.unselected('SELF_STUDY QUESTION', missing) == ident
+    restarted = StudyFeedback(tmp_path).load()
+    assert restarted['pending'] == selected
+    assert restarted['records'][0] == before
+    assert len(restarted['records']) == 2
+    assert restarted['records'][-1]['status'] == 'unselected'
+    assert 'No inquiry operation was queued or applied' in store.render()

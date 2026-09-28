@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Candidate: study command boundary (2026-09-28).** Retain verified nonselection receipts without replacing pending choices; keep notebook prose/question arguments out of action splitting and route misplaced directives to specific recovery. Test corrected dispatch, REST, storage preservation and delivery identity. Paired release record: `docs/steward-notes/2026-09-28-study-command-boundary.md`.
+
 - **Live: provenance through older recall consumers (2026-09-28).** Push source `4be737c` and gracefully replace the agent with PID 12214. All 89 loaded inputs match the qualified snapshot; session 5319 and the exact pending study continuation survive and the continuation reaches a handled receipt. Bridge 84722 and protected services are unchanged. Qualification: 1,692 tests, 141 subtests, one existing skip, plus 38 launch tests. Release follow-through: `docs/steward-notes/2026-09-28-recall-consumers.md`.
 
 - **Candidate: provenance through older recall consumers (2026-09-28).** Preserve database identity through regulation, spike, expression and continuity prompts without shrinking or rewriting their excerpts. Retain file/hash provenance through the journal-derived browsing topic, summarization, pagination and saved research; keep unknown measurement clocks explicit and action parsing unchanged. Qualification and activation boundary: `docs/steward-notes/2026-09-28-recall-consumers.md`.
