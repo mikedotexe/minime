@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Live: paired quiet-study and afterimage presentation (2026-09-30).** Source `d5176e8` is integrated with Astrid `4099bbfd10`; graceful activation verifies agent 48235, bridge 49008, all 89 loaded inputs and exact checkpoint/session continuity. Packaged qualification passes 1,707 tests plus 141 subtests with one existing skip. Engine/model/sensory processes remain unchanged. Timing candidate `e9f2f5f` is separately committed, not merged or activated. Automations remain paused. See the paired release steward note.
+
 - **Paired quiet-study and afterimage presentation candidate (2026-09-30).** Preserve optional historical cues before the selected writing request, including provider adaptation; describe samples with unmet cadence requirements and retain exact explicit retrieval. Combine with the schema-11 quiet-notebook helper. The engine elapsed-time candidate is separate and not included in this agent rollout. See `docs/steward-notes/2026-09-30-paired-quiet-afterimage-release.md`.
 
 - **Candidate: quiet notebook return and truthful study decisions (2026-09-30).** Consume the shared Rust reader's continuation-decision marker instead of recognizing EOF alone. Record new choice replies as `study_decision` with a decision heading, preserving exact NEXT and REST handling and excluding them from verified-source-study classification. Exercise explicit legacy-notebook inspection, parking and return through the real dispatcher/helper. Historical journals are unchanged. Requires the paired schema-11 helper; not deployed. See `docs/steward-notes/2026-09-30-quiet-notebook-return.md`.

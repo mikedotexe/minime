@@ -57,3 +57,18 @@ the standard gate and reused only the verified owned hold through the original
 sanctioned handoff checks. No foreign process was killed or gate bypassed.
 Automation stays paused. Sampling and engine-controller qualification debt remain
 explicit, and no subjective improvement or natural uptake is asserted.
+
+## Git Integration
+
+Canonical main contains Minime `d5176e862920a0fb15e520a3471561ce5fb09e9d` paired
+with Astrid `4099bbfd10bb7d91a43d0c696967445017569c9f`. All 89 loaded launch
+inputs and 659 canonical Astrid build inputs match the qualified release.
+The three installer-modified Python files were verified against the incoming
+commit, explicitly staged and fast-forwarded without stash/reset or foreign edits.
+
+Original timing candidate `e9f2f5f151c89dd6b4a2dc80d5d8d12a60dc20d3` remains
+on `codex/afterimage-timing-20260930`, committed but not merged or activated.
+Its six timing tests pass with the pinned lock; controller qualification and
+existing strict engine-Clippy debt remain. Exact path lists and clean-state
+checks are in [Git alignment evidence](evidence/2026-09-30-paired-quiet-afterimage-git.json).
+Older unrelated worktrees and paused automations were not changed.
