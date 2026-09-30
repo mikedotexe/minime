@@ -91,6 +91,24 @@ def quoted(text):
     return "\n".join("> " + line for line in text.split("\n"))
 
 
+def coverage_description(row):
+    """Describe archive coverage, not an absent event or a felt state."""
+    channels = (row.get("coverage") or {}).get("channels") or {}
+    samples = sum(channel.get("samples", 0) for channel in channels.values())
+    gaps = any(channel.get("gaps") for channel in channels.values())
+    invalid = any(channel.get("invalid_samples", 0) for channel in channels.values())
+    if samples and gaps:
+        return ("Historical telemetry: samples available; cadence requirement not met; "
+                "some temporal measurements unavailable.")
+    if samples and invalid:
+        return "Historical telemetry: samples available; invalid values limit measurement coverage."
+    if samples and row.get("status") == "completed":
+        return "Historical telemetry: recorded window meets its coverage checks."
+    if samples:
+        return "Historical telemetry: samples available; partial coverage. Inspect the record for reasons."
+    return "Historical telemetry: sample coverage unavailable. This does not establish an absent event."
+
+
 class AfterimageStore:
     def __init__(self, workspace, archive_workspace=None, actor="minime"):
         if actor not in {"minime", "astrid"}:
@@ -213,7 +231,7 @@ class AfterimageStore:
                         "measurements": {}, "reasons": [reason]}
         overview = {key: artifact.get(key) for key in ("id", "origin", "anchor_unix_ms", "session_id", "status", "reasons", "coverage")}
         # Each page remains a stable slice of immutable source records, with explicit page numbering.
-        sections = [json.dumps(overview, ensure_ascii=False, sort_keys=True, indent=2)]
+        sections = [coverage_description(artifact), json.dumps(overview, ensure_ascii=False, sort_keys=True, indent=2)]
         for note in notes:
             source_time = dated(note["source_timestamp_unix_ms"]) if note["source_timestamp_unix_ms"] is not None else "original source time unavailable"
             sections.append(f"Authored note {note['note_id']} | {note['author']} | {source_time}\n"
@@ -402,7 +420,11 @@ class AfterimageStore:
                         excerpt = json.dumps(notes[-1]["text"].replace("\n", " "), ensure_ascii=False)
                         text += f" | {notes[-1]['author']} wrote: {excerpt}"
                     elif age < 6*HOUR_MS:
-                        text += f" | {row.get('status', 'coverage unavailable')} physical trace"
+                        text += " | " + coverage_description(row)
+                        text += f" Details: AFTERIMAGE_OPEN {row['id']}"
+                        # Coverage qualifications and the exact return command stay whole.
+                        if len(text) > limit:
+                            continue
                     # The cue is an explicitly bounded excerpt; the saved note stays exact.
                     if len(text) > limit:
                         text = text[:limit-3] + "..."

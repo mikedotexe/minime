@@ -21684,7 +21684,7 @@ def _adapt_ollama_messages_for_model(
     if afterimage is not None:
         remaining = min(compaction["budget_chars"], 16_000) - len(adapted_system) - len(adapted_prompt) - 64
         if len(afterimage.block) <= remaining:
-            adapted_prompt += afterimage.block
+            adapted_prompt = afterimage.compose(adapted_prompt)
         elif afterimage.selection.get("protected"):
             raise ValueError("afterimage page exceeds intact admission budget; no request sent")
     user_content = adapted_prompt if gemma4 else "/no_think\n" + adapted_prompt
@@ -32467,7 +32467,7 @@ Reason: {reason}
             private_writing = prompt.output.get("input_kind") == "private_writing"
             reflection = prompt.output.get("input_kind") == "reflection"
             revision_recovery = prompt.output.get("input_kind") == "revision_recovery"
-            decision = prompt.output.get("input_kind") == "end_of_file"
+            decision = prompt.output.get("continuation_decision") is True or prompt.output.get("input_kind") == "end_of_file"
             mode = "private_writing" if private_writing else "introspect" if reflection else "study_decision" if decision else "self_study"
             source = (prompt.output.get("page") or {}).get("source", f"study session ({len(session_pages)} source pages)" if session_pages else "source catalog")
             if private_writing:
@@ -32475,7 +32475,7 @@ Reason: {reason}
             elif reflection:
                 source = "open reflection"
             elif decision:
-                source = "continuation decision at end of source"
+                source = "study continuation choice"
             elif revision_recovery:
                 source = "source revision recovery"
             elif prompt.output.get("input_kind") == "geometry":
@@ -32492,7 +32492,7 @@ Reason: {reason}
                 revision = "frozen observation hashes in supplied evidence; no new source page"
             elif reflection:
                 revision = "not applicable; no source or measurements supplied"
-            heading = "PRIVATE WRITING" if private_writing else "INTROSPECTION" if reflection else "STUDY NAVIGATION RESPONSE" if revision_recovery else "SELF-STUDY"
+            heading = "PRIVATE WRITING" if private_writing else "INTROSPECTION" if reflection else "STUDY DECISION" if decision else "STUDY NAVIGATION RESPONSE" if revision_recovery else "SELF-STUDY"
             path.write_text(f"=== {heading}: {source} ===\nSource revision: {revision}\nInput evidence: {scope}\n"
                             f"Account: Minime’s response to this input, not independently verified code facts.\nDelivery: {status}\n\n{response}\n")
             self._record_current_action_artifact(mode, path, f"{mode}: {status}", visibility="protected" if private_writing else "summary" if verified else "protected")
