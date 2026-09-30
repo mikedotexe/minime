@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Candidate: afterimage scope and elapsed fill rates (2026-09-30).** Explain historical samples with unmet cadence requirements, retain explicit retrieval, and keep optional cues before the foreground writing request in both provider routes. Preserve protected pages, receipt identities and archive bytes. Separately replace nominal-tick fill derivatives with process-local observed intervals, mark startup/restart rates unavailable, and add bounded read-only production-policy replay. Engine activation requires separate review; this does not repair sample cadence or establish subjective improvement. See `docs/steward-notes/2026-09-30-afterimage-timing.md`.
+
 - **Live: study command boundary (2026-09-28).** Merge and push source `100e1a6`, gracefully activate Minime 29284 with bridge 30203, and verify all 89 loaded inputs, session continuity and unchanged protected services. The packaged-reader suite passes 1,702 tests and 141 subtests with one existing skip. Receipts and observation limits: `docs/steward-notes/2026-09-28-study-command-boundary.md`.
 
 - **Candidate: study command boundary (2026-09-28).** Retain verified nonselection receipts without replacing pending choices; keep notebook prose/question arguments out of action splitting and route misplaced directives to specific recovery. Test corrected dispatch, REST, storage preservation and delivery identity. Paired release record: `docs/steward-notes/2026-09-28-study-command-boundary.md`.

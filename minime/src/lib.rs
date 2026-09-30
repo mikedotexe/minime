@@ -12,6 +12,7 @@ pub mod db;
 pub mod division;
 pub mod envelope_registry;
 pub mod esn;
+pub mod fill_timing;
 pub mod gpu;
 pub mod hard_reset;
 pub mod ising_shadow;

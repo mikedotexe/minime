@@ -41,6 +41,8 @@ def test_optional_cue_is_whole_or_absent_and_each_fallback_logged(tmp_path):
     cue = selection("Past ai_2026-09-07_test | 2026-09-07 | quiet_sample")
     prompt = AfterimagePrompt("ambient", cue, store)
     first, _ = adapt(prompt)
+    assert first[1]["content"].startswith("Optional historical context")
+    assert first[1]["content"].endswith("ambient")
     record_attempt(prompt, first, "mlx", "profile", "final_request_prepared")
     second, _ = aa._adapt_ollama_messages_for_model(model="legacy", system_msg="s" * 16000,
         prompt=prompt, num_ctx=8192, num_predict=768)
@@ -49,6 +51,22 @@ def test_optional_cue_is_whole_or_absent_and_each_fallback_logged(tmp_path):
     records = [json.loads(line) for path in (store.private / "exposures").glob("*.jsonl") for line in path.read_text().splitlines()]
     assert [record["included"] for record in records] == [True, False]
     assert len({record["opportunity_id"] for record in records}) == 1
+
+
+@pytest.mark.parametrize("model", ["gemma4:12b", "legacy"])
+def test_optional_memory_remains_before_chosen_writing_on_real_adapter(model, tmp_path):
+    foreground = "Develop this dialogue in my chosen direction.\nNEXT: REST"
+    cue = selection("Past fixture | historical samples")
+    prompt = AfterimagePrompt(foreground, cue, AfterimageStore(tmp_path))
+    assert str(prompt).endswith(foreground)
+    assert prompt.with_ambient("revised writing").endswith("revised writing")
+    messages, meta = aa._adapt_ollama_messages_for_model(
+        model=model, system_msg="Writing contract", prompt=prompt, num_ctx=8192, num_predict=768)
+    assert len(messages) == 2
+    assert meta["afterimage_included"]
+    assert messages[-1]["content"].endswith(foreground)
+    assert messages[-1]["content"].index(cue["text"]) < messages[-1]["content"].index(foreground)
+    assert prompt.selection == cue
 
 
 def test_open_only_parses_fresh_response(tmp_path):

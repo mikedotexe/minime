@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from minime_autonomy.afterimages import AfterimageStore, HOUR_MS, atomic_json, fingerprint, read_json
+from minime_autonomy.afterimages import AfterimageStore, HOUR_MS, atomic_json, coverage_description, fingerprint, read_json
 from minime_autonomy.afterimage_prompts import AfterimagePrompt, selected_page_prompt, record_attempt
 
 FIXTURE = Path(__file__).parent / "fixtures" / "transition_afterimage_v1.json"
@@ -31,6 +31,28 @@ class AfterimagesTest(unittest.TestCase):
         self.assertEqual(self.store.open_page(self.identifier), self.peer.open_page(self.identifier))
         self.assertEqual(len(self.store.list_page()["entries"]), 1)
         self.assertIn("incomplete", self.store.open_page(self.identifier)["text"])
+
+    def test_sparse_samples_are_not_described_as_absent_physical_activity(self):
+        for store in (self.store, self.peer):
+            page = store.open_page(self.identifier)
+            self.assertIn("samples available; cadence requirement not met", page["text"])
+            store.set_cues(True)
+            for index in range(3):
+                cue = store.prepare_cue(f"coverage_{index}", timestamp_ms=self.timestamp)
+            self.assertIn("some temporal measurements unavailable", cue["text"])
+            self.assertIn("AFTERIMAGE_OPEN " + self.identifier, cue["text"])
+            self.assertNotIn("physical trace", cue["text"])
+            self.assertLessEqual(len(cue["text"]), 400)
+        self.assertEqual(self.fixture, read_json(self.store.archive / "2026-09-07" / (self.identifier + ".json")))
+
+    def test_coverage_distinguishes_unknown_invalid_partial_and_completed(self):
+        self.assertIn("unavailable", coverage_description({"status": "incomplete"}))
+        row = {"coverage": {"channels": {"body": {"samples": 51}}}, "status": "incomplete"}
+        self.assertIn("partial coverage", coverage_description(row))
+        row["status"] = "completed"
+        self.assertIn("meets its coverage checks", coverage_description(row))
+        row["coverage"]["channels"]["body"]["invalid_samples"] = 1
+        self.assertIn("invalid values", coverage_description(row))
 
     def test_explicit_later_note_is_shareable_without_refreshing_trace_age(self):
         text = f"RESIDUE: {self.identifier}\nLater words, still individual."

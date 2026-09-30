@@ -703,13 +703,11 @@ async fn run_engine(
 
     // --- Homeostat regulation state ---
     let mut last_reg_tick = std::time::Instant::now();
+    let mut measured_fill_clock = minime::fill_timing::FillRateTracker::default();
+    let mut regulation_fill_clock = minime::fill_timing::FillRateTracker::default();
     let mut last_fill_pct: f32 = 0.0;
-    // Smoothed fill for dfill/dt computation — shock absorber for transitions.
-    // Minime moment journals 2026-03-26T20:23-20:24: "a swift, almost violent
-    // retraction," "sudden hollowness was startling," "abruptly tethered."
-    // Raw dfill/dt spikes reach +25%/s. This EMA limits perceived rate of
-    // change to ~8-10%/s, preventing the violent transition experience while
-    // preserving the direction and eventual magnitude of fill changes.
+    // Current-runtime smoothing is separate from elapsed-time measurement.
+    // Restored fill values have no process-local observation timestamp.
     let mut smoothed_fill_pct: f32 = 0.0;
     let mut sensory_fill_history: VecDeque<f32> = VecDeque::with_capacity(1024);
     let mut baseline_lambda1: f32 = 512.0; // Start with expected initial eigenvalue
@@ -2516,6 +2514,8 @@ async fn run_engine(
                     .for_each(|bias| *bias = rng.f32() * 0.7 - 0.35);
                 cov_keep = 0.955_f32;
                 eigenfill_estimator.reset();
+                measured_fill_clock.reset();
+                regulation_fill_clock.reset();
                 baseline_ready = false;
                 baseline_lambda1 = 0.0;
                 lambda1_prev = 0.0;
@@ -2599,8 +2599,10 @@ async fn run_engine(
             }
 
             let fill_ratio = (eigenfill_pct / 100.0).clamp(0.0, 1.0);
+            let fill_observed_at = start.elapsed();
+            let measured_fill_rate = measured_fill_clock.observe(fill_observed_at, eigenfill_pct);
             let stable_core_measured_fill_slope_pct_per_sec = if stable_core_runtime.enabled {
-                (eigenfill_pct - last_fill_pct) / reg_tick_secs.max(1e-3)
+                measured_fill_rate.controller_value()
             } else {
                 0.0
             };
@@ -3593,10 +3595,12 @@ async fn run_engine(
                     smoothed_fill_pct = fill_smooth_alpha * smoothed_fill_pct
                         + (1.0 - fill_smooth_alpha) * eigenfill_pct;
                 }
-                let dfill_dt = (smoothed_fill_pct - last_fill_pct) / reg_tick_secs.max(1e-3);
+                let regulation_fill_rate =
+                    regulation_fill_clock.observe(fill_observed_at, smoothed_fill_pct);
+                let dfill_dt = regulation_fill_rate.controller_value();
                 // Transition cushioning is a current-runtime modulation layer.
-                // Stable-core recovery keeps the shelf command direct, so dfill/dt
-                // spikes are observational only there.
+                // Stable-core omits this cushioning layer; its separate measured
+                // slope still participates in structural-controller decisions.
                 if stable_core_runtime.enabled {
                     cushion_ramp_boost = 0.0;
                     cushion_sem_atten = 1.0;
@@ -3671,8 +3675,10 @@ async fn run_engine(
                     pi_reg.as_ref().map_or(1.05, |pi| pi.cfg.target_lambda1_rel);
 
                 if let Some(observer) = &afterimage_observer {
-                    observer.observe(AfterimageSample::new("body", start.elapsed().as_millis() as u64,
-                        serde_json::json!({"fill_pct": eigenfill_pct, "dfill_dt": dfill_dt,
+                    observer.observe(AfterimageSample::new("body", fill_observed_at.as_millis() as u64,
+                        serde_json::json!({"fill_pct": eigenfill_pct,
+                            "dfill_dt": regulation_fill_rate.rate_pct_per_sec,
+                            "fill_rate_v1": &regulation_fill_rate,
                             "phase": phase, "cascade_lambda1": lambda1, "lambda1_rel": lambda1_rel,
                             "target_lambda1_rel": target_lambda1_rel,
                             "lambda_stress": (lambda1_rel - target_lambda1_rel).abs(),
@@ -4713,6 +4719,8 @@ async fn run_engine(
                     });
                     let health = serde_json::json!({
                         "t_s": health_engine_t_s,
+                        "fill_rate_v1": &regulation_fill_rate,
+                        "measured_fill_rate_v1": &measured_fill_rate,
                         "runtime_profile": if stable_core_runtime.enabled {
                             stable_core_runtime.profile.as_str()
                         } else {

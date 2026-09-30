@@ -21684,7 +21684,7 @@ def _adapt_ollama_messages_for_model(
     if afterimage is not None:
         remaining = min(compaction["budget_chars"], 16_000) - len(adapted_system) - len(adapted_prompt) - 64
         if len(afterimage.block) <= remaining:
-            adapted_prompt += afterimage.block
+            adapted_prompt = afterimage.compose(adapted_prompt)
         elif afterimage.selection.get("protected"):
             raise ValueError("afterimage page exceeds intact admission budget; no request sent")
     user_content = adapted_prompt if gemma4 else "/no_think\n" + adapted_prompt

@@ -324,6 +324,32 @@ fn gaps_break_integration_and_sustained_return() {
 }
 
 #[test]
+fn slow_complete_span_is_still_incomplete_without_contiguous_coverage() {
+    let mut artifact = episode(|t| {
+        if t < 60 {
+            68.0
+        } else if t < 80 {
+            78.0
+        } else {
+            69.0
+        }
+    });
+    artifact.samples.retain(|s| s.engine_t_ms % 3_000 == 0);
+    Recorder::finalize(&mut artifact, None);
+    assert_eq!(artifact.status, "incomplete");
+    assert!(artifact.samples.len() > 100);
+    assert_eq!(
+        artifact.measurements["fill_half_return_s"]["reason"],
+        "insufficient_contiguous_coverage"
+    );
+    assert!(artifact.measurements["lambda_stress_area"]["value"].is_null());
+    assert_eq!(
+        artifact.measurements["lambda_stress_area"]["observed_duration_ms"],
+        0
+    );
+}
+
+#[test]
 fn enrichment_and_crossings_merge_without_extending_window() {
     let mut r = Recorder::new("17");
     for t in 0..=60 {

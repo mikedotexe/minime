@@ -5,13 +5,21 @@ import uuid
 
 class AfterimagePrompt(str):
     def __new__(cls, ambient, selection, store):
-        block = "\n\n" + selection["text"]
-        obj = super().__new__(cls, str(ambient) + block)
+        protected = selection.get("protected", False)
+        block = ("\n\n" + selection["text"] if protected else
+                 "Optional historical context (reference only, not a new request). "
+                 "Revisiting it is optional.\n"
+                 + selection["text"] + "\nEnd optional memory.\n\n")
+        obj = super().__new__(cls, str(ambient) + block if protected else block + str(ambient))
         obj.ambient = str(ambient)
         obj.selection = selection
         obj.store = store
         obj.block = block
         return obj
+
+    def compose(self, ambient):
+        return (str(ambient) + self.block if self.selection.get("protected")
+                else self.block + str(ambient))
 
     def with_ambient(self, ambient):
         return AfterimagePrompt(ambient, self.selection, self.store)
