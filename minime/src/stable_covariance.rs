@@ -9,6 +9,9 @@ use crate::rescue_scaffold::{
     self, RescueScaffold, StabilityPiOutput, StabilityPiState, StableCoreRestartGate,
 };
 
+mod settle_observation;
+pub use settle_observation::RestartSettleObservationV1;
+
 pub struct StepInput<'a> {
     pub dim: usize,
     pub fill_pct: f32,
@@ -242,6 +245,7 @@ pub struct ScaffoldLifecycle {
     pub retirement_reason: &'static str,
 }
 
+#[derive(Clone, Copy)]
 pub struct MeasurementInput {
     pub now_unix_ms: u64,
     pub fill_pct: f32,
@@ -273,6 +277,16 @@ pub fn record_measurement(
         input.reentry_active,
         input.recovery_active,
     );
+    record_scaffold_measurement(lifecycle, restart, input);
+}
+
+/// Scaffold lifecycle after the restart gate has consumed this measurement.
+/// Kept separate for isolated policy comparisons; production uses `record_measurement`.
+pub fn record_scaffold_measurement(
+    lifecycle: &mut ScaffoldLifecycle,
+    restart: &mut StableCoreRestartGate,
+    input: MeasurementInput,
+) {
     let mut retired_this_tick = false;
     if lifecycle.active {
         let candidate = rescue_scaffold::stable_core_scaffold_retirement_candidate_reason(

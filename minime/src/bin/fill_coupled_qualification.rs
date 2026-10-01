@@ -31,6 +31,16 @@ enum Scenario {
     MatrixFault,
     Restart,
     Semantic,
+    SemanticContinuous,
+    SemanticThenQuiet,
+}
+
+// Experimental policies exist only in this offline executable, never in runtime configuration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SettlePolicy {
+    Current,
+    IgnoreSemanticEverywhere,
+    RestartOnlyUnderLoad,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -78,6 +88,9 @@ struct Row {
     generation: Option<u64>,
     scaffold: bool,
     settled: bool,
+    semantic_active: bool,
+    settle_reason: String,
+    retirement_reason: String,
     intake_reason: String,
     matrix_hash: String,
 }
@@ -181,6 +194,54 @@ fn run(
     schedule: Schedule,
     seed: u64,
 ) -> Result<Vec<Row>> {
+    run_with_policy(
+        gpu,
+        dim,
+        scenario,
+        timing,
+        schedule,
+        seed,
+        SettlePolicy::Current,
+    )
+}
+
+fn record_with_policy(
+    lifecycle: &mut ScaffoldLifecycle,
+    restart: &mut StableCoreRestartGate,
+    mut input: MeasurementInput,
+    policy: SettlePolicy,
+) {
+    match policy {
+        SettlePolicy::Current => stable_covariance::record_measurement(lifecycle, restart, input),
+        SettlePolicy::IgnoreSemanticEverywhere => {
+            input.semantic_active = false;
+            stable_covariance::record_measurement(lifecycle, restart, input);
+        }
+        SettlePolicy::RestartOnlyUnderLoad => {
+            restart.record_measured_fill(
+                input.now_unix_ms,
+                input.fill_pct,
+                input.rate,
+                input.stage,
+                false,
+                lifecycle.active,
+                input.reentry_active,
+                input.recovery_active,
+            );
+            stable_covariance::record_scaffold_measurement(lifecycle, restart, input);
+        }
+    }
+}
+
+fn run_with_policy(
+    gpu: &Gpu,
+    dim: usize,
+    scenario: Scenario,
+    timing: Timing,
+    schedule: Schedule,
+    seed: u64,
+    policy: SettlePolicy,
+) -> Result<Vec<Row>> {
     ensure!(
         (K..=512).contains(&dim),
         "dimension outside qualification bound"
@@ -233,7 +294,10 @@ fn run(
     let mut previous_nominal = None;
     let mut control_rate = None;
     let mut rows = Vec::new();
-    let steps = if matches!(scenario, Scenario::LowRankExtended) {
+    let steps = if matches!(
+        scenario,
+        Scenario::LowRankExtended | Scenario::SemanticContinuous | Scenario::SemanticThenQuiet
+    ) {
         144
     } else {
         STEPS
@@ -321,8 +385,19 @@ fn run(
         };
         let guard = select_guard(observed_fill, &mut stage, &mut pi, gate, filter, keep);
         keep = guard.cov_keep_max.unwrap_or(keep);
-        let semantic = matches!(scenario, Scenario::Semantic) && (12..28).contains(&tick);
-        stable_covariance::record_measurement(
+        let semantic_present = match scenario {
+            Scenario::Semantic => (12..28).contains(&tick),
+            Scenario::SemanticContinuous => true,
+            Scenario::SemanticThenQuiet => tick < 80,
+            _ => false,
+        };
+        let semantic = minime::controller_recovery::stable_core_semantic_retirement_active(
+            semantic_present.then_some(800),
+            15_000,
+            if semantic_present { 0.000217 } else { 0.0 },
+            semantic_present,
+        );
+        record_with_policy(
             &mut lifecycle,
             &mut restart,
             MeasurementInput {
@@ -340,6 +415,7 @@ fn run(
                 high_fill_drain_active: result.pi.high_fill_drain_active,
                 applied_drain_weight: result.drain_weight,
             },
+            policy,
         );
         let preview = pi.preview(observed_fill, control_rate, stage, lifecycle.active);
         let intake = runtime.live_intake_decision_for_stage(
@@ -391,6 +467,12 @@ fn run(
             generation: measured.latest().map(|value| value.reset_generation),
             scaffold: lifecycle.active,
             settled: restart.is_settled(),
+            semantic_active: semantic,
+            settle_reason: restart
+                .status(time_ms, false, false, "offline", 0.0, 0.0, 0.0)
+                .settle_candidate_reason
+                .into(),
+            retirement_reason: lifecycle.retirement_reason.into(),
             intake_reason: intake.reason.into(),
             matrix_hash: matrix_hash(matrix),
         });
@@ -409,6 +491,106 @@ fn summary(rows: &[Row]) -> Value {
         "drain_steps": rows.iter().filter(|r| r.drain > 0.0).count(),
         "max_drain": rows.iter().map(|r| r.drain).fold(0.0_f32, f32::max)})
 }
+
+fn semantic_settle_review(gpu: &Gpu) -> Result<Value> {
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let mut results = Vec::new();
+    for scenario in [Scenario::SemanticContinuous, Scenario::SemanticThenQuiet] {
+        for schedule in [
+            Schedule::Nominal500,
+            Schedule::Delayed2370,
+            Schedule::MixedGaps,
+        ] {
+            let mut policies = Vec::new();
+            for policy in [
+                SettlePolicy::Current,
+                SettlePolicy::IgnoreSemanticEverywhere,
+                SettlePolicy::RestartOnlyUnderLoad,
+            ] {
+                ensure!(
+                    Instant::now() < deadline,
+                    "semantic review deadline exceeded"
+                );
+                let rows =
+                    run_with_policy(gpu, 512, scenario, Timing::Observed, schedule, SEED, policy)?;
+                policies.push(json!({"policy": format!("{policy:?}"), "summary": summary(&rows),
+                    "first_settled_tick": rows.iter().find(|r| r.settled).map(|r| r.tick),
+                    "first_retired_tick": rows.iter().find(|r| r.retirement_reason == "retired_after_restart_gate_settle").map(|r| r.tick),
+                    "rows": rows}));
+            }
+            results.push(json!({"scenario":format!("{scenario:?}"),"schedule":format!("{schedule:?}"),"policies":policies}));
+        }
+    }
+    Ok(json!({"schema":"isolated_semantic_settle_review_v1",
+        "scope":"counterfactual lifecycle policies only; projected stimulus is identical across policies",
+        "semantic_fixture":"fresh age 800ms, stale window 15000ms, kernel energy 0.000217, trickle admitted; no text, embedding, ESN or sensory transport simulation",
+        "sources": semantic_review_sources(),
+        "deployment_authorized":false,"semantic_suppression_authorized":false,
+        "results":results}))
+}
+
+fn semantic_review_sources() -> Value {
+    let sources = [
+        (
+            "controller_recovery.rs",
+            include_bytes!("../controller_recovery.rs").as_slice(),
+        ),
+        (
+            "stable_covariance.rs",
+            include_bytes!("../stable_covariance.rs").as_slice(),
+        ),
+        (
+            "stable_covariance/settle_observation.rs",
+            include_bytes!("../stable_covariance/settle_observation.rs").as_slice(),
+        ),
+        (
+            "rescue_scaffold.rs",
+            include_bytes!("../rescue_scaffold.rs").as_slice(),
+        ),
+        (
+            "rescue_overfill.rs",
+            include_bytes!("../rescue_overfill.rs").as_slice(),
+        ),
+        (
+            "covariance_math.rs",
+            include_bytes!("../covariance_math.rs").as_slice(),
+        ),
+        (
+            "measurement_basis.rs",
+            include_bytes!("../measurement_basis.rs").as_slice(),
+        ),
+        (
+            "fill_timing.rs",
+            include_bytes!("../fill_timing.rs").as_slice(),
+        ),
+        (
+            "spectral/eigenfill.rs",
+            include_bytes!("../spectral/eigenfill.rs").as_slice(),
+        ),
+        (
+            "stable_core.rs",
+            include_bytes!("../stable_core.rs").as_slice(),
+        ),
+        ("gpu.rs", include_bytes!("../gpu.rs").as_slice()),
+        (
+            "spectral.metal",
+            include_bytes!("../../shaders/spectral.metal").as_slice(),
+        ),
+        ("Cargo.lock", include_bytes!("../../Cargo.lock").as_slice()),
+        (
+            "fill_coupled_qualification.rs",
+            include_bytes!("fill_coupled_qualification.rs").as_slice(),
+        ),
+    ];
+    json!(sources
+        .iter()
+        .map(|(path, bytes)| json!({"path":path,"sha256":hash_bytes(bytes)}))
+        .collect::<Vec<_>>())
+}
+
+#[cfg(test)]
+#[path = "fill_coupled_qualification/semantic_tests.rs"]
+mod semantic_tests;
 
 fn collapsed_basis_probe(gpu: &Gpu, dim: usize) -> Result<Value> {
     let mut matrix = vec![0.0; dim * dim];
@@ -469,10 +651,18 @@ fn estimator_history_probe() -> Value {
 fn main() -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(180);
     ensure!(
-        std::env::args().len() == 1,
-        "qualification accepts no paths, commands or endpoints"
+        std::env::args().len() == 1
+            || std::env::args().skip(1).collect::<Vec<_>>() == ["--semantic-settle-review"],
+        "qualification accepts only --semantic-settle-review; no paths, commands or endpoints"
     );
     let gpu = Gpu::new()?;
+    if std::env::args().len() == 2 {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&semantic_settle_review(&gpu)?)?
+        );
+        return Ok(());
+    }
     let scenarios = [
         Scenario::Cold,
         Scenario::Restored,

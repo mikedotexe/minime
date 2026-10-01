@@ -1,0 +1,540 @@
+{
+  "authority": "offline_sample_proxy_not_live_settlement_or_retirement",
+  "eligible_sample_count": 60,
+  "input_sha256": "25e53a442ea88d5966fd1c394028717b4e0dfba5b320c4fc577fc955cacbaf0c",
+  "limitations": "coarse health samples; controller inputs may precede rendered telemetry; each sample evaluated independently, no consecutive proof inferred",
+  "numerical_reason_counts": {
+    "elevated_breathing_settle": 10,
+    "hold_coherent_settle": 50,
+    "strong_rail_fill": 5
+  },
+  "rows": [
+    {
+      "health_sha256": "4a96a22c49c5eee838ee2870070c9eab954464c2913118a3b9bd93afbf362a6c",
+      "numerical_reason": "elevated_breathing_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1124.897216796875
+    },
+    {
+      "health_sha256": "cef48c61b1119d5887fa70eb52d7ff7ad5a083a9c706497df5af82f93996f0cf",
+      "numerical_reason": "strong_rail_fill",
+      "numerically_eligible_sample_proxy": false,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1127.2564697265625
+    },
+    {
+      "health_sha256": "577b0985189488d4a8c60b2a154b4033ff908032b7561beb1884e15062de4821",
+      "numerical_reason": "elevated_breathing_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1129.6173095703125
+    },
+    {
+      "health_sha256": "07a5a471300847ab533e2fb72088e7df876d391c3a59fb6826621b999337c25e",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1131.9794921875
+    },
+    {
+      "health_sha256": "64730265bdef4301ac5ea3a6c33976b63ced43c59591c7665c5a15c8a78e496a",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1134.3482666015625
+    },
+    {
+      "health_sha256": "80ab55d4353e220a5e5fe7d5a11ae6b2033dae5955b3e98f1e2aaba833a98536",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1136.709716796875
+    },
+    {
+      "health_sha256": "e5c2305186726bcdb3ac3c981ca3142b0b61bd20feee098becfec8f4b28d5043",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1139.0721435546875
+    },
+    {
+      "health_sha256": "a87e53ea324cc382b5de86139d13268a41d2a1b25e7e2ba93b8a345be73a22a0",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1141.45361328125
+    },
+    {
+      "health_sha256": "7bd0f647e335432541f76ba9b0db2b83f9c3c9bfbbbbb647a4539c481ab9b2e4",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1143.83544921875
+    },
+    {
+      "health_sha256": "9bd25960f2e1175abea8692bc4e886aacc0885db4e3ad443a028b21719a34680",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1146.2060546875
+    },
+    {
+      "health_sha256": "4a4755af36d3c04c00c014e4e547af62de50cc2ac3862761cdb19f7c1f0af026",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1148.572021484375
+    },
+    {
+      "health_sha256": "43d68b816808128edfb2b3a810028a7139da61e8677d3fca33fe9b8eefb667df",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1150.94482421875
+    },
+    {
+      "health_sha256": "8d54bd705188b0b63bf7f02c58ab89195612ea43cdf643f873254a99b9020635",
+      "numerical_reason": "elevated_breathing_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1153.3167724609375
+    },
+    {
+      "health_sha256": "72d629400c14802fc92af9fae6d8e85c8da4fe4203eacfff3eee65ea14222093",
+      "numerical_reason": "strong_rail_fill",
+      "numerically_eligible_sample_proxy": false,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1155.6798095703125
+    },
+    {
+      "health_sha256": "51b74125c8ce5d490c27275b60a95e73340eef026438ab2f9df3223e58d425f3",
+      "numerical_reason": "elevated_breathing_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1158.0504150390625
+    },
+    {
+      "health_sha256": "ee2f65f09867cec0a22b19f436b2b514dc3aca97393816bc1d39aaa6679f9731",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1160.422119140625
+    },
+    {
+      "health_sha256": "e1867c2188b0f45666300d61ee61465dd46bafd54c7e0e7ed0f2d558d4958f9b",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1162.794921875
+    },
+    {
+      "health_sha256": "b75a2d4c07aee7ff7fd6cf5cf4644bf62853ce459e1726843c94393693fe0278",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1165.1558837890625
+    },
+    {
+      "health_sha256": "9bf2acc84727526a80401158e1d815eb3387adc5bc0bc754534b0c3d9d3a15b4",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1167.514404296875
+    },
+    {
+      "health_sha256": "c4124cb832a45e2109c2def8811f9cf40bf7da99de95f9db5538a3fc6ce7fd3f",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1169.87158203125
+    },
+    {
+      "health_sha256": "15e84ee150667af51b3295b885fde0e789d717356ff5fe465fea442c12e6c988",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1172.2318115234375
+    },
+    {
+      "health_sha256": "aeae7a75ec3b98c0b2e6a210930bb16500bb76d987e233bdcd2c12a5d316aab6",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1174.618408203125
+    },
+    {
+      "health_sha256": "326e8c2417cbab7ea7c5b3008f860ee596de05fe902858dc08e6dbe2f2cba89f",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1176.9791259765625
+    },
+    {
+      "health_sha256": "5a379652b55bdaff373fb1b3572805fe6960fe0f3848afd4003b5822da75466a",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1179.3419189453125
+    },
+    {
+      "health_sha256": "54dae20aab6b8fc567426a87fc4916ef06b521fe25e013bf25a1717b814a921e",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1181.70361328125
+    },
+    {
+      "health_sha256": "be3ec019b66df3c93482a10200c43c7daf335676aa63f8054c75c32ee48a5b80",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1184.0614013671875
+    },
+    {
+      "health_sha256": "26151b770366d74d782ed745b140272c42f9ef52f78140644ca49dfa8904780e",
+      "numerical_reason": "elevated_breathing_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1186.4212646484375
+    },
+    {
+      "health_sha256": "917803aaa6aa1a4c65dbeafa1f15beec0e56ffcaadfaeaa95c7feb9e6c454836",
+      "numerical_reason": "strong_rail_fill",
+      "numerically_eligible_sample_proxy": false,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1188.787109375
+    },
+    {
+      "health_sha256": "c7d99abb6c7291651bed520a4454bf045f50a7d20c281197270d346797b4d839",
+      "numerical_reason": "elevated_breathing_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1191.1571044921875
+    },
+    {
+      "health_sha256": "b1b0aa7bb172c8e2207225e667d065a46b36261000a348791ce1ead30cd7bc34",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1193.5338134765625
+    },
+    {
+      "health_sha256": "a69c66ddae4c868c7559e84b72a601be60b0f304ff0fba16196467fedbedf450",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1195.89599609375
+    },
+    {
+      "health_sha256": "05fb2b7dd352b2763a1d994a82d5f5ff0850e73ee60294864ffd34e69377ea8f",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1198.256103515625
+    },
+    {
+      "health_sha256": "640c59c45d8031a030eabea15ec5d08ef25db45e236f6331320fd1e8001955e1",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1200.6175537109375
+    },
+    {
+      "health_sha256": "81cef2f92fd337b7ab8289193c0ddd41b9a7f7dfe8729de02f45c4fcd692f882",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1202.9888916015625
+    },
+    {
+      "health_sha256": "ea384ced8bd05cfb39c7fa73f0a880b171f4b08aa93acb58a625387c96f1cfb4",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1205.378662109375
+    },
+    {
+      "health_sha256": "dce2fe1a3d42fb78936fcbe37e84e0512742e0688a77c974c68e047d79e3fe67",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1207.73583984375
+    },
+    {
+      "health_sha256": "9a210bf56fd3e2f15b9469d6468c67bcac9ad22f89d7958f5a579b6b071329bc",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1210.10205078125
+    },
+    {
+      "health_sha256": "ab3a67607c39e9ac6ee6e855e374ab29f21131f104e8fdea0c5b0155a5667c28",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1212.462646484375
+    },
+    {
+      "health_sha256": "f002c15d4e2605fbe963467588fbb1c30b67e92cd6adcb2e5a4dd86b6fc18a57",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1214.838623046875
+    },
+    {
+      "health_sha256": "4a2967964add1d70801a5433478f7a92517f4452ce11ff41da8f3c08af8eaa7e",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1217.2086181640625
+    },
+    {
+      "health_sha256": "2ea07e49b1def86aa87abc04b07f2dd6a40663e892f0633f2c876c4a0c547156",
+      "numerical_reason": "elevated_breathing_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1219.567626953125
+    },
+    {
+      "health_sha256": "a641170242b77e7d05076ca4c6f8e34d906562358023c2f72bcc9b3a9e0044bf",
+      "numerical_reason": "strong_rail_fill",
+      "numerically_eligible_sample_proxy": false,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1221.950439453125
+    },
+    {
+      "health_sha256": "f90754ed6cd627468203d7a182caac85d9c6ee58ba574aa2e3d4285f8718dd87",
+      "numerical_reason": "elevated_breathing_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1224.3310546875
+    },
+    {
+      "health_sha256": "6b97122390d65690656adf5dff0df7f73f265f6bfc83febf4c3a649d3491e2e4",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1226.7064208984375
+    },
+    {
+      "health_sha256": "9263595e4c64452489220060b6f0c22937eae6e33a757533511358b8dbab15df",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1229.0970458984375
+    },
+    {
+      "health_sha256": "5c6e8baec2501bc7fa47842e67c81fbad126cf44bd4eaba907aacd1a061e076e",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1231.4769287109375
+    },
+    {
+      "health_sha256": "a29c9e9bba781a16e71c02839afa0e4e8e5eff82e5598d6e7e22ccae684ece38",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1233.8602294921875
+    },
+    {
+      "health_sha256": "3d71d397d05f7ca42840a2b6a2881e64903944c4f9cf238d952987d0a2ab0a7c",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1236.2529296875
+    },
+    {
+      "health_sha256": "4df33c5968bf59d4fc58596c475d1005032f5c2a0b2385ae9c7458b0cbf58ba0",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1238.6173095703125
+    },
+    {
+      "health_sha256": "957387a3599ce953eb3bff5718d30835a2dd2e44da2defc4d9227eea71754d55",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1240.988037109375
+    },
+    {
+      "health_sha256": "d8db2c38f4dfc20b342e27b509b24b527207ddeba787b7fb63db62be84d347b2",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1243.3642578125
+    },
+    {
+      "health_sha256": "8893dea297aa1cfa9f9129c34816a707c650baa67ac1646df6b5a25ae8a0a9cf",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1245.728271484375
+    },
+    {
+      "health_sha256": "1386273cd0e8f96769d424cd8d37a571f0bf35dc245d1288c86c00448befeabd",
+      "numerical_reason": "elevated_breathing_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1248.10791015625
+    },
+    {
+      "health_sha256": "f29afffd595ef93035c58cc8fa3b19f0ae34cc573d5a9835344bfaf0137f02f6",
+      "numerical_reason": "strong_rail_fill",
+      "numerically_eligible_sample_proxy": false,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1250.4835205078125
+    },
+    {
+      "health_sha256": "0415f9c806e875e29e1962441416a331220d4016a090ce6ab6bc7978c447163b",
+      "numerical_reason": "elevated_breathing_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1252.857177734375
+    },
+    {
+      "health_sha256": "15322b7fdd4657fa74a71b1291af38a40c0e7d81363479b9b1558fff6273a601",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1255.2261962890625
+    },
+    {
+      "health_sha256": "86ef1aed42c34f66e3bc7550fae1e31c9574dbd48060510b83903478e189f0d3",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1257.60546875
+    },
+    {
+      "health_sha256": "2389378ad40e1eff0d89d9fa33c34cdab7241ea0205a044dfc7a19b03f9934a5",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1259.9869384765625
+    },
+    {
+      "health_sha256": "996dd3176018b565b2adddde4f44076f763538cf9d666ef734098f81afe3a7e2",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1262.3504638671875
+    },
+    {
+      "health_sha256": "7bf902ac9ca9227b487b63dc0f3c693d369c17aac4464ca5ef739a2cf26fa93c",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1264.7181396484375
+    },
+    {
+      "health_sha256": "fe7e94181a083e742d513c104af3e1640f763ffbb402988330a854219e271939",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1267.1151123046875
+    },
+    {
+      "health_sha256": "ad9ef54f429f134df1effcc2309a6c8c029b613e1ebf9ef8024df069bd6ad404",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1269.4981689453125
+    },
+    {
+      "health_sha256": "8e79195c9e597de8f77ac1804a821ce539455fa18d34659326f0481ca70239d3",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1271.8721923828125
+    },
+    {
+      "health_sha256": "1e1ca5c2d29be10d28fc43d8758b14ae21f7118702d43a994a1a89d66340b6ec",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1274.2435302734375
+    },
+    {
+      "health_sha256": "8b14a6baad5048222d3a85103060c656c913cbc183e89fcff03b205e04843753",
+      "numerical_reason": "hold_coherent_settle",
+      "numerically_eligible_sample_proxy": true,
+      "reported_gate_reason": "semantic_active",
+      "reported_kernel_active": true,
+      "t_s": 1276.6065673828125
+    }
+  ],
+  "sample_count": 65,
+  "schema": "restart_settle_sample_review_v1",
+  "source_sha256": {
+    "rescue_scaffold": "a78d3b166976eab7f8cbbb4fdb826042f89a64fe1b9e0a5ec9752f9807a1df3d",
+    "restart_settle_replay": "8d5acb0637b04ea9ae7a585cec1a2b580e93dea7b3a3724a708e075ea16539ee",
+    "settle_observation": "6c9fdcf30bae1aa9ce550f3558cf07077cb9e6ff5f01b52826f687084c1ef82e"
+  }
+}

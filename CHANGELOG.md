@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Candidate: distinguish numerical restart eligibility from semantic quiet (2026-10-01).** Add read-only `restart_settle_observation_v1` to health/status, reusing production predicates without releasing the real latch or retiring the scaffold. Extend isolated qualification with sustained semantic input and a bounded frozen-health replay. Retain evidence against blanket bypass and premature retirement; no live control, input, restart or automation change. See `docs/steward-notes/2026-10-01-semantic-settle-review.md`.
+
 - **Live: approved engine release-04 (2026-10-01).** Run source `c428fca` through the sanctioned bounded transition; verify new process identities, PI-only restore, signed control lineage and 360 seconds of observation. No protected service restart or state-backup restore. Retain the `semantic_active` settle-proof wait as explicit follow-up. See `docs/steward-notes/2026-10-01-engine-live-transition.md`.
 
 - **Engine candidate merged and pushed, not activated (2026-10-01).** Integrate numerical/restore repairs at `c428fca` and qualify clean release-04 against all 120 inputs. 833 selected Rust tests and strict selected all-features Clippy pass. Launch-wrapper hashes are aligned without changing the running engine; specific legacy-transition approval remains pending. See `docs/steward-notes/2026-10-01-engine-git-integration.md`.

@@ -1,0 +1,2427 @@
+{
+  "policy_version": 2,
+  "profile": "bridge_budgeted_sovereignty_v1",
+  "configured_interval_secs": 7,
+  "configured_intensity": 0.30000001192092896,
+  "feature_scale": 0.02500000037252903,
+  "max_abs": 0.017999999225139618,
+  "window_duration_secs": 600.0,
+  "window_attempt_count": 89,
+  "window_send_count": 89,
+  "window_block_count": 0,
+  "delivery_health_v1": {
+    "authority": "read_only_enqueue_evidence_not_cadence_intensity_rescue_dispatch_or_control",
+    "gap_over_twice_configured_interval_count": 1,
+    "interpretation": "bounded_channel_enqueue_timing_only; downstream_processing_or_minime_arrival_not_inferred",
+    "latest_outcome": "enqueued",
+    "max_inter_enqueue_gap_secs": 14.335742950439451,
+    "max_queue_wait_ms": 35.545708000000005,
+    "mean_inter_enqueue_gap_secs": 6.882068135521629,
+    "mean_queue_wait_ms": 10.484393931818182,
+    "runtime_effect_applied": false,
+    "sample_count": 88,
+    "schema": "semantic_heartbeat_delivery_health_v1",
+    "schema_version": 1,
+    "send_count_compatibility_semantics": "rescue_policy_admission_before_channel_enqueue",
+    "window_duration_secs": 600.0
+  },
+  "enqueue_samples_v1": [
+    {
+      "completed_at_unix_s": 1790879731.274188,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.01706600189209,
+      "outcome": "enqueued",
+      "queue_wait_ms": 10.529792,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879740.974715,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 9.70052695274353,
+      "outcome": "enqueued",
+      "queue_wait_ms": 4.912792,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879747.998619,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.023904085159302,
+      "outcome": "enqueued",
+      "queue_wait_ms": 14.234458,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879755.014148,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.015528917312622,
+      "outcome": "enqueued",
+      "queue_wait_ms": 9.3445,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879762.031144,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.016995906829834,
+      "outcome": "enqueued",
+      "queue_wait_ms": 9.374083,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879769.055227,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.024083137512207,
+      "outcome": "enqueued",
+      "queue_wait_ms": 11.70725,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879776.071899,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.016671895980835,
+      "outcome": "enqueued",
+      "queue_wait_ms": 9.900458,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879783.089769,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.01786994934082,
+      "outcome": "enqueued",
+      "queue_wait_ms": 10.066,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879790.106788,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.017019033432007,
+      "outcome": "enqueued",
+      "queue_wait_ms": 10.566625,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879801.963193,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 11.856405019760132,
+      "outcome": "enqueued",
+      "queue_wait_ms": 2.214625,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879808.978936,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.015743017196655,
+      "outcome": "enqueued",
+      "queue_wait_ms": 10.01075,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879815.999267,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.020331144332886,
+      "outcome": "enqueued",
+      "queue_wait_ms": 12.903833,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879825.098898,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 9.09963083267212,
+      "outcome": "enqueued",
+      "queue_wait_ms": 3.180292,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879832.130327,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.031429052352905,
+      "outcome": "enqueued",
+      "queue_wait_ms": 26.531959,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879839.151279,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.020951986312866,
+      "outcome": "enqueued",
+      "queue_wait_ms": 13.475292,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879846.171237,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.019958019256592,
+      "outcome": "enqueued",
+      "queue_wait_ms": 12.102667,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879853.189123,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.01788592338562,
+      "outcome": "enqueued",
+      "queue_wait_ms": 11.152083,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879860.208155,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.019032001495361,
+      "outcome": "enqueued",
+      "queue_wait_ms": 13.006875,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879867.223711,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.01555609703064,
+      "outcome": "enqueued",
+      "queue_wait_ms": 9.765292,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879874.242782,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.019071102142334,
+      "outcome": "enqueued",
+      "queue_wait_ms": 12.733584,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879881.262505,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.019722938537598,
+      "outcome": "enqueued",
+      "queue_wait_ms": 13.750125,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879888.283103,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.0205979347229,
+      "outcome": "enqueued",
+      "queue_wait_ms": 12.730708,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879895.311264,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.02816104888916,
+      "outcome": "enqueued",
+      "queue_wait_ms": 12.35425,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879902.327681,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.016417026519775,
+      "outcome": "enqueued",
+      "queue_wait_ms": 8.97525,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879909.345808,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.018126964569092,
+      "outcome": "enqueued",
+      "queue_wait_ms": 11.6025,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879916.360088,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.014280080795288,
+      "outcome": "enqueued",
+      "queue_wait_ms": 7.762167000000001,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879923.375922,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.015833854675293,
+      "outcome": "enqueued",
+      "queue_wait_ms": 8.30925,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879930.389168,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.013246059417725,
+      "outcome": "enqueued",
+      "queue_wait_ms": 7.282209000000001,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879944.724911,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 14.335742950439451,
+      "outcome": "enqueued",
+      "queue_wait_ms": 2.708083,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879951.740802,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.015891075134277,
+      "outcome": "enqueued",
+      "queue_wait_ms": 10.871166,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879958.758268,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.017466068267822,
+      "outcome": "enqueued",
+      "queue_wait_ms": 11.453292,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879970.845579,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 12.087310791015623,
+      "outcome": "enqueued",
+      "queue_wait_ms": 2.019416,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879977.862855,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.017276048660278,
+      "outcome": "enqueued",
+      "queue_wait_ms": 13.273958,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879984.877557,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.014702081680298,
+      "outcome": "enqueued",
+      "queue_wait_ms": 8.471209,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879991.889783,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.012225866317749,
+      "outcome": "enqueued",
+      "queue_wait_ms": 6.773625,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790879998.91117,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.021387100219727,
+      "outcome": "enqueued",
+      "queue_wait_ms": 14.095583,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880005.926474,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.015304088592529,
+      "outcome": "enqueued",
+      "queue_wait_ms": 8.560833,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880012.946072,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.019598007202148,
+      "outcome": "enqueued",
+      "queue_wait_ms": 8.569333,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880024.704171,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 11.7580988407135,
+      "outcome": "enqueued",
+      "queue_wait_ms": 10.845417,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880029.7543,
+      "configured_interval_secs": 5,
+      "inter_enqueue_gap_secs": 5.050129175186157,
+      "outcome": "enqueued",
+      "queue_wait_ms": 9.27075,
+      "source": "autonomous_rest_pulse"
+    },
+    {
+      "completed_at_unix_s": 1790880031.719029,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 1.964728832244873,
+      "outcome": "enqueued",
+      "queue_wait_ms": 8.891,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880034.822529,
+      "configured_interval_secs": 5,
+      "inter_enqueue_gap_secs": 3.1035001277923584,
+      "outcome": "enqueued",
+      "queue_wait_ms": 10.518125,
+      "source": "autonomous_rest_pulse"
+    },
+    {
+      "completed_at_unix_s": 1790880040.190894,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 5.3683648109436035,
+      "outcome": "enqueued",
+      "queue_wait_ms": 2.3470829999999996,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880040.218689,
+      "configured_interval_secs": 5,
+      "inter_enqueue_gap_secs": 0.027795076370239254,
+      "outcome": "enqueued",
+      "queue_wait_ms": 4.6207080000000005,
+      "source": "autonomous_rest_pulse"
+    },
+    {
+      "completed_at_unix_s": 1790880045.261237,
+      "configured_interval_secs": 5,
+      "inter_enqueue_gap_secs": 5.042547941207886,
+      "outcome": "enqueued",
+      "queue_wait_ms": 10.237542,
+      "source": "autonomous_rest_pulse"
+    },
+    {
+      "completed_at_unix_s": 1790880047.210117,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 1.948880195617676,
+      "outcome": "enqueued",
+      "queue_wait_ms": 11.864375,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880050.312752,
+      "configured_interval_secs": 5,
+      "inter_enqueue_gap_secs": 3.102634906768799,
+      "outcome": "enqueued",
+      "queue_wait_ms": 10.226208,
+      "source": "autonomous_rest_pulse"
+    },
+    {
+      "completed_at_unix_s": 1790880054.226656,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 3.9139039516448975,
+      "outcome": "enqueued",
+      "queue_wait_ms": 10.05775,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880055.361076,
+      "configured_interval_secs": 5,
+      "inter_enqueue_gap_secs": 1.1344201564788818,
+      "outcome": "enqueued",
+      "queue_wait_ms": 11.107041,
+      "source": "autonomous_rest_pulse"
+    },
+    {
+      "completed_at_unix_s": 1790880060.435458,
+      "configured_interval_secs": 5,
+      "inter_enqueue_gap_secs": 5.0743818283081055,
+      "outcome": "enqueued",
+      "queue_wait_ms": 12.780333,
+      "source": "autonomous_rest_pulse"
+    },
+    {
+      "completed_at_unix_s": 1790880061.268897,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 0.8334391117095947,
+      "outcome": "enqueued",
+      "queue_wait_ms": 35.545708000000005,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880065.479885,
+      "configured_interval_secs": 5,
+      "inter_enqueue_gap_secs": 4.2109880447387695,
+      "outcome": "enqueued",
+      "queue_wait_ms": 11.946042,
+      "source": "autonomous_rest_pulse"
+    },
+    {
+      "completed_at_unix_s": 1790880068.293791,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 2.813905954360962,
+      "outcome": "enqueued",
+      "queue_wait_ms": 17.474834,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880080.020033,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 11.726241827011108,
+      "outcome": "enqueued",
+      "queue_wait_ms": 2.539666,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880087.036348,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.016315221786499,
+      "outcome": "enqueued",
+      "queue_wait_ms": 11.161708,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880094.057261,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.0209128856658936,
+      "outcome": "enqueued",
+      "queue_wait_ms": 12.619125,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880101.078039,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.020777940750122,
+      "outcome": "enqueued",
+      "queue_wait_ms": 12.727458,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880108.095883,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.017843961715698,
+      "outcome": "enqueued",
+      "queue_wait_ms": 11.223584,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880115.110755,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.014872074127197,
+      "outcome": "enqueued",
+      "queue_wait_ms": 8.449250000000001,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880122.126704,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.015949010848999,
+      "outcome": "enqueued",
+      "queue_wait_ms": 10.491542,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880129.149015,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.022310972213745,
+      "outcome": "enqueued",
+      "queue_wait_ms": 15.048083,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880136.166683,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.017668008804321,
+      "outcome": "enqueued",
+      "queue_wait_ms": 11.198625,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880143.184122,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.017439126968384,
+      "outcome": "enqueued",
+      "queue_wait_ms": 10.9955,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880150.203028,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.018905878067017,
+      "outcome": "enqueued",
+      "queue_wait_ms": 11.43875,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880157.221646,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.018618106842041,
+      "outcome": "enqueued",
+      "queue_wait_ms": 9.117792,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880164.237192,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.015545845031738,
+      "outcome": "enqueued",
+      "queue_wait_ms": 8.590625,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880171.262249,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.025057077407837,
+      "outcome": "enqueued",
+      "queue_wait_ms": 14.336209,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880178.28178,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.019531011581421,
+      "outcome": "enqueued",
+      "queue_wait_ms": 12.574292000000002,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880185.300699,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.018918991088867,
+      "outcome": "enqueued",
+      "queue_wait_ms": 11.742,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880192.311638,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.010939121246338,
+      "outcome": "enqueued",
+      "queue_wait_ms": 2.420584,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880199.323029,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.011390924453735,
+      "outcome": "enqueued",
+      "queue_wait_ms": 7.491458000000001,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880206.340013,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.016983985900879,
+      "outcome": "enqueued",
+      "queue_wait_ms": 7.800583,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880213.35439,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.014376878738403,
+      "outcome": "enqueued",
+      "queue_wait_ms": 7.437208,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880220.973646,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.619256019592285,
+      "outcome": "enqueued",
+      "queue_wait_ms": 2.2973749999999997,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880227.99068,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.01703405380249,
+      "outcome": "enqueued",
+      "queue_wait_ms": 10.679625,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880235.005301,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.014621019363403,
+      "outcome": "enqueued",
+      "queue_wait_ms": 8.484209,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880243.455759,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 8.45045804977417,
+      "outcome": "enqueued",
+      "queue_wait_ms": 2.113416,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880250.465134,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.0093748569488525,
+      "outcome": "enqueued",
+      "queue_wait_ms": 6.659166,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880257.50704,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.041906118392944,
+      "outcome": "enqueued",
+      "queue_wait_ms": 35.342709,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880264.525272,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.0182318687438965,
+      "outcome": "enqueued",
+      "queue_wait_ms": 11.872625,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880271.548404,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.023132085800171,
+      "outcome": "enqueued",
+      "queue_wait_ms": 14.168,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880278.567021,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.0186169147491455,
+      "outcome": "enqueued",
+      "queue_wait_ms": 11.926,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880285.596457,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.029436111450195,
+      "outcome": "enqueued",
+      "queue_wait_ms": 19.161,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880298.880881,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 13.28442406654358,
+      "outcome": "enqueued",
+      "queue_wait_ms": 2.08675,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880305.897732,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.01685094833374,
+      "outcome": "enqueued",
+      "queue_wait_ms": 8.889667000000001,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880312.917772,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.020040035247803,
+      "outcome": "enqueued",
+      "queue_wait_ms": 11.528083,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880322.861923,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 9.944150924682615,
+      "outcome": "enqueued",
+      "queue_wait_ms": 2.567958,
+      "source": "steady_semantic_heartbeat"
+    },
+    {
+      "completed_at_unix_s": 1790880329.879118,
+      "configured_interval_secs": 7,
+      "inter_enqueue_gap_secs": 7.017194986343384,
+      "outcome": "enqueued",
+      "queue_wait_ms": 10.436957999999999,
+      "source": "steady_semantic_heartbeat"
+    }
+  ],
+  "window_samples_v1": [
+    {
+      "at_unix_s": 1790879731.264935,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002887243404984474,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.012243712320923804,
+          "rms": 0.002930960850790143,
+          "tail_rms": 0.0036945571191608906
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879740.970417,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0029763400088995695,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013171941041946411,
+          "rms": 0.003012901172041893,
+          "tail_rms": 0.0038447126280516386
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879747.987568,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0030166946817189455,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013339802622795103,
+          "rms": 0.003062524599954486,
+          "tail_rms": 0.003853260539472103
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879755.006459,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.003068278543651104,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013518059626221657,
+          "rms": 0.003106079762801528,
+          "tail_rms": 0.003865662030875683
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879762.022549,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 47,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.003115874482318759,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013643755577504637,
+          "rms": 0.00316971424035728,
+          "tail_rms": 0.0039802961982786655
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879769.041285,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0031295784283429384,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013882867991924286,
+          "rms": 0.003182024694979191,
+          "tail_rms": 0.0039824252016842365
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879776.062465,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.003091739257797599,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013585149310529232,
+          "rms": 0.003147106152027846,
+          "tail_rms": 0.0038848607800900936
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879783.081434,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.003164210356771946,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013806928880512714,
+          "rms": 0.0032124544959515333,
+          "tail_rms": 0.004014231730252504
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879790.097661,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0031763629522174597,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013626686297357082,
+          "rms": 0.0032299645245075226,
+          "tail_rms": 0.004009782336652279
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879801.961442,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.003222857601940632,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.014217945747077463,
+          "rms": 0.0032726849894970655,
+          "tail_rms": 0.004096486140042543
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879808.970834,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0031870969105511904,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013965827412903307,
+          "rms": 0.003245843108743429,
+          "tail_rms": 0.004024079535156488
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879815.98856,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0032149043399840593,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.0141318216919899,
+          "rms": 0.0032745080534368753,
+          "tail_rms": 0.00410290015861392
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879825.096849,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.003258226905018091,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.014518595300614834,
+          "rms": 0.0033171894028782845,
+          "tail_rms": 0.004136431496590376
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879832.123672,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0032324872445315123,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01431737281382084,
+          "rms": 0.003280550241470337,
+          "tail_rms": 0.004093875642865896
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879839.140406,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0031778765842318535,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.014046206139028072,
+          "rms": 0.0032371662091463804,
+          "tail_rms": 0.004017623607069254
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879846.16132,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.003167155431583524,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013738987036049366,
+          "rms": 0.003217741148546338,
+          "tail_rms": 0.003983558155596256
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879853.180249,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0031286508310586214,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01361505687236786,
+          "rms": 0.0031926461961120367,
+          "tail_rms": 0.003964117728173733
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879860.198572,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0031868747901171446,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.014026333577930927,
+          "rms": 0.0032376146409660578,
+          "tail_rms": 0.00403129355981946
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879867.216849,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0030781347304582596,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013532011769711971,
+          "rms": 0.003128214506432414,
+          "tail_rms": 0.003891001688316464
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879874.232124,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.003093046136200428,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013379831798374653,
+          "rms": 0.0031362734735012054,
+          "tail_rms": 0.003938432317227125
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879881.252718,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.003068771678954363,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013744098134338856,
+          "rms": 0.0031173897441476583,
+          "tail_rms": 0.003923463169485331
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879888.272642,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0029942095279693604,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01297564059495926,
+          "rms": 0.0030426718294620514,
+          "tail_rms": 0.003788570640608668
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879895.303082,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0029355951119214296,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013233390636742117,
+          "rms": 0.00298301805742085,
+          "tail_rms": 0.003730172757059336
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879902.320366,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0029349136166274548,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013088417239487171,
+          "rms": 0.002974633360281586,
+          "tail_rms": 0.003722686320543289
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879909.337275,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 47,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0029278225265443325,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01290856022387743,
+          "rms": 0.002964793937280774,
+          "tail_rms": 0.0037070291582494974
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879916.352272,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002857683692127466,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.012621491216123104,
+          "rms": 0.002890620846301317,
+          "tail_rms": 0.0036487788893282418
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879923.368106,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002832681406289339,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01253500860184431,
+          "rms": 0.002869992982596159,
+          "tail_rms": 0.003611526684835553
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879930.383325,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0028567297849804163,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01251618005335331,
+          "rms": 0.00288895471021533,
+          "tail_rms": 0.003654797561466694
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879944.723257,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0027816288638859987,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.012154010124504566,
+          "rms": 0.00280332425609231,
+          "tail_rms": 0.0035465697292238474
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879951.731942,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002790295286104083,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.012422776781022549,
+          "rms": 0.0028238354716449976,
+          "tail_rms": 0.0035812747664749622
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879958.750692,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0027235890738666058,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.012012140825390816,
+          "rms": 0.0027519434224814177,
+          "tail_rms": 0.0034450176171958447
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879970.844033,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0027167298831045628,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.012214384973049164,
+          "rms": 0.0027476605027914047,
+          "tail_rms": 0.0034741361159831285
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879977.854199,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002733777742832899,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011831908486783504,
+          "rms": 0.002760320203378797,
+          "tail_rms": 0.0035180512350052595
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879984.870477,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0026883743703365326,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01164091657847166,
+          "rms": 0.0027191105764359236,
+          "tail_rms": 0.0034660117235034704
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879991.884567,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002622073981910944,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011537006124854088,
+          "rms": 0.0026482120156288147,
+          "tail_rms": 0.003394562983885407
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790879998.900267,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002698379335924983,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011761629953980446,
+          "rms": 0.0027266156394034624,
+          "tail_rms": 0.0034747871104627848
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880005.918508,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0026604298036545515,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011184745468199251,
+          "rms": 0.0026835091412067413,
+          "tail_rms": 0.003405414754524827
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880012.938122,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002642090432345867,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01138909813016653,
+          "rms": 0.002674367744475603,
+          "tail_rms": 0.0033798618242144585
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880024.688636,
+      "source": "autonomous_rest_pulse",
+      "outcome": "sent",
+      "configured_interval_secs": 5,
+      "signal_evidence_v1": {
+        "content_basis": "journal_warmth_blend",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.00539245642721653,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01564730517566204,
+          "rms": 0.006256680004298687,
+          "tail_rms": 0.00579164968803525
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880024.696489,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0026646347250789404,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01156803872436285,
+          "rms": 0.0026890228036791086,
+          "tail_rms": 0.003445141250267625
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880029.748387,
+      "source": "autonomous_rest_pulse",
+      "outcome": "sent",
+      "configured_interval_secs": 5,
+      "signal_evidence_v1": {
+        "content_basis": "journal_warmth_blend",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 1,
+          "component_stddev": 0.005648123566061258,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.017999999225139618,
+          "rms": 0.006548813544213772,
+          "tail_rms": 0.005477720871567726
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880031.711451,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002652700524777174,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01133714523166418,
+          "rms": 0.002679324010387063,
+          "tail_rms": 0.0033955571707338095
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880034.815422,
+      "source": "autonomous_rest_pulse",
+      "outcome": "sent",
+      "configured_interval_secs": 5,
+      "signal_evidence_v1": {
+        "content_basis": "journal_warmth_blend",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 2,
+          "component_stddev": 0.005937553010880947,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.017999999225139618,
+          "rms": 0.0068099619820714,
+          "tail_rms": 0.005137023515999317
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880040.188932,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0026562493294477463,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011492098681628704,
+          "rms": 0.0026834814343601465,
+          "tail_rms": 0.003385017393156886
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880040.214485,
+      "source": "autonomous_rest_pulse",
+      "outcome": "sent",
+      "configured_interval_secs": 5,
+      "signal_evidence_v1": {
+        "content_basis": "journal_warmth_blend",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 2,
+          "component_stddev": 0.005820944905281067,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.017999999225139618,
+          "rms": 0.006684021092951298,
+          "tail_rms": 0.004816311411559582
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880045.253224,
+      "source": "autonomous_rest_pulse",
+      "outcome": "sent",
+      "configured_interval_secs": 5,
+      "signal_evidence_v1": {
+        "content_basis": "journal_warmth_blend",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 3,
+          "component_stddev": 0.005742011126130819,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.017999999225139618,
+          "rms": 0.0065913633443415165,
+          "tail_rms": 0.00472654215991497
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880047.200972,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002652189927175641,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01133146695792675,
+          "rms": 0.0026869792491197586,
+          "tail_rms": 0.0034397593699395657
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880050.30531,
+      "source": "autonomous_rest_pulse",
+      "outcome": "sent",
+      "configured_interval_secs": 5,
+      "signal_evidence_v1": {
+        "content_basis": "journal_warmth_blend",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 2,
+          "component_stddev": 0.005898626986891031,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.017999999225139618,
+          "rms": 0.006802760995924473,
+          "tail_rms": 0.004765904974192381
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880054.218778,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0026925336569547653,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011508901603519917,
+          "rms": 0.0027173429261893034,
+          "tail_rms": 0.0034231534227728844
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880055.352691,
+      "source": "autonomous_rest_pulse",
+      "outcome": "sent",
+      "configured_interval_secs": 5,
+      "signal_evidence_v1": {
+        "content_basis": "journal_warmth_blend",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 3,
+          "component_stddev": 0.005855157505720854,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.017999999225139618,
+          "rms": 0.006719301920384169,
+          "tail_rms": 0.004797143395990133
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880060.426568,
+      "source": "autonomous_rest_pulse",
+      "outcome": "sent",
+      "configured_interval_secs": 5,
+      "signal_evidence_v1": {
+        "content_basis": "journal_warmth_blend",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 3,
+          "component_stddev": 0.006023305468261242,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.017999999225139618,
+          "rms": 0.006884367670863867,
+          "tail_rms": 0.004876007325947285
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880061.23602,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002687903121113777,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011457091197371485,
+          "rms": 0.002714837435632944,
+          "tail_rms": 0.003479703096672893
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880065.470325,
+      "source": "autonomous_rest_pulse",
+      "outcome": "sent",
+      "configured_interval_secs": 5,
+      "signal_evidence_v1": {
+        "content_basis": "journal_warmth_blend",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 2,
+          "component_stddev": 0.005845103412866592,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.017999999225139618,
+          "rms": 0.006703962571918964,
+          "tail_rms": 0.004860319662839174
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880068.2812,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002684968756511807,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011167841032147408,
+          "rms": 0.0027117107529193163,
+          "tail_rms": 0.003441121196374297
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880080.018154,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002749691717326641,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011833008378744124,
+          "rms": 0.0027823331765830517,
+          "tail_rms": 0.0035590233746916056
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880087.027935,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002725779777392745,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011474725790321829,
+          "rms": 0.002760391915217042,
+          "tail_rms": 0.0035473851021379232
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880094.046576,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002739947754889726,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011255186051130297,
+          "rms": 0.0027706348337233067,
+          "tail_rms": 0.003488939953967929
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880101.068334,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002754796063527465,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011514721438288689,
+          "rms": 0.002792388666421175,
+          "tail_rms": 0.0035650385543704033
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880108.087442,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002719063078984618,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011402222327888012,
+          "rms": 0.0027475401293486357,
+          "tail_rms": 0.0035304869525134563
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880115.103589,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002763722324743867,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011419895105063915,
+          "rms": 0.0027992292307317257,
+          "tail_rms": 0.0035672017838805914
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880122.118562,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002749880775809288,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01166341733187437,
+          "rms": 0.002782276365906,
+          "tail_rms": 0.0035436423495411873
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880129.137134,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0026851962320506573,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011586626060307026,
+          "rms": 0.002712898189201951,
+          "tail_rms": 0.0034761494025588036
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880136.158331,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0027340876404196024,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011667597107589245,
+          "rms": 0.0027641470078378916,
+          "tail_rms": 0.0035156472586095333
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880143.175428,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0027447135653346777,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01169371511787176,
+          "rms": 0.002773044165223837,
+          "tail_rms": 0.0035290939267724752
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880150.193736,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002667930442839861,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011363746598362924,
+          "rms": 0.0027013642247766256,
+          "tail_rms": 0.0034464236814528704
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880157.21384,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 47,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002805652329698205,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.012045232579112051,
+          "rms": 0.0028410013765096664,
+          "tail_rms": 0.0036196731962263584
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880164.229518,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0027458651456981897,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01184165757149458,
+          "rms": 0.002778596244752407,
+          "tail_rms": 0.003538591554388404
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880171.250824,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0027418280951678753,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.012065081857144833,
+          "rms": 0.002770237857475877,
+          "tail_rms": 0.003542111488059163
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880178.272011,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0027504051104187965,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011580757796764374,
+          "rms": 0.002785914810374379,
+          "tail_rms": 0.0035107769072055817
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880185.290583,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.00274883140809834,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.012088553979992868,
+          "rms": 0.0027777955401688814,
+          "tail_rms": 0.003530587302520871
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880192.309797,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0027972173411399126,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011892891488969326,
+          "rms": 0.002825911156833172,
+          "tail_rms": 0.0035589991603046656
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880199.316896,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002707524225115776,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.011912330985069277,
+          "rms": 0.0027383987326174974,
+          "tail_rms": 0.0034967362880706787
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880206.333635,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.002879066625609994,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.012370936572551727,
+          "rms": 0.002914217067882418,
+          "tail_rms": 0.003680147929117083
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880213.348549,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0028923996724188328,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.012938226573169231,
+          "rms": 0.002929502632468939,
+          "tail_rms": 0.0037076096050441265
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880220.971824,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0029077932704240084,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01265410240739584,
+          "rms": 0.0029495626222342253,
+          "tail_rms": 0.003726646304130554
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880227.981673,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0029945392161607742,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013227904215455055,
+          "rms": 0.0030615022405982018,
+          "tail_rms": 0.003872395260259509
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880234.99903,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.003001840552315116,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.0129659166559577,
+          "rms": 0.003050662577152252,
+          "tail_rms": 0.0038401635829359297
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880243.454096,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.003021664451807738,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013673200272023678,
+          "rms": 0.003068258287385106,
+          "tail_rms": 0.003854797687381506
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880250.45977,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0031007633078843355,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01385789643973112,
+          "rms": 0.003152470337226987,
+          "tail_rms": 0.003949721343815327
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880257.475653,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0031484116334468126,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01399144995957613,
+          "rms": 0.0032014648895710707,
+          "tail_rms": 0.0040023853071033955
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880264.517217,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.003119898959994316,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013505450449883938,
+          "rms": 0.0031806444749236107,
+          "tail_rms": 0.003975781612098217
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880271.536133,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0031803115271031857,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.01421424001455307,
+          "rms": 0.0032471760641783476,
+          "tail_rms": 0.00404650904238224
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880278.559139,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0031855604611337185,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013752497732639313,
+          "rms": 0.0032412961591035128,
+          "tail_rms": 0.004048347007483244
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880285.577926,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.003196390112861991,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.014038222841918468,
+          "rms": 0.0032608406618237495,
+          "tail_rms": 0.00403239019215107
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880298.87925,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.003226866479963064,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.014163671992719172,
+          "rms": 0.003285410348325968,
+          "tail_rms": 0.004083377309143543
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880305.888256,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0032365326769649982,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013964255340397358,
+          "rms": 0.003284615697339177,
+          "tail_rms": 0.004046025685966015
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880312.90819,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.003183081280440092,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.013814711943268776,
+          "rms": 0.003241650061681866,
+          "tail_rms": 0.004052482545375824
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880322.860026,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.003188346279785037,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.014387053437530994,
+          "rms": 0.0032439178321510553,
+          "tail_rms": 0.004056413657963276
+        }
+      }
+    },
+    {
+      "at_unix_s": 1790880329.8707,
+      "source": "steady_semantic_heartbeat",
+      "outcome": "sent",
+      "configured_interval_secs": 7,
+      "signal_evidence_v1": {
+        "content_basis": "steady_warmth",
+        "delivered": {
+          "active_dimension_count": 48,
+          "clipped_dimension_count": 0,
+          "component_stddev": 0.0032315615098923445,
+          "feature_count": 48,
+          "finite_feature_count": 48,
+          "max_abs": 0.014409856870770454,
+          "rms": 0.0032790987752377987,
+          "tail_rms": 0.004044798202812672
+        }
+      }
+    }
+  ]
+}

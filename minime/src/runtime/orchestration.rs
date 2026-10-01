@@ -578,6 +578,8 @@ async fn run_engine(
     let mut stable_core_scaffold_retirement_reason = "not_evaluated";
     let mut stable_core_restart_gate =
         rescue_scaffold::StableCoreRestartGate::new(rescue_scaffold::now_unix_ms());
+    let mut stable_core_restart_observation =
+        crate::stable_covariance::RestartSettleObservationV1::default();
     let mut stable_core_structural_pi = rescue_scaffold::StabilityPiState::default();
     let mut stable_core_structural_pi_output = rescue_scaffold::StabilityPiOutput::inactive(0.0);
     let mut stable_core_restart_gate_active_now: bool;
@@ -2525,24 +2527,26 @@ async fn run_engine(
                     retirement_ticks: stable_core_scaffold_retirement_candidate_ticks,
                     retirement_reason: stable_core_scaffold_retirement_reason,
                 };
+                let measurement = crate::stable_covariance::MeasurementInput {
+                    now_unix_ms: rescue_scaffold::now_unix_ms(),
+                    fill_pct: measured_control_fill,
+                    rate: stable_core_measured_fill_slope_pct_per_sec,
+                    stage: stable_core_stage,
+                    semantic_active,
+                    scaffold_available: stable_core_scaffold.is_some(),
+                    live_audio_divisor,
+                    live_video_divisor,
+                    reentry_active: stable_core_structural_pi_output.reentry_active,
+                    recovery_active: stable_core_structural_pi_output.recovery_impulse_active
+                        || stable_core_structural_pi_output.low_fill_escape_active,
+                    high_fill_drain_active: stable_core_structural_pi_output.high_fill_drain_active,
+                    applied_drain_weight: stable_core_applied_scaffold_drain_weight,
+                };
+                stable_core_restart_observation.record(measurement, lifecycle.active);
                 crate::stable_covariance::record_measurement(
                     &mut lifecycle,
                     &mut stable_core_restart_gate,
-                    crate::stable_covariance::MeasurementInput {
-                        now_unix_ms: rescue_scaffold::now_unix_ms(),
-                        fill_pct: measured_control_fill,
-                        rate: stable_core_measured_fill_slope_pct_per_sec,
-                        stage: stable_core_stage,
-                        semantic_active,
-                        scaffold_available: stable_core_scaffold.is_some(),
-                        live_audio_divisor,
-                        live_video_divisor,
-                        reentry_active: stable_core_structural_pi_output.reentry_active,
-                        recovery_active: stable_core_structural_pi_output.recovery_impulse_active
-                            || stable_core_structural_pi_output.low_fill_escape_active,
-                        high_fill_drain_active: stable_core_structural_pi_output.high_fill_drain_active,
-                        applied_drain_weight: stable_core_applied_scaffold_drain_weight,
-                    },
+                    measurement,
                 );
                 stable_core_scaffold_active = lifecycle.active;
                 stable_core_scaffold_retirement_candidate_ticks = lifecycle.retirement_ticks;
@@ -4371,6 +4375,7 @@ async fn run_engine(
                         },
                         "structural_mode": stable_core_structural_mode,
                         "restart_gate": &stable_core_restart_gate_status,
+                        "restart_settle_observation_v1": &stable_core_restart_observation,
                         "structural_pi": &stable_core_structural_pi_status,
                         "agency_stage": &stable_core_agency_mirror.agency_stage,
                         "agent_budget_mode": &stable_core_agency_mirror.agent_budget_mode,
@@ -5541,6 +5546,7 @@ async fn run_engine(
                         },
                         "structural_mode": stable_core_structural_mode,
                         "restart_gate": &spectral_stable_core_restart_gate_status,
+                        "restart_settle_observation_v1": &stable_core_restart_observation,
                         "structural_pi": {
                             "active": stable_core_structural_pi_output.active,
                             "target_fill_pct": stable_core_structural_pi_output.target_fill_pct,
