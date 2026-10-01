@@ -1,5 +1,8 @@
 # Engine Integration: Qualified, Not Activated
 
+Later approved outcome: [release-04 is now live](2026-10-01-engine-live-transition.md).
+The preparation status below remains the historical record before that approval.
+
 October 1, 2026. Codex integrated the reviewed engine repair as `c94db1b` and
 reconciled current main in `c428fcaec55090a29b9c3f38c4219b093b1d9172`.
 That main was pushed to origin, paired with Astrid `63d1f0628f`. Both canonical
