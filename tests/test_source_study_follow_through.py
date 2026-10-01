@@ -85,7 +85,8 @@ def test_source_entry_completes_under_paused_experiment_and_dispatches_its_next(
     assert (offers[0].output["page"] is None) == recovery
     if recovery:
         assert "No requested source bytes were delivered" in offers[0]
-    journals = list((aa.WORKSPACE_DIR / "journal").glob("self_study_*.txt"))
+    # Navigation turns (recovery, no page) file as study_navigation_* since 2026-10-01.
+    journals = list((aa.WORKSPACE_DIR / "journal").glob(("study_navigation_" if recovery else "self_study_") + "*.txt"))
     assert journals and "Who calls entry?" in journals[0].read_text()
     assert agent._pending_next_action == "SELF_STUDY MAP minime"
     assert agent._decide_action(dict(STATE)) == "self_study"
@@ -392,7 +393,9 @@ def test_map_journal_keeps_navigation_scope_and_does_not_claim_code(study_agent)
     prompt = offers[-1]
     assert prompt.output["input_kind"] == "map"
     assert prompt.receipt
-    artifact = next((aa.WORKSPACE_DIR / "journal").glob("self_study_*.txt")).read_text()
+    artifact = next((aa.WORKSPACE_DIR / "journal").glob("study_navigation_*.txt")).read_text()
+    assert artifact.startswith("=== STUDY NAVIGATION: ")
+    assert not list((aa.WORKSPACE_DIR / "journal").glob("self_study_*.txt"))
     assert "Input evidence: Map:" in artifact
     assert "No new source page is supplied this turn." in artifact
     assert "Source revision: navigation only" in artifact

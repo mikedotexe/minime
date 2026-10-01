@@ -32591,7 +32591,7 @@ Reason: {reason}
             elif reflection:
                 revision = "not applicable; no source or measurements supplied"
             heading = ("PRIVATE WRITING" if private_writing else "INTROSPECTION" if reflection else "STUDY DECISION" if decision
-                       else "STUDY NAVIGATION" if navigation else "STUDY NAVIGATION RESPONSE" if revision_recovery else "SELF-STUDY")
+                       else "STUDY NAVIGATION RESPONSE" if revision_recovery else "STUDY NAVIGATION" if navigation else "SELF-STUDY")
             path.write_text(f"=== {heading}: {source} ===\nSource revision: {revision}\nInput evidence: {scope}\n"
                             f"Account: Minime’s response to this input, not independently verified code facts.\nDelivery: {status}\n\n{response}\n")
             self._record_current_action_artifact(mode, path, f"{mode}: {status}", visibility="protected" if private_writing else "summary" if verified else "protected")

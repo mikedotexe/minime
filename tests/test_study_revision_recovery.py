@@ -61,7 +61,7 @@ def test_runtime_delivers_revision_recovery_and_preserves_explicit_next(tmp_path
     after = json.loads(reader_state.read_bytes())
     for key in ("bookmarks", "current", "progress", "notebook", "questions", "last_input"):
         assert after[key] == before[key]
-    journals = list((workspace / "journal").glob("self_study_*.txt"))
+    journals = list((workspace / "journal").glob("study_navigation_*.txt"))
     assert any("=== STUDY NAVIGATION RESPONSE: source revision recovery ===" in p.read_text() for p in journals)
     assert not list((workspace / "journal").glob("introspect_notice*"))
     run(OPEN, "explicit-reselection")
