@@ -1,0 +1,241 @@
+{
+  "schema": "paired_quiet_afterimage_release_v1",
+  "qualification_logs": [
+    {
+      "name": "reader",
+      "path": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/reader.log",
+      "sha256": "c253feab4bd25e851d52141e543d2788523bf42057aebdf1183db13f28a40185",
+      "rust_passed": 299,
+      "summary": []
+    },
+    {
+      "name": "reader-clippy",
+      "path": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/reader-clippy.log",
+      "sha256": "2bc683fb4e4f4f21ee9ee39e2b8ecce2efe20d3b1be57bda5316aa519ab3d30a",
+      "rust_passed": 0,
+      "summary": []
+    },
+    {
+      "name": "reader-fmt",
+      "path": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/reader-fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "rust_passed": 0,
+      "summary": []
+    },
+    {
+      "name": "bridge",
+      "path": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/bridge.log",
+      "sha256": "e4ace5235b081aef1a041db053c813bedd9cc342592852c218d3d1b68a02ceef",
+      "rust_passed": 2368,
+      "summary": []
+    },
+    {
+      "name": "bridge-clippy",
+      "path": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/bridge-clippy.log",
+      "sha256": "4d1d747126b4da8670bd4b302614775274201d0084727d8e906be42d1946fad6",
+      "rust_passed": 0,
+      "summary": []
+    },
+    {
+      "name": "bridge-fmt",
+      "path": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/bridge-fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "rust_passed": 0,
+      "summary": []
+    },
+    {
+      "name": "release-tools",
+      "path": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/release-tools.log",
+      "sha256": "9a204bea125d8677b8ae900951bab7e04d9a63d26cdb080774349c67de15034b",
+      "rust_passed": 0,
+      "summary": [
+        "Ran 55 tests in 2.690s"
+      ]
+    },
+    {
+      "name": "domain",
+      "path": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/domain.log",
+      "sha256": "20b7ccac7804bd23f689ee8f9a555224ea3d9da8b4573a8332803a581c5c0f56",
+      "rust_passed": 0,
+      "summary": []
+    },
+    {
+      "name": "minime-full-packaged",
+      "path": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/minime-full-packaged.log",
+      "sha256": "f8360f992a636cc74da7a01678debe58aca9ed385830523026cb658248cdfea5",
+      "rust_passed": 0,
+      "summary": [
+        "1707 passed, 1 skipped, 141 subtests passed in 65.11s (0:01:05)"
+      ]
+    },
+    {
+      "name": "ops-addressing",
+      "path": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/ops-addressing.log",
+      "sha256": "d9ad6b0b982f5f4dfc4413cb6fb5c29d740a82e896724ce3ad35b5454ddbba52",
+      "rust_passed": 0,
+      "summary": [
+        "Ran 44 tests in 0.076s"
+      ]
+    },
+    {
+      "name": "ops-evidence",
+      "path": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/ops-evidence.log",
+      "sha256": "923620762adef70ff4220aeef361b309d783000a7488e2072ee0b966a9ecc4c0",
+      "rust_passed": 0,
+      "summary": [
+        "Ran 13 tests in 0.468s"
+      ]
+    },
+    {
+      "name": "ops-controller",
+      "path": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/ops-controller.log",
+      "sha256": "a5a9a65c4b7b3e918e1de9db318804787e93a6e6d5cbe1eba1f5ed9dea852118",
+      "rust_passed": 0,
+      "summary": [
+        "Ran 43 tests in 20.366s"
+      ]
+    },
+    {
+      "name": "ops-epistemic",
+      "path": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/ops-epistemic.log",
+      "sha256": "5f111acda980c7a6bcf14a900eebeaa3c9d0357e696eccd68c91edac5516c995",
+      "rust_passed": 0,
+      "summary": [
+        "Ran 2 tests in 0.000s"
+      ]
+    },
+    {
+      "name": "ops-division",
+      "path": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/ops-division.log",
+      "sha256": "8dbed4639a5f3b8d81a467bb5c85b9063f0ac7871bdfcdd9ffefd4297fdd56a0",
+      "rust_passed": 0,
+      "summary": []
+    },
+    {
+      "name": "ops-projectors",
+      "path": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/ops-projectors.log",
+      "sha256": "3ae68efa4cef082343a9bb86a73d99dba89199d5741c1ecdf6ec5aba634975f8",
+      "rust_passed": 0,
+      "summary": [
+        "Ran 19 tests in 6.175s"
+      ]
+    },
+    {
+      "name": "ops-chronicle",
+      "path": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/ops-chronicle.log",
+      "sha256": "0d1dee4adf0f0026746ebd16d8fbfecd59a1288e4a275640266d9f15c681c17e",
+      "rust_passed": 0,
+      "summary": [
+        "Ran 10 tests in 0.030s"
+      ]
+    }
+  ],
+  "migration": {
+    "path": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/migration-01/qualification.json",
+    "sha256": "8c077da1775ddd4d135dd8280253d78a26b6ac6a4c459bb6e60de2283284103f",
+    "checks": 32,
+    "schema_transition": [
+      10,
+      11
+    ]
+  },
+  "ready": {
+    "acknowledgement_sha256": "05c4b1d31be5138a9e85631a3185d1ac11a87d5282c609037bec6dd036a28565",
+    "activation_performed": false,
+    "actor": "codex-astra-interactive",
+    "authority": "build_manifest_witness_not_deploy_authority",
+    "binary_sha256": "d5cb132365e4dbad3d75f22d7ca7c3659fe06c715a12d4b60f196b8a2b025c23",
+    "live_authority_granted": false,
+    "live_eligible_now": false,
+    "manifest_sha256": "51b21448e64302c8fa46c5fa04ad0738d145749038d3a7e96e36aa898b10a25e",
+    "native_target": "aarch64-apple-darwin",
+    "prepared_at": "2026-09-30T23:09:08.387189+00:00",
+    "schema": "bridge_staged_release_v3",
+    "source_inputs_sha256": "2952f351c9c44bc35c02ba0a2de660c20f4de196f5e05d5cb850a3949c4e71c6",
+    "source_root": "/Users/v/other/worktrees/quiet-study-return-20260930/astrid",
+    "stage": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/bridge-stage-01",
+    "status": "staged_verified_not_activated"
+  },
+  "activation": {
+    "path": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/activation-01.jsonl",
+    "sha256": "5f184df896d24d2efa0b0916243dd1169621613602409ce57b137930aec10449",
+    "old_pid": 3909,
+    "new_pid": 48235,
+    "outcome": "success",
+    "forced_termination": false,
+    "retained_failures": [
+      {
+        "error": "deployment preflight denied: /Users/v/other/worktrees/quiet-study-return-20260930/astrid: foreign_active",
+        "forced_termination": false,
+        "outcome": "failed",
+        "owned_hold_retained": true,
+        "recorded_at": "2026-09-30T23:15:16.995868+00:00"
+      }
+    ]
+  },
+  "verification": {
+    "recorded_at": 1790810473.931329,
+    "pid": 48235,
+    "protected": {
+      "com.minime.engine": {
+        "pid": 3906,
+        "started_at": "Wed Sep 30 14:29:07 2026"
+      },
+      "com.minime.division-gateway": {
+        "pid": 3887,
+        "started_at": "Wed Sep 30 14:29:07 2026"
+      },
+      "com.minime.division-supervisor": {
+        "pid": 3897,
+        "started_at": "Wed Sep 30 14:29:07 2026"
+      },
+      "com.reservoir.coupled-astrid": {
+        "pid": 3893,
+        "started_at": "Wed Sep 30 14:29:07 2026"
+      },
+      "com.astrid.spectral-bridge": {
+        "pid": 49008,
+        "started_at": "Wed Sep 30 16:19:24 2026"
+      },
+      "com.minime.mic-to-sensory": {
+        "pid": 3879,
+        "started_at": "Wed Sep 30 14:29:07 2026"
+      },
+      "com.minime.camera-client": {
+        "pid": 3914,
+        "started_at": "Wed Sep 30 14:29:07 2026"
+      },
+      "com.minime.visual-frame-service": {
+        "pid": 3898,
+        "started_at": "Wed Sep 30 14:29:07 2026"
+      },
+      "com.minime.host-sensory": {
+        "pid": 3911,
+        "started_at": "Wed Sep 30 14:29:07 2026"
+      },
+      "com.reservoir.astrid-feeder": {
+        "pid": 3878,
+        "started_at": "Wed Sep 30 14:29:07 2026"
+      }
+    },
+    "source_inputs_verified": 89,
+    "reload_required": false,
+    "agent_hold_absent": true,
+    "bridge_hold_absent": true,
+    "selected_reader": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/bridge-stage-01/helpers/astrid-source-study",
+    "selected_reader_sha256": "78e04decfccf71aaf48b5f544144482bbd3f5790895c0036cafa053ddb3aca5b",
+    "checkpoint_sha256": "d886e62b82caf1002ec178ee0a3dec2e8b8d276b2acc3bc78e216af3950b22b2",
+    "active_stage": {
+      "manifest_sha256": "51b21448e64302c8fa46c5fa04ad0738d145749038d3a7e96e36aa898b10a25e",
+      "schema": "bridge_release_selection_v1",
+      "stage": "/Users/v/other/worktrees/quiet-study-return-20260930/deployment/bridge-stage-01",
+      "transaction": "/Users/v/other/astrid/.runtime/bridge-deployment/transactions/5d676c9673234b97893018eb2c5b90e5"
+    }
+  },
+  "boundary": {
+    "engine_timing_activated": false,
+    "automation_resumed": false,
+    "subjective_improvement_claimed": false,
+    "sampling_shortfall_repaired": false
+  }
+}

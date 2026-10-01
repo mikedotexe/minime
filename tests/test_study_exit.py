@@ -103,3 +103,52 @@ def test_later_choice_reports_rest_superseded_before_dispatch(study_agent, monke
     assert receipt["origin"]["response_sha256"] == origin["response_sha256"]
     assert agent._pending_next_action == "REGIME focus"
     assert '"status":"superseded"' in client.prepare("SELF_STUDY MAP")
+
+
+def test_question_decisions_are_not_studies_and_legacy_return_is_explicit(study_agent, monkeypatch):
+    agent, _, client, offers = study_agent
+    answer = ["STUDY_QUESTION: Retained synthetic question?\nNEXT: REST"]
+
+    def provider(prompt, **kwargs):
+        offers.append(prompt)
+        response = Mock(status_code=200, text=json.dumps({"message": {"content": answer[0]}, "done": True}))
+        prompt.post(Mock(return_value=response), "fake", {"messages": [
+            {"role": "user", "content": str(prompt)}]}, 1)
+        prompt.accepted()
+        return answer[0]
+
+    monkeypatch.setattr(agent, "_query_llm", provider)
+    execute_choice(agent, "SELF_STUDY OPEN minime/minime_autonomy/runtime.py 1")
+    path = client.workspace / "diagnostics/source_first_v3/shared_reader/reader-v1.json"
+    original = json.loads(path.read_text())
+    answer[0] = "NEXT: REST"
+    for action in [
+        "SELF_STUDY QUESTION NEW Separate inquiry?",
+        "SELF_STUDY QUESTION RESOLVE q1 Still uncertain.",
+        "SELF_STUDY QUESTION HOME",
+        "SELF_STUDY QUESTION PARK NOTEBOOK",
+    ]:
+        execute_choice(agent, action)
+        assert offers[-1].output["continuation_decision"] is True
+        assert "Retained synthetic question?" not in offers[-1]
+        assert agent._write_journal_entry.call_args.args[0] == "study_decision"
+        assert agent._write_journal_entry.call_args.kwargs["verified_source_study"] is False
+        assert agent._pending_next_action == "REST"
+        assert agent._decide_action(dict(STATE)) is None
+    journals = list((aa.WORKSPACE_DIR / "journal").glob("study_decision_*.txt"))
+    assert len(journals) == 4
+    assert all("=== STUDY DECISION: study continuation choice ===" in p.read_text() for p in journals)
+    assert all(p.read_text().endswith("NEXT: REST\n") for p in journals)
+    execute_choice(agent, "SELF_STUDY MAP")
+    assert "Retained synthetic question?" not in offers[-1]
+    execute_choice(agent, "SELF_STUDY QUESTION NOTEBOOK")
+    assert "Retained synthetic question?" in offers[-1]
+    assert json.loads(path.read_text())["questions"]["unthreaded_quiet"] is True
+    execute_choice(agent, "SELF_STUDY QUESTION RETURN NOTEBOOK")
+    assert "Retained synthetic question?" in offers[-1]
+    saved = json.loads(path.read_text())
+    assert saved["notebook"]["question"] == original["notebook"]["question"]
+    assert saved["bookmarks"] == original["bookmarks"]
+    assert len(saved["questions"]["entries"]) == 1
+    execute_choice(agent, "SELF_STUDY CONTINUE")
+    assert offers[-1].output["page"]["start"] == original["bookmarks"]["minime/minime_autonomy/runtime.py"]["end"]

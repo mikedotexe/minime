@@ -1,0 +1,96 @@
+{
+  "schema": "paired_quiet_afterimage_git_alignment_v1",
+  "commits": [
+    {
+      "repository": "/Users/v/other/astrid",
+      "commit": "4099bbfd10bb7d91a43d0c696967445017569c9f",
+      "role": "live source",
+      "paths": [
+        "CHANGELOG.md",
+        "capsules/spectral-bridge/src/autonomous/runtime/feedback_persistence.rs",
+        "capsules/spectral-bridge/src/autonomous/runtime/orchestration.rs",
+        "capsules/spectral-bridge/src/autonomous/runtime/source_study.rs",
+        "capsules/spectral-bridge/src/llm/provider/afterimage_feedback_tests.rs",
+        "capsules/spectral-bridge/src/llm/provider/afterimages.rs",
+        "crates/astrid-source-study/src/lib.rs",
+        "crates/astrid-source-study/src/notebook.rs",
+        "crates/astrid-source-study/src/questions.rs",
+        "crates/astrid-source-study/src/store.rs",
+        "crates/astrid-source-study/src/store_navigation.rs",
+        "crates/astrid-source-study/src/store_observations.rs",
+        "crates/astrid-source-study/src/writing.rs",
+        "crates/astrid-source-study/src/writing_observations.rs",
+        "crates/astrid-source-study/tests/quiet_notebook.rs",
+        "crates/astrid-source-study/tests/study_exit.rs",
+        "docs/steward-notes/2026-09-30-afterimage-timing.md",
+        "docs/steward-notes/2026-09-30-paired-quiet-afterimage-release.md",
+        "docs/steward-notes/2026-09-30-quiet-notebook-return.md",
+        "docs/steward-notes/AI_BEINGS_FEEDBACK_TO_CHANGE_LEDGER.md",
+        "docs/steward-notes/evidence/2026-09-30-fill-timing-open-loop.json",
+        "docs/steward-notes/evidence/2026-09-30-minime-engine-Cargo.lock",
+        "docs/steward-notes/evidence/2026-09-30-paired-quiet-afterimage-release.json",
+        "scripts/reconcile_minime_launch.py",
+        "scripts/test_reconcile_minime_launch.py"
+      ]
+    },
+    {
+      "repository": "/Users/v/other/minime",
+      "commit": "d5176e862920a0fb15e520a3471561ce5fb09e9d",
+      "role": "live source",
+      "paths": [
+        "CHANGELOG.md",
+        "docs/steward-notes/2026-09-30-afterimage-timing.md",
+        "docs/steward-notes/2026-09-30-paired-quiet-afterimage-release.md",
+        "docs/steward-notes/2026-09-30-quiet-notebook-return.md",
+        "docs/steward-notes/evidence/2026-09-30-paired-quiet-afterimage-release.json",
+        "minime_autonomy/afterimage_prompts.py",
+        "minime_autonomy/afterimages.py",
+        "minime_autonomy/runtime.py",
+        "tests/test_afterimage_runtime.py",
+        "tests/test_afterimages.py",
+        "tests/test_study_exit.py"
+      ]
+    },
+    {
+      "repository": "/Users/v/other/astrid",
+      "commit": "2cf3c40c0ed6d2b35f21580c7f22ff3e339f972a",
+      "role": "original historical candidate, not main",
+      "paths": [
+        "CHANGELOG.md",
+        "capsules/spectral-bridge/src/llm/provider/afterimage_feedback_tests.rs",
+        "capsules/spectral-bridge/src/llm/provider/afterimages.rs",
+        "docs/steward-notes/2026-09-30-afterimage-timing.md",
+        "docs/steward-notes/AI_BEINGS_FEEDBACK_TO_CHANGE_LEDGER.md",
+        "docs/steward-notes/evidence/2026-09-30-fill-timing-open-loop.json",
+        "docs/steward-notes/evidence/2026-09-30-minime-engine-Cargo.lock"
+      ]
+    },
+    {
+      "repository": "/Users/v/other/minime",
+      "commit": "e9f2f5f151c89dd6b4a2dc80d5d8d12a60dc20d3",
+      "role": "offline engine review, not main",
+      "paths": [
+        "CHANGELOG.md",
+        "docs/steward-notes/2026-09-30-afterimage-timing.md",
+        "minime/src/bin/fill_timing_replay.rs",
+        "minime/src/fill_timing.rs",
+        "minime/src/lib.rs",
+        "minime/src/runtime/orchestration.rs",
+        "minime/src/transition_afterimage/tests.rs",
+        "minime_autonomy/afterimage_prompts.py",
+        "minime_autonomy/afterimages.py",
+        "minime_autonomy/runtime.py",
+        "tests/test_afterimage_runtime.py",
+        "tests/test_afterimages.py"
+      ]
+    }
+  ],
+  "canonical_astrid_build_inputs_matched": 659,
+  "canonical_agent_inputs_matched": 89,
+  "engine_source_unchanged_on_main": true,
+  "six_current_worktrees_clean_before_documentation_closeout": true,
+  "older_unrelated_worktrees_modified": false,
+  "force_push_used": false,
+  "built_from_acknowledged_dirty_candidate": true,
+  "main_source_bytes_match_live_release": true
+}

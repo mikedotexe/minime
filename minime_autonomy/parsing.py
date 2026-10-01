@@ -36,7 +36,7 @@ def has_study_payload(action: str) -> bool:
     words = str(action or '').split(None, 2)
     return notebook_directive_action(action) or bool(words and (
         words[0].upper() == 'QUESTION' or (
-            words[0] == 'SELF_STUDY' and len(words) > 1 and words[1].upper() == 'QUESTION')))
+            words[0] == 'SELF_STUDY' and len(words) > 1 and words[1].upper() in {'QUESTION', 'NEW'})))
 
 
 def first_sentence(raw_excerpt: str) -> str:
