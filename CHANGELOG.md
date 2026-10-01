@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Engine candidate merged and pushed, not activated (2026-10-01).** Integrate numerical/restore repairs at `c428fca` and qualify clean release-04 against all 120 inputs. 833 selected Rust tests and strict selected all-features Clippy pass. Launch-wrapper hashes are aligned without changing the running engine; specific legacy-transition approval remains pending. See `docs/steward-notes/2026-10-01-engine-git-integration.md`.
+
 - **Engine transition preparation (2026-10-01).** Let the engine, dormant gateway and supervisor wait behind explicit owner-managed launch holds before opening binary/profile state. Paired sanctioned tooling validates stopped inputs and signed lineage, without a broad service restart or old-state restore. Fixture qualification and pending legacy-transition approval: `docs/steward-notes/2026-10-01-engine-transition-qualification.md`.
 
 - **Offline engine release/checkpoint qualification (2026-10-01).** Save regulator context through synced atomic replacement, surface save failures and reject overflow to nonfinite f32 during restore. Add a read-only production restore inspector; qualify an exact staged engine without changing the live launch profile or claiming full reservoir continuity. No activation. See `docs/steward-notes/2026-10-01-engine-release-checkpoint-qualification.md`.
