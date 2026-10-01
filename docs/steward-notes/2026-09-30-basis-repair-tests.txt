@@ -1,0 +1,40 @@
+   Compiling minime v0.1.0 (/Users/v/other/worktrees/afterimage-timing-20260930/minime/minime)
+    Finished `test` profile [unoptimized] target(s) in 12.84s
+     Running unittests src/lib.rs (/Users/v/other/worktrees/afterimage-timing-20260930/target-minime/debug/deps/minime-3c024b9efc063504)
+
+running 424 tests
+....................................................................................... 87/424
+....................................................................................... 174/424
+....................................................................................... 261/424
+....................................................................................... 348/424
+............................................................................
+test result: ok. 424 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.34s
+
+     Running unittests src/bin/fill_coupled_qualification.rs (/Users/v/other/worktrees/afterimage-timing-20260930/target-minime/debug/deps/fill_coupled_qualification-98e26d640bee8190)
+
+running 7 tests
+.......
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.21s
+
+     Running unittests src/bin/fill_timing_replay.rs (/Users/v/other/worktrees/afterimage-timing-20260930/target-minime/debug/deps/fill_timing_replay-ea98612f87a6fe6d)
+
+running 2 tests
+..
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/Users/v/other/worktrees/afterimage-timing-20260930/target-minime/debug/deps/minime-195d3449602ec264)
+
+running 378 tests
+....................................................................................... 87/378
+....................................................................................... 174/378
+....................................................................................... 261/378
+....................................................................................... 348/378
+..............................
+test result: ok. 378 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.86s
+
+     Running tests/fill_timing_controller_review.rs (/Users/v/other/worktrees/afterimage-timing-20260930/target-minime/debug/deps/fill_timing_controller_review-225029faf4850fce)
+
+running 19 tests
+...................
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

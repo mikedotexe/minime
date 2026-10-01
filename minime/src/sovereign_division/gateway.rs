@@ -12,6 +12,7 @@ use crate::sovereign_division::records::{
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg(feature = "division-rehearsal")]
 pub(crate) struct GatewayByteExactProofMetricsV1 {
     pub payload_count: u64,
     pub payload_bytes: u64,

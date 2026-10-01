@@ -286,8 +286,7 @@ pub fn stage_guard_for_state(
 pub fn stable_core_command_slew_active(stage: OverfillStage, fill_pct: f32) -> bool {
     matches!(stage, OverfillStage::Hold | OverfillStage::Elevated)
         && fill_pct.is_finite()
-        && fill_pct >= HOLD_ELEVATED_SLEW_START_PCT
-        && fill_pct < ELEVATED_STRONG_RAIL_THRESHOLD
+        && (HOLD_ELEVATED_SLEW_START_PCT..ELEVATED_STRONG_RAIL_THRESHOLD).contains(&fill_pct)
 }
 
 #[must_use]

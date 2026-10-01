@@ -12,7 +12,7 @@ pub struct FillRate {
 }
 
 impl FillRate {
-    fn unavailable(reason: &'static str) -> Self {
+    pub fn unavailable(reason: &'static str) -> Self {
         Self {
             policy: "observed_fill_rate_v1",
             rate_pct_per_sec: None,
@@ -21,23 +21,60 @@ impl FillRate {
         }
     }
 
-    /// Neutral input at an unobserved boundary, not an assertion of zero motion.
+    /// Legacy scalar fallback, not a measurement or proof of stability.
+    /// Consumers must retain availability: zero can satisfy control gates.
     pub fn controller_value(self) -> f32 {
         self.rate_pct_per_sec.unwrap_or(0.0)
     }
+
+    pub fn phase(self) -> &'static str {
+        match self.rate_pct_per_sec.filter(|rate| rate.is_finite()) {
+            Some(rate) if rate > 1.0 => "expanding",
+            Some(rate) if rate < -1.0 => "contracting",
+            Some(_) => "plateau",
+            None => "unavailable",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct FillObservation {
+    pub fill_pct: f32,
+    pub observed_at: Duration,
+    pub reset_generation: u64,
+    pub rate: FillRate,
 }
 
 #[derive(Default)]
 pub struct FillRateTracker {
     previous: Option<(Duration, f32)>,
+    latest: Option<FillObservation>,
+    reset_generation: u64,
 }
 
 impl FillRateTracker {
     pub fn reset(&mut self) {
         self.previous = None;
+        self.latest = None;
+        self.reset_generation = self.reset_generation.saturating_add(1);
+    }
+
+    pub fn latest(&self) -> Option<FillObservation> {
+        self.latest
     }
 
     pub fn observe(&mut self, time: Duration, fill_pct: f32) -> FillRate {
+        let rate = self.observe_rate(time, fill_pct);
+        self.latest = fill_pct.is_finite().then_some(FillObservation {
+            fill_pct,
+            observed_at: time,
+            reset_generation: self.reset_generation,
+            rate,
+        });
+        rate
+    }
+
+    fn observe_rate(&mut self, time: Duration, fill_pct: f32) -> FillRate {
         if !fill_pct.is_finite() {
             self.reset();
             return FillRate::unavailable("invalid_fill");
@@ -47,6 +84,8 @@ impl FillRateTracker {
             return FillRate::unavailable("first_observation");
         };
         let Some(elapsed) = time.checked_sub(previous_time).filter(|dt| !dt.is_zero()) else {
+            self.reset();
+            self.previous = Some((time, fill_pct));
             return FillRate::unavailable("nonincreasing_clock");
         };
         let elapsed_s = elapsed.as_secs_f64();

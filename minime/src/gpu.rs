@@ -110,7 +110,7 @@ impl Gpu {
 
     // Zero-copy write to unified memory buffer
     pub fn write_f32(&self, buf: &Buffer, data: &[f32]) {
-        let bytes = data.len() * mem::size_of::<f32>();
+        let bytes = std::mem::size_of_val(data);
         unsafe {
             std::ptr::copy_nonoverlapping(
                 data.as_ptr() as *const u8,
@@ -146,30 +146,12 @@ impl Gpu {
 }
 
 // CPU Gram-Schmidt orthonormalization (cache handoff pattern)
-pub fn gs_orthonormalize_colmajor(x: &mut [f32], n: usize, k: usize) {
-    for i in 0..k {
-        // Orthogonalize against previous vectors
-        for j in 0..i {
-            let mut dot = 0f32;
-            for row in 0..n {
-                dot += x[j * n + row] * x[i * n + row];
-            }
-            for row in 0..n {
-                x[i * n + row] -= dot * x[j * n + row];
-            }
-        }
-
-        // Normalize
-        let mut norm_sq = 0f64;
-        for row in 0..n {
-            norm_sq += (x[i * n + row] as f64).powi(2);
-        }
-        let norm = norm_sq.sqrt().max(1e-18) as f32;
-
-        for row in 0..n {
-            x[i * n + row] /= norm;
-        }
-    }
+pub fn gs_orthonormalize_colmajor(
+    x: &mut [f32],
+    n: usize,
+    k: usize,
+) -> crate::measurement_basis::BasisReport {
+    crate::measurement_basis::orthonormalize(x, n, k)
 }
 
 // Rayleigh quotient for eigenvalue estimation
@@ -199,7 +181,7 @@ pub fn rayleigh_quotient(a: &[f32], x: &[f32], n: usize) -> f32 {
 
 // Generic write_slice helper for any Copy type
 pub fn write_slice<T: Copy>(buf: &Buffer, data: &[T]) {
-    let bytes = data.len() * std::mem::size_of::<T>();
+    let bytes = std::mem::size_of_val(data);
     unsafe {
         std::ptr::copy_nonoverlapping(data.as_ptr(), buf.contents() as *mut T, data.len());
         buf.did_modify_range(NSRange::new(0, bytes as u64));

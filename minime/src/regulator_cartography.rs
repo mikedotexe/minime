@@ -1206,6 +1206,10 @@ fn fluctuation_from_pressure(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Offline replay fixture keeps independently varied inputs visible at each call."
+)]
 fn replay_input(
     label: &str,
     timestamp: f64,
@@ -1580,10 +1584,9 @@ fn load_resonance_rows(
     Ok(resonance_rows)
 }
 
-fn load_eigen_rows(
-    conn: &Connection,
-    window_secs: f64,
-) -> Result<Vec<(f64, f32, f32, Option<f32>)>> {
+type EigenTimelineRow = (f64, f32, f32, Option<f32>);
+
+fn load_eigen_rows(conn: &Connection, window_secs: f64) -> Result<Vec<EigenTimelineRow>> {
     let mut statement = conn.prepare(
         "SELECT timestamp, lambda1, fill_ratio
          FROM eigenvalue_timeline
@@ -1618,10 +1621,7 @@ fn nearest_resonance(
         .map(|(_, resonance)| resonance.clone())
 }
 
-fn nearest_eigen(
-    rows: &[(f64, f32, f32, Option<f32>)],
-    timestamp: f64,
-) -> Option<(f64, f32, f32, Option<f32>)> {
+fn nearest_eigen(rows: &[EigenTimelineRow], timestamp: f64) -> Option<EigenTimelineRow> {
     rows.iter()
         .min_by(|(left_ts, _, _, _), (right_ts, _, _, _)| {
             (left_ts - timestamp)

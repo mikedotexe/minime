@@ -161,6 +161,10 @@ pub fn fixed_survival_aux_z(lambda1_rel: f32, geom_rel: f32, geom_clamp_hi: f32)
 }
 
 #[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Pinned recovery input recipe retains its existing explicit inputs."
+)]
 pub fn stable_core_recovery_z(
     live_z: Option<&[f32]>,
     lambda1_rel: f32,
@@ -398,7 +402,7 @@ impl StableCoreRuntime {
         scaffold_active: bool,
         high_fill_drain_active: bool,
         fill_pct: f32,
-        fill_slope_pct_per_sec: f32,
+        fill_slope_pct_per_sec: impl Into<Option<f32>>,
     ) -> StableCoreLiveIntakeDecision {
         if !self.enabled {
             return StableCoreLiveIntakeDecision::suppressed("stable_core_disabled");
@@ -406,9 +410,15 @@ impl StableCoreRuntime {
         if !self.allows_live_intake_for_stage(stage) {
             return StableCoreLiveIntakeDecision::suppressed("stage_not_allowed");
         }
-        if !fill_pct.is_finite() || !fill_slope_pct_per_sec.is_finite() {
+        if !fill_pct.is_finite() {
             return StableCoreLiveIntakeDecision::suppressed("invalid_fill_or_slope");
         }
+        let Some(fill_slope_pct_per_sec) = fill_slope_pct_per_sec
+            .into()
+            .filter(|rate| rate.is_finite())
+        else {
+            return StableCoreLiveIntakeDecision::suppressed("rate_unavailable");
+        };
         if self.sensory_presence_profile == FULL_PRESENCE_PROFILE {
             if stage == "discharge" {
                 return StableCoreLiveIntakeDecision::suppressed(

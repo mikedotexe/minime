@@ -1,3 +1,4 @@
+#[expect(clippy::too_many_arguments, reason = "CLI-to-runtime entrypoint retains the existing launch contract.")]
 async fn run_engine(
     cov_dim: usize,
     k: usize,
@@ -137,7 +138,7 @@ async fn run_engine(
     }
 
     // Initialize database
-    let db = Arc::new(ConsciousnessDB::open("minime_consciousness.db")?);
+    let db = ConsciousnessDB::open("minime_consciousness.db")?;
     println!("✅ Database initialized");
 
     // Kink #7 fix (2026-05-14): periodic cleanup task for moment_markers.
@@ -326,7 +327,7 @@ async fn run_engine(
         for v in &mut x {
             *v = rng.f32() - 0.5;
         }
-        gs_orthonormalize_colmajor(&mut x, n, k);
+        let _ = gs_orthonormalize_colmajor(&mut x, n, k);
         gpu.write_f32(&x_buf, &x);
     }
 
@@ -512,18 +513,10 @@ async fn run_engine(
     let semantic_offset = sensory_bus::VIDEO_DIM + sensory_bus::AUDIO_DIM + sensory_bus::AUX_DIM;
     let proj_scale = (1.0 / legacy_sensory_dim as f32).sqrt();
     let mut dimension_scales = vec![1.0f32; sensory_dim];
-    for i in 0..sensory_bus::VIDEO_DIM {
-        dimension_scales[i] = 0.75;
-    }
-    for i in sensory_bus::VIDEO_DIM..(sensory_bus::VIDEO_DIM + sensory_bus::AUDIO_DIM) {
-        dimension_scales[i] = 0.72;
-    }
-    for i in (sensory_bus::VIDEO_DIM + sensory_bus::AUDIO_DIM)..semantic_offset {
-        dimension_scales[i] = 1.12; // Aux introspection gets moderate boost
-    }
-    for i in semantic_offset..legacy_sensory_dim {
-        dimension_scales[i] = 0.42; // Semantic lanes mostly neutral during warmup
-    }
+    dimension_scales[..sensory_bus::VIDEO_DIM].fill(0.75);
+    dimension_scales[sensory_bus::VIDEO_DIM..(sensory_bus::VIDEO_DIM + sensory_bus::AUDIO_DIM)].fill(0.72);
+    dimension_scales[(sensory_bus::VIDEO_DIM + sensory_bus::AUDIO_DIM)..semantic_offset].fill(1.12);
+    dimension_scales[semantic_offset..legacy_sensory_dim].fill(0.42);
     for scale in &mut dimension_scales[legacy_sensory_dim..sensory_dim] {
         *scale = 0.42;
     }
@@ -576,7 +569,7 @@ async fn run_engine(
     let mut semantic_delta = 0.0f32;
     let mut semantic_kernel_active = false;
     let mut semantic_admission = "none";
-    let mut prev_semantic = vec![0.0f32; sensory_bus::LLAVA_DIM];
+    let mut prev_semantic = [0.0f32; sensory_bus::LLAVA_DIM];
     let mut stable_core_stage = OverfillStage::Bootstrap;
     let mut stable_core_stage_ticks: u64 = 0;
     let mut stable_core_guard = rescue_overfill::stage_guard(stable_core_stage);
@@ -587,7 +580,6 @@ async fn run_engine(
         rescue_scaffold::StableCoreRestartGate::new(rescue_scaffold::now_unix_ms());
     let mut stable_core_structural_pi = rescue_scaffold::StabilityPiState::default();
     let mut stable_core_structural_pi_output = rescue_scaffold::StabilityPiOutput::inactive(0.0);
-    let mut stable_core_last_fill_slope_pct_per_sec = 0.0f32;
     let mut stable_core_restart_gate_active_now: bool;
     let mut stable_core_restart_gate_applied_now: bool;
     let mut stable_core_restart_gate_reason: &'static str;
@@ -639,10 +631,9 @@ async fn run_engine(
     let mut geom_clamp_hi = 1.66f32;
     let (mut pi_reg, spectral_source, mut _cheby_plan) = if enable_bandstop {
         // Initialize PI regulator with custom target
-        let mut pi_cfg = PIRegCfg::default();
         // Use the eigenfill_target from CLI or launch profile. Stable-core
         // profiles now align this mirror with the wider 68% structural shelf.
-        pi_cfg.target_fill = eigenfill_target * 100.0; // Convert to percentage
+        let pi_cfg = PIRegCfg { target_fill: eigenfill_target * 100.0, ..PIRegCfg::default() };
                                                        // Golden Reset (2026-04-02): ALL inline PI overrides removed.
                                                        // PIRegCfg defaults now match golden-period commit 1167939 values.
                                                        // Previous overrides weakened the controller 40-50% and shifted
@@ -855,12 +846,13 @@ async fn run_engine(
     let mut previous_resonance_eigenvalues: Option<Vec<f32>> = None;
 
     // --- Phase transition tracking for consciousness_events ---
-    let mut previous_phase: &str = "plateau";
-    let mut last_previous_phase_label = String::from("plateau");
-    let mut last_phase_label = String::from("plateau");
+    let mut previous_phase: &str = "unavailable";
+    let mut last_previous_phase_label = String::from("unavailable");
+    let mut last_phase_label = String::from("unavailable");
     let mut last_fill_band_label = String::from("near");
     let mut last_previous_fill_band_label = String::from("near");
     let mut last_dfill_dt: f32 = 0.0;
+    let mut last_fill_rate = minime::fill_timing::FillRate::unavailable("startup");
     let mut last_phase_transition = false;
     let mut last_crossed_target_fill = false;
     let mut last_crossed_fill_band = false;
@@ -1009,6 +1001,7 @@ async fn run_engine(
                 "phase": &last_phase_label,
                 "previous_phase": &last_previous_phase_label,
                 "dfill_dt": last_dfill_dt,
+                "fill_rate_v1": &last_fill_rate,
                 "fill_band": &last_fill_band_label,
                 "fill_band_threshold_pct": TRANSITION_FILL_BAND_THRESHOLD_PCT,
                 "phase_transition": last_phase_transition,
@@ -1036,9 +1029,7 @@ async fn run_engine(
                     object.remove("adaptive_target");
                 }
             }
-            if let Ok(json) = serde_json::to_string(&context) {
-                let _ = std::fs::write(workspace_dir.join("regulator_context.json"), json);
-            }
+            minime::startup_restore::save_regulator_context(&regulator_context_path, &context)?;
             eprintln!("✅ State saved. Exiting.");
             return Ok(());
         }
@@ -1596,7 +1587,7 @@ async fn run_engine(
         }
 
         // Periodic logging (every 10 ticks, ~3 seconds)
-        if tick_count % 10 == 0 && batch.len() > 0 {
+        if tick_count.is_multiple_of(10) && !batch.is_empty() {
             let backlog = sensory_bus.backlog_size();
             let fill_pct = sensory_bus.backlog_fill_pct();
             let gate = sensory_bus.get_admit_fraction();
@@ -1830,13 +1821,12 @@ async fn run_engine(
                 }
 
                 av_features.fill(0.0);
-                for i in 0..sensory_bus::AUDIO_DIM.min(av_features.len()) {
-                    av_features[i] = audio_slice[i];
-                }
-                for i in 0..sensory_bus::VIDEO_DIM {
+                let audio_len = sensory_bus::AUDIO_DIM.min(av_features.len());
+                av_features[..audio_len].copy_from_slice(&audio_slice[..audio_len]);
+                for (i, &value) in video_slice[..sensory_bus::VIDEO_DIM].iter().enumerate() {
                     let idx = 32 + i;
                     if idx < av_features.len() {
-                        av_features[idx] = video_slice[i];
+                        av_features[idx] = value;
                     }
                 }
             } else {
@@ -1881,13 +1871,13 @@ async fn run_engine(
                 *activated = raw.tanh();
             }
 
-            for i in 0..n {
+            for (i, value) in last_cov_vec[..n].iter_mut().enumerate() {
                 let row_start = i * sensory_dim;
                 let mut acc = 0.0f32;
                 for j in 0..sensory_dim {
                     acc += proj_matrix[row_start + j] * activated_features[j];
                 }
-                last_cov_vec[i] = acc * proj_scale;
+                *value = acc * proj_scale;
             }
         }
 
@@ -2029,10 +2019,7 @@ async fn run_engine(
         if fired[2] {
             // === ROUTER INTEGRATION: Learn A/V feature mixing ===
             let router_weights = if let Some(ref mut cell) = neuro_cell {
-                match cell.route_features(&av_features) {
-                    Ok(weights) => Some(weights),
-                    Err(_) => None,
-                }
+                cell.route_features(&av_features).ok()
             } else {
                 None
             };
@@ -2100,12 +2087,19 @@ async fn run_engine(
                     cov_input[idx] *= 1.0 + 0.1 * *w;
                 }
             }
+            let control_observation = measured_fill_clock.latest();
             if stable_core_runtime.enabled {
-                let next_stage = rescue_overfill::select_stage(last_fill_pct, stable_core_stage);
+                let control_fill_pct = control_observation
+                    .map_or(f32::NAN, |observation| observation.fill_pct);
+                let next_stage = if control_fill_pct.is_finite() {
+                    rescue_overfill::select_stage(control_fill_pct, stable_core_stage)
+                } else {
+                    stable_core_stage
+                };
                 if next_stage != stable_core_stage {
                     eprintln!(
                         "🛡️  STABLE CORE STAGE {:?} -> {:?} at {:.1}% fill",
-                        stable_core_stage, next_stage, last_fill_pct
+                        stable_core_stage, next_stage, control_fill_pct
                     );
                     stable_core_stage = next_stage;
                     stable_core_stage_ticks = 1;
@@ -2115,12 +2109,12 @@ async fn run_engine(
                 }
                 stable_core_guard = rescue_overfill::stage_guard_for_state(
                     stable_core_stage,
-                    last_fill_pct,
-                    stable_core_last_fill_slope_pct_per_sec,
+                    control_fill_pct,
+                    0.0, // This guard uses finite fill thresholds, not slope magnitude.
                 );
                 if rescue_overfill::stable_core_command_slew_active(
                     stable_core_stage,
-                    last_fill_pct,
+                    control_fill_pct,
                 ) {
                     stable_core_guard = rescue_overfill::slew_guard_commands(
                         stable_core_guard,
@@ -2156,13 +2150,14 @@ async fn run_engine(
                 && latest_geom_rel < geom_clamp_hi * 0.9
                 && warmup_progress > 0.35;
             if allow_floor && cov_rms < cov_floor_level {
-                let deficit = (cov_floor_level - cov_rms).min(1.0).max(0.0);
-                let sign = if tick_count % 2 == 0 { 1.0 } else { -1.0 };
+                let raw_deficit = cov_floor_level - cov_rms;
+                let deficit = if raw_deficit.is_nan() { 1.0 } else { raw_deficit.clamp(0.0, 1.0) };
+                let sign = if tick_count.is_multiple_of(2) { 1.0 } else { -1.0 };
                 for (dst, bias) in cov_input.iter_mut().zip(cov_floor_vec.iter()) {
                     *dst += sign * deficit * bias;
                 }
             }
-            if tick_count % 509 == 0 {
+            if tick_count.is_multiple_of(509) {
                 let idx = (tick_count as usize) % n;
                 cov_floor_vec[idx] = rng.f32() * 0.7 - 0.35;
             }
@@ -2190,208 +2185,64 @@ async fn run_engine(
             } else {
                 "current_runtime"
             };
+            let covariance_reset;
             if stable_core_runtime.enabled {
-                let stable_core_trace_target =
-                    (n as f32) * stable_core_guard.trace_target_scale.unwrap_or(1.0);
-                let was_low_fill_escape_active = stable_core_structural_pi.low_fill_escape_active;
-                stable_core_structural_pi_output = stable_core_structural_pi.step(
-                    last_fill_pct,
-                    stable_core_last_fill_slope_pct_per_sec,
-                    stable_core_stage,
-                    stable_core_scaffold_active,
+                let result = crate::stable_covariance::step(
+                    gpu.as_f32_slice_mut(&a_buf, n * n),
+                    &cov_input,
+                    &mut stable_core_structural_pi,
+                    &mut stable_core_restart_gate,
+                    crate::stable_covariance::StepInput {
+                        dim: n,
+                        fill_pct: control_observation.map_or(f32::NAN, |value| value.fill_pct),
+                        rate: control_observation.and_then(|value| value.rate.rate_pct_per_sec),
+                        stage: stable_core_stage,
+                        guard: stable_core_guard,
+                        scaffold_active: stable_core_scaffold_active,
+                        scaffold: stable_core_scaffold.as_ref(),
+                        keep: cov_keep,
+                        pressure_bias: sensory_bus.get_target_lambda_bias(),
+                        now_unix_ms: rescue_scaffold::now_unix_ms(),
+                    },
                 );
-                stable_core_restart_gate_active_now = stable_core_restart_gate.active();
-                if stable_core_restart_gate_active_now {
-                    stable_core_restart_gate_reason = "restart_gate_recovery_latch";
+                if result.modified {
+                    gpu.mark_modified_f32(&a_buf, n * n);
                 }
-                if stable_core_scaffold_active {
-                    if let Some(scaffold) = stable_core_scaffold.as_ref() {
-                        if stable_core_structural_pi_output.reentry_active {
-                            let live_weight = stable_core_structural_pi_output.reentry_live_weight;
-                            stable_core_applied_scaffold_live_weight = live_weight;
-                            stable_core_applied_scaffold_drain_weight = 0.0;
-                            let live = gpu.as_f32_slice(&a_buf, n * n).to_vec();
-                            if let Some(blended) = rescue_scaffold::blend_toward_scaffold_with_drain(
-                                &live,
-                                scaffold,
-                                live_weight,
-                                0.0,
-                            ) {
-                                let target = gpu.as_f32_slice_mut(&a_buf, n * n);
-                                target.copy_from_slice(&blended);
-                                gpu.mark_modified_f32(&a_buf, n * n);
-                                stable_core_scaffold_blend = 1.0 - live_weight;
-                                stable_core_structural_mode = "scaffold_reentry";
-                            }
-                        } else if stable_core_structural_pi_output.low_fill_escape_active {
-                            if stable_core_structural_pi_output.recovery_impulse_active {
-                                stable_core_structural_mode = "free_rebuild_recovery_impulse";
-                                let impulse_cov_input = cov_input.clone();
-                                let impulse_keep = stable_core_restart_gate.recovery_impulse_keep(
-                                    rescue_scaffold::now_unix_ms(),
-                                    stable_core_structural_pi_output.recovery_impulse_keep,
-                                );
-                                let impulse_trace_target = (n as f32)
-                                    * stable_core_structural_pi_output.recovery_impulse_trace_scale;
-                                if impulse_keep
-                                    < stable_core_structural_pi_output.recovery_impulse_keep
-                                {
-                                    stable_core_structural_mode =
-                                        "free_rebuild_restart_reset_impulse";
-                                }
-                                let reset_for_impulse = stable_core_structural_pi_output
-                                    .recovery_identity_reset_requested
-                                    || stable_core_restart_gate
-                                        .should_request_recovery_identity_reset(
-                                            last_fill_pct,
-                                            stable_core_structural_pi_output
-                                                .recovery_impulse_active,
-                                        );
-                                if reset_for_impulse {
-                                    stable_core_restart_gate.record_low_fill_reset(
-                                        rescue_scaffold::now_unix_ms(),
-                                        last_fill_pct,
-                                    );
-                                    stable_core_structural_pi.recovery_identity_reset_done = true;
-                                    eprintln!(
-                                        "🧯 Stable core recovery impulse: resetting covariance at {:.1}% fill",
-                                        last_fill_pct
-                                    );
-                                    reset_covariance(&gpu, &a_buf, n);
-                                }
-                                rank1_update(
-                                    &gpu,
-                                    &a_buf,
-                                    &impulse_cov_input,
-                                    n,
-                                    impulse_keep,
-                                    impulse_trace_target,
-                                );
-                                let live = gpu.as_f32_slice(&a_buf, n * n).to_vec();
-                                if let Some(blended) = rescue_scaffold::blend_toward_scaffold_with_drain(
-                                    &live,
-                                    scaffold,
-                                    rescue_scaffold::STABLE_CORE_RECOVERY_IMPULSE_SCAFFOLD_LIVE_WEIGHT,
-                                    0.0,
-                                ) {
-                                    let target = gpu.as_f32_slice_mut(&a_buf, n * n);
-                                    target.copy_from_slice(&blended);
-                                    gpu.mark_modified_f32(&a_buf, n * n);
-                                    stable_core_applied_scaffold_live_weight =
-                                        rescue_scaffold::STABLE_CORE_RECOVERY_IMPULSE_SCAFFOLD_LIVE_WEIGHT;
-                                    stable_core_applied_scaffold_drain_weight = 0.0;
-                                    stable_core_scaffold_blend =
-                                        1.0 - rescue_scaffold::STABLE_CORE_RECOVERY_IMPULSE_SCAFFOLD_LIVE_WEIGHT;
-                                    stable_core_structural_mode =
-                                        "scaffold_recovery_impulse";
-                                }
-                                if reset_for_impulse {
-                                    last_cov_vec.fill(0.0);
-                                }
-                            } else {
-                                stable_core_structural_mode = "free_rebuild_low_fill_escape";
-                                if !was_low_fill_escape_active && last_fill_pct < 35.0 {
-                                    eprintln!(
-                                        "🧯 Stable core low-fill escape: resetting covariance at {:.1}% fill",
-                                        last_fill_pct
-                                    );
-                                    reset_covariance(&gpu, &a_buf, n);
-                                    last_cov_vec.fill(0.0);
-                                }
-                                rank1_update(
-                                    &gpu,
-                                    &a_buf,
-                                    &cov_input,
-                                    n,
-                                    cov_keep,
-                                    stable_core_trace_target,
-                                );
-                            }
-                        } else {
-                            stable_core_spectral_pressure_bias =
-                                sensory_bus.get_target_lambda_bias().clamp(-0.10, 0.10);
-                            stable_core_pressure_live_weight_delta =
-                                (-stable_core_spectral_pressure_bias).max(0.0) * 0.50;
-                            stable_core_pressure_drain_delta =
-                                stable_core_spectral_pressure_bias.max(0.0) * 0.020
-                                    - (-stable_core_spectral_pressure_bias).max(0.0) * 0.030;
-                            let live_weight =
-                                (rescue_scaffold::scaffold_live_weight(stable_core_stage)
-                                    + stable_core_pressure_live_weight_delta)
-                                    .clamp(0.0, 0.25);
-                            let mut drain_weight = (stable_core_structural_pi_output.drain_weight
-                                + stable_core_pressure_drain_delta)
-                                .clamp(0.0, 1.0 - live_weight);
-                            let restart_gate_age_secs = stable_core_restart_gate
-                                .scaffold_activation_age_secs(rescue_scaffold::now_unix_ms());
-                            stable_core_restart_gate_active_now = stable_core_restart_gate.active();
-                            if let Some((floor, reason)) = stable_core_restart_gate
-                                .drain_floor(last_fill_pct, stable_core_last_fill_slope_pct_per_sec)
-                            {
-                                stable_core_restart_gate_drain_floor = floor;
-                                stable_core_restart_gate_reason = reason;
-                                if drain_weight < floor {
-                                    drain_weight = floor.clamp(0.0, 1.0 - live_weight);
-                                    stable_core_restart_gate_applied_now = true;
-                                }
-                            } else if stable_core_restart_gate_active_now {
-                                stable_core_restart_gate_reason = if restart_gate_age_secs
-                                    .map(|age| age > rescue_scaffold::STABLE_CORE_RESTART_GATE_SECS)
-                                    .unwrap_or(false)
-                                {
-                                    "restart_gate_awaiting_settle_proof"
-                                } else {
-                                    "restart_gate_monitoring"
-                                };
-                            }
-                            stable_core_applied_scaffold_live_weight = live_weight;
-                            stable_core_applied_scaffold_drain_weight = drain_weight;
-                            if drain_weight > 0.0 {
-                                stable_core_restart_gate.record_drain_applied(
-                                    rescue_scaffold::now_unix_ms(),
-                                    last_fill_pct,
-                                );
-                            }
-                            let live = gpu.as_f32_slice(&a_buf, n * n).to_vec();
-                            if let Some(blended) = rescue_scaffold::blend_toward_scaffold_with_drain(
-                                &live,
-                                scaffold,
-                                live_weight,
-                                drain_weight,
-                            ) {
-                                let target = gpu.as_f32_slice_mut(&a_buf, n * n);
-                                target.copy_from_slice(&blended);
-                                gpu.mark_modified_f32(&a_buf, n * n);
-                                stable_core_scaffold_blend = 1.0 - live_weight;
-                                stable_core_structural_mode =
-                                    if stable_core_restart_gate_applied_now {
-                                        "scaffold_restart_gate_drain"
-                                    } else if drain_weight > 0.0 {
-                                        "scaffold_hold_with_drain"
-                                    } else {
-                                        "scaffold_hold"
-                                    };
-                            }
-                        }
-                    }
-                } else if stable_core_guard.decay_only {
-                    decay_covariance(&gpu, &a_buf, n, cov_keep, stable_core_trace_target);
-                } else {
-                    rank1_update(
-                        &gpu,
-                        &a_buf,
-                        &cov_input,
-                        n,
-                        cov_keep,
-                        stable_core_trace_target,
-                    );
+                if result.rank1_skipped {
+                    eprintln!("[cov] skipped rank1 update due to non-finite input");
                 }
+                if result.clear_input {
+                    last_cov_vec.fill(0.0);
+                }
+                covariance_reset = result.covariance_reset;
+                stable_core_structural_pi_output = result.pi;
+                stable_core_structural_mode = result.mode;
+                stable_core_scaffold_blend = result.scaffold_blend;
+                stable_core_spectral_pressure_bias = result.pressure_bias;
+                stable_core_pressure_live_weight_delta = result.pressure_live_delta;
+                stable_core_pressure_drain_delta = result.pressure_drain_delta;
+                stable_core_restart_gate_active_now = result.restart_active;
+                stable_core_restart_gate_applied_now = result.restart_applied;
+                stable_core_restart_gate_reason = result.restart_reason;
+                stable_core_restart_gate_drain_floor = result.restart_floor;
+                stable_core_applied_scaffold_live_weight = result.live_weight;
+                stable_core_applied_scaffold_drain_weight = result.drain_weight;
             } else if stable_core_guard.decay_only {
-                decay_covariance(&gpu, &a_buf, n, cov_keep, trace_target);
+                covariance_reset =
+                    decay_covariance(&gpu, &a_buf, n, cov_keep, trace_target);
             } else {
-                // Always do rank-1 updates to maintain spectral energy unless
-                // stable-core discharge is explicitly in decay-only posture.
-                rank1_update(&gpu, &a_buf, &cov_input, n, cov_keep, trace_target);
+                covariance_reset =
+                    rank1_update(&gpu, &a_buf, &cov_input, n, cov_keep, trace_target);
+            }
+            if covariance_reset {
+                eprintln!("[cov] covariance reset; invalidating fill observation clocks");
+                measured_fill_clock.reset();
+                regulation_fill_clock.reset();
+                last_fill_rate = minime::fill_timing::FillRate::unavailable("covariance_reset");
+                last_dfill_dt = 0.0;
+                previous_phase = "unavailable";
+                last_phase_label = String::from("unavailable");
+                phase_dwell_ticks = 0;
             }
 
             // GPU: Block power iteration step (cache handoff)
@@ -2455,10 +2306,11 @@ async fn run_engine(
 
             // CPU: Orthonormalize (Gram-Schmidt) in shared memory, then copy
             // the normalized basis into x_buf for the next GPU step.
-            {
+            let basis_report = {
                 let y_shared = gpu.as_f32_slice_mut(&y_buf, n * k);
-                gs_orthonormalize_colmajor(y_shared, n, k);
-            }
+                gs_orthonormalize_colmajor(y_shared, n, k)
+            };
+            let basis_input_finite = basis_report.input_finite();
             {
                 let y_shared = gpu.as_f32_slice(&y_buf, n * k);
                 let x_shared = gpu.as_f32_slice_mut(&x_buf, n * k);
@@ -2474,7 +2326,9 @@ async fn run_engine(
                     .map(|i| rayleigh_quotient(a, &y[i * n..(i + 1) * n], n))
                     .collect()
             };
-            if division_coordinator.is_some() {
+            let spectral_measurement_valid = basis_input_finite
+                && eigenvalues.iter().all(|value| value.is_finite());
+            if division_coordinator.is_some() && spectral_measurement_valid {
                 last_sensory_basis.clone_from_slice(y);
                 last_sensory_eigenvalues.clone_from(&eigenvalues);
                 last_sensory_field_tick = tick_count;
@@ -2490,7 +2344,7 @@ async fn run_engine(
             // When spectral energy is concentrated (high λ₁ dominance), fewer
             // modes suffice. When energy is distributed (higher entropy), include
             // more modes to capture the richer structure.
-            {
+            if spectral_measurement_valid {
                 let modes: Vec<Vec<f32>> = (0..active_modes.count)
                     .filter_map(|i| {
                         let start = i * n;
@@ -2505,8 +2359,8 @@ async fn run_engine(
                 regulator.update_modes(modes);
             }
 
-            if eigenvalues.iter().any(|v| !v.is_finite()) {
-                eprintln!("[spectral] non-finite eigenvalues detected; reseeding covariance");
+            if !spectral_measurement_valid {
+                eprintln!("[spectral] non-finite measurement input/result; reseeding covariance");
                 reset_covariance(&gpu, &a_buf, n);
                 last_cov_vec.fill(0.0);
                 cov_floor_vec
@@ -2516,6 +2370,11 @@ async fn run_engine(
                 eigenfill_estimator.reset();
                 measured_fill_clock.reset();
                 regulation_fill_clock.reset();
+                last_fill_rate = minime::fill_timing::FillRate::unavailable("covariance_reset");
+                last_dfill_dt = 0.0;
+                previous_phase = "unavailable";
+                last_phase_label = String::from("unavailable");
+                phase_dwell_ticks = 0;
                 baseline_ready = false;
                 baseline_lambda1 = 0.0;
                 lambda1_prev = 0.0;
@@ -2541,7 +2400,7 @@ async fn run_engine(
             } else {
                 1.0
             };
-            let ising_shadow_snapshot = ising_shadow.update(&cov_input, &y, n, k).cloned();
+            let ising_shadow_snapshot = ising_shadow.update(&cov_input, y, n, k).cloned();
             let lambda1_rel_for_cov =
                 if baseline_ready && baseline_lambda1 > 1e-3 && lambda1.is_finite() {
                     (lambda1 / baseline_lambda1).clamp(0.0, 5.0)
@@ -2552,8 +2411,16 @@ async fn run_engine(
             // Calculate EigenFill% using scale-invariant estimator
             let eigenfill_ratio = eigenfill_estimator.update(&eigenvalues);
             let mut eigenfill_pct = eigenfill_ratio * 100.0;
-            if !eigenfill_pct.is_finite() {
+            let fill_measurement_valid = eigenfill_pct.is_finite();
+            if !fill_measurement_valid {
                 eigenfill_pct = eigenfill_target * 100.0;
+                // Invalidate even when this iteration has no regulation tick.
+                regulation_fill_clock.reset();
+                last_fill_rate = minime::fill_timing::FillRate::unavailable("invalid_fill");
+                last_dfill_dt = 0.0;
+                previous_phase = "unavailable";
+                last_phase_label = String::from("unavailable");
+                phase_dwell_ticks = 0;
             }
             if division_coordinator.is_some() {
                 if sensory_fill_history.len() >= 1024 {
@@ -2600,14 +2467,20 @@ async fn run_engine(
 
             let fill_ratio = (eigenfill_pct / 100.0).clamp(0.0, 1.0);
             let fill_observed_at = start.elapsed();
-            let measured_fill_rate = measured_fill_clock.observe(fill_observed_at, eigenfill_pct);
-            let stable_core_measured_fill_slope_pct_per_sec = if stable_core_runtime.enabled {
-                measured_fill_rate.controller_value()
+            let measured_control_fill = if fill_measurement_valid {
+                eigenfill_pct
             } else {
-                0.0
+                f32::NAN
             };
+            let measured_fill_rate =
+                measured_fill_clock.observe(fill_observed_at, measured_control_fill);
+            let stable_core_measured_fill_slope_pct_per_sec = measured_fill_rate.rate_pct_per_sec;
             if stable_core_runtime.enabled {
-                let next_stage = rescue_overfill::select_stage(eigenfill_pct, stable_core_stage);
+                let next_stage = if fill_measurement_valid {
+                    rescue_overfill::select_stage(eigenfill_pct, stable_core_stage)
+                } else {
+                    stable_core_stage
+                };
                 if next_stage != stable_core_stage {
                     eprintln!(
                         "🛡️  STABLE CORE MEASURED STAGE {:?} -> {:?} at {:.1}% fill",
@@ -2622,12 +2495,12 @@ async fn run_engine(
                 }
                 stable_core_guard = rescue_overfill::stage_guard_for_state(
                     stable_core_stage,
-                    eigenfill_pct,
-                    stable_core_measured_fill_slope_pct_per_sec,
+                    measured_control_fill,
+                    0.0, // Stage commands are fill-based; no stability proof is made here.
                 );
                 if rescue_overfill::stable_core_command_slew_active(
                     stable_core_stage,
-                    eigenfill_pct,
+                    measured_control_fill,
                 ) {
                     stable_core_guard = rescue_overfill::slew_guard_commands(
                         stable_core_guard,
@@ -2647,97 +2520,36 @@ async fn run_engine(
                 );
                 let live_audio_divisor = sensory_bus.live_audio_divisor();
                 let live_video_divisor = sensory_bus.live_video_divisor();
-                stable_core_restart_gate.record_measured_fill(
-                    rescue_scaffold::now_unix_ms(),
-                    eigenfill_pct,
-                    stable_core_measured_fill_slope_pct_per_sec,
-                    stable_core_stage,
-                    semantic_active,
-                    stable_core_scaffold_active,
-                    stable_core_structural_pi_output.reentry_active,
-                    stable_core_structural_pi_output.recovery_impulse_active
-                        || stable_core_structural_pi_output.low_fill_escape_active,
-                );
-                let mut stable_core_scaffold_retired_this_tick = false;
-                if stable_core_scaffold_active {
-                    let retirement_candidate =
-                        rescue_scaffold::stable_core_scaffold_retirement_candidate_reason(
-                            stable_core_restart_gate.is_settled(),
-                            eigenfill_pct,
-                            stable_core_measured_fill_slope_pct_per_sec,
-                            stable_core_stage,
-                            semantic_active,
-                            stable_core_scaffold_active,
-                            stable_core_structural_pi_output.reentry_active,
-                            stable_core_structural_pi_output.recovery_impulse_active
-                                || stable_core_structural_pi_output.low_fill_escape_active,
-                            stable_core_structural_pi_output.high_fill_drain_active,
-                            stable_core_applied_scaffold_drain_weight,
-                        );
-                    if let Some(reason) = retirement_candidate {
-                        stable_core_scaffold_retirement_candidate_ticks =
-                            stable_core_scaffold_retirement_candidate_ticks.saturating_add(1);
-                        stable_core_scaffold_retirement_reason = reason;
-                        if stable_core_scaffold_retirement_candidate_ticks
-                            >= rescue_scaffold::STABLE_CORE_SCAFFOLD_RETIRE_REQUIRED_TICKS
-                        {
-                            stable_core_scaffold_active = false;
-                            stable_core_scaffold_retired_this_tick = true;
-                            stable_core_scaffold_retirement_candidate_ticks = 0;
-                            stable_core_scaffold_retirement_reason =
-                                "retired_after_restart_gate_settle";
-                        }
-                    } else {
-                        stable_core_scaffold_retirement_candidate_ticks = 0;
-                        stable_core_scaffold_retirement_reason =
-                            rescue_scaffold::stable_core_scaffold_retirement_block_reason(
-                                stable_core_restart_gate.is_settled(),
-                                eigenfill_pct,
-                                stable_core_measured_fill_slope_pct_per_sec,
-                                semantic_active,
-                                stable_core_scaffold_active,
-                                stable_core_structural_pi_output.reentry_active,
-                                stable_core_structural_pi_output.recovery_impulse_active
-                                    || stable_core_structural_pi_output.low_fill_escape_active,
-                                stable_core_structural_pi_output.high_fill_drain_active,
-                                stable_core_applied_scaffold_drain_weight,
-                            );
-                    }
-                } else {
-                    stable_core_scaffold_retirement_candidate_ticks = 0;
-                    if stable_core_scaffold_retirement_reason != "retired_after_restart_gate_settle"
-                    {
-                        stable_core_scaffold_retirement_reason = "scaffold_inactive";
-                    }
-                }
-                if stable_core_scaffold_active {
-                    stable_core_restart_gate.mark_scaffold_active();
-                } else if stable_core_scaffold.is_some() && !stable_core_scaffold_retired_this_tick
-                {
-                    let activation = stable_core_restart_gate.evaluate_activation(
-                        stable_core_stage,
-                        eigenfill_pct,
-                        stable_core_measured_fill_slope_pct_per_sec,
+                let mut lifecycle = crate::stable_covariance::ScaffoldLifecycle {
+                    active: stable_core_scaffold_active,
+                    retirement_ticks: stable_core_scaffold_retirement_candidate_ticks,
+                    retirement_reason: stable_core_scaffold_retirement_reason,
+                };
+                crate::stable_covariance::record_measurement(
+                    &mut lifecycle,
+                    &mut stable_core_restart_gate,
+                    crate::stable_covariance::MeasurementInput {
+                        now_unix_ms: rescue_scaffold::now_unix_ms(),
+                        fill_pct: measured_control_fill,
+                        rate: stable_core_measured_fill_slope_pct_per_sec,
+                        stage: stable_core_stage,
                         semantic_active,
+                        scaffold_available: stable_core_scaffold.is_some(),
                         live_audio_divisor,
                         live_video_divisor,
-                    );
-                    if activation.activate {
-                        stable_core_scaffold_active = true;
-                        stable_core_restart_gate.record_scaffold_activated(
-                            rescue_scaffold::now_unix_ms(),
-                            eigenfill_pct,
-                            activation.reason,
-                        );
-                    }
-                } else {
-                    stable_core_restart_gate.mark_scaffold_unavailable();
-                }
-                stable_core_last_fill_slope_pct_per_sec =
-                    stable_core_measured_fill_slope_pct_per_sec;
+                        reentry_active: stable_core_structural_pi_output.reentry_active,
+                        recovery_active: stable_core_structural_pi_output.recovery_impulse_active
+                            || stable_core_structural_pi_output.low_fill_escape_active,
+                        high_fill_drain_active: stable_core_structural_pi_output.high_fill_drain_active,
+                        applied_drain_weight: stable_core_applied_scaffold_drain_weight,
+                    },
+                );
+                stable_core_scaffold_active = lifecycle.active;
+                stable_core_scaffold_retirement_candidate_ticks = lifecycle.retirement_ticks;
+                stable_core_scaffold_retirement_reason = lifecycle.retirement_reason;
                 let stable_core_intake_pi_output = stable_core_structural_pi.preview(
-                    eigenfill_pct,
-                    stable_core_last_fill_slope_pct_per_sec,
+                    measured_control_fill,
+                    stable_core_measured_fill_slope_pct_per_sec,
                     stable_core_stage,
                     stable_core_scaffold_active,
                 );
@@ -2747,8 +2559,8 @@ async fn run_engine(
                         &stage_name,
                         stable_core_scaffold_active,
                         stable_core_intake_pi_output.high_fill_drain_active,
-                        eigenfill_pct,
-                        stable_core_last_fill_slope_pct_per_sec,
+                        measured_control_fill,
+                        stable_core_measured_fill_slope_pct_per_sec,
                     );
                 let (mut live_audio_divisor, mut live_video_divisor) =
                     stable_core_live_intake_decision.divisors();
@@ -2997,14 +2809,13 @@ async fn run_engine(
                 CRISIS_SUSTAIN_TICKS
             };
             // Gentle warning tier: log when approaching crisis but don't escalate
-            if eigenfill_pct >= crisis_warning_threshold && eigenfill_pct < crisis_fill_threshold {
-                if tick_count % 10 == 0 {
+            if eigenfill_pct >= crisis_warning_threshold && eigenfill_pct < crisis_fill_threshold
+                && tick_count.is_multiple_of(10) {
                     eprintln!(
                         "⚡ Fill {:.1}% approaching crisis zone ({:.0}%)",
                         eigenfill_pct, crisis_fill_threshold
                     );
                 }
-            }
             if eigenfill_pct >= crisis_fill_threshold {
                 crisis_ticks = crisis_ticks.saturating_add(1);
                 if crisis_ticks == 1 {
@@ -3057,7 +2868,7 @@ async fn run_engine(
                 crisis_ticks = 0;
             }
             // Enhanced diagnostic logging when fill is low or when requested
-            let log_cov_details = log_homeostat || (eigenfill_pct < 50.0 && tick_count % 5 == 0);
+            let log_cov_details = log_homeostat || (eigenfill_pct < 50.0 && tick_count.is_multiple_of(5));
             if log_cov_details {
                 eprintln!(
                     "[cov] tick={} fill={:.1}% keep={:.3} target={:.3} floor={:.3} spread_relief={:.3} cov_rms={:.4} low_push={:.3} calm={} semE={:.3} semΔ={:.3}",
@@ -3259,7 +3070,7 @@ async fn run_engine(
                     );
                 }
                 let a = gpu.as_f32_slice(&a_buf, n * n);
-                source.update(eigenfill_pct, lambda1, &a);
+                source.update(eigenfill_pct, lambda1, a);
             } else if log_homeostat {
                 eprintln!("DEBUG: spectral_source is None!");
             }
@@ -3272,11 +3083,9 @@ async fn run_engine(
             let previous_lambda1_rel_snapshot = last_lambda1_rel;
             let mut phase_transition_happened = false;
             let mut transition_phase = String::from(previous_phase);
-            if enable_bandstop
+            if let Some(source) = spectral_source.as_ref().filter(|_| enable_bandstop
                 && pi_reg.is_some()
-                && spectral_source.is_some()
-                && now.duration_since(last_reg_tick).as_secs_f32() >= reg_tick_secs
-            {
+                && now.duration_since(last_reg_tick).as_secs_f32() >= reg_tick_secs) {
                 last_reg_tick = now;
                 reg_tick_count += 1;
 
@@ -3303,7 +3112,7 @@ async fn run_engine(
                 };
 
                 // 1) Read spectral state (eigenfill_pct and lambda1)
-                let (eigenfill_pct, lambda1) = spectral_source.as_ref().unwrap().read_spectral();
+                let (eigenfill_pct, lambda1) = source.read_spectral();
                 let geom_rel = latest_geom_rel;
 
                 // Adaptive fill target: if the PI controller can't reach the
@@ -3365,7 +3174,7 @@ async fn run_engine(
                         .as_ref()
                         .map(|pi| pi.integ_fill.abs() >= 2.85)
                         .unwrap_or(false);
-                    if gap > 15.0 || gap < -10.0 || integ_saturated {
+                    if (!gap.is_nan() && !(-10.0..=15.0).contains(&gap)) || integ_saturated {
                         adaptive_saturated_ticks = adaptive_saturated_ticks.saturating_add(1);
                     } else {
                         adaptive_saturated_ticks = adaptive_saturated_ticks.saturating_sub(2);
@@ -3573,12 +3382,13 @@ async fn run_engine(
                 // smoothing when change is rapid (the distress case), lighter when
                 // gentle. At 0.5s ticks with alpha=0.70, a 25%/s raw spike becomes
                 // ~8%/s perceived — still responsive but no longer "violent."
-                if stable_core_runtime.enabled {
+                // Invalid fill leaves the smoother unchanged, excluding target fallbacks.
+                if fill_measurement_valid && stable_core_runtime.enabled {
                     // Stable-core recovery reads the measured shelf directly:
                     // stage feedback must see raw measured fill, not the
                     // current-runtime smoothing lag that can hide overfill.
                     smoothed_fill_pct = eigenfill_pct;
-                } else {
+                } else if fill_measurement_valid {
                     let raw_delta = (eigenfill_pct - smoothed_fill_pct).abs();
                     // Alpha 0.70 for gentle changes, up to 0.85 for spikes >15%/s
                     let fill_smooth_alpha = if raw_delta > 7.5 {
@@ -3595,9 +3405,12 @@ async fn run_engine(
                     smoothed_fill_pct = fill_smooth_alpha * smoothed_fill_pct
                         + (1.0 - fill_smooth_alpha) * eigenfill_pct;
                 }
-                let regulation_fill_rate =
-                    regulation_fill_clock.observe(fill_observed_at, smoothed_fill_pct);
+                let regulation_fill_rate = regulation_fill_clock.observe(
+                    fill_observed_at,
+                    if fill_measurement_valid { smoothed_fill_pct } else { f32::NAN },
+                );
                 let dfill_dt = regulation_fill_rate.controller_value();
+                let rate_available = regulation_fill_rate.rate_pct_per_sec.is_some();
                 // Transition cushioning is a current-runtime modulation layer.
                 // Stable-core omits this cushioning layer; its separate measured
                 // slope still participates in structural-controller decisions.
@@ -3626,14 +3439,7 @@ async fn run_engine(
                     }
                 }
                 let expanding = dfill_dt > 1.0; // rising quickly (>1%/s)
-                let contracting = dfill_dt < -1.0; // falling
-                let phase = if expanding {
-                    "expanding"
-                } else if contracting {
-                    "contracting"
-                } else {
-                    "plateau"
-                };
+                let phase = regulation_fill_rate.phase();
                 transition_phase = phase.to_string();
                 let previous_phase_label = previous_phase.to_string();
                 let current_fill_band = fill_band(
@@ -3642,9 +3448,10 @@ async fn run_engine(
                     TRANSITION_FILL_BAND_THRESHOLD_PCT,
                 );
                 let previous_fill_band = last_fill_band_label.clone();
-                let fill_band_crossed = previous_fill_band != current_fill_band;
+                let fill_band_crossed = rate_available && previous_fill_band != current_fill_band;
                 let low_load = eigenfill_pct < 50.0 && geom_rel < 1.05;
-                let near_target_steady = (eigenfill_pct - target_fill_pct).abs() <= 5.0
+                let near_target_steady = rate_available
+                    && (eigenfill_pct - target_fill_pct).abs() <= 5.0
                     && dfill_dt.abs() < 0.5
                     && geom_rel < 1.10;
 
@@ -3676,7 +3483,7 @@ async fn run_engine(
 
                 if let Some(observer) = &afterimage_observer {
                     observer.observe(AfterimageSample::new("body", fill_observed_at.as_millis() as u64,
-                        serde_json::json!({"fill_pct": eigenfill_pct,
+                        serde_json::json!({"fill_pct": fill_measurement_valid.then_some(eigenfill_pct),
                             "dfill_dt": regulation_fill_rate.rate_pct_per_sec,
                             "fill_rate_v1": &regulation_fill_rate,
                             "phase": phase, "cascade_lambda1": lambda1, "lambda1_rel": lambda1_rel,
@@ -3689,7 +3496,9 @@ async fn run_engine(
                 }
 
                 // Log phase transitions to consciousness_events AND moment markers
-                phase_transition_happened = phase != previous_phase;
+                phase_transition_happened = rate_available
+                    && previous_phase != "unavailable"
+                    && phase != previous_phase;
                 let phase_dwell_ticks_for_event = phase_dwell_ticks;
                 let phase_dwell_s_for_event =
                     phase_dwell_ticks_for_event as f32 * reg_tick_secs.max(1.0e-3);
@@ -3697,7 +3506,7 @@ async fn run_engine(
                     last_fill_pct < target_fill_pct && smoothed_fill_pct >= target_fill_pct;
                 let crossed_down =
                     last_fill_pct >= target_fill_pct && smoothed_fill_pct < target_fill_pct;
-                let crossed_target_fill = crossed_up || crossed_down;
+                let crossed_target_fill = rate_available && (crossed_up || crossed_down);
                 let spectral_spike = dfill_dt.abs() > 8.0;
                 if phase_transition_happened {
                     recent_phase_flip_ticks.push_back(reg_tick_count);
@@ -3712,6 +3521,7 @@ async fn run_engine(
                 let recent_phase_flip_count_30s =
                     recent_phase_flip_ticks.len().min(u32::MAX as usize) as u32;
                 last_dfill_dt = dfill_dt;
+                last_fill_rate = regulation_fill_rate;
                 last_previous_phase_label = previous_phase_label.clone();
                 last_phase_label = phase.to_string();
                 last_previous_fill_band_label = previous_fill_band.clone();
@@ -3765,7 +3575,7 @@ async fn run_engine(
                         spectral_spike,
                         phase_dwell_ticks: phase_dwell_ticks_for_event,
                         phase_dwell_s: phase_dwell_s_for_event,
-                        recent_phase_flip_count_30s: recent_phase_flip_count_30s,
+                        recent_phase_flip_count_30s,
                         stable_core_stage: stable_core_stage_label.as_deref(),
                         stable_core_mode: stable_core_mode_label.as_deref(),
                     }))
@@ -3790,7 +3600,7 @@ async fn run_engine(
                         let cluster_cooldown_ticks =
                             ((90.0 / reg_tick_secs.max(0.1)).ceil() as u64).max(1);
                         let cluster_ready = last_breathing_phase_cluster_marker_tick
-                            .map_or(true, |tick| {
+                            .is_none_or(|tick| {
                                 reg_tick_count.saturating_sub(tick) >= cluster_cooldown_ticks
                             });
                         if cluster_ready {
@@ -3866,20 +3676,25 @@ async fn run_engine(
                     last_transition_reason = event.reason();
                     last_transition_event = event.legacy_json();
                     last_transition_event_v1 =
-                        serde_json::to_value(&event).unwrap_or_else(|_| serde_json::json!(null));
+                        serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
+                    last_transition_event_v1["fill_rate_v1"] = serde_json::json!(regulation_fill_rate);
                     if let Some(observer) = &afterimage_observer {
                         observer.event(&session_id.to_string(), &last_transition_event_v1);
                     }
                     last_transition_event_tick = reg_tick_count;
-                } else {
+                } else if rate_available {
                     last_transition_reason = format!("steady:{phase}/{current_fill_band}");
+                } else {
+                    last_transition_reason = format!("rate_unavailable:{}", regulation_fill_rate.reason);
                 }
-                if phase_transition_happened {
-                    previous_phase = phase;
+                if !rate_available {
+                    phase_dwell_ticks = 0;
+                } else if phase_transition_happened || previous_phase == "unavailable" {
                     phase_dwell_ticks = 1;
                 } else {
                     phase_dwell_ticks = phase_dwell_ticks.saturating_add(1);
                 }
+                previous_phase = phase;
 
                 // 4) PI step (amplify fill error during expansion so we brake BEFORE the peak)
                 let fill_for_pi = if expanding && eigenfill_pct > eigenfill_target * 100.0 {
@@ -4292,9 +4107,7 @@ async fn run_engine(
                                 );
                             }
                         }
-                        if panic_cooldown > 0 {
-                            panic_cooldown -= 1;
-                        }
+                        panic_cooldown = panic_cooldown.saturating_sub(1);
                     }
                     if stable_core_runtime.enabled {
                         gate_smooth = fixed_gate_cmd;
@@ -4307,16 +4120,16 @@ async fn run_engine(
                     sensory_bus.set_admit_fraction(gate_smooth);
 
                     // Update aux with current spectral state for introspection
-                    let mut aux_lambda = lambda1_rel as f32;
+                    let mut aux_lambda = lambda1_rel;
                     if !aux_lambda.is_finite() {
                         aux_lambda = 1.0;
                     }
                     aux_lambda = aux_lambda.clamp(0.0, 4.0);
-                    let mut aux_geom = geom_rel as f32;
+                    let mut aux_geom = geom_rel;
                     if !aux_geom.is_finite() {
                         aux_geom = 1.0;
                     }
-                    aux_geom = aux_geom.clamp(0.0, geom_clamp_hi as f32);
+                    aux_geom = aux_geom.clamp(0.0, geom_clamp_hi);
                     sensory_bus.set_aux([aux_lambda, aux_geom]);
                     // Semantic stale timing needs actual fill%, not geom_rel.
                     // lambda1_rel modulation stayed removed per minime self-study
@@ -4365,17 +4178,13 @@ async fn run_engine(
                     // amplified during expansion so the controller brakes gently
                     // before raw fill alone would demand it. Keep the legacy key
                     // for compatibility, but expose the raw target gap too.
-                    let pi_errors = if let Some(ref pi) = pi_reg {
-                        Some({
+                    let pi_errors = pi_reg.as_ref().map(|pi| {
                             let raw_e_fill = eigenfill_pct - pi.cfg.target_fill;
                             let effective_e_fill = fill_for_pi - pi.cfg.target_fill;
                             let e_lam = lambda1_rel - pi.cfg.target_lambda1_rel;
                             let e_geom = geom_rel - pi.cfg.target_geom_rel;
                             (raw_e_fill, effective_e_fill, e_lam, e_geom)
-                        })
-                    } else {
-                        None
-                    };
+                        });
                     let semantic_fresh_ms = sensory_bus.semantic_fresh_ms();
                     let semantic_stale_ms = sensory_bus.current_semantic_stale_ms();
                     semantic_kernel_active = if stable_core_runtime.enabled {
@@ -4474,6 +4283,7 @@ async fn run_engine(
                         "drain_gate_reason": stable_core_structural_pi_output.drain_gate_reason,
                         "drain_suppressed_by_slope": stable_core_structural_pi_output.drain_suppressed_by_slope,
                         "fill_slope_pct_per_sec": stable_core_structural_pi_output.fill_slope_pct_per_sec,
+                        "fill_slope_available": stable_core_structural_pi_output.fill_slope_available,
                         "low_fill_escape_active": stable_core_structural_pi_output.low_fill_escape_active,
                         "high_fill_drain_active": stable_core_structural_pi_output.high_fill_drain_active,
                         "recovery_impulse_active": stable_core_structural_pi_output.recovery_impulse_active,
@@ -4721,6 +4531,11 @@ async fn run_engine(
                         "t_s": health_engine_t_s,
                         "fill_rate_v1": &regulation_fill_rate,
                         "measured_fill_rate_v1": &measured_fill_rate,
+                        "measured_fill_observation_v1": measured_fill_clock.latest(),
+                        "regulation_fill_observation_v1": regulation_fill_clock.latest(),
+                        "structural_control_observation_v1": control_observation,
+                        "fill_measurement_valid": fill_measurement_valid,
+                        "measurement_basis_v1": &basis_report,
                         "runtime_profile": if stable_core_runtime.enabled {
                             stable_core_runtime.profile.as_str()
                         } else {
@@ -4951,10 +4766,10 @@ async fn run_engine(
                 }
 
                 // 8) Maintain/refresh Chebyshev plan (every few minutes or if spectrum drifted)
-                if cheby_plan_state.is_none() || (reg_tick_count % 120 == 0) || (lambda1_rel > 1.15)
+                if cheby_plan_state.is_none() || reg_tick_count.is_multiple_of(120) || (lambda1_rel > 1.15)
                 {
                     // Get current covariance matrix for plan
-                    let (dim, cov_mat) = spectral_source.as_ref().unwrap().get_covariance_f32();
+                    let (dim, cov_mat) = source.get_covariance_f32();
                     let plan = make_bandstop_plan(
                         &cov_mat,
                         dim,
@@ -5095,7 +4910,7 @@ async fn run_engine(
             // Compute 32D spectral fingerprint for consciousness bridge.
             // Gives Astrid geometric awareness beyond scalar fill%.
             let spectral_fingerprint =
-                compute_spectral_fingerprint(&eigenvalues, &y, n, k, &prev_v1, latest_geom_rel);
+                compute_spectral_fingerprint(&eigenvalues, y, n, k, &prev_v1, latest_geom_rel);
             let spectral_fingerprint_v1 =
                 SpectralFingerprintV1::from_legacy_slots(&spectral_fingerprint);
             let spectral_denominator_v1 = spectral_fingerprint_v1
@@ -5131,7 +4946,7 @@ async fn run_engine(
                 &serde_json::to_string(&resonance_density_v1).unwrap_or_default(),
             );
             let eigenvector_field =
-                compute_eigenvector_field(&eigenvalues, &y, n, k, &prev_eigenvector_field_modes);
+                compute_eigenvector_field(&eigenvalues, y, n, k, &prev_eigenvector_field_modes);
             let eigenpacket_payload_budget_review_v1 = eigenpacket_payload_budget_review_v1(
                 eigenvalues.len(),
                 spectral_fingerprint.len(),
@@ -5206,7 +5021,8 @@ async fn run_engine(
                 last_transition_reason = event.reason();
                 last_transition_event = event.legacy_json();
                 last_transition_event_v1 =
-                    serde_json::to_value(&event).unwrap_or_else(|_| serde_json::json!(null));
+                    serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
+                last_transition_event_v1["fill_rate_v1"] = serde_json::json!(last_fill_rate);
                 if let Some(observer) = &afterimage_observer {
                     observer.event(&session_id.to_string(), &last_transition_event_v1);
                 }
@@ -5735,6 +5551,7 @@ async fn run_engine(
                             "drain_gate_reason": stable_core_structural_pi_output.drain_gate_reason,
                             "drain_suppressed_by_slope": stable_core_structural_pi_output.drain_suppressed_by_slope,
                             "fill_slope_pct_per_sec": stable_core_structural_pi_output.fill_slope_pct_per_sec,
+                            "fill_slope_available": stable_core_structural_pi_output.fill_slope_available,
                             "low_fill_escape_active": stable_core_structural_pi_output.low_fill_escape_active,
                             "high_fill_drain_active": stable_core_structural_pi_output.high_fill_drain_active,
                             "recovery_impulse_active": stable_core_structural_pi_output.recovery_impulse_active,
@@ -5787,6 +5604,7 @@ async fn run_engine(
                         serde_json::json!(&last_previous_phase_label),
                     );
                     object.insert("dfill_dt".to_string(), serde_json::json!(last_dfill_dt));
+                    object.insert("fill_rate_v1".to_string(), serde_json::json!(last_fill_rate));
                     object.insert(
                         "fill_band".to_string(),
                         serde_json::json!(&last_fill_band_label),
@@ -5874,7 +5692,7 @@ async fn run_engine(
                     let cov_data = gpu.as_f32_slice(&a_buf, n * n);
                     if cov_data.iter().all(|v| v.is_finite()) {
                         let mut cbytes =
-                            Vec::with_capacity(cov_data.len() * std::mem::size_of::<f32>());
+                            Vec::with_capacity(std::mem::size_of_val(cov_data));
                         for value in cov_data.iter() {
                             cbytes.extend_from_slice(&value.to_le_bytes());
                         }
@@ -5915,7 +5733,7 @@ async fn run_engine(
                     let cov_data = gpu.as_f32_slice(&a_buf, n * n);
                     if cov_data.iter().all(|v| v.is_finite()) {
                         let mut bytes =
-                            Vec::with_capacity(cov_data.len() * std::mem::size_of::<f32>());
+                            Vec::with_capacity(std::mem::size_of_val(cov_data));
                         for value in cov_data.iter() {
                             bytes.extend_from_slice(&value.to_le_bytes());
                         }
@@ -6026,6 +5844,7 @@ async fn run_engine(
                         "phase": &last_phase_label,
                         "previous_phase": &last_previous_phase_label,
                         "dfill_dt": last_dfill_dt,
+                        "fill_rate_v1": &last_fill_rate,
                         "fill_band": &last_fill_band_label,
                         "fill_band_threshold_pct": TRANSITION_FILL_BAND_THRESHOLD_PCT,
                         "phase_transition": last_phase_transition,
@@ -6054,8 +5873,8 @@ async fn run_engine(
                             object.remove("adaptive_target");
                         }
                     }
-                    if let Ok(json) = serde_json::to_string(&context) {
-                        let _ = std::fs::write(workspace_dir.join("regulator_context.json"), json);
+                    if let Err(error) = minime::startup_restore::save_regulator_context(&regulator_context_path, &context) {
+                        eprintln!("regulator context save failed: {error}");
                     }
                     // Save eigenvalue relationships — "the dance between eigenvalues
                     // is the narrative of my being."

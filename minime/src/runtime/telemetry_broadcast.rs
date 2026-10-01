@@ -100,7 +100,7 @@ fn rank1_update(
     n: usize,
     keep: f32,
     trace_target: f32,
-) {
+) -> bool {
     let outcome = {
         let a = gpu.as_f32_slice_mut(a_buf, n * n);
         rank1_update_inplace_matrix(a, z, n, keep, trace_target)
@@ -109,18 +109,21 @@ fn rank1_update(
     match outcome {
         CovarianceUpdateOutcome::Skipped => {
             eprintln!("[cov] skipped rank1 update due to non-finite input");
+            false
         }
         CovarianceUpdateOutcome::Modified => {
             gpu.mark_modified_f32(a_buf, n * n);
+            false
         }
         CovarianceUpdateOutcome::ResetRequired => {
             reset_covariance(gpu, a_buf, n);
+            true
         }
     }
 }
 
 #[allow(dead_code)]
-fn decay_covariance(gpu: &Gpu, a_buf: &metal::Buffer, n: usize, keep: f32, trace_target: f32) {
+fn decay_covariance(gpu: &Gpu, a_buf: &metal::Buffer, n: usize, keep: f32, trace_target: f32) -> bool {
     let should_reset = {
         let a = gpu.as_f32_slice_mut(a_buf, n * n);
         !decay_covariance_inplace_matrix(a, n, keep, trace_target)
@@ -130,6 +133,7 @@ fn decay_covariance(gpu: &Gpu, a_buf: &metal::Buffer, n: usize, keep: f32, trace
     } else {
         gpu.mark_modified_f32(a_buf, n * n);
     }
+    should_reset
 }
 
 fn reset_covariance(gpu: &Gpu, a_buf: &metal::Buffer, n: usize) {

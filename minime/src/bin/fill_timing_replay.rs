@@ -24,6 +24,7 @@ struct Args {
 fn decision(output: StabilityPiOutput) -> Value {
     json!({
         "active": output.active, "integral": output.integral,
+        "fill_slope_available": output.fill_slope_available,
         "pi_output": output.pi_output, "drain_weight": output.drain_weight,
         "drain_gate_reason": output.drain_gate_reason,
         "recovery_impulse_active": output.recovery_impulse_active,
@@ -69,7 +70,7 @@ fn replay(artifact: &Artifact, nominal_seconds: f64) -> Result<Value> {
             let old = decision(nominal_pi.step(fill, rate as f32, OverfillStage::Hold, true));
             let corrected = decision(observed_pi.step(
                 fill,
-                observed.controller_value(),
+                observed.rate_pct_per_sec,
                 OverfillStage::Hold,
                 true,
             ));

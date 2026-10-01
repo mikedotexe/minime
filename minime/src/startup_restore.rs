@@ -1,6 +1,48 @@
 use serde::Serialize;
 use serde_json::Value;
-use std::{fs, io::ErrorKind, path::Path};
+use std::{
+    fs,
+    io::{self, ErrorKind, Write},
+    path::Path,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+/// Replace one regulator context only after its complete bytes are durable.
+/// This is the single engine writer, not a general multi-writer state store.
+pub fn save_regulator_context(path: &Path, value: &Value) -> io::Result<()> {
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("missing context parent"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("missing context filename"))?;
+    let temp = parent.join(format!(
+        ".{}.{}-{}.tmp",
+        name.to_string_lossy(),
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let bytes = serde_json::to_vec(value)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temp)?;
+    let result = (|| {
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp, path)?;
+        fs::File::open(parent)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
 
 const PI_STATE_FIELDS: [&str; 5] = ["integ_fill", "integ_lam", "integ_geom", "gate", "filt"];
 const ADAPTIVE_FIELDS: [&str; 2] = ["fill_ema", "adaptive_target"];
@@ -305,6 +347,7 @@ fn read_f32(value: &Value, field: &str) -> Option<f32> {
         .get(field)
         .and_then(Value::as_f64)
         .map(|raw| raw as f32)
+        .filter(|value| value.is_finite())
 }
 
 #[cfg(test)]
@@ -315,6 +358,48 @@ mod tests {
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn oversized_numeric_context_is_not_restored_as_infinity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context.json");
+        fs::write(&path, r#"{"integ_fill":1e100,"integ_lam":0,"integ_geom":0,"gate":0.4,"filt":0.2,"baseline_lambda1":1e100}"#).unwrap();
+        let report = load_regulator_context(&path, false);
+        assert_eq!(report.status.state, StartupRestoreState::Partial);
+        assert!(!report.status.restored_pi_state);
+        assert!(report.context.unwrap().baseline_lambda1.is_none());
+    }
+
+    #[test]
+    fn durable_context_roundtrip_preserves_unknown_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context.json");
+        for gate in [0.3, 0.4] {
+            let value = serde_json::json!({"integ_fill":1,"integ_lam":2,"integ_geom":3,"gate":gate,"filt":0.2,"fill_rate_v1":{"available":false}});
+            save_regulator_context(&path, &value).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap(),
+                value
+            );
+            assert!(
+                load_regulator_context(&path, false)
+                    .status
+                    .restored_pi_state
+            );
+        }
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn context_replace_failure_is_an_error_and_preserves_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context.json");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("keep"), b"prior evidence").unwrap();
+        assert!(save_regulator_context(&path, &serde_json::json!({})).is_err());
+        assert_eq!(fs::read(path.join("keep")).unwrap(), b"prior evidence");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     fn temp_path(label: &str) -> PathBuf {
         let nanos = SystemTime::now()

@@ -256,9 +256,8 @@ impl RegulatorState {
         for v in self.modes.iter() {
             // dot
             let mut s = 0.0f32;
-            let feature_len = item.feature.len().min(v.len());
-            for k in 0..feature_len {
-                s += v[k] * item.feature[k];
+            for (mode, feature) in v.iter().zip(item.feature) {
+                s += mode * feature;
             }
             pen += s * s;
         }

@@ -1,3 +1,4 @@
+#[expect(clippy::too_many_arguments, reason = "Versioned telemetry recipe retains independently named inputs without retuning.")]
 fn compute_resonance_density_v1(
     eigenvalues: &[f32],
     active_modes: ActiveModeTelemetry,
@@ -121,6 +122,7 @@ fn semantic_trickle_pressure(semantic: &SemanticEnergyV1) -> f32 {
         .clamp(0.0, 1.0)
 }
 
+#[expect(clippy::too_many_arguments, reason = "Versioned telemetry recipe retains independently named inputs without retuning.")]
 fn compute_pressure_source_v1(
     eigenvalues: &[f32],
     active_modes: ActiveModeTelemetry,
@@ -261,9 +263,10 @@ fn should_write_phase_transition_moment_marker(
     fill_band_crossed: bool,
     spectral_spike: bool,
 ) -> bool {
-    !debounced && !(crossed_target_fill || fill_band_crossed || spectral_spike)
+    !(debounced || crossed_target_fill || fill_band_crossed || spectral_spike)
 }
 
+#[expect(clippy::too_many_arguments, reason = "Versioned telemetry recipe retains independently named inputs without retuning.")]
 fn compute_inhabitable_fluctuation_v1(
     eigenvalues: &[f32],
     previous_eigenvalues: Option<&[f32]>,

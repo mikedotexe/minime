@@ -8,6 +8,7 @@ pub mod av_ws;
 pub mod buffer_pool;
 pub mod cheby;
 pub mod controller_recovery;
+pub mod covariance_math;
 pub mod db;
 pub mod division;
 pub mod envelope_registry;
@@ -16,7 +17,9 @@ pub mod fill_timing;
 pub mod gpu;
 pub mod hard_reset;
 pub mod ising_shadow;
+pub mod measurement_basis;
 pub mod memory_bank;
+pub mod stable_covariance;
 // pub mod net;  // no net.rs file
 pub mod nn;
 pub mod owner_inquiry;

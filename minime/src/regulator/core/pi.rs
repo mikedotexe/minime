@@ -130,7 +130,7 @@ impl PIRegState {
         self.fill_variance_ema = 0.95 * self.fill_variance_ema + 0.05 * fill_error;
 
         // Calibrate every 120 ticks
-        if self.calibration_tick % 120 != 0 {
+        if !self.calibration_tick.is_multiple_of(120) {
             return;
         }
 

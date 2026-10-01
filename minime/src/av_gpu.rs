@@ -63,7 +63,7 @@ impl AvGpu {
         let tex = Self::make_gray_tex(&dev, w as u64, h as u64, mem_mode)?;
 
         // buffers (page-aligned for SLC fast path)
-        let npix = (w * h) as usize;
+        let npix = w * h;
         let prev = dev.new_buffer(
             Self::page_align((npix * mem::size_of::<f32>()) as u64),
             Self::opts(mem_mode),

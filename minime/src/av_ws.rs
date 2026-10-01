@@ -200,7 +200,7 @@ async fn handle_av_client(
                             }
 
                             // Forward frame to GPU processor
-                            if let Err(_) = frame_tx.send(data).await {
+                            if frame_tx.send(data).await.is_err() {
                                 eprintln!("⚠️  GPU processor channel closed");
                                 break;
                             }
@@ -291,7 +291,7 @@ pub async fn spawn_av_gpu_server_v2(
                     bus_clone.push_video(features.to_vec(), NowMs::now());
 
                     frame_count += 1;
-                    if frame_count % 30 == 0 {
+                    if frame_count.is_multiple_of(30) {
                         println!(
                             "🎨 Processed {} GPU frames | Latest: [mean={:.3}, var={:.3}, motion={:.3}, edge={:.3}]",
                             frame_count, features[0], features[1], features[2], features[3]

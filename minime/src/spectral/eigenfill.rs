@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -127,6 +127,16 @@ impl EigenFillEstimator {
 
     /// Update with raw eigenvalues (any scale). Returns smoothed fill in [0,1].
     pub fn update(&mut self, lambdas: &[f32]) -> f32 {
+        self.update_with_clock(lambdas, None)
+    }
+
+    /// Same numerical update with an explicit interval for isolated qualification.
+    /// Does not read or update the process-local clock used by `update`.
+    pub fn update_with_elapsed(&mut self, lambdas: &[f32], elapsed: Duration) -> f32 {
+        self.update_with_clock(lambdas, Some(elapsed))
+    }
+
+    fn update_with_clock(&mut self, lambdas: &[f32], elapsed: Option<Duration>) -> f32 {
         let sample_dim = lambdas.len().max(1) as f32;
         let mut sum = 0.0f32;
         for &l in lambdas {
@@ -177,8 +187,13 @@ impl EigenFillEstimator {
         };
 
         // Temporal smoothing and slight decay to avoid sticky 100%
-        let dt = self.last_update.elapsed().as_secs_f32().max(1e-3);
-        self.last_update = Instant::now();
+        let dt = elapsed
+            .unwrap_or_else(|| self.last_update.elapsed())
+            .as_secs_f32()
+            .max(1e-3);
+        if elapsed.is_none() {
+            self.last_update = Instant::now();
+        }
 
         // decay term scaled by configured leak rate
         let leak = (self.leak_rate * dt).min(0.15);
@@ -192,7 +207,7 @@ impl EigenFillEstimator {
         self.ema_fill
     }
     pub fn set_rel_thresh(&mut self, r: f32) {
-        self.rel_thresh = r.max(0.01).min(0.9);
+        self.rel_thresh = if r.is_nan() { 0.01 } else { r.clamp(0.01, 0.9) };
     }
     pub fn set_smoothing(&mut self, alpha_stats: f32, alpha_fill: f32) {
         self.alpha_stats = alpha_stats.clamp(0.01, 0.5);
@@ -241,6 +256,22 @@ impl EigenFillEstimator {
 #[cfg(test)]
 mod tests {
     use super::{EigenFillEstimator, ThresholdMode};
+
+    #[test]
+    fn injected_intervals_use_the_existing_leak_recurrence_without_reading_clock() {
+        let mut estimator = EigenFillEstimator::fixed_survival(8);
+        let clock = estimator.last_update;
+        let mut expected = 0.0_f32;
+        for milliseconds in [0, 500, 2370, 10_000, 100_000] {
+            let seconds = (milliseconds as f32 / 1000.0).max(0.001);
+            let leak = (0.006 * seconds).min(0.15);
+            expected = 0.1 + 0.9 * (1.0 - leak) * expected;
+            let actual = estimator
+                .update_with_elapsed(&[1.0; 8], std::time::Duration::from_millis(milliseconds));
+            assert!((actual - expected).abs() < 1e-6);
+            assert_eq!(estimator.last_update, clock);
+        }
+    }
 
     #[test]
     fn identity_spectrum_does_not_count_as_fully_filled() {

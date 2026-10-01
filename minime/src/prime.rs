@@ -43,6 +43,11 @@ impl PrimeRing {
     pub fn len(&self) -> usize {
         self.len
     }
+
+    /// Like `len`, this describes allocated storage, not sample occupancy.
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
 }
 
 #[derive(Clone)]
@@ -80,9 +85,9 @@ pub fn sensory_primes() -> Vec<usize> {
 // Synthetic feature generators for testing
 pub fn synth_audio_features(n: usize, phase: &mut f32) -> Vec<f32> {
     let mut v = vec![0.0f32; n];
-    for i in 0..n {
+    for (i, value) in v.iter_mut().enumerate() {
         let t = *phase + i as f32 * 0.03;
-        v[i] = t.sin() * 0.5 + (t * 0.5).cos() * 0.25;
+        *value = t.sin() * 0.5 + (t * 0.5).cos() * 0.25;
     }
     *phase += n as f32 * 0.03;
     v

@@ -1,0 +1,53 @@
+{
+  "schema": "measurement_basis_receipt_review_v1",
+  "paired_comparisons": 24,
+  "feedback_runs": 49,
+  "feedback_steps": 2448,
+  "nominal_controls": 8,
+  "nominal_controls_exact": true,
+  "paired_fill_curves_exact": true,
+  "prior_observed_fill_and_matrix_equal": true,
+  "rank_one_oracle": true,
+  "retained_identity_oracle": true,
+  "fresh_identity_oracle": true,
+  "measured_row_nonfinite_columns": 0,
+  "extended_summary": {
+    "drain_steps": 11,
+    "high_fill_samples_ge_90": 0,
+    "last_fill": 73.92506408691406,
+    "max_drain": 0.23999999463558197,
+    "max_fill": 75.52215576171875,
+    "min_fill": 0.005663042422384024,
+    "missing_rate_steps": 2,
+    "recovery_steps": 75,
+    "resets": 1
+  },
+  "extended_first_leave": {
+    "tick": 76,
+    "time_ms": 182490,
+    "fill_pct": 65.52216339111328,
+    "mode": "scaffold_reentry"
+  },
+  "estimator_48": {
+    "fresh_fill": 88.37039947509766,
+    "retained_ema_mean": 5.680955410003662,
+    "retained_fill": 0.03843171149492264,
+    "tick": 47,
+    "time_ms": 113760
+  },
+  "estimator_144": {
+    "fresh_fill": 88.65401458740234,
+    "retained_ema_mean": 1.0340241193771362,
+    "retained_fill": 88.6471176147461,
+    "tick": 143,
+    "time_ms": 341280
+  },
+  "estimator_first_ge_68": {
+    "fresh_fill": 88.646240234375,
+    "retained_ema_mean": 2.004713773727417,
+    "retained_fill": 69.94866943359375,
+    "tick": 77,
+    "time_ms": 184860
+  },
+  "boundary": "synthetic numerical qualification; not live-state, stability or experiential evidence"
+}

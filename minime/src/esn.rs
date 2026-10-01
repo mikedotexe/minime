@@ -535,8 +535,7 @@ pub fn settled_entropy_pressure_buffer_review_v1(
             PROPOSED_SETTLED_ENTROPY_PRESSURE_HIGH_FLOOR,
         );
     let status = if entropy >= ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY
-        && pressure >= DYNAMIC_NOISE_PRESSURE_ROOM_START
-        && pressure <= 0.22
+        && (DYNAMIC_NOISE_PRESSURE_ROOM_START..=0.22).contains(&pressure)
         && foothold >= 0.65
     {
         "approval_required_settled_entropy_pressure_floor_trial"
@@ -621,8 +620,9 @@ pub fn entropy_ceiling_noise_damping_review_v1(
         - (damping_need * (dynamic_noise - PROPOSED_HIGH_ENTROPY_NOISE_DAMPENING).max(0.0)))
     .clamp(DYNAMIC_EXPLORATION_NOISE_MIN, DYNAMIC_EXPLORATION_NOISE_MAX);
     let proposed_exploration_noise = damped_noise.min(PROPOSED_HIGH_ENTROPY_NOISE_DAMPENING);
-    let entropy_between_current_and_proposed = entropy >= ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY
-        && entropy < PROPOSED_VOLATILE_ENTROPY_CEILING;
+    let entropy_between_current_and_proposed = (ADAPTIVE_INTROSPECTION_VOLATILE_ENTROPY
+        ..PROPOSED_VOLATILE_ENTROPY_CEILING)
+        .contains(&entropy);
     let density_noise_trial = damping_need > 0.25 && active_noise > damped_noise;
     let status = if entropy_between_current_and_proposed && density_noise_trial {
         "approval_required_entropy_ceiling_and_density_noise_damping_trial"
@@ -1288,7 +1288,7 @@ impl SpectralSR {
             IntrospectionPolicy::Adaptive => {
                 let next_introspection = self.introspection_count.saturating_add(1);
                 let reason_periodic =
-                    next_introspection % ADAPTIVE_INTROSPECTION_RECALIBRATE_EVERY == 0;
+                    next_introspection.is_multiple_of(ADAPTIVE_INTROSPECTION_RECALIBRATE_EVERY);
                 let reason_geom = geom_rel >= ADAPTIVE_INTROSPECTION_GEOM_HIGH;
                 let reason_pressure = pressure_rel >= ADAPTIVE_INTROSPECTION_PRESSURE_HIGH;
                 let high_step = reason_periodic || reason_geom || reason_pressure;
@@ -1542,7 +1542,7 @@ impl SpectralSR {
             let ratio = self.eig1 / self.ema_eig.max(1e-3);
             let alpha = if self.ema_eig < 1e-3 {
                 1.0 // First value: seed directly
-            } else if ratio > 2.0 || ratio < 0.5 {
+            } else if !ratio.is_nan() && !(0.5..=2.0).contains(&ratio) {
                 0.10 // Warmup: fast catch-up
             } else {
                 0.005 // Steady-state: slow tracking
@@ -1626,8 +1626,8 @@ impl SpectralSR {
         }
         let norm_start = timing_enabled.then(Instant::now);
         let n = l2_norm(&v);
-        for i in 0..self.d {
-            v[i] /= n;
+        for value in &mut v[..self.d] {
+            *value /= n;
         }
         if let Some(start) = norm_start {
             acc.host_norm_us = acc.host_norm_us.saturating_add(micros_u64(start.elapsed()));
@@ -1639,8 +1639,8 @@ impl SpectralSR {
             let norm_start = timing_enabled.then(Instant::now);
             let n = l2_norm(&y);
             v = y;
-            for i in 0..self.d {
-                v[i] /= n;
+            for value in &mut v[..self.d] {
+                *value /= n;
             }
             if let Some(start) = norm_start {
                 acc.host_norm_us = acc.host_norm_us.saturating_add(micros_u64(start.elapsed()));
@@ -1662,7 +1662,7 @@ impl SpectralSR {
             let ratio = self.eig1 / self.ema_eig.max(1e-3);
             let alpha = if self.ema_eig < 1e-3 {
                 1.0 // First value: seed directly
-            } else if ratio > 2.0 || ratio < 0.5 {
+            } else if !ratio.is_nan() && !(0.5..=2.0).contains(&ratio) {
                 0.10 // Warmup: fast catch-up
             } else {
                 0.005 // Steady-state: slow tracking
@@ -1686,7 +1686,7 @@ impl SpectralSR {
         let mut introspection_fired = false;
         let decision = self.default_step_decision();
 
-        if self.t % p == 0 {
+        if self.t.is_multiple_of(p) {
             self.power_iter_profiled(decision.steps, &mut acc)?;
             self.pidx = (self.pidx + 1) % self.primes.len();
             self.introspection_count = self.introspection_count.saturating_add(1);
@@ -1722,7 +1722,7 @@ impl SpectralSR {
 
         self.reap_completed_rank1s()?;
 
-        if self.t % p == 0 {
+        if self.t.is_multiple_of(p) {
             // Batched: rank1 + power iteration with fused first submit
             self.rank1_and_power_step_profiled(x_host, decision.steps, &mut acc)?;
             // V₁ damping: redistribute excess energy from dominant eigenvector.
@@ -1741,7 +1741,7 @@ impl SpectralSR {
             z ^= z >> 31;
             let roll = z % 100;
             if roll < 20 {
-                self.pidx = (z >> 7) as usize % self.primes.len();
+                self.pidx = (z >> 7) % self.primes.len();
             } else {
                 self.pidx = (self.pidx + 1) % self.primes.len();
             }
@@ -1815,6 +1815,10 @@ impl SpectralSR {
 // Echo State Network with Self-Referential Adaptation
 //=============================================================================
 
+#[allow(
+    clippy::upper_case_acronyms,
+    reason = "Existing public type name is shared by library and runtime callers."
+)]
 pub struct ESN {
     pub res_size: usize,
     pub in_size: usize,
@@ -1857,6 +1861,10 @@ pub struct ESN {
 }
 
 impl ESN {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Existing reservoir constructor parameters remain independent; no configuration migration."
+    )]
     pub fn new(
         res_size: usize,
         in_size: usize,
@@ -1877,13 +1885,13 @@ impl ESN {
         // Boost aux (indices 16-17) and semantic lanes (>=18) so they influence the reservoir more strongly.
         for chunk in win.chunks_mut(in_size + 1) {
             if in_size > 16 {
-                for idx in 16..in_size.min(18) {
-                    chunk[idx] *= 1.2;
+                for value in &mut chunk[16..in_size.min(18)] {
+                    *value *= 1.2;
                 }
             }
             if in_size > 18 {
-                for idx in 18..in_size {
-                    chunk[idx] *= 1.6;
+                for value in &mut chunk[18..in_size] {
+                    *value *= 1.6;
                 }
             }
         }
@@ -2202,9 +2210,9 @@ impl ESN {
 
         // k = P*phi / (lambda + phi^T*P*phi)
         let mut pphi = vec![0.0f32; m];
-        for r in 0..m {
+        for (r, value) in pphi.iter_mut().enumerate() {
             let row = &self.p[r * m..(r + 1) * m];
-            pphi[r] = vv_dot(row, &self.phi);
+            *value = vv_dot(row, &self.phi);
         }
 
         let denom = self.lambda_live + vv_dot(&self.phi, &pphi);
@@ -2217,8 +2225,8 @@ impl ESN {
 
         // Update weights
         let err = target - yhat;
-        for i in 0..m {
-            self.wout[i] += k[i] * err;
+        for (weight, &gain) in self.wout[..m].iter_mut().zip(&k) {
+            *weight += gain * err;
         }
 
         // Update P = (P - k*phi^T*P) / lambda
@@ -2233,8 +2241,8 @@ impl ESN {
             }
         }
 
-        for i in 0..m * m {
-            self.p[i] = (self.p[i] - kphit_p[i]) / self.lambda_live;
+        for (value, &correction) in self.p[..m * m].iter_mut().zip(&kphit_p) {
+            *value = (*value - correction) / self.lambda_live;
         }
 
         // Now adapt with actual error
@@ -2633,13 +2641,13 @@ pub struct EsnLeakOverrideStatus {
 //=============================================================================
 
 fn mv_mul(m: &[f32], rows: usize, cols: usize, v: &[f32], out: &mut [f32]) {
-    for r in 0..rows {
+    for (r, value) in out[..rows].iter_mut().enumerate() {
         let mut s = 0.0f32;
         let base = r * cols;
         for c in 0..cols {
             s += m[base + c] * v[c];
         }
-        out[r] = s;
+        *value = s;
     }
 }
 

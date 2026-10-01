@@ -1,0 +1,1299 @@
+   Compiling minime v0.1.0 (/Users/v/other/worktrees/afterimage-timing-20260930/minime/minime)
+       Fixed src/nn.rs (6 fixes)
+       Fixed src/transition_afterimage/metrics.rs (1 fix)
+       Fixed src/sensory_bus.rs (1 fix)
+       Fixed src/av_ws.rs (1 fix)
+       Fixed src/ising_shadow.rs (1 fix)
+       Fixed src/regulator/core/pi.rs (1 fix)
+       Fixed src/transition_afterimage/capture.rs (1 fix)
+       Fixed src/cheby.rs (1 fix)
+       Fixed src/gpu.rs (2 fixes)
+       Fixed src/esn.rs (8 fixes)
+       Fixed src/av_gpu.rs (1 fix)
+       Fixed src/rescue_overfill.rs (1 fix)
+warning: unnecessary parentheses around assigned value
+  --> src/av_gpu.rs:66:20
+   |
+66 |         let npix = (w * h);
+   |                    ^     ^
+   |
+   = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+   |
+66 -         let npix = (w * h);
+66 +         let npix = w * h;
+   |
+
+warning: unnecessary parentheses
+    --> src/esn.rs:1742:29
+     |
+1742 |                 self.pidx = ((z >> 7)) % self.primes.len();
+     |                             ^^^^^^^^^^ help: remove them: `(z >> 7)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#double_parens
+     = note: `#[warn(clippy::double_parens)]` on by default
+
+warning: constant `FANOUT_BUFFER_BYTES` is never used
+ --> src/sovereign_division/fanout.rs:7:7
+  |
+7 | const FANOUT_BUFFER_BYTES: usize = 16 * 1024;
+  |       ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `LegacyAvFanoutProofMetricsV1` is never constructed
+  --> src/sovereign_division/fanout.rs:10:19
+   |
+10 | pub(crate) struct LegacyAvFanoutProofMetricsV1 {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `copy_exact_fanout` is never used
+  --> src/sovereign_division/fanout.rs:22:21
+   |
+22 | pub(crate) async fn copy_exact_fanout<R, A, B>(
+   |                     ^^^^^^^^^^^^^^^^^
+
+warning: struct `GatewayByteExactProofMetricsV1` is never constructed
+  --> src/sovereign_division/gateway.rs:15:19
+   |
+15 | pub(crate) struct GatewayByteExactProofMetricsV1 {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: this function has too many arguments (8/7)
+   --> src/activation_trace.rs:96:5
+    |
+ 96 | /     pub fn maybe_sample(
+ 97 | |         &mut self,
+ 98 | |         t_ms: u64,
+ 99 | |         wall_clock_unix_ms: u64,
+...   |
+104 | |         activations: &[f32],
+105 | |     ) -> bool {
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+    = note: `#[warn(clippy::too_many_arguments)]` on by default
+
+warning: redundant pattern matching, consider using `is_err()`
+   --> src/av_ws.rs:203:36
+    |
+203 | ...                   if let Err(_) = frame_tx.send(data).await {
+    |                       -------^^^^^^---------------------------- help: try: `if frame_tx.send(data).await.is_err()`
+    |
+    = note: this will change drop order of the result, as well as all temporaries
+    = note: add `#[allow(clippy::redundant_pattern_matching)]` if this is important
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#redundant_pattern_matching
+    = note: `#[warn(clippy::redundant_pattern_matching)]` on by default
+
+warning: this function has too many arguments (10/7)
+   --> src/cheby.rs:96:1
+    |
+ 96 | / pub fn cheby_apply_gpu(
+ 97 | |     pool: &mut BufferPool,
+ 98 | |     queue: &CommandQueue,
+ 99 | |     pso: &ComputePipelineState,
+...   |
+106 | |     plan: &ChebyPlan,
+107 | | ) -> f32 {
+    | |________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: the loop variable `k` is used to index `coeffs`
+   --> src/cheby.rs:248:14
+    |
+248 |     for k in 0..=m {
+    |              ^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+    = note: `#[warn(clippy::needless_range_loop)]` on by default
+help: consider using an iterator and enumerate()
+    |
+248 -     for k in 0..=m {
+248 +     for (k, <item>) in coeffs.iter_mut().enumerate().take(m + 1) {
+    |
+
+warning: this function has too many arguments (9/7)
+   --> src/db.rs:372:5
+    |
+372 | /     pub fn save_eigenvalues(
+373 | |         &self,
+374 | |         session_id: i64,
+375 | |         timestamp: f64,
+...   |
+381 | |         phase: &str,
+382 | |     ) -> Result<()> {
+    | |___________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (10/7)
+   --> src/db.rs:516:5
+    |
+516 | /     pub fn save_esn_metrics(
+517 | |         &self,
+518 | |         session_id: i64,
+519 | |         timestamp: f64,
+...   |
+526 | |         esn_geom_rel: f32,
+527 | |     ) -> Result<()> {
+    | |___________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (8/7)
+   --> src/db.rs:549:5
+    |
+549 | /     pub fn save_resonance_density(
+550 | |         &self,
+551 | |         session_id: i64,
+552 | |         timestamp: f64,
+...   |
+557 | |         payload: &str,
+558 | |     ) -> Result<()> {
+    | |___________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (8/7)
+   --> src/db.rs:577:5
+    |
+577 | /     pub fn save_pressure_source(
+578 | |         &self,
+579 | |         session_id: i64,
+580 | |         timestamp: f64,
+...   |
+585 | |         payload: &str,
+586 | |     ) -> Result<()> {
+    | |___________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (9/7)
+   --> src/db.rs:605:5
+    |
+605 | /     pub fn save_inhabitable_fluctuation(
+606 | |         &self,
+607 | |         session_id: i64,
+608 | |         timestamp: f64,
+...   |
+614 | |         payload: &str,
+615 | |     ) -> Result<()> {
+    | |___________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (11/7)
+   --> src/db.rs:636:5
+    |
+636 | /     pub fn save_ising_shadow_metrics(
+637 | |         &self,
+638 | |         session_id: i64,
+639 | |         timestamp: f64,
+...   |
+647 | |         phase: &str,
+648 | |     ) -> Result<()> {
+    | |___________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (9/7)
+   --> src/db.rs:775:5
+    |
+775 | /     pub fn log_decision(
+776 | |         &self,
+777 | |         session_id: i64,
+778 | |         timestamp: f64,
+...   |
+784 | |         esn_deig: Option<f32>,
+785 | |     ) -> Result<()> {
+    | |___________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (8/7)
+   --> src/db.rs:891:5
+    |
+891 | /     pub fn write_journal(
+892 | |         &self,
+893 | |         session_id: i64,
+894 | |         timestamp: f64,
+...   |
+899 | |         file_path: Option<&str>,
+900 | |     ) -> Result<i64> {
+    | |____________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (9/7)
+   --> src/db.rs:912:5
+    |
+912 | /     pub fn save_spectral_checkpoint(
+913 | |         &self,
+914 | |         session_id: i64,
+915 | |         timestamp: f64,
+...   |
+921 | |         annotation: Option<&str>,
+922 | |     ) -> Result<()> {
+    | |___________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: the loop variable `i` is only used to index `v`
+    --> src/esn.rs:1627:18
+     |
+1627 |         for i in 0..self.d {
+     |                  ^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator
+     |
+1627 -         for i in 0..self.d {
+1627 +         for <item> in v.iter_mut().take(self.d) {
+     |
+
+warning: the loop variable `i` is only used to index `v`
+    --> src/esn.rs:1640:22
+     |
+1640 |             for i in 0..self.d {
+     |                      ^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator
+     |
+1640 -             for i in 0..self.d {
+1640 +             for <item> in v.iter_mut().take(self.d) {
+     |
+
+warning: this function has too many arguments (9/7)
+    --> src/esn.rs:1858:5
+     |
+1858 | /     pub fn new(
+1859 | |         res_size: usize,
+1860 | |         in_size: usize,
+1861 | |         in_scale: f32,
+...    |
+1867 | |         rng: &mut fastrand::Rng,
+1868 | |     ) -> Result<Self> {
+     | |_____________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: the loop variable `idx` is only used to index `chunk`
+    --> src/esn.rs:1878:28
+     |
+1878 |                 for idx in 16..in_size.min(18) {
+     |                            ^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator
+     |
+1878 -                 for idx in 16..in_size.min(18) {
+1878 +                 for <item> in chunk.iter_mut().take(in_size.min(18)).skip(16) {
+     |
+
+warning: the loop variable `idx` is only used to index `chunk`
+    --> src/esn.rs:1883:28
+     |
+1883 |                 for idx in 18..in_size {
+     |                            ^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator
+     |
+1883 -                 for idx in 18..in_size {
+1883 +                 for <item> in chunk.iter_mut().take(in_size).skip(18) {
+     |
+
+warning: the loop variable `r` is used to index `pphi`
+    --> src/esn.rs:2203:18
+     |
+2203 |         for r in 0..m {
+     |                  ^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+2203 -         for r in 0..m {
+2203 +         for (r, <item>) in pphi.iter_mut().enumerate().take(m) {
+     |
+
+warning: the loop variable `i` is used to index `k`
+    --> src/esn.rs:2218:18
+     |
+2218 |         for i in 0..m {
+     |                  ^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+2218 -         for i in 0..m {
+2218 +         for (i, <item>) in k.iter().enumerate().take(m) {
+     |
+
+warning: the loop variable `i` is used to index `kphit_p`
+    --> src/esn.rs:2234:18
+     |
+2234 |         for i in 0..m * m {
+     |                  ^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+2234 -         for i in 0..m * m {
+2234 +         for (i, <item>) in kphit_p.iter().enumerate().take(m * m) {
+     |
+
+warning: the loop variable `r` is used to index `out`
+    --> src/esn.rs:2634:14
+     |
+2634 |     for r in 0..rows {
+     |              ^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+2634 -     for r in 0..rows {
+2634 +     for (r, <item>) in out.iter_mut().enumerate().take(rows) {
+     |
+
+warning: the loop variable `i` is used to index `field`
+   --> src/ising_shadow.rs:497:18
+    |
+497 |         for i in 0..self.mode_dim {
+    |                  ^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+    |
+497 -         for i in 0..self.mode_dim {
+497 +         for (i, <item>) in field.iter().enumerate().take(self.mode_dim) {
+    |
+
+warning: the loop variable `mode` is used to index `reduced`
+   --> src/ising_shadow.rs:663:17
+    |
+663 |     for mode in 0..mode_dim {
+    |                 ^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+    |
+663 -     for mode in 0..mode_dim {
+663 +     for (mode, <item>) in reduced.iter_mut().enumerate().take(mode_dim) {
+    |
+
+warning: this function has too many arguments (8/7)
+   --> src/ising_shadow.rs:865:1
+    |
+865 | / pub fn build_influence_response(
+866 | |     intent_id: String,
+867 | |     label: String,
+868 | |     stage: String,
+...   |
+873 | |     total_applied_ticks: u64,
+874 | | ) -> ShadowInfluenceResponseV3 {
+    | |______________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: the loop variable `i` is used to index `features`
+   --> src/nn.rs:571:22
+    |
+571 |             for i in 0..15 {
+    |                      ^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+    |
+571 -             for i in 0..15 {
+571 +             for (i, <item>) in features.iter().enumerate().take(15) {
+    |
+
+warning: the loop variable `i` is used to index `av_features`
+   --> src/nn.rs:595:22
+    |
+595 |             for i in 0..64 {
+    |                      ^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+    |
+595 -             for i in 0..64 {
+595 +             for (i, <item>) in av_features.iter().enumerate().take(64) {
+    |
+
+warning: the loop variable `i` is used to index `weights`
+   --> src/nn.rs:608:22
+    |
+608 |             for i in 0..32 {
+    |                      ^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+    |
+608 -             for i in 0..32 {
+608 +             for (i, <item>) in weights.iter_mut().enumerate() {
+    |
+
+warning: the loop variable `i` is used to index `state`
+   --> src/nn.rs:623:22
+    |
+623 |             for i in 0..20 {
+    |                      ^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+    |
+623 -             for i in 0..20 {
+623 +             for (i, <item>) in state.iter().enumerate().take(20) {
+    |
+
+warning: the loop variable `i` is used to index `control`
+   --> src/nn.rs:636:22
+    |
+636 |             for i in 0..5 {
+    |                      ^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+    |
+636 -             for i in 0..5 {
+636 +             for (i, <item>) in control.iter_mut().enumerate() {
+    |
+
+warning: struct `PrimeRing` has a public `len` method, but no `is_empty` method
+  --> src/prime.rs:43:5
+   |
+43 |     pub fn len(&self) -> usize {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#len_without_is_empty
+   = note: `#[warn(clippy::len_without_is_empty)]` on by default
+
+warning: the loop variable `i` is used to index `v`
+  --> src/prime.rs:83:14
+   |
+83 |     for i in 0..n {
+   |              ^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+   |
+83 -     for i in 0..n {
+83 +     for (i, <item>) in v.iter_mut().enumerate().take(n) {
+   |
+
+warning: this function has too many arguments (8/7)
+   --> src/regulator/core/viscosity.rs:519:1
+    |
+519 | / pub fn viscosity_cohesion_index_v1(
+520 | |     density: f32,
+521 | |     elasticity: f32,
+522 | |     persistence: f32,
+...   |
+527 | |     effective_mobility: f32,
+528 | | ) -> f32 {
+    | |________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: the loop variable `k` is used to index `v`
+   --> src/regulator/core/rate_gate.rs:260:22
+    |
+260 |             for k in 0..feature_len {
+    |                      ^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+    |
+260 -             for k in 0..feature_len {
+260 +             for (k, <item>) in v.iter().enumerate().take(feature_len) {
+    |
+
+warning: this function has too many arguments (10/7)
+    --> src/regulator_cartography.rs:1209:1
+     |
+1209 | / fn replay_input(
+1210 | |     label: &str,
+1211 | |     timestamp: f64,
+1212 | |     fill_pct: f32,
+...    |
+1219 | |     felt_pressure_sample: bool,
+1220 | | ) -> PiPressureReplayInput {
+     | |__________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/regulator_cartography.rs:1586:6
+     |
+1586 | ) -> Result<Vec<(f64, f32, f32, Option<f32>)>> {
+     |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#type_complexity
+     = note: `#[warn(clippy::type_complexity)]` on by default
+
+warning: this function has too many arguments (9/7)
+   --> src/rescue_scaffold.rs:252:5
+    |
+252 | /     pub fn record_measured_fill(
+253 | |         &mut self,
+254 | |         now_unix_ms: u64,
+255 | |         fill_pct: f32,
+...   |
+261 | |         recovery_active: bool,
+262 | |     ) {
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (8/7)
+   --> src/rescue_scaffold.rs:511:5
+    |
+511 | /     pub fn status(
+512 | |         &self,
+513 | |         now_unix_ms: u64,
+514 | |         active_now: bool,
+...   |
+519 | |         applied_drain_weight: f32,
+520 | |     ) -> StableCoreRestartGateStatus {
+    | |____________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (16/7)
+   --> src/rescue_scaffold.rs:647:5
+    |
+647 | /     fn from_parts(
+648 | |         matrix: Vec<f32>,
+649 | |         dim: usize,
+650 | |         source: String,
+...   |
+663 | |         activation_fill_band: Option<[f32; 2]>,
+664 | |     ) -> Option<Self> {
+    | |_____________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (8/7)
+   --> src/rescue_scaffold.rs:844:1
+    |
+844 | / pub fn capture_scaffold(
+845 | |     matrix: &[f32],
+846 | |     dim: usize,
+847 | |     bin_path: &Path,
+...   |
+852 | |     captured_at_unix_ms: u64,
+853 | | ) -> Option<RescueScaffold> {
+    | |___________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (10/7)
+    --> src/rescue_scaffold.rs:1210:1
+     |
+1210 | / pub fn stable_core_scaffold_retirement_candidate_reason(
+1211 | |     restart_gate_settled: bool,
+1212 | |     fill_pct: f32,
+1213 | |     fill_slope_pct_per_sec: impl Into<Option<f32>>,
+...    |
+1220 | |     applied_drain_weight: f32,
+1221 | | ) -> Option<&'static str> {
+     | |_________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (9/7)
+    --> src/rescue_scaffold.rs:1249:1
+     |
+1249 | / pub fn stable_core_scaffold_retirement_block_reason(
+1250 | |     restart_gate_settled: bool,
+1251 | |     fill_pct: f32,
+1252 | |     fill_slope_pct_per_sec: impl Into<Option<f32>>,
+...    |
+1258 | |     applied_drain_weight: f32,
+1259 | | ) -> &'static str {
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: the variable `idx` is used as a loop counter
+    --> src/sensory_bus.rs:1277:9
+     |
+1277 |         for item in self.q.drain(..) {
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `for (idx, item) in self.q.drain(..).enumerate()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#explicit_counter_loop
+     = note: `#[warn(clippy::explicit_counter_loop)]` on by default
+
+warning: clamp-like pattern without using clamp function
+   --> src/spectral/eigenfill.rs:210:27
+    |
+210 |         self.rel_thresh = r.max(0.01).min(0.9);
+    |                           ^^^^^^^^^^^^^^^^^^^^ help: replace with clamp: `r.clamp(0.01, 0.9)`
+    |
+    = note: clamp will panic if max < min, min.is_nan(), or max.is_nan()
+    = note: clamp returns NaN if the input is NaN
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#manual_clamp
+    = note: `#[warn(clippy::manual_clamp)]` on by default
+
+warning: this function has too many arguments (8/7)
+   --> src/stable_core.rs:164:1
+    |
+164 | / pub fn stable_core_recovery_z(
+165 | |     live_z: Option<&[f32]>,
+166 | |     lambda1_rel: f32,
+167 | |     geom_rel: f32,
+...   |
+172 | |     semantic_scale: f32,
+173 | | ) -> [f32; Z_DIM] {
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: `minime` (lib) generated 51 warnings (run `cargo clippy --fix --lib -p minime` to apply 2 suggestions)
+warning: digits of hex, binary or octal literal not in groups of equal size
+  --> src/bin/fill_coupled_qualification.rs:21:19
+   |
+21 | const SEED: u64 = 0x30_09_2026;
+   |                   ^^^^^^^^^^^^ help: consider: `0x3009_2026`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#unusual_byte_groupings
+   = note: `#[warn(clippy::unusual_byte_groupings)]` on by default
+
+warning: `minime` (bin "fill_coupled_qualification") generated 1 warning
+warning: failed to automatically apply fixes suggested by rustc to crate `minime`
+
+after fixes were automatically applied the compiler reported errors within these files:
+
+  * src/runtime/orchestration.rs
+
+This likely indicates a bug in either rustc or cargo itself,
+and we would appreciate a bug report! You're likely to see
+a number of compiler warnings after this message which cargo
+attempted to fix but failed. If you could open an issue at
+https://github.com/rust-lang/rust-clippy/issues
+quoting the full output of this command we'd be very appreciative!
+Note that you may be able to make some more progress in the near-term
+fixing code with the `--broken-code` flag
+
+The following errors were reported:
+error: expected expression, found `$`
+    --> src/runtime/orchestration.rs:3689:64
+     |
+3689 |                         serde_json::to_value(&event).unwrap_or($crate::Value::Null);
+     |                                                                ^ expected expression
+
+error: expected expression, found `$`
+    --> src/runtime/orchestration.rs:5034:60
+     |
+5034 |                     serde_json::to_value(&event).unwrap_or($crate::Value::Null);
+     |                                                            ^ expected expression
+
+error: aborting due to 2 previous errors
+
+Original diagnostics will follow.
+
+warning: redundant field names in struct initialization
+    --> src/runtime/orchestration.rs:3592:25
+     |
+3592 |                         recent_phase_flip_count_30s: recent_phase_flip_count_30s,
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace it with: `recent_phase_flip_count_30s`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#redundant_field_names
+     = note: `#[warn(clippy::redundant_field_names)]` on by default
+
+warning: this function has too many arguments (10/7)
+   --> src/cheby.rs:96:1
+    |
+ 96 | / pub fn cheby_apply_gpu(
+ 97 | |     pool: &mut BufferPool,
+ 98 | |     queue: &CommandQueue,
+ 99 | |     pso: &ComputePipelineState,
+...   |
+106 | |     plan: &ChebyPlan,
+107 | | ) -> f32 {
+    | |________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+    = note: `#[warn(clippy::too_many_arguments)]` on by default
+
+warning: name `ESN` contains a capitalized acronym
+    --> src/esn.rs:1816:12
+     |
+1816 | pub struct ESN {
+     |            ^^^ help: consider making the acronym lowercase, except the initial letter: `Esn`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#upper_case_acronyms
+     = note: `#[warn(clippy::upper_case_acronyms)]` on by default
+
+warning: manually reimplementing `div_ceil`
+   --> src/handoff_diag.rs:101:22
+    |
+101 |     let line_count = (slice.len() + floats_per_line - 1) / floats_per_line;
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using `.div_ceil()`: `slice.len().div_ceil(floats_per_line)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#manual_div_ceil
+    = note: `#[warn(clippy::manual_div_ceil)]` on by default
+
+warning: name `MLP` contains a capitalized acronym
+  --> src/nn.rs:18:12
+   |
+18 | pub struct MLP {
+   |            ^^^ help: consider making the acronym lowercase, except the initial letter: `Mlp`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#upper_case_acronyms
+
+warning: this function has too many arguments (9/7)
+  --> src/runtime/reviews.rs:15:1
+   |
+15 | / fn spectral_damping_warm_start_review_v1(
+16 | |     cheby_order: usize,
+17 | |     cheby_stop_lo: f32,
+18 | |     cheby_stop_hi: f32,
+...  |
+24 | |     regulator_drive_energy: f32,
+25 | | ) -> SpectralDampingWarmStartReviewV1 {
+   | |_____________________________________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (8/7)
+   --> src/runtime/reviews.rs:134:1
+    |
+134 | / fn hard_reset_texture_preservation_review_v1(
+135 | |     eigenfill_pct: f32,
+136 | |     spectral_entropy: f32,
+137 | |     resonance_density: &ResonanceDensityV1,
+...   |
+142 | |     semantic_lane_active: bool,
+143 | | ) -> HardResetTexturePreservationReviewV1 {
+    | |_________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (13/7)
+   --> src/runtime/entrypoint.rs:455:1
+    |
+455 | / fn update_health_transition_surface(
+456 | |     health: &mut serde_json::Value,
+457 | |     phase: &str,
+458 | |     previous_phase: &str,
+...   |
+468 | |     transition_event_v1: &serde_json::Value,
+469 | | ) -> bool {
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (14/7)
+   --> src/runtime/entrypoint.rs:516:1
+    |
+516 | / fn sync_health_transition_surface(
+517 | |     workspace_dir: &std::path::Path,
+518 | |     log_homeostat: bool,
+519 | |     phase: &str,
+...   |
+530 | |     transition_event_v1: &serde_json::Value,
+531 | | ) {
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (24/7)
+  --> src/runtime/orchestration.rs:1:1
+   |
+ 1 | / async fn run_engine(
+ 2 | |     cov_dim: usize,
+ 3 | |     k: usize,
+ 4 | |     ws_addr: &str,
+...  |
+25 | |     legacy_video_synth_enabled: bool,
+26 | | ) -> Result<()> {
+   | |_______________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: called `unwrap` on `spectral_source` after checking its variant with `is_some`
+    --> src/runtime/orchestration.rs:3129:48
+     |
+3100 |                 && spectral_source.is_some()
+     |                    ------------------------- the check is happening here
+...
+3129 |                 let (eigenfill_pct, lambda1) = spectral_source.as_ref().unwrap().read_spectral();
+     |                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: try using `match`
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#unnecessary_unwrap
+     = note: `#[warn(clippy::unnecessary_unwrap)]` on by default
+
+warning: called `unwrap` on `spectral_source` after checking its variant with `is_some`
+    --> src/runtime/orchestration.rs:4792:42
+     |
+3100 |                 && spectral_source.is_some()
+     |                    ------------------------- the check is happening here
+...
+4792 |                     let (dim, cov_mat) = spectral_source.as_ref().unwrap().get_covariance_f32();
+     |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: try using `match`
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#unnecessary_unwrap
+
+warning: usage of an `Arc` that is not `Send` and `Sync`
+   --> src/runtime/orchestration.rs:140:14
+    |
+140 |     let db = Arc::new(ConsciousnessDB::open("minime_consciousness.db")?);
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `Arc<ConsciousnessDB>` is not `Send` and `Sync` as `ConsciousnessDB` is not `Sync`
+    = help: if the `Arc` will not be used across threads replace it with an `Rc`
+    = help: otherwise make `ConsciousnessDB` `Send` and `Sync` or consider a wrapper type such as `Mutex`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#arc_with_non_send_sync
+    = note: `#[warn(clippy::arc_with_non_send_sync)]` on by default
+
+warning: the loop variable `i` is only used to index `dimension_scales`
+   --> src/runtime/orchestration.rs:515:14
+    |
+515 |     for i in 0..sensory_bus::VIDEO_DIM {
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator
+    |
+515 -     for i in 0..sensory_bus::VIDEO_DIM {
+515 +     for <item> in dimension_scales.iter_mut().take(sensory_bus::VIDEO_DIM) {
+    |
+
+warning: the loop variable `i` is only used to index `dimension_scales`
+   --> src/runtime/orchestration.rs:518:14
+    |
+518 |     for i in sensory_bus::VIDEO_DIM..(sensory_bus::VIDEO_DIM + sensory_bus::AUDIO_DIM) {
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator
+    |
+518 -     for i in sensory_bus::VIDEO_DIM..(sensory_bus::VIDEO_DIM + sensory_bus::AUDIO_DIM) {
+518 +     for <item> in dimension_scales.iter_mut().skip(sensory_bus::VIDEO_DIM).take(sensory_bus::AUDIO_DIM) {
+    |
+
+warning: the loop variable `i` is only used to index `dimension_scales`
+   --> src/runtime/orchestration.rs:521:14
+    |
+521 |     for i in (sensory_bus::VIDEO_DIM + sensory_bus::AUDIO_DIM)..semantic_offset {
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator
+    |
+521 -     for i in (sensory_bus::VIDEO_DIM + sensory_bus::AUDIO_DIM)..semantic_offset {
+521 +     for <item> in dimension_scales.iter_mut().take(semantic_offset).skip((sensory_bus::VIDEO_DIM + sensory_bus::AUDIO_DIM)) {
+    |
+
+warning: the loop variable `i` is only used to index `dimension_scales`
+   --> src/runtime/orchestration.rs:524:14
+    |
+524 |     for i in semantic_offset..legacy_sensory_dim {
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator
+    |
+524 -     for i in semantic_offset..legacy_sensory_dim {
+524 +     for <item> in dimension_scales.iter_mut().take(legacy_sensory_dim).skip(semantic_offset) {
+    |
+
+warning: field assignment outside of initializer for an instance created with Default::default()
+   --> src/runtime/orchestration.rs:644:9
+    |
+644 |         pi_cfg.target_fill = eigenfill_target * 100.0; // Convert to percentage
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+note: consider initializing the variable with `regulator::core::PIRegCfg { target_fill: eigenfill_target * 100.0, ..Default::default() }` and removing relevant reassignments
+   --> src/runtime/orchestration.rs:641:9
+    |
+641 |         let mut pi_cfg = PIRegCfg::default();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#field_reassign_with_default
+    = note: `#[warn(clippy::field_reassign_with_default)]` on by default
+
+warning: manual implementation of `.is_multiple_of()`
+    --> src/runtime/orchestration.rs:1600:12
+     |
+1600 |         if tick_count % 10 == 0 && batch.len() > 0 {
+     |            ^^^^^^^^^^^^^^^^^^^^ help: replace with: `tick_count.is_multiple_of(10)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#manual_is_multiple_of
+     = note: `#[warn(clippy::manual_is_multiple_of)]` on by default
+
+warning: length comparison to zero
+    --> src/runtime/orchestration.rs:1600:36
+     |
+1600 |         if tick_count % 10 == 0 && batch.len() > 0 {
+     |                                    ^^^^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!batch.is_empty()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#len_zero
+     = note: `#[warn(clippy::len_zero)]` on by default
+
+warning: it looks like you're manually copying between slices
+    --> src/runtime/orchestration.rs:1834:17
+     |
+1834 | /                 for i in 0..sensory_bus::AUDIO_DIM.min(av_features.len()) {
+1835 | |                     av_features[i] = audio_slice[i];
+1836 | |                 }
+     | |_________________^ help: try replacing the loop by: `av_features[..sensory_bus::AUDIO_DIM.min(av_features.len())].copy_from_slice(&audio_slice[..sensory_bus::AUDIO_DIM.min(av_features.len())]);`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#manual_memcpy
+     = note: `#[warn(clippy::manual_memcpy)]` on by default
+
+warning: the loop variable `i` is used to index `video_slice`
+    --> src/runtime/orchestration.rs:1837:26
+     |
+1837 |                 for i in 0..sensory_bus::VIDEO_DIM {
+     |                          ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+1837 -                 for i in 0..sensory_bus::VIDEO_DIM {
+1837 +                 for (i, <item>) in video_slice.iter().enumerate().take(sensory_bus::VIDEO_DIM) {
+     |
+
+warning: the loop variable `i` is used to index `last_cov_vec`
+    --> src/runtime/orchestration.rs:1885:22
+     |
+1885 |             for i in 0..n {
+     |                      ^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+1885 -             for i in 0..n {
+1885 +             for (i, <item>) in last_cov_vec.iter_mut().enumerate().take(n) {
+     |
+
+warning: manual implementation of `ok`
+    --> src/runtime/orchestration.rs:2033:17
+     |
+2033 | /                 match cell.route_features(&av_features) {
+2034 | |                     Ok(weights) => Some(weights),
+2035 | |                     Err(_) => None,
+2036 | |                 }
+     | |_________________^ help: replace with: `cell.route_features(&av_features).ok()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#manual_ok_err
+     = note: `#[warn(clippy::manual_ok_err)]` on by default
+
+warning: clamp-like pattern without using clamp function
+    --> src/runtime/orchestration.rs:2167:31
+     |
+2167 |                 let deficit = (cov_floor_level - cov_rms).min(1.0).max(0.0);
+     |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace with clamp: `(cov_floor_level - cov_rms).clamp(0.0, 1.0)`
+     |
+     = note: clamp will panic if max < min, min.is_nan(), or max.is_nan()
+     = note: clamp returns NaN if the input is NaN
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#manual_clamp
+     = note: `#[warn(clippy::manual_clamp)]` on by default
+
+warning: manual implementation of `.is_multiple_of()`
+    --> src/runtime/orchestration.rs:2168:31
+     |
+2168 |                 let sign = if tick_count % 2 == 0 { 1.0 } else { -1.0 };
+     |                               ^^^^^^^^^^^^^^^^^^^ help: replace with: `tick_count.is_multiple_of(2)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#manual_is_multiple_of
+
+warning: manual implementation of `.is_multiple_of()`
+    --> src/runtime/orchestration.rs:2173:16
+     |
+2173 |             if tick_count % 509 == 0 {
+     |                ^^^^^^^^^^^^^^^^^^^^^ help: replace with: `tick_count.is_multiple_of(509)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#manual_is_multiple_of
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/runtime/orchestration.rs:2414:73
+     |
+2414 |             let ising_shadow_snapshot = ising_shadow.update(&cov_input, &y, n, k).cloned();
+     |                                                                         ^^ help: change this to: `y`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_borrow
+     = note: `#[warn(clippy::needless_borrow)]` on by default
+
+warning: this `if` statement can be collapsed
+    --> src/runtime/orchestration.rs:2823:13
+     |
+2823 | /             if eigenfill_pct >= crisis_warning_threshold && eigenfill_pct < crisis_fill_threshold {
+2824 | |                 if tick_count % 10 == 0 {
+2825 | |                     eprintln!(
+2826 | |                         "⚡ Fill {:.1}% approaching crisis zone ({:.0}%)",
+...    |
+2830 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#collapsible_if
+     = note: `#[warn(clippy::collapsible_if)]` on by default
+help: collapse nested if block
+     |
+2823 ~             if eigenfill_pct >= crisis_warning_threshold && eigenfill_pct < crisis_fill_threshold
+2824 ~                 && tick_count % 10 == 0 {
+2825 |                     eprintln!(
+ ...
+2828 |                     );
+2829 ~                 }
+     |
+
+warning: manual implementation of `.is_multiple_of()`
+    --> src/runtime/orchestration.rs:2824:20
+     |
+2824 |                 if tick_count % 10 == 0 {
+     |                    ^^^^^^^^^^^^^^^^^^^^ help: replace with: `tick_count.is_multiple_of(10)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#manual_is_multiple_of
+
+warning: manual implementation of `.is_multiple_of()`
+    --> src/runtime/orchestration.rs:2883:77
+     |
+2883 |             let log_cov_details = log_homeostat || (eigenfill_pct < 50.0 && tick_count % 5 == 0);
+     |                                                                             ^^^^^^^^^^^^^^^^^^^ help: replace with: `tick_count.is_multiple_of(5)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#manual_is_multiple_of
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/runtime/orchestration.rs:3085:55
+     |
+3085 |                 source.update(eigenfill_pct, lambda1, &a);
+     |                                                       ^^ help: change this to: `a`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_borrow
+
+warning: manual `!RangeInclusive::contains` implementation
+    --> src/runtime/orchestration.rs:3191:24
+     |
+3191 |                     if gap > 15.0 || gap < -10.0 || integ_saturated {
+     |                        ^^^^^^^^^^^^^^^^^^^^^^^^^ help: use: `!(-10.0..=15.0).contains(&gap)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#manual_range_contains
+     = note: `#[warn(clippy::manual_range_contains)]` on by default
+
+warning: this `map_or` can be simplified
+    --> src/runtime/orchestration.rs:3616:45
+     |
+3616 |                           let cluster_ready = last_breathing_phase_cluster_marker_tick
+     |  _____________________________________________^
+3617 | |                             .map_or(true, |tick| {
+3618 | |                                 reg_tick_count.saturating_sub(tick) >= cluster_cooldown_ticks
+3619 | |                             });
+     | |______________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#unnecessary_map_or
+     = note: `#[warn(clippy::unnecessary_map_or)]` on by default
+help: use is_none_or instead
+     |
+3617 -                             .map_or(true, |tick| {
+3617 +                             .is_none_or(|tick| {
+     |
+
+warning: unnecessary closure used to substitute value for `Result::Err`
+    --> src/runtime/orchestration.rs:3693:25
+     |
+3693 |                         serde_json::to_value(&event).unwrap_or_else(|_| serde_json::json!(null));
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#unnecessary_lazy_evaluations
+     = note: `#[warn(clippy::unnecessary_lazy_evaluations)]` on by default
+help: use `unwrap_or` instead
+     |
+3693 -                         serde_json::to_value(&event).unwrap_or_else(|_| serde_json::json!(null));
+3693 +                         serde_json::to_value(&event).unwrap_or($crate::Value::Null);
+     |
+
+warning: implicitly performing saturating subtraction
+    --> src/runtime/orchestration.rs:4124:25
+     |
+4124 | /                         if panic_cooldown > 0 {
+4125 | |                             panic_cooldown -= 1;
+4126 | |                         }
+     | |_________________________^ help: try: `panic_cooldown = panic_cooldown.saturating_sub(1);`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#implicit_saturating_sub
+     = note: `#[warn(clippy::implicit_saturating_sub)]` on by default
+
+warning: casting to the same type is unnecessary (`f32` -> `f32`)
+    --> src/runtime/orchestration.rs:4139:42
+     |
+4139 |                     let mut aux_lambda = lambda1_rel as f32;
+     |                                          ^^^^^^^^^^^^^^^^^^ help: try: `lambda1_rel`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#unnecessary_cast
+     = note: `#[warn(clippy::unnecessary_cast)]` on by default
+
+warning: casting to the same type is unnecessary (`f32` -> `f32`)
+    --> src/runtime/orchestration.rs:4144:40
+     |
+4144 |                     let mut aux_geom = geom_rel as f32;
+     |                                        ^^^^^^^^^^^^^^^ help: try: `geom_rel`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#unnecessary_cast
+
+warning: casting to the same type is unnecessary (`f32` -> `f32`)
+    --> src/runtime/orchestration.rs:4148:52
+     |
+4148 |                     aux_geom = aux_geom.clamp(0.0, geom_clamp_hi as f32);
+     |                                                    ^^^^^^^^^^^^^^^^^^^^ help: try: `geom_clamp_hi`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#unnecessary_cast
+
+warning: manual implementation of `Option::map`
+    --> src/runtime/orchestration.rs:4197:37
+     |
+4197 |                       let pi_errors = if let Some(ref pi) = pi_reg {
+     |  _____________________________________^
+4198 | |                         Some({
+4199 | |                             let raw_e_fill = eigenfill_pct - pi.cfg.target_fill;
+4200 | |                             let effective_e_fill = fill_for_pi - pi.cfg.target_fill;
+...    |
+4206 | |                         None
+4207 | |                     };
+     | |_____________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#manual_map
+     = note: `#[warn(clippy::manual_map)]` on by default
+help: try
+     |
+4197 ~                     let pi_errors = pi_reg.as_ref().map(|pi| {
+4198 +                             let raw_e_fill = eigenfill_pct - pi.cfg.target_fill;
+4199 +                             let effective_e_fill = fill_for_pi - pi.cfg.target_fill;
+4200 +                             let e_lam = lambda1_rel - pi.cfg.target_lambda1_rel;
+4201 +                             let e_geom = geom_rel - pi.cfg.target_geom_rel;
+4202 +                             (raw_e_fill, effective_e_fill, e_lam, e_geom)
+4203 ~                         });
+     |
+
+warning: manual implementation of `.is_multiple_of()`
+    --> src/runtime/orchestration.rs:4789:50
+     |
+4789 |                 if cheby_plan_state.is_none() || (reg_tick_count % 120 == 0) || (lambda1_rel > 1.15)
+     |                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace with: `reg_tick_count.is_multiple_of(120)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#manual_is_multiple_of
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/runtime/orchestration.rs:4933:60
+     |
+4933 |                 compute_spectral_fingerprint(&eigenvalues, &y, n, k, &prev_v1, latest_geom_rel);
+     |                                                            ^^ help: change this to: `y`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/runtime/orchestration.rs:4969:57
+     |
+4969 |                 compute_eigenvector_field(&eigenvalues, &y, n, k, &prev_eigenvector_field_modes);
+     |                                                         ^^ help: change this to: `y`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_borrow
+
+warning: unnecessary closure used to substitute value for `Result::Err`
+    --> src/runtime/orchestration.rs:5044:21
+     |
+5044 |                     serde_json::to_value(&event).unwrap_or_else(|_| serde_json::json!(null));
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#unnecessary_lazy_evaluations
+help: use `unwrap_or` instead
+     |
+5044 -                     serde_json::to_value(&event).unwrap_or_else(|_| serde_json::json!(null));
+5044 +                     serde_json::to_value(&event).unwrap_or($crate::Value::Null);
+     |
+
+warning: manual slice size calculation
+    --> src/runtime/orchestration.rs:5715:48
+     |
+5715 | ...                   Vec::with_capacity(cov_data.len() * std::mem::size_of::<f32>());
+     |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `std::mem::size_of_val(cov_data)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#manual_slice_size_calculation
+     = note: `#[warn(clippy::manual_slice_size_calculation)]` on by default
+
+warning: manual slice size calculation
+    --> src/runtime/orchestration.rs:5756:48
+     |
+5756 | ...                   Vec::with_capacity(cov_data.len() * std::mem::size_of::<f32>());
+     |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `std::mem::size_of_val(cov_data)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#manual_slice_size_calculation
+
+warning: this function has too many arguments (8/7)
+  --> src/runtime/telemetry_evidence.rs:1:1
+   |
+ 1 | / fn compute_resonance_density_v1(
+ 2 | |     eigenvalues: &[f32],
+ 3 | |     active_modes: ActiveModeTelemetry,
+ 4 | |     effective_dimensionality: Option<f32>,
+...  |
+ 9 | |     previous_eigenvalues: Option<&[f32]>,
+10 | | ) -> ResonanceDensityV1 {
+   | |_______________________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (12/7)
+   --> src/runtime/telemetry_evidence.rs:124:1
+    |
+124 | / fn compute_pressure_source_v1(
+125 | |     eigenvalues: &[f32],
+126 | |     active_modes: ActiveModeTelemetry,
+127 | |     resonance: &ResonanceDensityV1,
+...   |
+136 | |     video_source: &str,
+137 | | ) -> PressureSourceV1 {
+    | |_____________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: this boolean expression can be simplified
+   --> src/runtime/telemetry_evidence.rs:264:5
+    |
+264 |     !debounced && !(crossed_target_fill || fill_band_crossed || spectral_spike)
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `!(debounced || crossed_target_fill || fill_band_crossed || spectral_spike)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#nonminimal_bool
+    = note: `#[warn(clippy::nonminimal_bool)]` on by default
+
+warning: this function has too many arguments (9/7)
+   --> src/runtime/telemetry_evidence.rs:267:1
+    |
+267 | / fn compute_inhabitable_fluctuation_v1(
+268 | |     eigenvalues: &[f32],
+269 | |     previous_eigenvalues: Option<&[f32]>,
+270 | |     eigenvector_field: &serde_json::Value,
+...   |
+276 | |     distinguishability_loss: Option<f32>,
+277 | | ) -> InhabitableFluctuationV1 {
+    | |_____________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_arguments
+
+warning: clamp-like pattern without using clamp function
+   --> src/spectral/eigenfill.rs:210:27
+    |
+210 |         self.rel_thresh = r.max(0.01).min(0.9);
+    |                           ^^^^^^^^^^^^^^^^^^^^ help: replace with clamp: `r.clamp(0.01, 0.9)`
+    |
+    = note: clamp will panic if max < min, min.is_nan(), or max.is_nan()
+    = note: clamp returns NaN if the input is NaN
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#manual_clamp
+
+warning: useless use of `vec!`
+   --> src/runtime/orchestration.rs:579:29
+    |
+579 |     let mut prev_semantic = vec![0.0f32; sensory_bus::LLAVA_DIM];
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: you can use an array directly: `[0.0f32; sensory_bus::LLAVA_DIM]`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#useless_vec
+    = note: `#[warn(clippy::useless_vec)]` on by default
+
+warning: `minime` (bin "minime") generated 96 warnings (44 duplicates) (run `cargo clippy --fix --bin "minime" -p minime` to apply 27 suggestions)
+    Finished `dev` profile [unoptimized] target(s) in 16.78s

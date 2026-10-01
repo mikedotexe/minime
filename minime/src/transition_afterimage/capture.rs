@@ -107,12 +107,11 @@ impl Recorder {
                 .last_engine_t_ms
                 .saturating_sub(self.last_quiet_capture_ms)
                 >= 900_000
+            && self.collecting.len() < MAX_COLLECTING
         {
-            if self.collecting.len() < MAX_COLLECTING {
-                self.start_automatic("quiet_sample", self.last_engine_t_ms, self.last_wall_ms);
-                self.last_quiet_capture_ms = self.last_engine_t_ms;
-                self.last_quiet_wall_ms = Some(self.last_wall_ms);
-            }
+            self.start_automatic("quiet_sample", self.last_engine_t_ms, self.last_wall_ms);
+            self.last_quiet_capture_ms = self.last_engine_t_ms;
+            self.last_quiet_wall_ms = Some(self.last_wall_ms);
         }
         finished
     }

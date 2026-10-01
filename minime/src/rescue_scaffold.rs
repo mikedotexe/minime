@@ -249,17 +249,27 @@ impl StableCoreRestartGate {
         self.settled_at_unix_ms.is_some()
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep explicit independent evidence and state inputs at the existing scaffold boundary."
+    )]
     pub fn record_measured_fill(
         &mut self,
         now_unix_ms: u64,
         fill_pct: f32,
-        fill_slope_pct_per_sec: f32,
+        fill_slope_pct_per_sec: impl Into<Option<f32>>,
         stage: OverfillStage,
         semantic_active: bool,
         scaffold_active: bool,
         reentry_active: bool,
         recovery_active: bool,
     ) {
+        // This path proves settling, never applies a drain. Unknown rate must
+        // fail the existing finite-slope proof, not become a measured zero.
+        let fill_slope_pct_per_sec = fill_slope_pct_per_sec
+            .into()
+            .filter(|rate| rate.is_finite())
+            .unwrap_or(f32::NAN);
         if !fill_pct.is_finite() {
             self.settle_candidate_ticks = 0;
             self.settle_candidate_reason = "invalid_fill";
@@ -326,11 +336,15 @@ impl StableCoreRestartGate {
         &mut self,
         stage: OverfillStage,
         fill_pct: f32,
-        fill_slope_pct_per_sec: f32,
+        fill_slope_pct_per_sec: impl Into<Option<f32>>,
         semantic_active: bool,
         live_audio_divisor: u32,
         live_video_divisor: u32,
     ) -> StableCoreScaffoldActivationDecision {
+        let rate = fill_slope_pct_per_sec
+            .into()
+            .filter(|rate| rate.is_finite());
+        let fill_slope_pct_per_sec = rate.unwrap_or(f32::NAN);
         let activation_reason = stable_core_scaffold_activation_delay_reason(
             stage,
             fill_pct,
@@ -339,6 +353,12 @@ impl StableCoreRestartGate {
             live_audio_divisor,
             live_video_divisor,
         );
+        let activation_reason =
+            if rate.is_none() && activation_reason != "protective_low_fill_candidate" {
+                "rate_unavailable"
+            } else {
+                activation_reason
+            };
         let mut activate = false;
         let mut reason = activation_reason;
         if activation_reason == "candidate" {
@@ -478,15 +498,24 @@ impl StableCoreRestartGate {
     pub fn drain_floor(
         &self,
         fill_pct: f32,
-        fill_slope_pct_per_sec: f32,
+        fill_slope_pct_per_sec: impl Into<Option<f32>>,
     ) -> Option<(f32, &'static str)> {
         if !self.active() {
             return None;
         }
-        stable_core_restart_gate_drain_floor_for_state(fill_pct, fill_slope_pct_per_sec)
+        // Absolute high-fill floors survive missing rate; the soft rising
+        // floor still requires a positive measured rate.
+        let rate = fill_slope_pct_per_sec
+            .into()
+            .filter(|rate| rate.is_finite());
+        stable_core_restart_gate_drain_floor_for_state(fill_pct, rate.unwrap_or(0.0))
     }
 
     #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep explicit independent evidence and state inputs at the existing scaffold boundary."
+    )]
     pub fn status(
         &self,
         now_unix_ms: u64,
@@ -623,6 +652,10 @@ pub struct RescueScaffold {
 }
 
 impl RescueScaffold {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep explicit independent evidence and state inputs at the existing scaffold boundary."
+    )]
     fn from_parts(
         matrix: Vec<f32>,
         dim: usize,
@@ -820,6 +853,10 @@ fn write_scaffold_artifacts(
     Some(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep explicit independent evidence and state inputs at the existing scaffold boundary."
+)]
 pub fn capture_scaffold(
     matrix: &[f32],
     dim: usize,
@@ -1186,10 +1223,14 @@ fn stable_core_restart_settle_block_reason(
 }
 
 #[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep explicit independent evidence and state inputs at the existing scaffold boundary."
+)]
 pub fn stable_core_scaffold_retirement_candidate_reason(
     restart_gate_settled: bool,
     fill_pct: f32,
-    fill_slope_pct_per_sec: f32,
+    fill_slope_pct_per_sec: impl Into<Option<f32>>,
     stage: OverfillStage,
     semantic_active: bool,
     scaffold_active: bool,
@@ -1198,6 +1239,9 @@ pub fn stable_core_scaffold_retirement_candidate_reason(
     high_fill_drain_active: bool,
     applied_drain_weight: f32,
 ) -> Option<&'static str> {
+    let fill_slope_pct_per_sec = fill_slope_pct_per_sec
+        .into()
+        .filter(|rate| rate.is_finite())?;
     if !restart_gate_settled
         || high_fill_drain_active
         || applied_drain_weight > STABLE_CORE_SCAFFOLD_RETIRE_DRAIN_EPS
@@ -1222,10 +1266,14 @@ pub fn stable_core_scaffold_retirement_candidate_reason(
 }
 
 #[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep explicit independent evidence and state inputs at the existing scaffold boundary."
+)]
 pub fn stable_core_scaffold_retirement_block_reason(
     restart_gate_settled: bool,
     fill_pct: f32,
-    fill_slope_pct_per_sec: f32,
+    fill_slope_pct_per_sec: impl Into<Option<f32>>,
     semantic_active: bool,
     scaffold_active: bool,
     reentry_active: bool,
@@ -1233,6 +1281,10 @@ pub fn stable_core_scaffold_retirement_block_reason(
     high_fill_drain_active: bool,
     applied_drain_weight: f32,
 ) -> &'static str {
+    let fill_slope_pct_per_sec = fill_slope_pct_per_sec
+        .into()
+        .filter(|rate| rate.is_finite())
+        .unwrap_or(f32::NAN);
     if !restart_gate_settled {
         return "restart_gate_not_settled";
     }
@@ -1365,6 +1417,7 @@ pub struct StabilityPiOutput {
     pub drain_gate_reason: &'static str,
     pub drain_suppressed_by_slope: bool,
     pub fill_slope_pct_per_sec: f32,
+    pub fill_slope_available: bool,
     pub low_fill_escape_active: bool,
     pub high_fill_drain_active: bool,
     pub recovery_impulse_active: bool,
@@ -1391,6 +1444,7 @@ impl StabilityPiOutput {
             drain_gate_reason: "inactive",
             drain_suppressed_by_slope: false,
             fill_slope_pct_per_sec: 0.0,
+            fill_slope_available: false,
             low_fill_escape_active: false,
             high_fill_drain_active: false,
             recovery_impulse_active: false,
@@ -1534,11 +1588,20 @@ impl StabilityPiState {
     pub fn step(
         &mut self,
         fill_pct: f32,
-        fill_slope_pct_per_sec: f32,
+        fill_slope_pct_per_sec: impl Into<Option<f32>>,
         stage: OverfillStage,
         scaffold_active: bool,
     ) -> StabilityPiOutput {
-        if !scaffold_active || !fill_pct.is_finite() {
+        let rate = fill_slope_pct_per_sec
+            .into()
+            .filter(|rate| rate.is_finite());
+        let fill_slope_available = rate.is_some();
+        let fill_slope_pct_per_sec = rate.unwrap_or(0.0);
+        if !fill_pct.is_finite() {
+            // No new fill evidence: emit no action and retain recovery history.
+            return StabilityPiOutput::inactive(self.integral);
+        }
+        if !scaffold_active {
             self.integral *= STABILITY_PI_INTEGRAL_DECAY;
             self.high_fill_drain_active = false;
             self.low_fill_escape_active = false;
@@ -1579,7 +1642,7 @@ impl StabilityPiState {
             } else {
                 self.reentry_ticks = self.reentry_ticks.saturating_add(1);
                 if self.reentry_ticks <= STABILITY_PI_REENTRY_TICKS {
-                    return self.reentry_output(fill_pct, fill_slope_pct_per_sec);
+                    return self.reentry_output(fill_pct, rate);
                 }
                 self.reentry_active = false;
                 self.reentry_ticks = 0;
@@ -1601,8 +1664,9 @@ impl StabilityPiState {
 
         if self.low_fill_escape_active {
             self.recovery_impulse_ticks = self.recovery_impulse_ticks.saturating_add(1);
-            let release_on_slope =
-                fill_pct >= STABILITY_PI_RELEASE_FILL_PCT && fill_slope_pct_per_sec >= 0.0;
+            let release_on_slope = fill_slope_available
+                && fill_pct >= STABILITY_PI_RELEASE_FILL_PCT
+                && fill_slope_pct_per_sec >= 0.0;
             if release_on_slope {
                 self.release_candidate_ticks = self.release_candidate_ticks.saturating_add(1);
             } else {
@@ -1612,6 +1676,7 @@ impl StabilityPiState {
                 && (fill_pct >= STABILITY_PI_RELEASE_STRONG_FILL_PCT
                     || self.release_candidate_ticks >= STABILITY_PI_RELEASE_STABLE_TICKS
                     || (self.recovery_impulse_ticks >= STABILITY_PI_RELEASE_LONG_IMPULSE_TICKS
+                        && fill_slope_available
                         && fill_pct >= STABILITY_PI_RELEASE_FILL_PCT
                         && fill_slope_pct_per_sec >= STABILITY_PI_RELEASE_LONG_IMPULSE_SLOPE_MIN));
             if release_allowed {
@@ -1621,7 +1686,7 @@ impl StabilityPiState {
                 self.release_candidate_ticks = 0;
                 self.reentry_active = true;
                 self.reentry_ticks = 1;
-                return self.reentry_output(fill_pct, fill_slope_pct_per_sec);
+                return self.reentry_output(fill_pct, rate);
             }
             let recovery_identity_reset_requested =
                 fill_pct < STABILITY_PI_LOW_FILL_TRIGGER_PCT && !self.recovery_identity_reset_done;
@@ -1639,6 +1704,7 @@ impl StabilityPiState {
                 drain_gate_reason: "impulse_no_drain",
                 drain_suppressed_by_slope: false,
                 fill_slope_pct_per_sec,
+                fill_slope_available,
                 low_fill_escape_active: true,
                 high_fill_drain_active: self.high_fill_drain_active,
                 recovery_impulse_active: true,
@@ -1662,11 +1728,15 @@ impl StabilityPiState {
         }
         let pi_output = (STABILITY_PI_KP * normalized_error + STABILITY_PI_KI * self.integral)
             .clamp(0.0, STABILITY_PI_MAX_OUTPUT);
-        let drain_policy = stable_core_drain_policy(
+        let mut drain_policy = stable_core_drain_policy(
             fill_pct,
             fill_slope_pct_per_sec,
             base_scaffold_drain_weight(stage).max(pi_output),
         );
+        if !fill_slope_available && !drain_policy.high_fill_active {
+            drain_policy.reason = "rate_unavailable_no_soft_drain";
+            drain_policy.suppressed_by_slope = false;
+        }
         self.high_fill_drain_active = drain_policy.high_fill_active;
         StabilityPiOutput {
             active: true,
@@ -1679,6 +1749,7 @@ impl StabilityPiState {
             drain_gate_reason: drain_policy.reason,
             drain_suppressed_by_slope: drain_policy.suppressed_by_slope,
             fill_slope_pct_per_sec,
+            fill_slope_available,
             low_fill_escape_active: false,
             high_fill_drain_active: self.high_fill_drain_active,
             recovery_impulse_active: false,
@@ -1696,7 +1767,7 @@ impl StabilityPiState {
     pub fn preview(
         &self,
         fill_pct: f32,
-        fill_slope_pct_per_sec: f32,
+        fill_slope_pct_per_sec: impl Into<Option<f32>>,
         stage: OverfillStage,
         scaffold_active: bool,
     ) -> StabilityPiOutput {
@@ -1704,7 +1775,7 @@ impl StabilityPiState {
         clone.step(fill_pct, fill_slope_pct_per_sec, stage, scaffold_active)
     }
 
-    fn reentry_output(&self, fill_pct: f32, fill_slope_pct_per_sec: f32) -> StabilityPiOutput {
+    fn reentry_output(&self, fill_pct: f32, rate: Option<f32>) -> StabilityPiOutput {
         StabilityPiOutput {
             active: true,
             target_fill_pct: STABILITY_PI_TARGET_FILL_PCT,
@@ -1715,7 +1786,8 @@ impl StabilityPiState {
             damping_state: "scaffold_reentry",
             drain_gate_reason: "reentry_no_drain",
             drain_suppressed_by_slope: false,
-            fill_slope_pct_per_sec,
+            fill_slope_pct_per_sec: rate.unwrap_or(0.0),
+            fill_slope_available: rate.is_some(),
             low_fill_escape_active: false,
             high_fill_drain_active: self.high_fill_drain_active,
             recovery_impulse_active: false,

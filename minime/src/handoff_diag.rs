@@ -98,7 +98,7 @@ pub fn random_probe_ns_per_access_f32(slice: &[f32]) -> Option<f64> {
     }
 
     let floats_per_line = (CACHE_LINE_BYTES / size_of::<f32>()).max(1);
-    let line_count = (slice.len() + floats_per_line - 1) / floats_per_line;
+    let line_count = slice.len().div_ceil(floats_per_line);
     let order = bit_reversal_order(line_count);
     if order.is_empty() {
         return None;

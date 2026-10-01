@@ -516,6 +516,7 @@ pub fn cognitive_drag_coefficient_v1(
 }
 
 #[must_use]
+#[expect(clippy::too_many_arguments, reason = "Versioned numerical recipe retains independently named measurement inputs.")]
 pub fn viscosity_cohesion_index_v1(
     density: f32,
     elasticity: f32,

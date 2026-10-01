@@ -12,6 +12,7 @@ fn cheby_coefficient_l1_norm(order: usize, stop_lo: f32, stop_hi: f32, soft: f32
 /// This records those as an explicit sandbox/operator route without mutating
 /// the running filter, covariance warm-start, denominator, fill target, or PI.
 #[must_use]
+#[expect(clippy::too_many_arguments, reason = "Versioned review evidence retains its existing independent inputs.")]
 fn spectral_damping_warm_start_review_v1(
     cheby_order: usize,
     cheby_stop_lo: f32,
@@ -131,6 +132,7 @@ fn spectral_damping_warm_start_review_v1(
 /// in the live packet without changing reset activation, covariance keep,
 /// fill target, PI, synth cadence, or semantic admission.
 #[must_use]
+#[expect(clippy::too_many_arguments, reason = "Versioned review evidence retains its existing independent inputs.")]
 fn hard_reset_texture_preservation_review_v1(
     eigenfill_pct: f32,
     spectral_entropy: f32,

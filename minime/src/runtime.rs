@@ -42,6 +42,10 @@ use tokio::{
 };
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
+use crate::covariance_math::{
+    decay_covariance_inplace_matrix, rank1_update_inplace_matrix, reset_covariance_inplace,
+    CovarianceUpdateOutcome,
+};
 use crate::{cheby, gpu, rescue_overfill, rescue_scaffold, sensory_bus};
 
 use crate::cheby::*;

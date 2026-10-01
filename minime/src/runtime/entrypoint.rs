@@ -452,6 +452,7 @@ fn open_profile_csv(path: &str, header: &str) -> Result<fs::File> {
     Ok(file)
 }
 
+#[expect(clippy::too_many_arguments, reason = "Existing health schema projection retains independent source fields.")]
 fn update_health_transition_surface(
     health: &mut serde_json::Value,
     phase: &str,
@@ -513,6 +514,7 @@ fn update_health_transition_surface(
     true
 }
 
+#[expect(clippy::too_many_arguments, reason = "Existing health schema projection retains independent source fields.")]
 fn sync_health_transition_surface(
     workspace_dir: &std::path::Path,
     log_homeostat: bool,

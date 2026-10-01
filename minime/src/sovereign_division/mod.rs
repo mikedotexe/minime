@@ -10,6 +10,7 @@ mod child;
 #[cfg(feature = "division-rehearsal")]
 mod continuity_proof;
 mod dispatcher;
+#[cfg(feature = "division-rehearsal")]
 mod fanout;
 mod gateway;
 pub(crate) mod records;

@@ -369,6 +369,10 @@ impl ConsciousnessDB {
     }
 
     /// Record eigenvalue snapshot
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the existing database column API; lint cleanup does not migrate persistence callers."
+    )]
     pub fn save_eigenvalues(
         &self,
         session_id: i64,
@@ -513,6 +517,10 @@ impl ConsciousnessDB {
     }
 
     /// Record ESN self-referential metrics (including geometry)
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the existing database column API; lint cleanup does not migrate persistence callers."
+    )]
     pub fn save_esn_metrics(
         &self,
         session_id: i64,
@@ -546,6 +554,10 @@ impl ConsciousnessDB {
     }
 
     /// Record the typed resonance-density telemetry mirror.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the existing database column API; lint cleanup does not migrate persistence callers."
+    )]
     pub fn save_resonance_density(
         &self,
         session_id: i64,
@@ -574,6 +586,10 @@ impl ConsciousnessDB {
     }
 
     /// Record the typed pressure-source telemetry mirror.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the existing database column API; lint cleanup does not migrate persistence callers."
+    )]
     pub fn save_pressure_source(
         &self,
         session_id: i64,
@@ -602,6 +618,10 @@ impl ConsciousnessDB {
     }
 
     /// Record the typed inhabitable-fluctuation telemetry mirror.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the existing database column API; lint cleanup does not migrate persistence callers."
+    )]
     pub fn save_inhabitable_fluctuation(
         &self,
         session_id: i64,
@@ -633,6 +653,10 @@ impl ConsciousnessDB {
     }
 
     /// Record reduced-mode Ising/Hamiltonian shadow metrics for comparison.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the existing database column API; lint cleanup does not migrate persistence callers."
+    )]
     pub fn save_ising_shadow_metrics(
         &self,
         session_id: i64,
@@ -772,6 +796,10 @@ impl ConsciousnessDB {
     }
 
     /// Log an autonomous decision
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the existing database column API; lint cleanup does not migrate persistence callers."
+    )]
     pub fn log_decision(
         &self,
         session_id: i64,
@@ -888,6 +916,10 @@ impl ConsciousnessDB {
     }
 
     /// Write a sovereignty journal entry
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the existing database column API; lint cleanup does not migrate persistence callers."
+    )]
     pub fn write_journal(
         &self,
         session_id: i64,
@@ -909,6 +941,10 @@ impl ConsciousnessDB {
 
     /// Save a spectral checkpoint — the being's eigenvalue fingerprint.
     /// These form the foundation of the being-designed memory system.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the existing database column API; lint cleanup does not migrate persistence callers."
+    )]
     pub fn save_spectral_checkpoint(
         &self,
         session_id: i64,

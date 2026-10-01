@@ -1,0 +1,28 @@
+   Compiling minime v0.1.0 (/Users/v/other/worktrees/afterimage-timing-20260930/minime/minime)
+error[E0277]: `&&[f32]` is not an iterator
+   --> src/regulator/core/rate_gate.rs:259:45
+    |
+259 |             for (mode, feature) in v.iter().zip(&item.feature) {
+    |                                             ^^^ `&&[f32]` is not an iterator
+    |
+    = help: the trait `std::iter::Iterator` is not implemented for `&&[f32]`
+    = help: the following other types implement trait `std::iter::IntoIterator`:
+              &[T; N]
+              &[T]
+              &mut [T; N]
+              &mut [T]
+              [T; N]
+    = note: required for `&&[f32]` to implement `std::iter::IntoIterator`
+
+error[E0277]: `&&[f32]` is not an iterator
+   --> src/regulator/core/rate_gate.rs:259:36
+    |
+259 |             for (mode, feature) in v.iter().zip(&item.feature) {
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&&[f32]` is not an iterator
+    |
+    = help: the trait `std::iter::Iterator` is not implemented for `&&[f32]`
+    = note: required for `std::iter::Zip<std::slice::Iter<'_, f32>, &&[f32]>` to implement `std::iter::Iterator`
+    = note: required for `std::iter::Zip<std::slice::Iter<'_, f32>, &&[f32]>` to implement `std::iter::IntoIterator`
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `minime` (lib) due to 2 previous errors

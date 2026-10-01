@@ -93,6 +93,10 @@ pub fn make_bandstop_plan(
 ///
 /// # Returns
 /// Elapsed time in milliseconds
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Explicit GPU buffers and polynomial parameters form the existing call contract."
+)]
 pub fn cheby_apply_gpu(
     pool: &mut BufferPool,
     queue: &CommandQueue,
@@ -245,7 +249,7 @@ pub fn cheby_coeffs_bandstop(order: usize, x_lo: f32, x_hi: f32, soft: f32) -> V
     }
 
     // Compute DCT-I coefficients
-    for k in 0..=m {
+    for (k, coefficient) in coeffs.iter_mut().enumerate().take(m + 1) {
         let mut sum = 0.0f64;
 
         // Sample at Chebyshev nodes: x_j = cos(πj/(ns-1))
@@ -304,7 +308,7 @@ pub fn cheby_coeffs_bandstop(order: usize, x_lo: f32, x_hi: f32, soft: f32) -> V
             ck *= 0.5;
         }
 
-        coeffs[k] = ck;
+        *coefficient = ck;
     }
 
     coeffs
@@ -317,7 +321,7 @@ pub fn cheby_coeffs_bandstop(order: usize, x_lo: f32, x_hi: f32, soft: f32) -> V
 /// Write slice to Metal buffer (unified memory helper)
 #[allow(dead_code)]
 pub fn write_slice(buf: &Buffer, data: &[f32]) {
-    let byte_len = data.len() * mem::size_of::<f32>();
+    let byte_len = std::mem::size_of_val(data);
     unsafe {
         std::ptr::copy_nonoverlapping(
             data.as_ptr() as *const u8,

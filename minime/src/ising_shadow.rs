@@ -311,7 +311,7 @@ impl IsingShadowCore {
 
         if shadow_diag_enabled() {
             let tick = SHADOW_DIAG_TICK_COUNTER.fetch_add(1, Ordering::Relaxed);
-            if tick % 100 == 0 {
+            if tick.is_multiple_of(100) {
                 let raw_l2 = l2_norm(&reduced_field);
                 let cov_l2 = l2_norm(cov_input);
                 let (mean_abs, max_abs, active_frac) =
@@ -494,8 +494,8 @@ impl IsingShadowCore {
         let temp = self.cfg.temperature.max(0.05);
         let quiet_threshold = self.cfg.quiet_threshold.max(0.0);
 
-        for i in 0..self.mode_dim {
-            let local = field[i] + row_dot(&self.coupling, self.mode_dim, i, &self.s_bin);
+        for (i, &field_value) in field[..self.mode_dim].iter().enumerate() {
+            let local = field_value + row_dot(&self.coupling, self.mode_dim, i, &self.s_bin);
             let prev = self.s_bin[i];
             let next = if field_norm < quiet_threshold {
                 if local.abs() >= quiet_threshold * 2.0 {
@@ -660,14 +660,14 @@ fn project_field(
     let input_norm = l2_norm(cov_input).max(1e-6);
     let mut reduced = vec![0.0; mode_dim];
 
-    for mode in 0..mode_dim {
+    for (mode, value) in reduced.iter_mut().enumerate() {
         let start = mode * reservoir_dim;
         let end = start + reservoir_dim;
         if end > eigenvectors_col_major.len() {
             break;
         }
         let proj = dot(cov_input, &eigenvectors_col_major[start..end]) / input_norm;
-        reduced[mode] = proj.clamp(-4.0, 4.0).tanh();
+        *value = proj.clamp(-4.0, 4.0).tanh();
     }
 
     reduced
@@ -862,6 +862,10 @@ fn compute_phase_dwell(history: &VecDeque<ShadowSnapshotV3>, current: &str) -> u
 /// recorded apply stats. Computes `basin_shift_score` from the field-norm
 /// magnitudes (a true cosine over the per-mode vectors would require
 /// passing more state; this is a useful first approximation).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Independent attributed influence inputs retain the existing response contract."
+)]
 pub fn build_influence_response(
     intent_id: String,
     label: String,

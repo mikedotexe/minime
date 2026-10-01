@@ -93,6 +93,10 @@ impl ActivationTraceRecorder {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Recorder input columns retain their existing call contract."
+    )]
     pub fn maybe_sample(
         &mut self,
         t_ms: u64,

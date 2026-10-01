@@ -1273,8 +1273,7 @@ impl Lane {
         // "randomness" without pulling in rand.
         let seed = self.dropped as u64;
         let mut new_q = std::collections::VecDeque::with_capacity(qlen);
-        let mut idx = 0u64;
-        for item in self.q.drain(..) {
+        for (idx, item) in (0u64..).zip(self.q.drain(..)) {
             let position_frac = idx as f32 / qlen.max(1) as f32; // 0=oldest, 1=newest
             let survival = 0.1 + 0.8 * position_frac; // 10% oldest, 90% newest
                                                       // Simple hash-based pseudo-random
@@ -1288,7 +1287,6 @@ impl Lane {
             } else {
                 new_q.push_back(item);
             }
-            idx += 1;
         }
         // If we didn't drop enough probabilistically, trim from front
         while removed < count {
@@ -2887,7 +2885,7 @@ impl SensoryBus {
         }
         let mut count = counter.lock();
         *count = count.saturating_add(1);
-        *count % u64::from(divisor) == 0
+        (*count).is_multiple_of(u64::from(divisor))
     }
 
     /// Drain up to batch_max samples. Each output is the production 66D vector:

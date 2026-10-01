@@ -6,6 +6,7 @@ mod av_gpu;
 mod av_ws;
 mod buffer_pool;
 mod cheby;
+mod covariance_math;
 mod db;
 mod division;
 mod envelope_registry;
@@ -14,6 +15,7 @@ mod gpu;
 mod handoff_diag;
 mod hard_reset;
 mod ising_shadow;
+mod measurement_basis;
 mod memory_bank;
 mod nn;
 mod owner_inquiry;
@@ -39,6 +41,7 @@ mod sensory_protocol;
 mod sensory_ws;
 mod sovereign_division;
 mod spectral;
+mod stable_covariance;
 
 fn main() -> anyhow::Result<()> {
     runtime::run()

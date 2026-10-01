@@ -8,6 +8,10 @@ PYTHON_BIN="${MINIME_PYTHON_BIN:-/opt/homebrew/bin/python3}"
 
 cd "$PROJECT_DIR"
 
+# A deployment may replace only the stopped engine, never a KeepAlive respawn.
+HOLD="$PROJECT_DIR/workspace/runtime/engine-release-holds/com.minime.engine.json"
+while [ -e "$HOLD" ] || [ -L "$HOLD" ]; do sleep 1; done
+
 if [ ! -x "$ENGINE_BIN" ]; then
     echo "minime engine binary missing or not executable: $ENGINE_BIN" >&2
     exit 1

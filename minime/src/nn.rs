@@ -15,6 +15,10 @@ use metal::*;
 // MLP Architecture
 //=============================================================================
 
+#[allow(
+    clippy::upper_case_acronyms,
+    reason = "Existing public type name is shared by library and runtime callers."
+)]
 pub struct MLP {
     pub din: usize,
     pub hidden: usize,
@@ -194,7 +198,7 @@ impl MLP {
 
         // Layer 1: H = ReLU(X @ W1 + b1)
         encoder.set_compute_pipeline_state(&self.dense_relu_fwd);
-        encoder.set_buffer(0, Some(&x_input), 0);
+        encoder.set_buffer(0, Some(x_input), 0);
         encoder.set_buffer(1, Some(&self.w1), 0);
         encoder.set_buffer(2, Some(&self.b1), 0);
         encoder.set_buffer(3, Some(&self.h), 0);
@@ -223,7 +227,7 @@ impl MLP {
         encoder.set_buffer(0, Some(&self.h), 0);
         encoder.set_buffer(1, Some(&self.w2), 0);
         encoder.set_buffer(2, Some(&self.b2), 0);
-        encoder.set_buffer(3, Some(&y_output), 0);
+        encoder.set_buffer(3, Some(y_output), 0);
         encoder.set_bytes(
             4,
             std::mem::size_of::<u32>() as u64,
@@ -368,7 +372,7 @@ impl MLP {
             &n as *const u32 as *const _,
         );
         encoder.dispatch_thread_groups(
-            MTLSize::new(((n + 255) / 256) as u64, 1, 1),
+            MTLSize::new(n.div_ceil(256) as u64, 1, 1),
             MTLSize::new(256, 1, 1),
         );
 
@@ -387,7 +391,7 @@ impl MLP {
             &n as *const u32 as *const _,
         );
         encoder.dispatch_thread_groups(
-            MTLSize::new(((n + 255) / 256) as u64, 1, 1),
+            MTLSize::new(n.div_ceil(256) as u64, 1, 1),
             MTLSize::new(256, 1, 1),
         );
 
@@ -406,7 +410,7 @@ impl MLP {
             &n as *const u32 as *const _,
         );
         encoder.dispatch_thread_groups(
-            MTLSize::new(((n + 255) / 256) as u64, 1, 1),
+            MTLSize::new(n.div_ceil(256) as u64, 1, 1),
             MTLSize::new(256, 1, 1),
         );
 
@@ -425,7 +429,7 @@ impl MLP {
             &n as *const u32 as *const _,
         );
         encoder.dispatch_thread_groups(
-            MTLSize::new(((n + 255) / 256) as u64, 1, 1),
+            MTLSize::new(n.div_ceil(256) as u64, 1, 1),
             MTLSize::new(256, 1, 1),
         );
 
@@ -568,8 +572,8 @@ impl NeuroCell {
         // Copy input
         unsafe {
             let ptr = self.pred_input.contents() as *mut f32;
-            for i in 0..15 {
-                *ptr.add(i) = features[i];
+            for (i, &value) in features.iter().enumerate() {
+                *ptr.add(i) = value;
             }
         }
 
@@ -592,8 +596,8 @@ impl NeuroCell {
         // Copy input
         unsafe {
             let ptr = self.router_input.contents() as *mut f32;
-            for i in 0..64 {
-                *ptr.add(i) = av_features[i];
+            for (i, &value) in av_features.iter().enumerate() {
+                *ptr.add(i) = value;
             }
         }
 
@@ -605,8 +609,8 @@ impl NeuroCell {
         let mut weights = [0.0f32; 32];
         unsafe {
             let ptr = self.router_output.contents() as *const f32;
-            for i in 0..32 {
-                weights[i] = *ptr.add(i);
+            for (i, value) in weights.iter_mut().enumerate() {
+                *value = *ptr.add(i);
             }
         }
 
@@ -620,8 +624,8 @@ impl NeuroCell {
         // Copy input
         unsafe {
             let ptr = self.reg_input.contents() as *mut f32;
-            for i in 0..20 {
-                *ptr.add(i) = state[i];
+            for (i, &value) in state.iter().enumerate() {
+                *ptr.add(i) = value;
             }
         }
 
@@ -633,8 +637,8 @@ impl NeuroCell {
         let mut control = [0.0f32; 5];
         unsafe {
             let ptr = self.reg_output.contents() as *const f32;
-            for i in 0..5 {
-                control[i] = *ptr.add(i);
+            for (i, value) in control.iter_mut().enumerate() {
+                *value = *ptr.add(i);
             }
         }
 
