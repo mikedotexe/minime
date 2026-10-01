@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Live and locally merged: sustained self-study (2026-09-30).** Source `d2c3c6e` is paired with Astrid `0dc40d5a46`; graceful activation verifies agent 74379, bridge 75202, 89 loaded inputs, exact helper selection and retained session. Packaged suite: 1,710 tests and 141 subtests, one existing skip. Engine/model/sensory processes and paused automations remain unchanged. No remote push; full receipts in the sustained-study steward note.
+
 - **Sustained voluntary source study (2026-09-30).** Keep the observed malformed `SELF_STUDY NEW` question intact through NEXT splitting and let the shared Rust helper return a specific recovery choice. Shorten routine source-study guidance while keeping the research-policy boundary and explicit command help. Exercise substantial SESSION prose, contrary-source revision, REST, quiet parking and deliberate return through the real dispatcher/helper with stubbed inference. Requires the paired schema-12 helper; exact qualification and activation status: `docs/steward-notes/2026-09-30-sustained-self-study.md`. No token, control or engine changes.
 
 - **Live: paired quiet-study and afterimage presentation (2026-09-30).** Source `d5176e8` is integrated with Astrid `4099bbfd10`; graceful activation verifies agent 48235, bridge 49008, all 89 loaded inputs and exact checkpoint/session continuity. Packaged qualification passes 1,707 tests plus 141 subtests with one existing skip. Engine/model/sensory processes remain unchanged. Timing candidate `e9f2f5f` is separately committed, not merged or activated. Automations remain paused. See the paired release steward note.

@@ -46,3 +46,30 @@ at note creation. No private journal is a fixture and no historical prose is
 rewritten. No engine/model/sensory restart or automation resume. After reader
 migration, never restore old authored state for rollback. Actual paired release
 and Git evidence will be appended after the corresponding checks complete.
+
+## Verified Live and Integrated
+
+The paired release completed at 2026-10-01 00:28:31 UTC. Minime source commit
+`d2c3c6e5c6946e778254ac6f1537061ea279c301` and Astrid
+`0dc40d5a460bcb97a65818b305a3cdbc5eaea5cc` are fast-forwarded onto local
+main. No remote push was performed. The installer changed exactly the two owned
+adapter files, byte-verified against the commit before explicit-path integration.
+
+Agent PID 48235 became 74379; paired bridge PID 49008 became 75202. The standard
+quiet window and roughly eleven-minute natural idle-boundary wait were retained;
+four studies completed during the wait. No accepted job was cancelled or forced.
+All 89 loaded Python inputs, the packaged shared helper, configuration and session
+5320 are verified. The exact pending NEXT was restored and competing boot
+reflection deferred; restoration does not prove a valid source path or completed
+study. Both launch holds are absent and protected engine/model/sensory identities
+are unchanged.
+
+The packaged reader is SHA-256
+`54c0dabf3ea1728ee4ba8290a300a3142416c2e3a2f0c21ce7397d58eeecb850`.
+The complete Python suite with this exact binary passes 1,710 tests and 141
+subtests, one existing skip. Real old/new packaged migration, helper selection,
+corrupt/future-state refusal and operation retries pass. Full receipts and exact
+committed path lists are in Astrid's paired note and its bounded release witness.
+
+Paused automations stay paused at generation 484. No engine timing implementation
+is activated and no subjective benefit or naturally longer output is inferred.
