@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Sustained voluntary source study (2026-09-30).** Keep the observed malformed `SELF_STUDY NEW` question intact through NEXT splitting and let the shared Rust helper return a specific recovery choice. Shorten routine source-study guidance while keeping the research-policy boundary and explicit command help. Exercise substantial SESSION prose, contrary-source revision, REST, quiet parking and deliberate return through the real dispatcher/helper with stubbed inference. Requires the paired schema-12 helper; exact qualification and activation status: `docs/steward-notes/2026-09-30-sustained-self-study.md`. No token, control or engine changes.
+
 - **Live: paired quiet-study and afterimage presentation (2026-09-30).** Source `d5176e8` is integrated with Astrid `4099bbfd10`; graceful activation verifies agent 48235, bridge 49008, all 89 loaded inputs and exact checkpoint/session continuity. Packaged qualification passes 1,707 tests plus 141 subtests with one existing skip. Engine/model/sensory processes remain unchanged. Timing candidate `e9f2f5f` is separately committed, not merged or activated. Automations remain paused. See the paired release steward note.
 
 - **Paired quiet-study and afterimage presentation candidate (2026-09-30).** Preserve optional historical cues before the selected writing request, including provider adaptation; describe samples with unmet cadence requirements and retain exact explicit retrieval. Combine with the schema-11 quiet-notebook helper. The engine elapsed-time candidate is separate and not included in this agent rollout. See `docs/steward-notes/2026-09-30-paired-quiet-afterimage-release.md`.
