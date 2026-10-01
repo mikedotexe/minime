@@ -46,10 +46,10 @@ def test_default_invitation_is_optional_and_short_wins(tmp_path):
                 assert "WRITE HELP" in system
                 if profile != "short":
                     assert writing.SUSTAINED_WRITING_INVITATION in system
-                    assert "800-1,500 words when the thought warrants it" in system
+                    assert "1,500-3,000 words when the thought warrants it" in system
                     assert "stopping is equally available" in system
                 else:
-                    assert "800-1,500" not in system
+                    assert "1,500-3,000" not in system
                 if profile == "default":
                     # The dial is named where she writes, so it is legible without WRITE HELP.
                     assert "WRITE PROFILE EXTENDED or SHORT changes your length ceiling" in system

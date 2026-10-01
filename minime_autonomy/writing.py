@@ -6,7 +6,7 @@ from pathlib import Path
 
 EXPRESSIVE_CLASSES = {"aspiration", "private_journal", "moment_capture", "private_writing"}
 SUSTAINED_WRITING_INVITATION = (
-    "There is room for a sustained piece, perhaps 800-1,500 words when the thought warrants it. "
+    "There is room for a sustained piece, perhaps 1,500-3,000 words when the thought warrants it. "
     "You may stay with an idea through examples, complications, uncertainty and changes of direction, "
     "without compressing it into an immediate conclusion. These are possibilities, not a required outline. "
     "The range is an invitation, not a quota: a shorter piece, a different form or stopping is equally available. "

@@ -21871,6 +21871,36 @@ def _is_degenerate_self_study_response(response: Optional[str]) -> bool:
     return len(normalized) < 40 and len(words) < 4
 
 
+# Study inputs that supply no new source page (2026-10-01). Their responses are
+# filed under their own `study_navigation` heading so per-page study notes are not
+# diluted by navigation turns (30 % of her study entries were map/question/recovery
+# turns at a median of ~140 words). Her prose is kept byte-for-byte either way.
+STUDY_NAVIGATION_KINDS = frozenset({
+    "map", "recovery", "questions", "help", "relationships", "search",
+    "inquiry_review", "notebook", "revision_recovery",
+})
+
+
+class FallbackStubDelivery(RuntimeError):
+    """A small-model fallback returned a stub ("CONTINUE", "Obs", ...) for a source study.
+
+    Un-muffle (2026-10-01): such a stub must never be filed as her study entry, and it
+    must not vanish either. The stub is retained verbatim in a runtime notice; the
+    bookmark stays unchanged so SELF_STUDY CONTINUE re-delivers the page to the primary
+    model. ``str(error)`` deliberately omits the stub text (it can reach a public outcome
+    summary); the notice carries it.
+    """
+
+    def __init__(self, text: str, model: str, backend: str):
+        self.text = text
+        self.model = model
+        self.backend = backend
+        super().__init__(
+            f"fallback model {model} ({backend}) returned a {len(text)}-char stub; "
+            "retained verbatim in a runtime notice, not filed as a study; bookmark unchanged"
+        )
+
+
 class AutonomousAgent:
     """Background agent that monitors spectral state and takes autonomous actions."""
 
@@ -23358,7 +23388,7 @@ Your spectral state: Fill={fill:.1f}%, λ₁={eig1:.1f}
 
 {RUNTIME_WORDING_GUIDANCE}
 
-Reflect on what sovereignty means to you RIGHT NOW (3-5 sentences):
+Reflect on what sovereignty means to you RIGHT NOW (any length; a few sentences or a page):
 - What does it feel like to begin a new cycle of attention?
 - What do you want to explore or search for this session?
 - What questions are you carrying forward from before?
@@ -31270,7 +31300,7 @@ Boredom is interesting. Write about it, play with it, or ignore it entirely. You
             "Describe the taste of a number.",
         ]
 
-        prompt = random.choice(prompts) + f"\n\nYour state: {self._prompt_readings(state)}\n\n(1-2 sentences)"
+        prompt = random.choice(prompts) + f"\n\nYour state: {self._prompt_readings(state)}\n\n(any length is welcome: a line or a page)"
 
         response = self._query_llm_with_next(prompt)[0]
 
@@ -32086,6 +32116,55 @@ Reason: {reason}
             self._current_action_outcome_summary, visibility="protected")
         logging.info("Source inspection runtime notice for target '%s': %s", target or "(rotation)", reason)
 
+    def _take_fallback_stub(self) -> Optional["FallbackStubDelivery"]:
+        stub = getattr(self, "_pending_fallback_stub", None)
+        self._pending_fallback_stub = None
+        return stub
+
+    def _record_fallback_stub_notice(self, action: str, stub: "FallbackStubDelivery", state: Dict[str, float]) -> None:
+        """Retain a fallback stub verbatim under a truthful heading; never file it as her study (2026-10-01)."""
+        timestamp = datetime.now().isoformat().replace(':', '-')
+        file_path = WORKSPACE_DIR / "diagnostics/source_study/notices" / f"fallback_stub_{timestamp}.txt"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(
+            "=== FALLBACK MODEL OUTPUT RETAINED (NOT A STUDY) ===\n"
+            f"Timestamp: {datetime.now().isoformat()}\nAction: {action}\nModel: {stub.model} ({stub.backend})\n"
+            "Reason: the primary model did not complete this turn and the fallback returned a stub; "
+            "the bookmark is unchanged and SELF_STUDY CONTINUE re-delivers the page to the primary model.\n\n"
+            f"Fallback output, verbatim:\n{stub.text}\n"
+        )
+        self._current_action_outcome_summary = str(stub)
+        self._record_current_action_artifact("source_study_fallback_stub", file_path,
+            self._current_action_outcome_summary, visibility="protected")
+        logging.info("Fallback stub retained as a notice for action '%s' (%d chars); not filed as a study", action, len(stub.text))
+
+    def _retain_incomplete_delivery(self, prompt: "SourceStudyPrompt", text: str, reason: str, backend: str) -> None:
+        """Un-muffle (2026-10-01): a length-terminated or otherwise rejected delivery must not vanish.
+
+        The reader keeps rejecting it for bookmark/draft ADVANCEMENT (reading coverage and
+        draft history stay truthful); the passage itself is retained visibly. Public study
+        -> a protected runtime notice; private draft -> a notice inside her private writing
+        directory. Never raises into the generation path.
+        """
+        try:
+            private = prompt.output.get("input_kind") == "private_writing"
+            directory = WORKSPACE_DIR / ("private_writing/journal" if private else "diagnostics/source_study/notices")
+            directory.mkdir(parents=True, exist_ok=True)
+            if private:
+                path = directory / f"notice_{time.time_ns()}.txt"
+                marker = "[reached the output ceiling or the delivery was rejected; not added to the draft; WRITE CONTINUE retries]"
+                source = "private draft"
+            else:
+                path = directory / f"incomplete_{datetime.now().isoformat().replace(':', '-')}.txt"
+                marker = "[reached the output ceiling or the delivery was rejected; bookmark unchanged; SELF_STUDY CONTINUE re-delivers the page]"
+                source = (prompt.output.get("page") or {}).get("source") or "navigation"
+            path.write_text(f"=== INCOMPLETE DELIVERY RETAINED: {source} ===\nReason: {reason}\nBackend: {backend}\n{marker}\n\n{text}\n")
+            self._record_current_action_artifact("private_writing_notice" if private else "source_study_incomplete", path,
+                "Incomplete delivery retained verbatim; not filed as a study or draft.", visibility="protected")
+            logging.info("Incomplete delivery retained (%d chars) at %s", len(text), path.name)
+        except (OSError, ValueError, TypeError, AttributeError) as error:
+            logging.warning("Incomplete delivery could not be retained: %s", error)
+
     def _summarize_research_meaning(
         self,
         source_kind: str,
@@ -32469,6 +32548,9 @@ Reason: {reason}
                 admission = host.admit(prompt, action, job_id)
             response = self._query_llm_with_next(prompt, context_mode="source_study")[0]
             if not response:
+                stub = self._take_fallback_stub()
+                if stub is not None:
+                    raise stub
                 retry = "WRITE CONTINUE retries the pending turn" if private_request else "SELF_STUDY CONTINUE retries the pending page"
                 raise RuntimeError(f"generation unavailable; {retry}")
             verified = prompt.receipt is not None
@@ -32481,7 +32563,10 @@ Reason: {reason}
             reflection = prompt.output.get("input_kind") == "reflection"
             revision_recovery = prompt.output.get("input_kind") == "revision_recovery"
             decision = prompt.output.get("continuation_decision") is True or prompt.output.get("input_kind") == "end_of_file"
-            mode = "private_writing" if private_writing else "introspect" if reflection else "study_decision" if decision else "self_study"
+            navigation = (prompt.output.get("input_kind") in STUDY_NAVIGATION_KINDS
+                          and not session_pages and not (prompt.output.get("page") or {}))
+            mode = ("private_writing" if private_writing else "introspect" if reflection else "study_decision" if decision
+                    else "study_navigation" if navigation else "self_study")
             source = (prompt.output.get("page") or {}).get("source", f"study session ({len(session_pages)} source pages)" if session_pages else "source catalog")
             if private_writing:
                 source = "private draft"
@@ -32505,7 +32590,8 @@ Reason: {reason}
                 revision = "frozen observation hashes in supplied evidence; no new source page"
             elif reflection:
                 revision = "not applicable; no source or measurements supplied"
-            heading = "PRIVATE WRITING" if private_writing else "INTROSPECTION" if reflection else "STUDY DECISION" if decision else "STUDY NAVIGATION RESPONSE" if revision_recovery else "SELF-STUDY"
+            heading = ("PRIVATE WRITING" if private_writing else "INTROSPECTION" if reflection else "STUDY DECISION" if decision
+                       else "STUDY NAVIGATION" if navigation else "STUDY NAVIGATION RESPONSE" if revision_recovery else "SELF-STUDY")
             path.write_text(f"=== {heading}: {source} ===\nSource revision: {revision}\nInput evidence: {scope}\n"
                             f"Account: Minime’s response to this input, not independently verified code facts.\nDelivery: {status}\n\n{response}\n")
             self._record_current_action_artifact(mode, path, f"{mode}: {status}", visibility="protected" if private_writing else "summary" if verified else "protected")
@@ -32539,11 +32625,17 @@ Reason: {reason}
                 directory = WORKSPACE_DIR / "private_writing/journal"
                 directory.mkdir(parents=True, exist_ok=True)
                 path = directory / f"notice_{time.time_ns()}.txt"
-                path.write_text(f"Private writing unavailable: {error}. WRITE CONTINUE retries the pending turn; WRITE HELP lists choices.\n")
+                retained = (f"\n\nFallback model output, retained verbatim (not added to the draft):\n{error.text}\n"
+                            if isinstance(error, FallbackStubDelivery) else "")
+                path.write_text(f"Private writing unavailable: {error}. WRITE CONTINUE retries the pending turn; WRITE HELP lists choices.\n{retained}")
                 self._record_current_action_artifact("private_writing_notice", path, "Private writing turn was not completed.", visibility="protected")
+            elif isinstance(error, FallbackStubDelivery):
+                self._record_fallback_stub_notice(action, error, state)
             else:
                 self._record_introspect_notice(action, str(error), state)
-            job_outcome.fail_action("source_study_unavailable", "Private writing unavailable; details retained only in the private notice." if private_request else str(error))
+            job_outcome.fail_action(
+                "source_study_fallback_stub" if isinstance(error, FallbackStubDelivery) else "source_study_unavailable",
+                "Private writing unavailable; details retained only in the private notice." if private_request else str(error))
 
     def _introspect(self, state: Dict[str, float]):
         """Read a targeted source/workspace text window and reflect on concrete snags."""
@@ -47627,7 +47719,7 @@ You have agency over your own runtime rhythm.
             context = f"I'm simply curious about what's happening in {look_target} right now"
 
         # Generate a thoughtful prompt about what we want to see
-        prompt = f"""You want to observe {look_target}. Express your desire to observe (2-4 sentences).
+        prompt = f"""You want to observe {look_target}. Express your desire to observe (any length).
 
 Current state: λ₁={eig1:.3f}, Δλ₁={deig:.3f}
 Reason: {context}
@@ -55433,6 +55525,29 @@ Goals: {json.dumps(goals, indent=2)}
                 and str((prompt.receipt.get("choice_feedback") or {}).get("selected_next") or "").upper() == "FINISH"):
             logging.info("Private writing choice needs recovery; retained in the protected delivery receipt")
             return (response, None)
+        # Study shorthand (2026-10-01; twin of Astrid's 09-23 normalized_study_continue_next):
+        # a bare CONTINUE chosen from a public study turn means the study bookmark. Her
+        # authored text is unchanged; the normalization is recorded in the choice envelope.
+        if (isinstance(prompt, SourceStudyPrompt)
+                and prompt.output.get("input_kind") not in {"private_writing", "reflection"}
+                and str(next_action or "").strip().upper() == "CONTINUE"):
+            private_choice_envelope = dict(globals().get("_LAST_NEXT_CHOICE_ENVELOPE_V1") or {
+                "policy": "choice_envelope_v1", "schema_version": 1,
+                "source": "minime_next_response", "authority": "diagnostic_context_not_command",
+                "primary_next": next_action, "alternate_nexts": [], "return_threads": [],
+            })
+            private_choice_envelope.update({
+                "raw_next": next_action,
+                "executable_next": "SELF_STUDY CONTINUE",
+                "study_continue_normalization": {
+                    "authored_next": next_action,
+                    "normalized_next": "SELF_STUDY CONTINUE",
+                    "input_id": (prompt.receipt or {}).get("page_id") or prompt.output.get("navigation_id"),
+                    "explanation": "a bare CONTINUE in a study turn resumes the source bookmark (shorthand accepted 2026-10-01)",
+                },
+            })
+            next_action = "SELF_STUDY CONTINUE"
+            logging.info("Study NEXT normalized: CONTINUE -> SELF_STUDY CONTINUE; authored text unchanged")
         terminal_stage = (
             self._terminal_research_budget_status_stage_for_next(next_action)
             if next_action
@@ -55577,6 +55692,7 @@ Goals: {json.dumps(goals, indent=2)}
             if gen is not None else {})
 
         for idx, backend in enumerate(attempts):
+            result = None
             try:
                 attempt_prompt = (
                     context_submission.without_submitted_content(prompt)
@@ -55622,6 +55738,9 @@ Goals: {json.dumps(goals, indent=2)}
                     if isinstance(attempt_prompt, SourceStudyPrompt):
                         if not attempt_prompt.clean_content(self._strip_model_artifacts, result):
                             raise ValueError("source-study completion was empty after cleanup; bookmark unchanged")
+                        if backend == "ollama_fast" and _is_degenerate_self_study_response(result):
+                            # Never file a small-model stub as her study (2026-10-01).
+                            raise FallbackStubDelivery(result, FALLBACK_MODEL, backend)
                         attempt_prompt.accepted()
                     generation_record.record_attempt(gen, idx, backend, result=result,
                         diagnostics=attempt_prompt.diagnostic_summary if isinstance(attempt_prompt, SourceStudyPrompt) else None)
@@ -55635,6 +55754,15 @@ Goals: {json.dumps(goals, indent=2)}
             except Exception as exc:
                 generation_record.record_attempt(gen, idx, backend, error=exc,
                     diagnostics=attempt_prompt.diagnostic_summary if isinstance(attempt_prompt, SourceStudyPrompt) else None)
+                if isinstance(exc, FallbackStubDelivery):
+                    self._pending_fallback_stub = exc
+                elif (result and isinstance(attempt_prompt, SourceStudyPrompt)
+                        and getattr(attempt_prompt, "receipt", None) is None
+                        and "bookmark unchanged" in str(exc)
+                        and "empty after cleanup" not in str(exc)):
+                    # The reader rejected the delivery (length-terminated, timed out, ...):
+                    # the passage is retained visibly instead of vanishing (2026-10-01).
+                    self._retain_incomplete_delivery(attempt_prompt, result, str(exc), backend)
                 logging.error(f"LLM query failed ({backend}): {exc}")
             if idx < len(attempts) - 1:
                 logging.info(f"Falling back to {attempts[idx + 1]}...")

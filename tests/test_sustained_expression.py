@@ -43,7 +43,7 @@ def test_aspiration_with_mail_keeps_room_and_explicit_reply_authority(
     assert source in payload["messages"][1]["content"]
     system = payload["messages"][0]["content"]
     assert (writing.SUSTAINED_WRITING_INVITATION in system) == (profile != "short")
-    assert system.count("800-1,500") == (0 if profile == "short" else 1)
+    assert system.count("1,500-3,000") == (0 if profile == "short" else 1)
     events = rows(aa.WORKSPACE_DIR)
     assert [row["stage"] for row in events[:3]] == ["file_consumed", "request_prepared", "supplied_to_model"]
     replies = list((aa.WORKSPACE_DIR / "outbox/human/mike").glob("*.txt"))

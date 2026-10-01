@@ -356,16 +356,19 @@ def test_private_normalization_updates_existing_metadata_envelope(writing_agent,
     assert envelope["private_writing_normalization"]["input_id"] == prompt.output["navigation_id"]
 
 
-def test_global_continue_is_not_a_private_writing_alias(writing_agent, monkeypatch, caplog):
+def test_global_continue_in_a_study_turn_means_the_bookmark_not_a_private_alias(writing_agent, monkeypatch, caplog):
+    """2026-10-01: a bare CONTINUE from a public study turn resumes the source bookmark
+    (twin of Astrid's 09-23 shorthand); it is still never a private-writing alias."""
     agent, client = writing_agent
     text = "NEXT: CONTINUE"
     prompt = client.prepare("SELF_STUDY MAP")
     deliver(prompt, text)
     assert prompt.receipt["choice_feedback"].get("normalized_next") is None
     monkeypatch.setattr(agent, "_query_llm", Mock(return_value=text))
-    assert agent._query_llm_with_next(prompt, context_mode="source_study") == (text, "CONTINUE")
-    assert agent._pending_next_action == "CONTINUE"
+    assert agent._query_llm_with_next(prompt, context_mode="source_study") == (text, "SELF_STUDY CONTINUE")
+    assert agent._pending_next_action == "SELF_STUDY CONTINUE"
     with caplog.at_level("INFO"):
-        agent._decide_action(dict(STATE))
-    assert "Unknown NEXT: 'CONTINUE'" in caplog.text
-    assert agent._pending_source_study_action is None
+        assert agent._decide_action(dict(STATE)) == "self_study"
+    assert "Unknown NEXT" not in caplog.text
+    assert agent._pending_source_study_action == "SELF_STUDY CONTINUE"
+    assert not list((client.workspace / "journal").glob("private_writing*"))

@@ -688,6 +688,15 @@ def final_bare_choice_index(lines: list[str], eligible: list[int]) -> int | None
     return None
 
 
+# Near-miss alias (2026-10-01): `WRITE_CONTINUE` was chosen 21 times in 14 days and fell
+# to threshold logic as an unknown verb. The underscore form of a WRITE sub-command
+# means that sub-command. Closed list; `WRITE_FILE` is a different, live-write action.
+_WRITE_UNDERSCORE_ALIAS = re.compile(
+    r"^WRITE_(START|CONTINUE|REVISE|BRANCH|RESUME|FINISH|PARK|HELP|LIST|READ|PROFILE|QUESTION|EVIDENCE|STOPPING_POINT|OBSERVE)$",
+    re.IGNORECASE,
+)
+
+
 def parse_next_action(text: str) -> tuple:
     """Extract NEXT: action from LLM response.
 
@@ -735,6 +744,9 @@ def parse_next_action(text: str) -> tuple:
                 # remainder starts with `EXPERIMENT_`.
                 if parts[0].upper().startswith('EXEXPERIMENT_'):
                     parts[0] = parts[0][2:]
+                write_alias = _WRITE_UNDERSCORE_ALIAS.match(parts[0])
+                if write_alias:
+                    parts = ['WRITE', write_alias.group(1).upper() + (' ' + parts[1] if len(parts) > 1 else '')]
                 if parts[0].upper() == 'EXPERIENCE_PLAN':
                     parts[0] = 'EXPERIMENT_PLAN'
                 if parts[0].upper() == 'SHADOW_DECOMPOSE':
