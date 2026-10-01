@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Semantic-settle reporting integrated and release-qualified (2026-10-01).** Commit and merge the observation-only candidate at `367cc7a`, build immutable release-05 and verify all 123 source inputs. New-inspector qualification and no-activation preflight pass. Fresh bounded-transition acknowledgement remains pending; release-04 stays live. See `docs/steward-notes/2026-10-01-semantic-settle-integration.md`.
+
 - **Candidate: distinguish numerical restart eligibility from semantic quiet (2026-10-01).** Add read-only `restart_settle_observation_v1` to health/status, reusing production predicates without releasing the real latch or retiring the scaffold. Extend isolated qualification with sustained semantic input and a bounded frozen-health replay. Retain evidence against blanket bypass and premature retirement; no live control, input, restart or automation change. See `docs/steward-notes/2026-10-01-semantic-settle-review.md`.
 
 - **Live: approved engine release-04 (2026-10-01).** Run source `c428fca` through the sanctioned bounded transition; verify new process identities, PI-only restore, signed control lineage and 360 seconds of observation. No protected service restart or state-backup restore. Retain the `semantic_active` settle-proof wait as explicit follow-up. See `docs/steward-notes/2026-10-01-engine-live-transition.md`.
