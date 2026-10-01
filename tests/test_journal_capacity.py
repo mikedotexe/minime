@@ -45,3 +45,21 @@ def test_real_ollama_and_mlx_payloads_use_expanded_budget():
         assert options["num_ctx"] >= 65536
         assert agent._query_ollama("machine", "system", 2048) == "Brief."
         assert post.call_args.kwargs["json"]["options"]["num_predict"] == aa.OLLAMA_NUM_PREDICT_CAP
+
+
+def test_source_study_deadline_floor_covers_ceiling_at_measured_decode():
+    """2026-10-01: the reboot-erased 160 s budget left source study at 320 s, below the
+    time a 4096-token answer takes; the floor derived from the ceiling and the measured
+    decode speed makes the deadline independent of a lost environment variable."""
+    floor = aa.SOURCE_STUDY_PROMPT_OVERHEAD_S + aa.SOURCE_STUDY_OUTPUT_TOKENS / aa.SOURCE_STUDY_MIN_DECODE_TOK_S
+    assert floor >= 800
+    for base_timeout in [45, 60, 160]:
+        tokens, timeout, _ = aa._journal_generation_budget(4096, 768, base_timeout, 8192,
+                                                           journal=True, source_study=True)
+        assert tokens == 4096
+        assert timeout >= floor
+    # The floor only raises: a generous base timeout keeps its own larger value.
+    _, timeout, _ = aa._journal_generation_budget(4096, 768, 400, 8192, journal=True, source_study=True)
+    assert timeout == 400 * (4096 / 768)
+    # Non-study journal lanes are untouched by the floor.
+    assert aa._journal_generation_budget(768, 768, 60, 8192, journal=True)[1] == 120

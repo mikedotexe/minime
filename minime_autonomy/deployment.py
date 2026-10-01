@@ -12,6 +12,9 @@ def source_inputs(root: Path) -> dict[str, str]:
         "scripts/launchd_autonomous_agent.sh",
         "scripts/minime_rescue_investigation.py",
         "launchd/com.minime.autonomous-agent.plist",
+        # Durable LLM budget sourced by the launch wrapper (2026-10-01): a config
+        # file that changes the running budget must be part of the verified inventory.
+        "launchd/autonomous-agent.env",
     ))
     return {
         str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()

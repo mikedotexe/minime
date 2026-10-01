@@ -17,6 +17,17 @@ while [ -e "$HOLD_PATH" ] || [ -L "$HOLD_PATH" ]; do
     sleep 1
 done
 
+# Durable LLM budget (survives reboot). `launchctl setenv` values imported
+# below still override it, so canaries and operators keep their override path.
+# See launchd/autonomous-agent.env for the 2026-09-25 reboot regression this closes.
+ENV_FILE="$PROJECT_DIR/launchd/autonomous-agent.env"
+if [ -f "$ENV_FILE" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
+    set +a
+fi
+
 launchctl_env() {
     local key="$1"
     local value

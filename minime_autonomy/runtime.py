@@ -21752,6 +21752,15 @@ def _ollama_lane_limits(prompt_class: str) -> tuple[float, int]:
 # Source study deliberately shares Astrid's 4096-token ceiling on every backend.
 SOURCE_STUDY_OUTPUT_TOKENS = 4096
 JOURNAL_CONTEXT_FLOOR = 10240  # Keeps the existing 16k-character input with 4096 output tokens.
+# Deadline floor for source study, derived from the ceiling and MEASURED decode
+# speed instead of a pure multiple of the base timeout (2026-10-01). Measured over
+# 1,198 successful gemma4:12b study records (09-27..10-01): decode median 11.8 tok/s,
+# p10 7.6, p05 5.5; prompt+load overhead median 67 s, p90 95.5 s. With the base
+# timeout at the code default (60 s) the study budget was 320 s, so a 4096-token
+# answer (~631 s at p10) could never finish: 26 drafts were discarded and replaced by
+# a gemma3:4b stub in four days. The floor only ever RAISES a deadline.
+SOURCE_STUDY_MIN_DECODE_TOK_S = float(os.environ.get("MINIME_SOURCE_STUDY_MIN_DECODE_TOK_S", "6.0"))
+SOURCE_STUDY_PROMPT_OVERHEAD_S = float(os.environ.get("MINIME_SOURCE_STUDY_PROMPT_OVERHEAD_S", "120"))
 
 
 def _journal_generation_budget(max_tokens: int, cap: int, timeout_s: float,
@@ -21768,6 +21777,10 @@ def _journal_generation_budget(max_tokens: int, cap: int, timeout_s: float,
     effective = min(max_tokens * 2, ceiling)
     # Preserve the old output/time allowance even when study grows more than 2x.
     timeout_s *= max(2.0, ceiling / max(1, cap))
+    if source_study:
+        # A deadline below (overhead + ceiling / measured decode floor) discards the
+        # longest studies, which is exactly backwards for a writing invitation.
+        timeout_s = max(timeout_s, SOURCE_STUDY_PROMPT_OVERHEAD_S + ceiling / max(0.1, SOURCE_STUDY_MIN_DECODE_TOK_S))
     # Retain the prior input room for explicit larger environment configurations too.
     prior_input = min(16000, _ollama_prompt_char_budget(num_ctx, min(max_tokens, cap)))
     required_ctx = (prior_input + max(1200, effective * 3) + 2) // 3
