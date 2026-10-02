@@ -24,7 +24,9 @@ def _bounded_wire(text: str) -> dict:
 
 class StudyAttemptDiagnostics:
     def __init__(self, workspace: Path, output: dict, request_json: str):
-        self.directory = workspace / "diagnostics/source_study_attempts"
+        self.private = output.get("input_kind") == "private_writing"
+        root = workspace / "private_writing" if self.private else workspace
+        self.directory = root / "diagnostics/source_study_attempts"
         self.request_json = request_json
         self.response_json = None
         self.summary = {}
@@ -91,7 +93,11 @@ class StudyAttemptDiagnostics:
                 json.dump(self.record, handle, ensure_ascii=False, indent=2)
                 handle.write("\n")
             os.replace(temporary, path)
-            self.summary["source_study_diagnostic_path"] = str(path)
+            if not self.private:
+                self.summary["source_study_diagnostic_path"] = str(path)
+            else:
+                # Timing summaries may be public; keep even the private path out.
+                self.summary["private_diagnostic_retained"] = True
             self.retained = True
         except Exception:
             logging.getLogger(__name__).debug("Source-study diagnostic could not be retained", exc_info=True)

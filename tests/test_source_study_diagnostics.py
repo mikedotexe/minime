@@ -106,3 +106,56 @@ def test_diagnostic_storage_failure_does_not_change_completion(study):
     with patch.object(Path, "mkdir", side_effect=OSError("unavailable diagnostics")):
         assert prompt.clean_content(lambda _: None, "") is None
     assert prompt.receipt is None
+
+
+@pytest.mark.parametrize("backend", ["ollama", "mlx"])
+@pytest.mark.parametrize("finish", ["stop", "length"])
+def test_private_writing_wire_stays_on_private_path(study, monkeypatch, backend, finish):
+    client, agent = study
+    monkeypatch.setattr(aa, "LLM_BACKEND", backend)
+    monkeypatch.setattr(aa, "MLX_MODEL", "fixture")
+    general_override = client.workspace / "general-record-override"
+    monkeypatch.setenv(gr.ENV_DIR, str(general_override))
+    secret = "PRIVATE_FIXTURE_ONLY exact continuation"
+    prompt = client.prepare("WRITE START " + secret)
+    content = secret + "\nNEXT: WRITE CONTINUE"
+    body = ({"choices": [{"message": {"content": content}, "finish_reason": finish}]}
+            if backend == "mlx" else {"message": {"content": content}, "done": True, "done_reason": finish})
+    response = Mock(status_code=200, text=json.dumps(body))
+    response.json.return_value = body
+    with patch.object(aa.requests, "post", return_value=response):
+        result = agent._query_llm_raw(prompt, prompt.output["system_prompt"], 2048,
+                                      prompt_class="source_study", journal=True)
+    assert bool(result) is (finish == "stop")
+    private = client.workspace / "private_writing"
+    records = list((private / "generations").glob("*/gen_*.json"))
+    assert records
+    assert any(secret in path.read_text() for path in records)
+    assert not list(general_override.rglob("*.json"))
+    assert not list((client.workspace / "generations").rglob("*.json"))
+    assert not list((client.workspace / "diagnostics/source_study_attempts").glob("*.json"))
+    failures = list((private / "diagnostics/source_study_attempts").glob("*.json"))
+    assert bool(failures) is (finish == "length")
+    assert "source_study_diagnostic_path" not in prompt.diagnostic_summary
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in records + failures)
+    for path in (client.workspace / "runtime").rglob("*"):
+        if path.is_file():
+            assert secret not in path.read_text()
+            assert "private_writing/diagnostics" not in path.read_text()
+
+
+def test_failed_private_record_cannot_link_to_previous_public_generation(tmp_path, monkeypatch):
+    monkeypatch.setenv(gr.ENV_IN_TESTS, "1")
+    monkeypatch.setenv(gr.ENV_ENABLED, "on")
+    gr.reset_thread_state()
+    public = gr.begin(tmp_path, prompt="Public input", system_msg="System",
+                      prompt_class="source_study", attempts=["ollama"], kind="full")
+    record = gr.record_attempt(public, 0, "ollama", result="Public result")
+    before = record.read_bytes()
+    private = gr.begin(tmp_path, prompt="Synthetic private input", system_msg="System",
+                       prompt_class="private_writing", attempts=["ollama"], kind="full")
+    with patch.object(gr, "write_record_at", return_value=None):
+        assert gr.record_attempt(private, 0, "ollama", result="PRIVATE_ONLY") is None
+    assert gr.note_next_action("WRITE START PRIVATE_ONLY") is False
+    assert record.read_bytes() == before
+    gr.reset_thread_state()

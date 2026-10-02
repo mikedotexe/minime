@@ -39,6 +39,40 @@ def deliver(prompt, text, *, finish_reason="stop"):
     prompt.accepted()
 
 
+def test_reflection_can_explicitly_become_private_continuation(writing_agent, monkeypatch):
+    agent, client = writing_agent
+    offers = []
+    exact = "A selected reflection with a λ and an unresolved distinction."
+
+    def completed(prompt, **kwargs):
+        offers.append(prompt)
+        if len(offers) == 1:
+            assert prompt.output["input_kind"] == "reflection"
+            text = f"{exact}\nNEXT: WRITE FROM_REFLECTION {prompt.output['navigation_id']}"
+        else:
+            assert prompt.output["input_kind"] == "private_writing"
+            assert exact in prompt
+            text = "A genuinely new passage.\nNEXT: WRITE PARK"
+        deliver(prompt, text)
+        return text
+
+    monkeypatch.setattr(agent, "_query_llm", completed)
+    agent._pending_next_action = "INTROSPECT"
+    for _ in range(2):
+        assert agent._decide_action(dict(STATE)) == "self_study"
+        agent._execute_action("self_study", dict(STATE), _from_llm_job=True)
+    assert len(offers) == 2
+    state = json.loads((client.workspace / "diagnostics/source_first_v3/shared_reader/writing/drafts-v2.json").read_text())
+    assert state["drafts"]["d1"]["parts"] == [exact, "A genuinely new passage."]
+    assert agent._pending_next_action == "WRITE PARK"
+    assert not list((client.workspace / "journal").glob("private_writing*"))
+    assert not any("A genuinely new passage." in p.read_text() for p in (client.workspace / "journal").glob("*.txt"))
+    private_call = agent._write_journal_entry.call_args
+    assert private_call.kwargs["private_canvas"] is True
+    fresh = client.prepare("INTROSPECT")
+    assert exact not in fresh and "A genuinely new passage." not in fresh
+
+
 def test_protected_runtime_recovers_choice_defers_mail_and_counts_jobs(writing_agent, monkeypatch):
     agent, client = writing_agent
     deliver(client.prepare("WRITE START synthetic private work"), "Exact prior prose.\nNEXT: REST")

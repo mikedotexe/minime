@@ -320,6 +320,9 @@ def begin(
     agent: Any = None,
 ) -> Optional[GenerationContext]:
     """Open a generation. Returns ``None`` when recording is off."""
+    # A failed/disabled new record must never attach its authored action to the
+    # previous generation, especially across the public/private boundary.
+    reset_thread_state()
     if not enabled():
         return None
     lane_info = infer_lane()
@@ -330,8 +333,14 @@ def begin(
             "action_id": _scalar(event.get("action_id")),
             "thread_id": _scalar(event.get("thread_id")),
         }
+    output = getattr(prompt, "output", None)
+    private = (prompt_class == "private_writing"
+               or isinstance(output, dict) and output.get("input_kind") == "private_writing")
+    # A general diagnostic override is not authorization to disclose draft text.
+    record_dir = (Path(workspace_dir) / "private_writing" / RECORD_SUBDIR
+                  if private else default_record_dir(workspace_dir))
     ctx = GenerationContext(
-        default_record_dir(workspace_dir),
+        record_dir,
         prompt=prompt or "",
         system_msg=system_msg or "",
         prompt_class=str(prompt_class or ""),
@@ -341,7 +350,6 @@ def begin(
         lane_info=lane_info,
         continuity=continuity,
     )
-    _tls().stash = None
     return ctx
 
 
