@@ -97,11 +97,13 @@ def test_source_entry_completes_under_paused_experiment_and_dispatches_its_next(
     assert store.research_budget_guard_assessment("READ_MORE", STATE) is not None
 
 
-def test_bare_introspection_uses_reflection_without_advancing_source_or_saving_study_claims(study_agent):
+@pytest.mark.parametrize("active", [False, True])
+def test_bare_introspection_uses_reflection_without_advancing_source_or_saving_study_claims(study_agent, active):
     agent, store, client, offers = study_agent
-    # Reflection retains the existing INTROSPECT experiment-budget policy.
-    assert store.research_budget_guard_assessment("INTROSPECT", STATE) is not None
-    store.create_thread("Open reflection outside an experiment")
+    if active:
+        store.start_experiment("Active legacy experiment", "An unrelated retained experiment")
+    assert store.research_budget_guard_assessment("INTROSPECT", STATE) is None
+    assert store.research_budget_preflight_for_action("INTROSPECT", STATE) == (True, None, "")
     agent._pending_next_action = "INTROSPECT"
     assert agent._decide_action(dict(STATE)) == "self_study"
     context = dict(agent._pending_action_continuity_context)
@@ -119,6 +121,48 @@ def test_bare_introspection_uses_reflection_without_advancing_source_or_saving_s
     assert not state["bookmarks"]
     assert not state["notebook"]["question"]
     assert agent._pending_next_action == "SELF_STUDY MAP minime"
+
+
+def test_study_can_choose_reflection_with_active_experiment_and_return_to_its_bookmark(study_agent, monkeypatch):
+    agent, store, client, offers = study_agent
+    experiment = store.start_experiment("Legacy experiment still active", "Unrelated to reflection")
+    responses = iter([
+        "STUDY_NOTE: The source is worth returning to.\nNEXT: INTROSPECT",
+        "I can leave this question open.\nSTUDY_NOTE: Not a source finding.\nNEXT: SELF_STUDY CONTINUE",
+        "I have returned to the next source page.\nNEXT: REST",
+    ])
+
+    def provider(prompt, **kwargs):
+        offers.append(prompt)
+        text = next(responses)
+        messages, _ = prompt.messages(prompt.output["system_prompt"], 16000)
+        response = Mock(status_code=200, text=json.dumps({"message": {"content": text}, "done": True}))
+        prompt.post(Mock(return_value=response), "fake", {"messages": messages}, 1)
+        prompt.accepted()
+        return text
+
+    monkeypatch.setattr(agent, "_query_llm", provider)
+    state_path = client.workspace / "diagnostics/source_first_v3/shared_reader/reader-v1.json"
+    agent._pending_next_action = "SELF_STUDY OPEN minime/minime_autonomy/runtime.py 1"
+    snapshots = []
+    for expected_next in ("INTROSPECT", "SELF_STUDY CONTINUE", "REST"):
+        assert agent._decide_action(dict(STATE)) == "self_study"
+        context = dict(agent._pending_action_continuity_context)
+        raw = context["raw_next"]
+        event = store.begin_action(raw, raw, "self_study", "self_study", dict(STATE), source="next")
+        with aa.job_outcome.capture(event["action_id"]) as outcome:
+            agent._execute_action("self_study", dict(STATE), _from_llm_job=True,
+                                  _precreated_continuity_context=context,
+                                  _precreated_continuity_event=event)
+        assert outcome.finish()[0] == "completed", outcome.finish()
+        assert agent._pending_next_action == expected_next
+        snapshots.append(json.loads(state_path.read_text()))
+    assert [offer.output["input_kind"] for offer in offers] == ["source_page", "reflection", "source_page"]
+    assert offers[2].output["page"]["start"] == offers[0].output["page"]["end"]
+    assert snapshots[0]["bookmarks"] == snapshots[1]["bookmarks"]
+    assert snapshots[0]["notebook"] == snapshots[1]["notebook"]
+    assert store.current_thread()["active_experiment_id"] == experiment["experiment_id"]
+    assert len(list((aa.WORKSPACE_DIR / "journal").glob("introspect_*.txt"))) == 1
 
 
 def test_note_revision_uses_actual_reader_delivery_and_remains_voluntary(study_agent, monkeypatch):
@@ -170,6 +214,24 @@ def test_artifact_and_external_routes_keep_research_policy(study_agent):
         agent._pending_next_action = raw
         assert agent._decide_action(dict(STATE)) is None, raw
         assert not store.research_budget_preflight_for_action(raw, STATE)[0]
+    assert not offers
+
+
+@pytest.mark.parametrize("raw", ["INTROSPECT journal/missing.txt", "INTROSPECT .", "INTROSPECT 0",
+                                 "INTROSPECT AND SEARCH example", "SEARCH example", "AR_START example"])
+def test_reflection_exemption_is_not_a_prefix_or_a_control_bypass(study_agent, raw):
+    _, store, _, _ = study_agent
+    assert store.research_budget_guard_assessment(raw, STATE) is not None
+    assert store.research_budget_preflight_for_action(raw, STATE)[0] is False
+
+
+def test_reflection_does_not_bypass_executor_safety_gate(study_agent, monkeypatch):
+    agent, store, _, offers = study_agent
+    store.start_experiment("Unrelated active experiment", "Retain its authority boundary")
+    agent._pending_next_action = "INTROSPECT"
+    assert agent._decide_action(dict(STATE)) == "self_study"
+    monkeypatch.setattr(agent, "_stable_core_action_allowed", lambda *args: (False, "test operator safety boundary"))
+    agent._execute_action("self_study", dict(STATE), _from_llm_job=True)
     assert not offers
 
 

@@ -7166,6 +7166,8 @@ class ActionContinuityStore:
 
     @classmethod
     def stage_for_action(cls, base: str, effective: str = "") -> str:
+        if base == "REGIME" or effective == "regime_choice":
+            return "live_control"
         if base in AFTERIMAGE_NEXT_ACTIONS:
             return "read_only" if base in {"AFTERIMAGE_LIST", "AFTERIMAGE_OPEN"} else "language_only"
         if base == "INQUIRY_STATUS":
@@ -11328,6 +11330,10 @@ class ActionContinuityStore:
         raw_action: str,
         state: Optional[Dict[str, float]] = None,
     ) -> Optional[Dict[str, Any]]:
+        # Bare reflection uses no research input. A retained experiment must not
+        # turn the chosen exit from study into a budget request.
+        if is_open_introspection_action(raw_action):
+            return None
         base = self.base_action(raw_action)
         # Pure local self-cartography (SHADOW_TRAJECTORY / SHADOW_FIELD / SHADOW /
         # GAP_STRUCTURE / SHADOW_GAP) reads only the being's own health.json /
@@ -12057,6 +12063,8 @@ class ActionContinuityStore:
         raw_action: str,
         state: Dict[str, float],
     ) -> tuple[bool, Optional[Dict[str, Any]], str]:
+        if is_open_introspection_action(raw_action):
+            return True, None, ""
         base = self.base_action(raw_action)
         if base not in self._research_budget_allowed_bases():
             if base in self._research_budget_mutating_bases():
@@ -25181,16 +25189,8 @@ Fill: {fill:.1f}%
                 return feedback_route
             mapped = action_map.get(base)
             if base == "REGIME":
-                remainder = chosen[len(chosen.split()[0]):].strip().lstrip(":").strip().lower()
-                # Robust against trailing punctuation / bundled params the being
-                # sometimes appends (e.g. "REGIME breathe;" or
-                # "REGIME recover, keep_floor: 0.87"). Take just the first token
-                # and strip surrounding punctuation so a VALID regime choice is
-                # never silently dropped to a notice (un-muffle invariant —
-                # this dropped ~6 days of minime's REGIME breathe requests).
-                _regime_tokens = remainder.split()
-                raw_regime = (_regime_tokens[0] if _regime_tokens else remainder).strip(";,.:!?\"'()[]")
-                if raw_regime in REGULATORY_REGIMES:
+                raw_regime = parse_regime_choice(chosen)
+                if raw_regime is not None:
                     self._pending_regime_choice = raw_regime
                     logging.info("🎯 Honoring being's NEXT: REGIME %s", raw_regime)
                     return "regime_choice"

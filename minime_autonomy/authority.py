@@ -10,6 +10,8 @@ from .action_vocabulary import (
     HARD_RESET_ALLOWED_NEXT_ACTIONS,
     LOW_FILL_ADVISORY_NEXT_ACTIONS,
 )
+from .parsing import parse_regime_choice
+from .self_regulation import _state_fill_pct
 
 
 def _runtime_module():
@@ -51,6 +53,7 @@ class ActionPreflightStore:
         "SELF_STUDY": "self_study",
         "WRITE": "self_study",
         "INTROSPECT": "introspect",
+        "REGIME": "regime_choice",
         "EXPERIMENT": "self_experiment",
         "SELF_EXPERIMENT": "self_experiment",
         "EXPERIMENT_BIND": "experiment_bind",
@@ -339,6 +342,20 @@ class ActionPreflightStore:
             visibility = "protected_summary"
             likely_gate = "blocked: unresolved angle-bracket placeholder syntax"
             continuity = "Would record a blocked notice; no runtime action would execute."
+        elif base == "REGIME":
+            requested = parse_regime_choice(inner)
+            if requested is None:
+                route, stage = "recess_notice", "blocked"
+                likely_gate = "unknown regime: dispatch would issue a notice, not send controls"
+                continuity = "No regulatory change; the requested regime is missing or unknown."
+            else:
+                likely_gate = "normal dispatcher/executor safety gates and bounded regime table apply"
+                if requested in {"calm", "explore"} and _state_fill_pct(state) < 35.0:
+                    likely_gate += "; below 35% fill the handler substitutes recover"
+                continuity = (
+                    "Would request bounded PI gains and record a regime-choice receipt. "
+                    "Preflight sends nothing; transmission is not proof of an engine effect."
+                )
         elif base == "EXPERIMENT_BIND":
             arg = self.agent._continuity_store()._strip_action_arg(inner, "EXPERIMENT_BIND")
             if "::" not in arg:

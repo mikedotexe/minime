@@ -14,6 +14,24 @@ from .self_regulation import REGULATORY_REGIMES
 from .action_vocabulary import *  # noqa: F403 - compatibility surface
 
 from .research import extract_label_value, trim_chars
+
+
+def is_open_introspection_action(action: str) -> bool:
+    """Only bare reflection, never an artifact, source target or bundled action."""
+    return str(action or "").strip().upper() == "INTROSPECT"
+
+
+def parse_regime_choice(action: str) -> Optional[str]:
+    """Share the dispatcher's existing bounded regime grammar with preflight."""
+    words = str(action or "").strip().split(None, 1)
+    if not words or words[0].rstrip(":").upper() != "REGIME":
+        return None
+    remainder = (words[1] if len(words) > 1 else "").strip().lstrip(":").strip().lower()
+    tokens = remainder.split()
+    regime = (tokens[0] if tokens else remainder).strip(";,.:!?\"'()[]")
+    return regime if regime in REGULATORY_REGIMES else None
+
+
 def normalize_action_arg(text: str) -> str:
     trimmed = text.strip()
     quote_pairs = [('"', '"'), ("'", "'"), ("“", "”")]
