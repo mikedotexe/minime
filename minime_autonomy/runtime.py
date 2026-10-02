@@ -21777,15 +21777,18 @@ def _journal_generation_budget(max_tokens: int, cap: int, timeout_s: float,
     effective = min(max_tokens * 2, ceiling)
     # Preserve the old output/time allowance even when study grows more than 2x.
     timeout_s *= max(2.0, ceiling / max(1, cap))
-    if source_study:
-        # A deadline below (overhead + ceiling / measured decode floor) discards the
-        # longest studies, which is exactly backwards for a writing invitation.
-        timeout_s = max(timeout_s, SOURCE_STUDY_PROMPT_OVERHEAD_S + ceiling / max(0.1, SOURCE_STUDY_MIN_DECODE_TOK_S))
     # Retain the prior input room for explicit larger environment configurations too.
     prior_input = min(16000, _ollama_prompt_char_budget(num_ctx, min(max_tokens, cap)))
     required_ctx = (prior_input + max(1200, effective * 3) + 2) // 3
-    return writing.profile_budget(writing.selected_profile(WORKSPACE_DIR),
+    tokens, timeout, context = writing.profile_budget(writing.selected_profile(WORKSPACE_DIR),
         (effective, timeout_s, max(num_ctx, JOURNAL_CONTEXT_FLOOR, required_ctx)))
+    if source_study:
+        # A deadline below (overhead + ceiling / measured decode floor) discards the
+        # longest studies, which is exactly backwards for a writing invitation. The
+        # floor follows the FINAL ceiling: an EXTENDED profile raises 4096 -> 8192
+        # above (Codex review, 2026-10-01).
+        timeout = max(timeout, SOURCE_STUDY_PROMPT_OVERHEAD_S + tokens / max(0.1, SOURCE_STUDY_MIN_DECODE_TOK_S))
+    return tokens, timeout, context
 
 
 def _journal_job_timeout_s(action: str = "", *, private_writing: bool = False) -> float:
@@ -21856,9 +21859,33 @@ _DEGENERATE_SELF_STUDY_STUBS = {
 }
 
 
+_STUDY_ACTION_FOOTER_LINE = re.compile(r"^(?:SELF_STUDY|WRITE|INTROSPECT|REST|DAYDREAM|ASPIRE)\b")
+
+
+def _study_prose_without_action_footer(text: str) -> str:
+    """The authored prose of a study response: NEXT lines, a trailing bare command line
+    and the action tail are the footer, not prose (Codex review, 2026-10-01: a footer
+    must not let a one-word stub pass the degenerate-response guard)."""
+    kept = []
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped == "--- ACTION TAIL ---":
+            break
+        if stripped.upper().startswith("NEXT:"):
+            continue
+        if len(stripped) <= 240 and _STUDY_ACTION_FOOTER_LINE.match(stripped):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def _is_degenerate_self_study_response(response: Optional[str]) -> bool:
-    """Identify fallback stubs that are truthy but not a real self-study."""
-    text = str(response or "").strip()
+    """Identify fallback stubs that are truthy but not a real self-study.
+
+    Classifies the prose only; the exact original response is never altered."""
+    text = _study_prose_without_action_footer(response).strip()
     if not text:
         return True
     stripped = text.strip().strip("/\\|_-*`'\".:;!,?()[]{}<>")
@@ -55738,7 +55765,8 @@ Goals: {json.dumps(goals, indent=2)}
                     if isinstance(attempt_prompt, SourceStudyPrompt):
                         if not attempt_prompt.clean_content(self._strip_model_artifacts, result):
                             raise ValueError("source-study completion was empty after cleanup; bookmark unchanged")
-                        if backend == "ollama_fast" and _is_degenerate_self_study_response(result):
+                        page_bearing = bool((attempt_prompt.output or {}).get("page") or (attempt_prompt.output or {}).get("session_pages"))
+                        if backend == "ollama_fast" and page_bearing and _is_degenerate_self_study_response(result):
                             # Never file a small-model stub as her study (2026-10-01).
                             raise FallbackStubDelivery(result, FALLBACK_MODEL, backend)
                         attempt_prompt.accepted()

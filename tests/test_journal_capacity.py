@@ -63,3 +63,16 @@ def test_source_study_deadline_floor_covers_ceiling_at_measured_decode():
     assert timeout == 400 * (4096 / 768)
     # Non-study journal lanes are untouched by the floor.
     assert aa._journal_generation_budget(768, 768, 60, 8192, journal=True)[1] == 120
+
+
+def test_source_study_deadline_floor_follows_the_extended_ceiling():
+    """Codex review 2026-10-01: EXTENDED raises the study ceiling to 8192 after the ordinary
+    computation, so the decode-based floor must be applied to the FINAL ceiling."""
+    from minime_autonomy import writing
+    with patch.object(writing, "selected_profile", return_value="extended"):
+        tokens, timeout, _ = aa._journal_generation_budget(4096, 768, 60, 8192, journal=True, source_study=True)
+    assert tokens == 8192
+    assert timeout >= aa.SOURCE_STUDY_PROMPT_OVERHEAD_S + 8192 / aa.SOURCE_STUDY_MIN_DECODE_TOK_S > 1200
+    with patch.object(writing, "selected_profile", return_value="default"):
+        tokens, timeout, _ = aa._journal_generation_budget(4096, 768, 60, 8192, journal=True, source_study=True)
+    assert tokens == 4096 and timeout >= aa.SOURCE_STUDY_PROMPT_OVERHEAD_S + 4096 / aa.SOURCE_STUDY_MIN_DECODE_TOK_S

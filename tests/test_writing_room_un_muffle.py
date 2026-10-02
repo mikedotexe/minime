@@ -126,3 +126,50 @@ def test_recess_prompts_no_longer_ask_for_a_sentence_count():
     source = Path(aa.__file__).read_text()
     for stale in ("(1-2 sentences)", "(3-5 sentences)", "(2-4 sentences)"):
         assert stale not in source, stale
+
+
+def test_write_underscore_alias_normalizes_before_payload_classification():
+    payload = '{"owner":"minime","draft":"d1","present":true,"operation":{"kind":"status"},"note":"Does exploration_noise explain this?"}'
+    exact = parse_next_action("Prose.\nNEXT: WRITE OBSERVE " + payload)
+    spelled = parse_next_action("Prose.\nNEXT: WRITE_OBSERVE " + payload)
+    assert spelled == exact
+    assert spelled[0] == "WRITE OBSERVE " + payload
+    # Authored text inside a WRITE sub-command never reroutes the turn, in either spelling.
+    for verb in ("WRITE STOPPING_POINT", "WRITE_STOPPING_POINT"):
+        action = parse_next_action(f"Prose.\nNEXT: {verb} keep_floor and exploration_noise feel related")[0]
+        assert action == "WRITE STOPPING_POINT keep_floor and exploration_noise feel related", action
+    assert parse_next_action("Prose.\nNEXT: **WRITE_CONTINUE**")[0] == "WRITE CONTINUE"
+    assert parse_next_action("Prose.\nNEXT: WRITE_CONTINUE2")[0] == "WRITE_CONTINUE2"
+
+
+def test_action_footer_does_not_rescue_a_fallback_stub():
+    assert aa._is_degenerate_self_study_response("Obs\nNEXT: SELF_STUDY CONTINUE")
+    assert aa._is_degenerate_self_study_response("Obs\nSELF_STUDY CONTINUE")
+    assert aa._is_degenerate_self_study_response("NEXT: WRITE CONTINUE")
+    assert not aa._is_degenerate_self_study_response(
+        "The regulator clamps keep_bias before the covariance update, which explains the plateau.\nNEXT: SELF_STUDY CONTINUE")
+    # The original response is classified, never altered.
+    agent = aa.AutonomousAgent.__new__(aa.AutonomousAgent)
+    prompt = _study_prompt()
+    prompt.clean_content.return_value = "Obs\nNEXT: SELF_STUDY CONTINUE"
+    with patch.object(aa, "_llm_backend_attempts", return_value=["ollama", "ollama_fast"]), \
+         patch.object(aa.generation_record, "begin", return_value=None), \
+         patch.object(aa.generation_record, "record_attempt"), \
+         patch.object(aa.job_timing, "correlate_generation"), \
+         patch.object(agent, "_query_ollama", return_value=""), \
+         patch.object(agent, "_query_ollama_fast_fallback", return_value="Obs\nNEXT: SELF_STUDY CONTINUE"), \
+         patch.object(agent, "_strip_model_artifacts", side_effect=lambda t: t):
+        assert agent._query_llm_raw(prompt, "system", 2048, journal=True, prompt_class="source_study") is None
+    prompt.accepted.assert_not_called()
+    assert agent._take_fallback_stub().text == "Obs\nNEXT: SELF_STUDY CONTINUE"
+    # A bare NEXT is a complete answer to a navigation input: the guard applies only where prose is expected.
+    navigation = _study_prompt(input_kind="map")
+    navigation.clean_content.return_value = "NEXT: SELF_STUDY OPEN astrid/crates/astrid-kernel/src/lib.rs 1"
+    with patch.object(aa, "_llm_backend_attempts", return_value=["ollama_fast"]), \
+         patch.object(aa.generation_record, "begin", return_value=None), \
+         patch.object(aa.generation_record, "record_attempt"), \
+         patch.object(aa.job_timing, "correlate_generation"), \
+         patch.object(agent, "_query_ollama_fast_fallback", return_value="NEXT: SELF_STUDY OPEN astrid/crates/astrid-kernel/src/lib.rs 1"), \
+         patch.object(agent, "_strip_model_artifacts", side_effect=lambda t: t):
+        assert agent._query_llm_raw(navigation, "system", 2048, journal=True, prompt_class="source_study")
+    navigation.accepted.assert_called_once()

@@ -697,6 +697,23 @@ _WRITE_UNDERSCORE_ALIAS = re.compile(
 )
 
 
+def _normalize_write_underscore_verb(raw_next: str) -> str:
+    """`WRITE_CONTINUE` -> `WRITE CONTINUE` on the leading token only.
+
+    The payload is preserved byte-for-byte. This runs BEFORE payload classification,
+    so a protected `WRITE OBSERVE {json}` keeps its exact argument and never reaches the
+    broader control-vocabulary normalizer (Codex review, 2026-10-01).
+    """
+    match = re.match(r"^([`*]*)(WRITE_[A-Za-z_]+)([`*]*)(.*)$", str(raw_next or ""), re.S | re.I)
+    if not match:
+        return raw_next
+    alias = _WRITE_UNDERSCORE_ALIAS.match(match.group(2))
+    rest = match.group(4)
+    if not alias or (rest and not rest[0].isspace()):
+        return raw_next
+    return "WRITE " + alias.group(1).upper() + rest
+
+
 def parse_next_action(text: str) -> tuple:
     """Extract NEXT: action from LLM response.
 
@@ -715,18 +732,21 @@ def parse_next_action(text: str) -> tuple:
     for i in reversed(eligible):
         stripped = lines[i].strip()
         if stripped.upper().startswith('NEXT:'):
-            raw_next = lines[i].lstrip()[5:].lstrip()
+            raw_next = _normalize_write_underscore_verb(lines[i].lstrip()[5:].lstrip())
             if has_study_payload(raw_next) or raw_next.upper().startswith("AFTERIMAGE_KEEP ") or raw_next.startswith(("SELF_STUDY GEOMETRY ", "SELF_STUDY OBSERVE ", "WRITE OBSERVE ")):
                 # The fragment is data, including trailing space and RESIDUE-like text.
                 cleaned = '\n'.join(lines[:i] + lines[i+1:]).strip()
                 return _parse_result(raw_next, cleaned)
-            action = stripped[5:].strip()
+            action = _normalize_write_underscore_verb(stripped[5:].strip())
             # Strip model end-of-turn tokens that leak into the action.
             action = action.replace('<end_of_turn>', '').replace('</s>', '').strip()
             raw_action_with_metadata = action
             action, residue = _split_choice_residue_suffix(action)
             raw_action = action
-            action = _normalize_observed_gemma4_next_alias(action) or action
+            # A WRITE sub-command carries authored text (STOPPING_POINT, START <topic>);
+            # control vocabulary inside it must not reroute the turn (2026-10-01).
+            if _action_verb(action) != "WRITE":
+                action = _normalize_observed_gemma4_next_alias(action) or action
             # Kink follow-up (2026-05-14, post-Tranche-5): strip markdown
             # decorations from the FIRST whitespace-separated token (the
             # action verb). Recurring LLM artifact: `**READ_MORE**`,
@@ -744,9 +764,6 @@ def parse_next_action(text: str) -> tuple:
                 # remainder starts with `EXPERIMENT_`.
                 if parts[0].upper().startswith('EXEXPERIMENT_'):
                     parts[0] = parts[0][2:]
-                write_alias = _WRITE_UNDERSCORE_ALIAS.match(parts[0])
-                if write_alias:
-                    parts = ['WRITE', write_alias.group(1).upper() + (' ' + parts[1] if len(parts) > 1 else '')]
                 if parts[0].upper() == 'EXPERIENCE_PLAN':
                     parts[0] = 'EXPERIMENT_PLAN'
                 if parts[0].upper() == 'SHADOW_DECOMPOSE':
