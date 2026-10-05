@@ -81,3 +81,95 @@ October 2 12:48:41 process start. Controller remains paused at generation 495,
 with no lease; V2 indexed-tail verification passes and V1 sources remain immutable.
 Remote main tips rechecked unchanged: Astrid `a66f7e190e0ecd3a0a4988abbcf6b0bf2cfb2a32`,
 Minime `9072abff9ed839851709300b3c3eaae3afaf669e`. Both canonical trees are clean.
+
+## Live Activation and Git Integration
+
+The approved agent-only wrapper completed successfully at
+`2026-10-05T22:07:41.356212+00:00`. It installed the exact reviewed overlay,
+kept replacement admission held during the quiet interval, sent one SIGTERM to
+agent **76377**, observed its exit, and verified replacement **1499** (process
+start **2026-10-05 15:06:57 PDT**, runtime start **15:07:07**). No forced
+termination, bootout, queue edit or historical-state restore was used.
+
+- All **93** loaded source inputs equal the frozen release and canonical source.
+  `reload_required=false`; normal idle/loop readiness passed.
+- Session **5321** is preserved. The live stopped queue was **empty**. Its seal
+  `2b5a32f6bda7c96da8b666205aaf33936891056ee8cc33e0b2d25c5572b8ccd1`
+  links to restoration
+  `b0e247893db44d71d7cc3c2409a35608ed9a3cb7ae8281cf0b8802e5b8673d61`.
+  This proves exact empty-queue restoration, not execution or nonempty live
+  recovery; synthetic cases cover nonempty recovery.
+- No newly interrupted job was found. The wrapper saw no new job during its
+  transition; a subsequent read-only check found one naturally admitted job.
+  Admission is not a claim of completed generation or improved experience.
+- All ten wrapper-protected process identities and starts are unchanged.
+  Shared Ollama **9458** was checked separately and is unchanged.
+- Bridge **4732**, coupled provider **3893**, and engine **35303** are unchanged.
+  The selected bridge/helper stage remains
+  `/Users/v/other/worktrees/writing-room-20261001/bridge-stage-03`.
+- The owned agent launch hold was removed only by the verified wrapper.
+  Controller generation **495** and previously paused automations remain paused.
+
+Durable activation receipt:
+`/Users/v/other/worktrees/maintenance-durability-20261005/release-01/activation.jsonl`,
+SHA-256 `f1f72f66bcf662e4d4c545c00fa7acacdef46866f28cb0acf88a322bb215b6c5`.
+Original source backups remain in `release-01/activation.source-before`;
+they are not authority to overwrite newer authored state.
+
+Read-only telemetry observations, with zero control messages sent:
+
+| Window | Seconds | Samples | Fill range | Last fill | Max receive gap |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Before restart, beginning 22:03:54.940426 UTC | 181.912 | 77 | 71.029365-73.041620% | 73.015654% | 2.414 s |
+| After restart, beginning 22:07:39.928273 UTC | 47.079 | 20 | 71.020370-73.029640% | 73.017970% | 2.396 s |
+
+Neither interval had a receive timeout. These bounded observations do not prove
+controller settling, long-term stability or subjective effects.
+
+### Committed Sources
+
+Both source commits were tested in staged state and fast-forwarded to local main:
+
+- Minime `ffa511dc094bd5d8c944cffd95a44e59570533bf`.
+- Astrid `3fb01de169d57d5f6cb436c0541d280255cc7637`.
+
+Minime exact committed paths:
+`CHANGELOG.md`,
+`docs/steward-notes/2026-10-05-maintenance-durability-release.md`,
+`minime_autonomy/llm_access.py`,
+`minime_autonomy/maintenance_next.py`,
+`minime_autonomy/runtime.py`,
+`minime_autonomy/source_status.py`,
+`tests/test_maintenance_next_edges.py`,
+`tests/test_maintenance_receipt_capacity.py`,
+`tests/test_source_status.py`.
+
+Astrid exact committed paths:
+`CHANGELOG.md`,
+`docs/steward-notes/2026-10-05-maintenance-durability-release.md`,
+`docs/steward-notes/AI_BEINGS_FEEDBACK_TO_CHANGE_LEDGER.md`,
+`scripts/reconcile_minime_launch.py`,
+`scripts/test_paired_minime_handoff.py`,
+`scripts/test_reconcile_minime_launch.py`.
+
+The first Minime fast-forward refused the installed worktree files. No reset,
+stash or discard followed. The coordinator staged only the four installed source
+paths, proved the index byte-identical to the reviewed commit for those paths,
+then completed the fast-forward. Both canonical trees and indexes were clean
+after integration; older candidate worktrees were preserved. No remote push was
+performed for this release.
+
+### Remaining Capacity Work
+
+The parallel provider-holder re-sync repair is offline in the original capacity
+worktree, not in this deployment. Its 69-test holder suite and combined 156-test
+holder/legacy/write-capacity suite pass, including nine pre-repair reproductions.
+Coordinator reran the combined suite. See the candidate note
+`/Users/v/.codex/worktrees/writing-capacity-next-budget/astrid/docs/steward-notes/2026-10-05-provider-holder-durability-repair.md`.
+
+Full writing-capacity activation still requires bridge failed-drain continuation
+retention, a finite qualified caller stop/restore transaction, isolated resource
+qualification and the real-model four-cell measurements. Production provider
+stopping remains disabled. The already approved maintenance window is retained;
+no new approval request or relaxed resource limit is implied. The 96,000-byte
+private input and 16,384-token expressive output promises are **not live**.

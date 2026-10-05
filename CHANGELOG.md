@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Live: maintenance durability (2026-10-05, Codex).** Commit `ffa511dc` is on local main and loaded by agent 1499 after the sanctioned graceful transition from 76377. All 93 source inputs match; exact empty-queue restoration and session 5321 are verified, with no newly interrupted job. Bridge/helper, providers, engine and sensory services are unchanged; automations remain paused. Larger writing capacity is not live. Exact receipt and remaining qualification work: `docs/steward-notes/2026-10-05-maintenance-durability-release.md`.
+
 - **Maintenance durability release candidate (2026-10-05, Codex).** Publish source-status snapshots atomically and require durable startup/drained acknowledgement; reserve logical NEXT-history headroom for restoration; re-sync retained job outcomes on exact retry and refuse corrupt or conflicting histories. Preserve existing writing/provider limits, helper, research policy and reservoir behavior. Qualification and activation status: `docs/steward-notes/2026-10-05-maintenance-durability-release.md`.
 
 - **Maintenance-only NEXT handoff live (2026-10-05, Codex).** Qualified commit `affae098` is installed and fast-forwarded to local main. Agent 79523 drained gracefully; replacement 76377 acknowledged the exact empty legacy queue and all 92 loaded source inputs match. No new interrupted job, altered launch configuration or restarted protected peer was observed. Existing writing limits, providers, engine and sensory services remain unchanged; the larger capacity release is not activated. See [activation evidence](docs/steward-notes/2026-10-05-maintenance-next-release.md).
