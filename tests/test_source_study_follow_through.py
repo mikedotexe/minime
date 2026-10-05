@@ -14,6 +14,12 @@ from minime_autonomy.source_study import StudyClient, SourceStudyPrompt
 STATE = {"eig1": 4.7, "deig": 0.01, "fill_ratio": 0.68, "spread": 3.0, "cov_lambda1": 8.0}
 
 
+def select_choice(agent, action):
+    """Offer fixtures through the real durable queue, including selection identity."""
+    agent._pending_next_action = action
+    agent._persist_pending_next_action(action, reason="synthetic authored choice")
+
+
 @pytest.fixture
 def study_agent(monkeypatch, tmp_path):
     source = aa.BASE_DIR / "minime_autonomy/runtime.py"
@@ -67,7 +73,7 @@ def test_source_entry_completes_under_paused_experiment_and_dispatches_its_next(
     if raw.startswith("INTROSPECT"):
         assert store.research_budget_guard_assessment(raw, STATE) is not None
         assert not store.research_budget_preflight_for_action(raw, STATE)[0]
-    agent._pending_next_action = raw
+    select_choice(agent, raw)
     route = agent._decide_action(dict(STATE))
     assert route == "self_study"
     context = dict(agent._pending_action_continuity_context)
@@ -104,7 +110,7 @@ def test_bare_introspection_uses_reflection_without_advancing_source_or_saving_s
         store.start_experiment("Active legacy experiment", "An unrelated retained experiment")
     assert store.research_budget_guard_assessment("INTROSPECT", STATE) is None
     assert store.research_budget_preflight_for_action("INTROSPECT", STATE) == (True, None, "")
-    agent._pending_next_action = "INTROSPECT"
+    select_choice(agent, "INTROSPECT")
     assert agent._decide_action(dict(STATE)) == "self_study"
     context = dict(agent._pending_action_continuity_context)
     assert context["source_study_action"] == "INTROSPECT"
@@ -143,7 +149,7 @@ def test_study_can_choose_reflection_with_active_experiment_and_return_to_its_bo
 
     monkeypatch.setattr(agent, "_query_llm", provider)
     state_path = client.workspace / "diagnostics/source_first_v3/shared_reader/reader-v1.json"
-    agent._pending_next_action = "SELF_STUDY OPEN minime/minime_autonomy/runtime.py 1"
+    select_choice(agent, "SELF_STUDY OPEN minime/minime_autonomy/runtime.py 1")
     snapshots = []
     for expected_next in ("INTROSPECT", "SELF_STUDY CONTINUE", "REST"):
         assert agent._decide_action(dict(STATE)) == "self_study"
@@ -211,7 +217,7 @@ def test_artifact_and_external_routes_keep_research_policy(study_agent):
     artifact.parent.mkdir(exist_ok=True)
     artifact.write_text("Preserved experiment observation.")
     for raw in [f"INTROSPECT {artifact} 0", "INTROSPECT journal/missing.txt 0", "READ_MORE", "SEARCH reservoir continuity"]:
-        agent._pending_next_action = raw
+        select_choice(agent, raw)
         assert agent._decide_action(dict(STATE)) is None, raw
         assert not store.research_budget_preflight_for_action(raw, STATE)[0]
     assert not offers
@@ -228,7 +234,7 @@ def test_reflection_exemption_is_not_a_prefix_or_a_control_bypass(study_agent, r
 def test_reflection_does_not_bypass_executor_safety_gate(study_agent, monkeypatch):
     agent, store, _, offers = study_agent
     store.start_experiment("Unrelated active experiment", "Retain its authority boundary")
-    agent._pending_next_action = "INTROSPECT"
+    select_choice(agent, "INTROSPECT")
     assert agent._decide_action(dict(STATE)) == "self_study"
     monkeypatch.setattr(agent, "_stable_core_action_allowed", lambda *args: (False, "test operator safety boundary"))
     agent._execute_action("self_study", dict(STATE), _from_llm_job=True)
@@ -244,12 +250,12 @@ def test_geometry_json_stays_opaque_through_real_routing_and_delivery(study_agen
         "operation":{"kind":"revise", "target":"missing", "text":"<think>quoted text</think> <unfinished> AND SELF_STUDY MAP </s>"}})
     assert parse_next_action("NEXT: " + data_action)[0] == data_action
     assert agent._split_multi_action(data_action) == [data_action]
-    agent._pending_next_action = data_action
+    select_choice(agent, data_action)
     assert agent._decide_action(dict(STATE)) == "self_study"
     assert agent._pending_action_continuity_context["raw_next"] == data_action
     assert parse_next_action("```\nNEXT: " + data_action + "\n```")[0] is None
     action = 'SELF_STUDY GEOMETRY {"question":"q1","operation":{"kind":"status"}}'
-    agent._pending_next_action = action
+    select_choice(agent, action)
     assert agent._decide_action(dict(STATE)) == "self_study"
     agent._execute_action("self_study", dict(STATE), _from_llm_job=True)
     assert offers[-1].output["input_kind"] == "geometry" and offers[-1].receipt
@@ -265,7 +271,7 @@ def test_geometry_json_stays_opaque_through_real_routing_and_delivery(study_agen
 ])
 def test_bare_relate_gives_exact_recovery_without_executing_a_guess(study_agent, monkeypatch, raw, expected):
     agent, store, client, offers = study_agent
-    agent._pending_next_action = raw
+    select_choice(agent, raw)
     route = agent._decide_action(dict(STATE))
     assert route == "recess_notice"
     context = dict(agent._pending_action_continuity_context)
@@ -291,7 +297,7 @@ def test_bare_relate_gives_exact_recovery_without_executing_a_guess(study_agent,
 def test_code_search_block_keeps_authority_and_offers_local_recovery(study_agent, verb):
     agent, store, _, offers = study_agent
     raw = f"{verb} dispatch.rs"
-    agent._pending_next_action = raw
+    select_choice(agent, raw)
     assert agent._decide_action(dict(STATE)) is None
     assert not store.research_budget_preflight_for_action(raw, STATE)[0]
     assert "SELF_STUDY FIND dispatch.rs" in agent._pending_notice_prompt
@@ -306,7 +312,7 @@ def test_allowed_code_search_stays_external_and_delivers_recovery_as_an_option(s
     agent, store, _, offers = study_agent
     monkeypatch.setattr(store, "research_budget_guard_assessment", lambda *args: None)
     raw = "SEARCH dispatch.rs"
-    agent._pending_next_action = raw
+    select_choice(agent, raw)
     assert agent._decide_action(dict(STATE)) == "research_exploration"
     context = dict(agent._pending_action_continuity_context)
     assert context["raw_next"] == raw
@@ -368,12 +374,12 @@ def test_multi_action_busy_study_has_truthful_receipt_and_keeps_first_job(study_
     if second.startswith("WRITE"):
         # WRITE is deliberately not an AND-splittable second verb. Exercise
         # the same busy admission seam with a separately offered private choice.
-        agent._pending_next_action = first
+        select_choice(agent, first)
         first_route = agent._decide_action(dict(STATE))
         agent._execute_action(first_route, dict(STATE))
-        agent._pending_next_action = second
+        select_choice(agent, second)
     else:
-        agent._pending_next_action = f"{first} AND {second}"
+        select_choice(agent, f"{first} AND {second}")
     route = agent._decide_action(dict(STATE))
     assert route == "self_study"
     jobs = agent._llm_job_store()
@@ -485,7 +491,7 @@ def test_list_choice_reaches_shared_reader_and_preserves_pending_source(study_ag
     choice, _ = aa.parse_next_action(response)
     assert choice == command
     assert client.analyze_response(response)["selected_next"] == command
-    agent._pending_next_action = choice
+    select_choice(agent, choice)
     route = agent._decide_action(dict(STATE))
     assert route == "self_study"
     context = dict(agent._pending_action_continuity_context)
@@ -506,7 +512,7 @@ def test_list_choice_reaches_shared_reader_and_preserves_pending_source(study_ag
 
 def test_write_choice_survives_real_action_routing_and_keeps_private_artifact(study_agent):
     agent, store, client, offers = study_agent
-    agent._pending_next_action = "WRITE START Why did my explanation change?"
+    select_choice(agent, "WRITE START Why did my explanation change?")
     route = agent._decide_action(dict(STATE))
     assert route == "self_study"
     context = dict(agent._pending_action_continuity_context)

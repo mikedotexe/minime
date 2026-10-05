@@ -1,0 +1,131 @@
+Maintenance-only NEXT candidate qualification, 2026-10-05
+
+STATUS: Frozen maintenance port; offline Python qualification green. NOT deployed.
+No live changes, model loads, helper rebuilds, staging, commits, or controller
+changes were performed. The original candidate, Astrid, and canonical source
+were not edited. Only this isolated worktree was edited.
+
+Worktree: /Users/v/other/worktrees/minime-next-maintenance-20261005/minime
+Branch: codex/minime-next-maintenance-20261005
+HEAD and verified canonical main: 9072abff9ed839851709300b3c3eaae3afaf669e
+Port source: /Users/v/other/worktrees/writing-capacity-next-budget-20261002/minime
+Only its explicitly reviewed uncommitted maintenance repair was ported.
+Its committed writing-capacity/provider/research tranche was not imported.
+
+Production scope
+- runtime.py: boot identity, exact restore before legacy profile/freshness gates,
+  boot-reflection suppression, shared writer lock, atomic persistence, source-
+  bound admission/CAS recovery, derived/compound routing, durable ambiguity
+  witness, worker-join seal, and source-status proof fields.
+- collaboration_attention.py: locked strict merge and atomic state write.
+- maintenance_next.py and maintenance_next_legacy.py: exact byte copies of the
+  coordinator's finalized modules, including the legacy restore hook.
+- No API change to the supplied legacy module was needed. Both protocol versions
+  remain 1. deployment.source_inputs automatically inventories both new modules;
+  an explicit regression test verifies that inclusion and their content hashes.
+- Canonical _experiment_bind was adapted to derived routing without importing
+  newer research binding/transaction behavior. The canonical StudyFeedback
+  transition reason remains "honored" at that existing API boundary.
+- All 88 other inventoried source inputs match HEAD byte-for-byte, including
+  provider clients, writing/source-study logic, budgets, and launch configuration.
+  Module-level runtime policy assignments and action_map ASTs match HEAD.
+
+Tests and fixture scope
+- Added four reviewed maintenance test files, including real subprocess SIGTERM,
+  worker-finalizer NEXT, drain seal, fresh-boot restore/ack, stale merge barriers,
+  corrupt/orphan records, fsync failures/retries, and interrupted admissions.
+- Added a source-inventory regression and two canonical EXPERIMENT_BIND cases:
+  inner routing/guard refusal preserve a newer durable pending tuple.
+- Existing admission fixture changes offer synthetic raw NEXT assignments through the
+  real durable selection writer in private_writing_continuation, regime_preflight,
+  and source_study_follow_through. Canonical research-policy blocks were preserved.
+- The coordinator subsequently corrected the reflection-continuation assertion
+  to the already-deployed public-recall contract from Astrid commit 0ac99af41b:
+  the prior public passage is optional material, while the new private passage
+  and its NEXT footer remain absent. No helper or runtime behavior changed.
+
+Results at frozen code/test hashes
+- Focused: 130 passed in 6.45s (unchanged focused files and production source).
+- FINAL full Python tests/: 1869 passed, 1 skipped, 143 subtests passed in 66.52s.
+  Same env-i command, qualified helper and stage manifest as both prior attempts.
+- git diff --check passes; staged diff is empty. Rust/model/live qualification
+  was not run and is not claimed. See docs/steward-notes/2026-10-05-maintenance-next-release.md.
+
+Preserved failed attempts and contract correction
+- First full attempt: 1 failed, 1866 passed, 1 skipped, 143 subtests in 69.48s.
+- Pre-correction frozen attempt: 1 failed, 1868 passed, 1 skipped, 143 subtests
+  in 75.39s; it added two passing port-specific binding regressions.
+- Sole failure in both: tests/test_private_writing_continuation.py::
+  test_reflection_can_explicitly_become_private_continuation, line 74.
+  Fresh INTROSPECT from the qualified baseline helper still includes the selected
+  reflection after WRITE FROM_REFLECTION. The old test expected that text absent.
+- The identical assertion also failed when an in-memory import loader substituted
+  exact `git show HEAD:<path>` bytes for runtime.py, collaboration_attention.py,
+  AND the failing test module, under the same env-i/helper. All three substitutions
+  were recorded and verified. Initially reported as a baseline/helper compatibility
+  failure, this was resolved by the coordinator as an outdated test expectation.
+- Canonical Astrid reflection_recall.rs confirms previous PUBLIC reflection is
+  optional material, never private drafts, and filters NEXT footer lines. Commit
+  0ac99af41b introduces that contract; the coordinator verified it already deployed.
+  Corrected assertions require the exact public passage plus its public/optional
+  notice and exclude the new private passage and "NEXT: WRITE PARK". The final
+  rerun passes without skips/xfails added or unqualified implementation imports.
+- Pre-correction code/test map SHA256:
+  c764af10b3f08ecc6cc8a53d236a60004fba347c2f02513facb29a5eef69ef5c
+  Pre-correction tracked patch SHA256:
+  b71af282dcb2d99a5ad67837c2ec82cb84eddff11be8909525edf5abbae61a4d
+  Pre-correction test_private_writing_continuation.py SHA256:
+  9ea9c93ac3d54d7f1cfc334fd3f09e5b2160828894ecf41e962c000d655e20af
+
+Test environment, explicitly scrubbed for both focused and full runs
+env -i HOME=/Users/v PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin \
+  TMPDIR=/tmp PYTHONDONTWRITEBYTECODE=1 \
+  ASTRID_SOURCE_ROOT=/Users/v/.codex/worktrees/writing-capacity-next-budget/astrid \
+  ASTRID_SOURCE_STUDY_BIN=/Users/v/other/worktrees/writing-room-20261001/bridge-stage-03/helpers/astrid-source-study \
+  ASTRID_CHOICE_FIXTURES=/Users/v/other/astrid/crates/astrid-source-study/tests/fixtures/response_choice_cases.json \
+  /opt/homebrew/bin/python3 -B -m pytest -p no:cacheprovider tests -q --tb=short
+Focused uses the same command, replacing tests with:
+  tests/test_maintenance_next.py tests/test_maintenance_next_edges.py
+  tests/test_maintenance_next_legacy.py tests/test_maintenance_collaboration_attention.py
+  tests/test_agent_lifecycle.py
+ASTRID_SOURCE_ROOT selects the coordinator's paired proof verifier only; the
+explicit helper executable is the existing qualified stage, not that source's
+unqualified build. The tests retain the repository's live-write/socket audit guard.
+
+Identities (SHA-256)
+Helper: af632204fd96760a413f73bbd00fbc54f6638bf163eb36bb23abde995dc296fe
+Stage manifest: 9ea2d28ccaf84f4a0df3857bff7f8af4938be1d94a5e2ed8816fd63f66e2dc69
+92-file source inventory, hashed with maintenance_next.canonical:
+  d29138949e5f1bd07f53bf88c65d696ff0912f80b7694d0b5eaf2621068cc378
+Changed code/tests hash map (sorted compact JSON, documentation excluded):
+  2c11eb9b8ad825620160eb1e0ee85e0f327fc6a6cacfe21f056ebfdf21258e13
+Tracked code/test git diff --binary --no-ext-diff -- '*.py':
+  291b28583fceaa13fbd337f3081af3691c28fe16e2f9e0bedcac44493065090b
+
+File hashes (11 code/test files, excluding this note)
+65c77e0bb40c9e117848c9b8af0fd3152d510365f5d931e7e12862d28e3a8a18  minime_autonomy/collaboration_attention.py
+3860e02f37aba9e4d69a447378dac245fddbfef230ebca3f92a2555fac28516c  minime_autonomy/maintenance_next.py
+64c25264e338923b5f1eddf7ec1e50e399393d36245bbe480d7366b02ae01adb  minime_autonomy/maintenance_next_legacy.py
+557826e10165d5895f8c8a8449e976da764770942dd60cab410c08d88668f48a  minime_autonomy/runtime.py
+6de5a910483acc098fa368a63262184a8151a6b18626f10c85dcc711a0e5d10c  tests/test_maintenance_collaboration_attention.py
+a148f485c42032eadb2d32e8d95e896fa28141023972fdeadd05dfb5bd8bfd00  tests/test_maintenance_next.py
+ee7816ecb889f6ce0ca0eb3adeef4721bc4d6a7754fd5759d64b2cb8ea87e124  tests/test_maintenance_next_edges.py
+939aa800d6e948a6a334ae40617df052f2c2f750574214e8cb3227b823f8deaa  tests/test_maintenance_next_legacy.py
+3350fdf9adb0dbe7a28846aaedcd49139c237c0749f551d702106fadeee6dd75  tests/test_private_writing_continuation.py
+2c33e74dbd4905a96564d39ea3994718887f167751fa38a58e13b5cef263e8f7  tests/test_regime_preflight.py
+24eabea4bbe8a967455d34672f16428ba4a5407c1696d055cf2946241882022a  tests/test_source_study_follow_through.py
+Tracked code/test changes: 5 files, +265/-99. New code/tests: 6 files, +2160 lines.
+Total code/tests: 11 files, +2425/-99, plus the qualification note, changelog,
+and maintenance release steward note (all non-runtime documentation).
+
+Limits
+- Normal compound routing is preserved; partial/uncertain compound admission
+  blocks a clean seal and fresh startup via the durable hash-only witness.
+  Automatic partial-chain reconstruction/replay is not implemented or claimed.
+- Derived route exceptions fail closed rather than continuing the rest of a
+  possibly partial chain. Manual recovery is required for unsealed admissions.
+- Legacy import is operator-issued exact stopped-state provenance, NOT an old
+  runtime drain seal or execution authority. No live import/ack was performed.
+- The outdated test expectation is corrected and the full offline Python suite
+  is green. This is not live bootstrap, stop/import/ack, or deployment evidence;
+  the coordinator owns any separately authorized bounded transition.

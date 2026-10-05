@@ -23,6 +23,7 @@ def test_preflight_matches_regime_dispatch_without_executing(monkeypatch, comman
     report = aa.ActionPreflightStore(agent).report("ACTION_PREFLIGHT " + command, state)
     assert getattr(agent, "_pending_regime_choice", None) == before
     agent._pending_next_action = command
+    agent._persist_pending_next_action(command, reason="synthetic authored choice")
     route = agent._decide_action(state)
     assert report["effective_route"] == route
     if requested:

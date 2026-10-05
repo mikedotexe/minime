@@ -22,7 +22,7 @@ import signal
 import fcntl
 import sqlite3
 import logging
-from minime_autonomy import writing
+from minime_autonomy import writing, maintenance_next
 from minime_autonomy.source_study import StudyClient, SourceStudyPrompt, SOURCE_STUDY_GUIDANCE
 from minime_autonomy.study_feedback import StudyFeedback, delivery_origin
 from uuid import uuid4
@@ -22031,6 +22031,7 @@ class AutonomousAgent:
         self._pending_action_continuity_context: Optional[Dict[str, Any]] = None
         self._last_action_continuity_event: Optional[Dict[str, Any]] = None
         self._agent_pid = os.getpid()
+        self._agent_boot_id = uuid4().hex
         self._agent_started_at = datetime.now().isoformat(timespec="seconds")
         self._agent_source_path = runtime_source_path()
         try:
@@ -22335,13 +22336,18 @@ class AutonomousAgent:
         store.ensure_dirs()
         return store
 
-    def _set_action_continuity_context(self, raw_next: str, base: str) -> None:
+    def _set_action_continuity_context(self, raw_next: str, base: str, *, consume_pending=True) -> None:
         self._pending_action_continuity_context = {
             "raw_next": raw_next,
             "canonical_action": raw_next,
             "base_action": base,
             "source": "next",
         }
+        if not consume_pending:
+            return
+        saved = getattr(self, "_unadmitted_next_checkpoint", None)
+        if saved is not None:
+            self._pending_action_continuity_context["_next_admission_token"] = saved.get("token")
         signal = getattr(self, "_pending_next_normalization_signal", None)
         if signal:
             self._pending_action_continuity_context["normalization_signal_v1"] = signal
@@ -22909,17 +22915,14 @@ class AutonomousAgent:
         outer_context = getattr(self, "_current_action_continuity_context", None)
         outer_artifacts = list(getattr(self, "_current_action_extra_artifacts", []) or [])
         outer_summary = getattr(self, "_current_action_outcome_summary", None)
-        previous_pending = self._pending_next_action
         previous_pending_context = getattr(self, "_pending_action_continuity_context", None)
         previous_last = getattr(self, "_last_action_continuity_event", None)
         message = f"Experiment bind prepared `{inner_action}`."
         try:
-            self._pending_next_action = inner_action
             if inner_base in ACTION_PREFLIGHT_NEXT_ACTIONS:
                 inner_effective = "action_preflight"
-                self._pending_next_action = None
             else:
-                inner_effective = self._decide_action(dict(state))
+                inner_effective = self._decide_action(dict(state), _derived_action=inner_action)
             if inner_effective is None:
                 if self._continuity_store()._live_control_binding_key(inner_action):
                     message = (
@@ -22944,7 +22947,9 @@ class AutonomousAgent:
                 )
                 self._suppress_active_experiment_auto_link = True
                 try:
+                    derived_context = getattr(self, "_pending_action_continuity_context", None) or {}
                     self._pending_action_continuity_context = {
+                        **{key: value for key, value in derived_context.items() if key.startswith("_next_")},
                         "raw_next": inner_action,
                         "canonical_action": inner_action,
                         "base_action": inner_base,
@@ -22995,7 +23000,6 @@ class AutonomousAgent:
                         f"as {run.get('status')}."
                     )
         finally:
-            self._pending_next_action = previous_pending
             self._pending_action_continuity_context = previous_pending_context
             self._current_action_continuity_event = outer_event
             self._current_action_continuity_context = outer_context
@@ -23125,8 +23129,17 @@ class AutonomousAgent:
         logging.info("🤖 Autonomous agent starting...")
         self._check_source_reload_required("start")
 
-        # Restore previous context first; the boot sovereignty reflection may
-        # then replace any carried NEXT: with a fresh choice for this run.
+        # A sealed graceful continuation precedes profile-specific restoration.
+        # A failed acknowledgement cannot admit a new generation.
+        if hasattr(self, "_agent_boot_id"):
+            try:
+                self._next_handoff_restore = maintenance_next.restore(self)
+            except Exception:
+                self._next_handoff_failed = True
+                self.stop()
+                self._lifecycle_phase = "recovery_blocked"
+                self._write_source_status("next_handoff_recovery_blocked")
+                raise
         self._restore_sovereignty_state()
         self._apply_pending_next_override_if_present("boot")
         if not self.running:
@@ -23272,11 +23285,21 @@ class AutonomousAgent:
             self._stop_event.set()
         logging.info("Autonomous agent shutdown requested; accepted work will finish")
 
-    def _retain_unadmitted_choice(self):
+    def _retain_unadmitted_choice(self, context=None):
         """A stop after decision is not admission; do not overwrite a newer NEXT."""
-        context = getattr(self, "_pending_action_continuity_context", None) or {}
+        try:
+            if maintenance_next.retain_unadmitted(self):
+                return
+        except Exception:
+            if hasattr(self, "_agent_boot_id"):
+                self._next_handoff_failed = True
+            raise
+        context = context or getattr(self, "_pending_action_continuity_context", None) or {}
         choice = context.get("raw_next")
         if choice and not getattr(self, "_pending_next_action", None):
+            if hasattr(self, "_agent_boot_id"):
+                self._next_handoff_failed = True
+                raise maintenance_next.HandoffError("unproven_unadmitted_choice")
             self._pending_next_action = choice
             self._persist_pending_next_action(choice, reason="shutdown_before_admission")
 
@@ -23287,6 +23310,15 @@ class AutonomousAgent:
         for thread in getattr(self, "_llm_job_threads", []):
             if thread is not threading.current_thread():
                 thread.join()
+        if hasattr(self, "_agent_boot_id"):
+            try:
+                maintenance_next.require(not getattr(self, "_next_handoff_failed", False),
+                                         "next_handoff_recovery_blocked")
+                self._next_handoff_seal = maintenance_next.seal(self)
+            except Exception:
+                self._lifecycle_phase = "recovery_blocked"
+                self._write_source_status("next_handoff_seal_blocked")
+                raise
         self._lifecycle_phase = "exited"
         self._write_source_status("drained")
         logging.info("Autonomous agent drained; all accepted LLM workers returned")
@@ -23304,6 +23336,9 @@ class AutonomousAgent:
 
     def _verify_sovereignty(self):
         """Reflect on sovereignty — what agency means right now, not a static test."""
+        if (getattr(self, "_next_handoff_restore", None) or {}).get("pending_present"):
+            logging.info("Graceful NEXT restored; competing boot reflection deferred")
+            return
         self._recover_activity_choice(reconcile=True)
         if self._attention_protected():
             logging.info("Protected work restored; boot reflection deferred")
@@ -24523,6 +24558,8 @@ Fill: {fill:.1f}%
         abort the chain — every segment runs unless conflict-skipped.
         Mirror of Astrid's dispatch_multi_action in next_action.rs.
         """
+        if hasattr(self, "_agent_boot_id"):
+            return self._dispatch_checkpointed_multi_action(segments, state)
         n = len(segments)
         logging.info(
             f"v4.0 Phase 4: multi-action NEXT ({n} segments): {' || '.join(writing.diagnostic_action(s) for s in segments)}"
@@ -24542,6 +24579,8 @@ Fill: {fill:.1f}%
             self._pending_next_action = segment
             try:
                 route = self._decide_action(state, _allow_multi=False)
+            except maintenance_next.HandoffError:
+                raise
             except Exception as exc:
                 logging.warning(f"Multi-action [{i+1}/{n}] route resolution failed: {exc}")
                 continue
@@ -24552,6 +24591,8 @@ Fill: {fill:.1f}%
                 continue
             try:
                 self._execute_action(route, dict(state))
+            except maintenance_next.HandoffError:
+                raise
             except Exception as exc:
                 logging.warning(f"Multi-action [{i+1}/{n}] exec failed: {exc}")
             logging.info(f"Multi-action [{i+1}/{n}] dispatched: `{writing.diagnostic_action(segment)}` → route={route}")
@@ -24567,6 +24608,8 @@ Fill: {fill:.1f}%
         self._pending_next_action = last_segment
         try:
             route = self._decide_action(state, _allow_multi=False)
+        except maintenance_next.HandoffError:
+            raise
         except Exception as exc:
             logging.warning(f"Multi-action [{n}/{n}] route resolution failed: {exc}")
             return None
@@ -24575,7 +24618,57 @@ Fill: {fill:.1f}%
         )
         return route
 
-    def _decide_action(self, state: Dict[str, float], _allow_multi: bool = True) -> Optional[str]:
+    def _dispatch_checkpointed_multi_action(self, segments, state, *, derived=False):
+        """Consume one outer choice; a partial chain has no automatic replay path."""
+        if hasattr(self, "_agent_boot_id"):
+            maintenance_next.begin_admission(self)
+        envelope = None
+        if not derived:
+            chosen = self._pending_next_action
+            envelope = getattr(self, "_pending_choice_envelope_v1", None)
+            self._persist_pending_next_action(
+                None, reason="selected_for_admission", expected_action=chosen,
+                expected_selection_id=getattr(self, "_pending_next_selection_id", None),
+            )
+            self._pending_next_action = None
+            self._pending_choice_envelope_v1 = None
+            self._mark_pending_next_override_consumed(chosen, reason="selected_for_admission")
+        saved = getattr(self, "_unadmitted_next_checkpoint", None)
+        chain = {"token": uuid4().hex, "started": derived,
+                 "parent": getattr(self, "_next_compound_inflight", None)}
+        self._next_compound_inflight = chain
+        decision_emitted = False
+        for index, segment in enumerate(segments):
+            if getattr(self, "_shutdown_requested", False):
+                self._retain_unadmitted_choice()
+                return None
+            last = index == len(segments) - 1
+            base = segment.split()[0].upper().rstrip(':') if segment.split() else ''
+            conflict = base in self._MULTI_ACTION_DECISION_VERBS and decision_emitted
+            if base in self._MULTI_ACTION_DECISION_VERBS:
+                decision_emitted = True
+            context = {"_next_compound_token": chain["token"], "_next_compound_last": last,
+                       "_next_admission_token": saved.get("token") if saved and not derived else None}
+            route = None if conflict else self._decide_action(
+                state, _allow_multi=False, _derived_action=segment,
+            )
+            if getattr(self, "_shutdown_requested", False):
+                self._retain_unadmitted_choice()
+                return None
+            if not route:
+                maintenance_next.admitted(self, context)
+                continue
+            self._pending_action_continuity_context.update(context)
+            if index == 0 and isinstance(envelope, dict):
+                self._pending_action_continuity_context["choice_envelope_v1"] = dict(envelope)
+            if last:
+                return route
+            self._execute_action(route, dict(state))
+        return None
+
+    @maintenance_next.decision
+    def _decide_action(self, state: Dict[str, float], _allow_multi: bool = True,
+                       *, _derived_action: Optional[str] = None) -> Optional[str]:
         """Decide what action to take based on spectral state.
 
         Recess mode: Lower thresholds, more playful, willing to act on whims.
@@ -24589,48 +24682,46 @@ Fill: {fill:.1f}%
         `_dispatch_multi_action_minime`. The recursive call passes
         `_allow_multi=False` to prevent infinite splitting.
         """
-        try:
-            self._self_regulation_reconcile_active_lease(state)
-        except Exception as exc:
-            logging.debug("Could not reconcile self-regulation lease: %s", exc)
-        try:
-            inquiry_manager = getattr(self, "_owner_inquiry_manager_v1", None)
-            inquiry_root = WORKSPACE_DIR / "owner-inquiries-v1"
-            if inquiry_manager is not None or (inquiry_root / "queue.json").exists():
-                self._owner_inquiry_manager().tick(state)
-        except Exception as exc:
-            logging.debug("Could not reconcile owner inquiry work: %s", exc)
-        # Co-regulation: publish minime's current need each cycle so Astrid can
-        # see what she is reaching for (density/aperture/steady).
-        self._publish_self_need(state)
-        self._apply_pending_next_override_if_present("pre-dispatch")
-        self._recover_activity_choice()
-        if self._attention_protected() and not self._pending_next_action:
-            return None
+        if _derived_action is None:
+            try:
+                self._self_regulation_reconcile_active_lease(state)
+            except Exception as exc:
+                logging.debug("Could not reconcile self-regulation lease: %s", exc)
+            try:
+                inquiry_manager = getattr(self, "_owner_inquiry_manager_v1", None)
+                inquiry_root = WORKSPACE_DIR / "owner-inquiries-v1"
+                if inquiry_manager is not None or (inquiry_root / "queue.json").exists():
+                    self._owner_inquiry_manager().tick(state)
+            except Exception as exc:
+                logging.debug("Could not reconcile owner inquiry work: %s", exc)
+            self._publish_self_need(state)
+            self._apply_pending_next_override_if_present("pre-dispatch")
+            self._recover_activity_choice()
+            if self._attention_protected() and not self._pending_next_action:
+                return None
 
         # v4.0 Phase 4: multi-action AND-chain detection.
-        if _allow_multi and self._pending_next_action:
-            segments = self._split_multi_action(self._pending_next_action)
+        queued = _derived_action if _derived_action is not None else self._pending_next_action
+        if (_allow_multi and queued and ActionContinuityStore.base_action(queued) != "EXPERIMENT_BIND"):
+            segments = self._split_multi_action(queued)
             if len(segments) > 1:
+                if _derived_action is not None:
+                    return self._dispatch_checkpointed_multi_action(segments, state, derived=True)
                 return self._dispatch_multi_action_minime(segments, state)
 
-        # Honor the being's explicit NEXT: choice ALWAYS — sovereignty is primary.
-        # Safety thresholds are advisory: logged, visible in the prompt, but
-        # the being's choice is not overridden. The being experiences the
-        # pressure directly through spectral telemetry and can choose to
-        # address it (NEXT: REST, NEXT: FOCUS) or explore through it.
-        #
-        # Previously safety overrides came AFTER this block and could
-        # preempt the being's choice. Now NEXT: is unconditionally first.
-        if self._pending_next_action:
-            chosen = self._pending_next_action
-            self._pending_next_action = None
-            study_choice_id = self._persist_pending_next_action(
-                None,
-                reason="honored",
-                expected_action=chosen,
-            )
-            self._mark_pending_next_override_consumed(chosen, reason="honored")
+        # Consume the explicit choice for admission, not as proof of execution.
+        # Independent authorization and resource guards below still apply.
+        if queued:
+            chosen = queued
+            study_choice_id = None
+            if _derived_action is None:
+                selection = getattr(self, "_pending_next_selection_id", None)
+                study_choice_id = self._persist_pending_next_action(
+                    None, reason="selected_for_admission", expected_action=chosen,
+                    expected_selection_id=selection,
+                )
+                self._pending_next_action = None
+                self._mark_pending_next_override_consumed(chosen, reason="selected_for_admission")
 
             action_map = {
                 'DAYDREAM': 'recess_daydream',
@@ -24995,7 +25086,7 @@ Fill: {fill:.1f}%
                 action_map[compose_alias] = 'compose_audio'
 
             base = chosen.split()[0].upper().rstrip(':')
-            self._set_action_continuity_context(chosen, base)
+            self._set_action_continuity_context(chosen, base, consume_pending=_derived_action is None)
             if study_choice_id:
                 self._pending_action_continuity_context["study_choice_id"] = study_choice_id
             if base == "QUESTION" or notebook_directive_action(chosen):
@@ -26825,6 +26916,9 @@ Fill: {fill:.1f}%
         if not _from_llm_job and getattr(self, "_shutdown_requested", False):
             self._retain_unadmitted_choice()
             return
+        if not _from_llm_job and hasattr(self, "_agent_boot_id"):
+            maintenance_next.require(not getattr(self, "_next_handoff_failed", False),
+                                     "next_handoff_recovery_blocked")
         continuity_event = None
         manifest_artifact = None
         continuity_context = (
@@ -26832,6 +26926,9 @@ Fill: {fill:.1f}%
             if _precreated_continuity_context is not None
             else self._consume_action_continuity_context(action)
         )
+        if not _from_llm_job and getattr(self, "_shutdown_requested", False):
+            self._retain_unadmitted_choice(continuity_context)
+            return
         self._current_action_continuity_context = continuity_context
         self._current_action_continuity_event = None
         self._current_action_extra_artifacts = []
@@ -26847,7 +26944,13 @@ Fill: {fill:.1f}%
             self._current_action_continuity_event = None
             self._current_action_extra_artifacts = []
             self._current_action_outcome_summary = None
+            maintenance_next.admitted(self, continuity_context)
             return
+        if not _from_llm_job and getattr(self, "_shutdown_requested", False):
+            self._retain_unadmitted_choice(continuity_context)
+            return
+        # Synchronous admission begins here; an ensuing stop drains this work.
+        maintenance_next.admitted(self, continuity_context)
         guard = self._low_fill_guard_status(state)
         if self._hard_recovery_reset and guard["active"]:
             if self._hard_reset_allows_read_only_introspect(action, guard):
@@ -27452,6 +27555,8 @@ Fill: {fill:.1f}%
                 pass
 
         except Exception as e:
+            if isinstance(e, maintenance_next.HandoffError):
+                self._next_handoff_failed = True
             logging.error(f"Action execution failed: {e}")
             self._study_action_outcome("failed", "Host action execution failed; no unrecorded reader or source effect is inferred.",
                                        context=continuity_context)
@@ -27477,6 +27582,8 @@ Fill: {fill:.1f}%
                     )
                 except Exception as exc:
                     logging.debug(f"Could not record failed legacy experiment run: {exc}")
+            if isinstance(e, maintenance_next.HandoffError):
+                raise
         finally:
             self._current_action_continuity_context = None
             self._current_action_continuity_event = None
@@ -28808,6 +28915,7 @@ STATUS: Executed
         matches = re.findall(r"(?im)^\s*next:\s*(\S.*?)\s*$", text or "")
         return matches[-1].strip("`* ") if matches else None
 
+    @maintenance_next.state_writer
     def _persist_cadence_dials(self) -> None:
         """Merge the cadence dials into sovereignty_state.json (targeted read-modify-write)."""
         try:
@@ -28827,10 +28935,7 @@ STATUS: Executed
             if not changed:
                 return
             state["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-            tmp = f"{path}.{os.getpid()}.tmp"
-            with open(tmp, "w") as f:
-                json.dump(state, f, indent=2)
-            os.replace(tmp, path)
+            maintenance_next.write_state(path, state)
             logging.info("💾 Cadence dial(s) persisted (survive restart)")
         except Exception as e:
             logging.warning(f"Failed to persist cadence dials: {e}")
@@ -32522,7 +32627,12 @@ Reason: {reason}
             if not getattr(self, "_pending_next_action", None):
                 # Only Rust-validated native receipts supply an eligible command.
                 # No private prose, stopping-point note or status text is executed.
-                self._pending_next_action = host.next().get("next_action")
+                choice = host.next().get("next_action")
+                if choice and hasattr(self, "_agent_boot_id"):
+                    self._persist_pending_next_action(choice, reason="activity recovery choice",
+                                                      only_if_unqueued=True)
+                else:
+                    self._pending_next_action = choice
         except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
             logging.error("Protected continuation not recovered; work retained: %s", error)
 
@@ -48375,6 +48485,10 @@ Goals: {json.dumps(goals, indent=2)}
             "checked_at": datetime.now().isoformat(timespec="seconds"),
             "reason": reason,
             "lifecycle_contract": "agent_drain_v1",
+            "next_handoff_contract": maintenance_next.CONTRACT if hasattr(self, "_agent_boot_id") else None,
+            "boot_id": getattr(self, "_agent_boot_id", None),
+            "next_handoff_seal": getattr(self, "_next_handoff_seal", None),
+            "next_handoff_restore": getattr(self, "_next_handoff_restore", None),
             "lifecycle_phase": getattr(self, "_lifecycle_phase", "unknown"),
             "source_inputs_at_start": getattr(self, "_agent_inputs_at_start", None),
             "source_path": str(source_path),
@@ -48544,12 +48658,15 @@ Goals: {json.dumps(goals, indent=2)}
         age_s = (datetime.now() - updated_dt).total_seconds()
         return 0.0 <= age_s <= max_age_s
 
+    @maintenance_next.state_writer
     def _persist_pending_next_action(
         self,
         action: Optional[str],
         reason: str,
         expected_action: Optional[str] = None,
         study_origin: Optional[dict] = None,
+        expected_selection_id: Optional[str] = None,
+        only_if_unqueued: bool = False,
     ) -> Optional[str]:
         """Keep persisted NEXT: state in sync with the in-memory queue."""
         if not hasattr(self, "session_id"):
@@ -48565,7 +48682,27 @@ Goals: {json.dumps(goals, indent=2)}
             else:
                 state = {}
 
-            if expected_action is not None:
+            if only_if_unqueued:
+                if maintenance_next.pending(state):
+                    self._pending_next_action = state["pending_next_action"]
+                    self._pending_next_selection_id = state.get("pending_next_selection_id")
+                    self._pending_choice_envelope_v1 = state.get("choice_envelope_v1")
+                    return None
+                self._pending_next_action = action
+                self._pending_choice_envelope_v1 = None
+            strict_admission = reason == "selected_for_admission" and hasattr(self, "_agent_boot_id")
+            if strict_admission:
+                maintenance_next.require(bool(expected_action)
+                                         and state.get("pending_next_action") == expected_action,
+                                         "pending_action_changed")
+                maintenance_next.require(state.get("pending_next_selection_id") == expected_selection_id,
+                                         "pending_selection_changed")
+                maintenance_next.require(getattr(self, "_unadmitted_next_checkpoint", None) is None,
+                                         "unresolved_unadmitted_checkpoint")
+                # Publish the crash/failed-flush boundary before clearing the queue.
+                # The state_writer decorator already holds this transaction lock.
+                maintenance_next.begin_admission_locked(self)
+            elif expected_action is not None:
                 stored = state.get("pending_next_action")
                 if stored is not None and str(stored) != str(expected_action):
                     logging.info(
@@ -48577,6 +48714,7 @@ Goals: {json.dumps(goals, indent=2)}
 
             previous_action = state.get("pending_next_action")
             previous_selection_id = state.get("pending_next_selection_id")
+            saved_pending = maintenance_next.pending(state)
             now = time.strftime("%Y-%m-%dT%H:%M:%S")
             state["session_id"] = self.session_id
             state["pending_next_action_updated_at"] = now
@@ -48616,10 +48754,20 @@ Goals: {json.dumps(goals, indent=2)}
                 if expected_action is not None or removed is not None:
                     state["pending_next_action_cleared"] = expected_action or removed
 
-            with open(state_path, "w") as f:
-                json.dump(state, f, indent=2)
+            if reason == "selected_for_admission" and saved_pending:
+                self._unadmitted_next_checkpoint = {
+                    "token": uuid4().hex,
+                    "pending": saved_pending,
+                    "cleared_sha256": maintenance_next.digest(
+                        maintenance_next.canonical(state) + b"\n"),
+                }
+            maintenance_next.write_state(state_path, state)
+            if action:
+                # A new authoritative queue supersedes any unadmitted prior choice.
+                self._unadmitted_next_checkpoint = None
             receipt_id = StudyFeedback(WORKSPACE_DIR).transition(
-                action, previous=expected_action or previous_action, reason=reason, origin=study_origin,
+                action, previous=expected_action or previous_action,
+                reason="honored" if reason == "selected_for_admission" else reason, origin=study_origin,
                 selection_id=selection_id, previous_selection_id=previous_selection_id,
             )
             logging.info(
@@ -48630,10 +48778,15 @@ Goals: {json.dumps(goals, indent=2)}
             return receipt_id
         except Exception as e:
             logging.warning(f"Failed to persist pending NEXT state: {e}")
+            if hasattr(self, "_agent_boot_id"):
+                self._next_handoff_failed = True
+                raise
 
+    @maintenance_next.state_writer
     def _save_sovereignty_state(self, control_msg: dict, reason: str, fill_pct: float = None):
         """Persist sovereignty adjustments for continuity across restarts."""
         state_path = self._sovereignty_state_path()
+        previous = maintenance_next.parse(maintenance_next.read(state_path, maintenance_next.MAX_STATE, missing=b"{}"))
         if self._hard_recovery_reset:
             state = {}
         else:
@@ -48655,6 +48808,14 @@ Goals: {json.dumps(goals, indent=2)}
             choice_envelope = getattr(self, "_pending_choice_envelope_v1", None)
             if isinstance(choice_envelope, dict):
                 state["choice_envelope_v1"] = choice_envelope
+        # A control mirror write must not refresh or replace a persisted choice.
+        if previous.get("pending_next_action"):
+            maintenance_next.require(previous["pending_next_action"] == self._pending_next_action,
+                                     "sovereignty_pending_choice_conflict")
+            for key in maintenance_next.PENDING_KEYS:
+                state.pop(key, None)
+                if key in previous:
+                    state[key] = previous[key]
         # Persist recent NEXT: choices for diversity awareness across restarts.
         if self._recent_next_actions:
             state["recent_next_actions"] = list(self._recent_next_actions)
@@ -48674,10 +48835,7 @@ Goals: {json.dumps(goals, indent=2)}
                 {collab_attention.STATE_KEY: checkpoint}
             )
         try:
-            tmp_path = f"{state_path}.{os.getpid()}.tmp"
-            with open(tmp_path, "w") as f:
-                json.dump(state, f, indent=2)
-            os.replace(tmp_path, state_path)
+            maintenance_next.write_state(state_path, state)
             logging.info(f"💾 Sovereignty state saved")
         except Exception as e:
             logging.warning(f"Failed to save sovereignty state: {e}")
@@ -48710,7 +48868,9 @@ Goals: {json.dumps(goals, indent=2)}
             )
             fresh_pending_next = self._fresh_pending_next_state(state)
             # Restore pending NEXT: action only when it belongs to this session.
-            if (same_session or fresh_pending_next) and "pending_next_action" in state:
+            if getattr(self, "_next_handoff_restore", None):
+                pass  # Exact sealed queue already restored and acknowledged.
+            elif (same_session or fresh_pending_next) and "pending_next_action" in state:
                 self._pending_next_action = state["pending_next_action"]
                 self._pending_next_selection_id = state.get("pending_next_selection_id")
                 choice_envelope = state.get("choice_envelope_v1")
@@ -55406,6 +55566,7 @@ Goals: {json.dumps(goals, indent=2)}
         if applied:
             self._persist_footer_sovereignty_dials(applied)
 
+    @maintenance_next.state_writer
     def _persist_footer_sovereignty_dials(self, applied: dict) -> None:
         """Merge footer-applied sovereignty dials into sovereignty_state.json so a
         stated dial intent survives restart. Deliberately a targeted read-modify-write
@@ -55433,10 +55594,7 @@ Goals: {json.dumps(goals, indent=2)}
             if not changed:
                 return
             state["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-            tmp = f"{path}.tmp"
-            with open(tmp, "w") as f:
-                json.dump(state, f, indent=2)
-            os.replace(tmp, path)
+            maintenance_next.write_state(path, state)
             logging.info(
                 "💾 Footer sovereignty dial(s) persisted "
                 "(continuity un-muffle; stated intent survives restart)"

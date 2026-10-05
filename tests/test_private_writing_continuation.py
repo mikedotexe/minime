@@ -58,6 +58,7 @@ def test_reflection_can_explicitly_become_private_continuation(writing_agent, mo
 
     monkeypatch.setattr(agent, "_query_llm", completed)
     agent._pending_next_action = "INTROSPECT"
+    agent._persist_pending_next_action(agent._pending_next_action, reason="synthetic authored choice")
     for _ in range(2):
         assert agent._decide_action(dict(STATE)) == "self_study"
         agent._execute_action("self_study", dict(STATE), _from_llm_job=True)
@@ -70,7 +71,11 @@ def test_reflection_can_explicitly_become_private_continuation(writing_agent, mo
     private_call = agent._write_journal_entry.call_args
     assert private_call.kwargs["private_canvas"] is True
     fresh = client.prepare("INTROSPECT")
-    assert exact not in fresh and "A genuinely new passage." not in fresh
+    # The deployed reflection-turn helper offers only the prior public passage.
+    assert exact in fresh
+    assert "retained publicly" in fresh and "optional material" in fresh
+    assert "A genuinely new passage." not in fresh
+    assert "NEXT: WRITE PARK" not in fresh
 
 
 def test_protected_runtime_recovers_choice_defers_mail_and_counts_jobs(writing_agent, monkeypatch):
@@ -115,12 +120,14 @@ def test_protected_metadata_park_and_mailbox_do_not_generate(writing_agent, monk
     monkeypatch.setattr(agent, "_query_llm", provider)
     for action in ("ACTIVITY_FOCUS WRITE d1", "ACTIVITY_STATUS", "PARK_ACTIVITY"):
         agent._pending_next_action = action
+        agent._persist_pending_next_action(action, reason="synthetic authored choice")
         assert agent._decide_action(dict(STATE)) == "activity_focus"
         agent._execute_action("activity_focus", dict(STATE))
     status = agent._activity_focus().status()
     assert status["admitted"] == 0 and not status["protected"]
     for action in (status["return_command"], "ACTIVITY_FOCUS WRITE d1", "CHECK_MAILBOX"):
         agent._pending_next_action = action
+        agent._persist_pending_next_action(action, reason="synthetic authored choice")
         assert agent._decide_action(dict(STATE)) == "activity_focus"
         agent._execute_action("activity_focus", dict(STATE))
     assert not agent._activity_focus().status()["protected"]
@@ -200,6 +207,7 @@ def test_private_choice_reaches_queue_dispatch_and_same_draft(writing_agent, mon
 
     monkeypatch.setattr(agent, "_query_llm", completed)
     agent._pending_next_action = "WRITE START A developing account"
+    agent._persist_pending_next_action(agent._pending_next_action, reason="synthetic authored choice")
     assert agent._decide_action(dict(STATE)) == "self_study"
     agent._execute_action("self_study", dict(STATE), _from_llm_job=True)
     assert len(offers) == 1

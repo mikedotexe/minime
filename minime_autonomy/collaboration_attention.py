@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, MutableMapping, Sequence
+
+from . import maintenance_next
 
 
 SCHEMA_VERSION = 1
@@ -91,20 +92,12 @@ def load_checkpoint_file(path: Path) -> dict[str, Any]:
 
 def merge_checkpoint_file(path: Path, checkpoint: Mapping[str, Any]) -> None:
     """Atomically merge the checkpoint while preserving unrelated state."""
-    try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        state = {}
-    if not isinstance(state, dict):
-        state = {}
-    state[STATE_KEY] = checkpoint_from_state({STATE_KEY: checkpoint})
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(
-        json.dumps(state, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    with maintenance_next.transaction(path):
+        state = maintenance_next.parse(
+            maintenance_next.read(path, maintenance_next.MAX_STATE, missing=b"{}")
+        )
+        state[STATE_KEY] = checkpoint_from_state({STATE_KEY: checkpoint})
+        maintenance_next.write_state(path, state)
 
 
 def prepare_prompt_offer(
