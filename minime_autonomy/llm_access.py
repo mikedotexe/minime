@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import stat
 import tempfile
 import threading
 import time
@@ -213,6 +214,13 @@ class LlmJobStore:
             # The authoritative job may have committed just before a projection
             # write failed. Retrying repairs the event/index/status, without
             # changing the outcome or publishing a second completion event.
+            result_path = job["outcome"].get("result_path")
+            if result_path:
+                retained = Path(result_path)
+                if hashlib.sha256(retained.read_bytes()).hexdigest() != job["outcome"]["result_sha256"]:
+                    raise ValueError("Retained LLM result identity changed")
+                self._confirm_file(retained)
+            self._confirm_file(self.jobs_dir / job_id / "job.json")
             self._record_outcome(job)
             self._update_index(job)
             self.write_runtime_status()
@@ -567,28 +575,58 @@ class LlmJobStore:
 
     def _record_outcome(self, job: Dict[str, Any]) -> None:
         path = self.jobs_dir / job["job_id"] / "events.jsonl"
-        if path.is_file():
-            for line in path.read_text().splitlines():
-                try:
-                    event = json.loads(line)
-                except ValueError:
-                    continue
-                if event.get("outcome_sha256") == job["outcome_sha256"]:
-                    return
-        self._append_event(job["job_id"], {
+        expected = {
             "event": "late_result_retained" if job["status"] in {"timeout", "canceled"} else job["worker_status"],
             "at": job["completed_at"], "worker_status": job["worker_status"],
             "outcome_sha256": job["outcome_sha256"], "summary": job["summary"],
             "error": job["outcome"]["error"],
-        })
+        }
+        outcomes = [event for event in self._read_events(path) if "outcome_sha256" in event]
+        if outcomes:
+            if outcomes != [expected]:
+                raise ValueError("Conflicting LLM outcome history; evidence retained")
+            self._confirm_file(path)
+            return
+        self._append_event(job["job_id"], expected)
+
+    @staticmethod
+    def _read_events(path: Path) -> List[Dict[str, Any]]:
+        raw = path.read_bytes() if path.exists() else b""
+        if raw and not raw.endswith(b"\n"):
+            raise ValueError("Incomplete LLM event history; evidence retained")
+        events = []
+        for line in raw.splitlines():
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise ValueError("Invalid LLM event history; evidence retained")
+            events.append(event)
+        return events
+
+    @staticmethod
+    def _confirm_file(path: Path) -> None:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+                raise ValueError("Invalid LLM receipt file")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def _append_event(self, job_id: str, payload: Dict[str, Any]) -> None:
         path = self.jobs_dir / job_id / "events.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
+        self._read_events(path)
         with path.open("a") as handle:
             handle.write(json.dumps(payload, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+        self._confirm_file(path)
 
     def _write_json(self, path: Path, payload: Dict[str, Any]) -> None:
         self._write_text(path, json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n")

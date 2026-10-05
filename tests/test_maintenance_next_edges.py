@@ -358,7 +358,7 @@ else:
         return None
     value._get_latest_spectral_state = scheduling_probe
     value.start()
-    assert events == ["scheduler_after_ack"], events
+    assert events == ["startup", "scheduler_after_ack"], events
     assert path.read_bytes() == before, "restore rewrote the exact queue"
     receipt = value._next_handoff_restore
 
@@ -417,7 +417,7 @@ print(json.dumps({
     assert restored["receipt"]["process"]["pid"] == new.pid
     assert restored["receipt"]["process"]["boot_id"] == restored["boot_id"]
     assert restored["receipt"]["scheduling_authorized"] is False
-    assert restored["events"] == ["scheduler_after_ack"]
+    assert restored["events"] == ["startup", "scheduler_after_ack"]
     assert path.read_bytes() == before
     rows, raw = maintenance.history(path)
     assert [row["body"]["kind"] for row in rows] == ["sealed", "restored"]

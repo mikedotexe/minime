@@ -23,6 +23,7 @@ import fcntl
 import sqlite3
 import logging
 from minime_autonomy import writing, maintenance_next
+from minime_autonomy import source_status
 from minime_autonomy.source_study import StudyClient, SourceStudyPrompt, SOURCE_STUDY_GUIDANCE
 from minime_autonomy.study_feedback import StudyFeedback, delivery_origin
 from uuid import uuid4
@@ -23131,15 +23132,16 @@ class AutonomousAgent:
 
         # A sealed graceful continuation precedes profile-specific restoration.
         # A failed acknowledgement cannot admit a new generation.
-        if hasattr(self, "_agent_boot_id"):
-            try:
+        try:
+            if hasattr(self, "_agent_boot_id"):
                 self._next_handoff_restore = maintenance_next.restore(self)
-            except Exception:
-                self._next_handoff_failed = True
-                self.stop()
-                self._lifecycle_phase = "recovery_blocked"
-                self._write_source_status("next_handoff_recovery_blocked")
-                raise
+            self._write_source_status("startup")
+        except Exception:
+            self._next_handoff_failed = True
+            self.stop()
+            self._lifecycle_phase = "recovery_blocked"
+            self._write_source_status("next_handoff_recovery_blocked")
+            raise
         self._restore_sovereignty_state()
         self._apply_pending_next_override_if_present("boot")
         if not self.running:
@@ -23320,7 +23322,11 @@ class AutonomousAgent:
                 self._write_source_status("next_handoff_seal_blocked")
                 raise
         self._lifecycle_phase = "exited"
-        self._write_source_status("drained")
+        try:
+            self._write_source_status("drained")
+        except Exception:
+            self._lifecycle_phase = "recovery_blocked"
+            raise
         logging.info("Autonomous agent drained; all accepted LLM workers returned")
 
     def _sleep_or_stop(self, seconds: float) -> bool:
@@ -48509,11 +48515,13 @@ Goals: {json.dumps(goals, indent=2)}
 
     def _write_source_status(self, reason: str = "heartbeat") -> Dict[str, Any]:
         status = self._current_source_status(reason)
-        path = self._source_status_path()
+        mandatory = reason in source_status.MANDATORY_REASONS
+        publisher = self.__dict__.setdefault("_source_status_publisher", source_status.Publisher())
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(status, indent=2))
+            return publisher.write(self._source_status_path(), status, mandatory=mandatory)
         except Exception as exc:
+            if mandatory:
+                raise
             logging.debug("Could not write autonomous-agent source status: %s", exc)
         return status
 

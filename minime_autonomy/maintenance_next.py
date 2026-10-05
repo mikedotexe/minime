@@ -21,6 +21,8 @@ HANDOFF_VERSION = 1
 MAX_STATE = 4 * 1024 * 1024
 MAX_HISTORY = 8 * 1024 * 1024
 MAX_RECORDS = 8192
+# Logical headroom for one replacement acknowledgement, not a disk allocation.
+MAX_RESTORE_RECORD_BYTES = 8192
 PENDING_KEYS = ("pending_next_action", "pending_next_selection_id", "choice_envelope_v1",
                 "pending_next_action_status", "pending_next_action_updated_at",
                 "pending_next_action_update_reason")
@@ -334,6 +336,10 @@ def append(state_path, rows, raw, body):
     row = {"body": body, "sha256": digest(canonical(body))}
     line = canonical(row) + b"\n"
     require(len(rows) < MAX_RECORDS and len(raw) + len(line) <= MAX_HISTORY, "handoff_capacity")
+    if body["kind"] == "sealed":
+        require_restore_capacity(len(rows) + 1, len(raw) + len(line))
+    else:
+        require(len(line) <= MAX_RESTORE_RECORD_BYTES, "handoff_restore_record_limit")
     path = stream_path(state_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     # The receipt directory's name must be durable before any receipt can be.
@@ -346,6 +352,11 @@ def append(state_path, rows, raw, body):
         os.fsync(handle.fileno())
     sync_parent(path)
     return row
+
+
+def require_restore_capacity(records, byte_count):
+    require(records < MAX_RECORDS and byte_count + MAX_RESTORE_RECORD_BYTES <= MAX_HISTORY,
+            "handoff_capacity_for_restore")
 
 
 def public(row):
@@ -397,6 +408,8 @@ def seal(agent):
                          and r["body"].get("process", {}).get("boot_id") == agent._agent_boot_id), None)
         if previous:
             require(all(previous["body"].get(k) == v for k, v in body.items()), "conflicting_drain_retry")
+            if not any(r["body"].get("seal_sha256") == previous["sha256"] for r in rows):
+                require_restore_capacity(len(rows), len(raw))
             confirm_durable(path)
             receipt = public(previous)
         else:
