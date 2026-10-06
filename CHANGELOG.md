@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Live: paired closure and finding-feedback helper (2026-10-06, Codex).** Gracefully reload agent 25454 -> 64807 after the paired bridge/helper transition. Verify the exact pending NEXT restoration, session 5321 and all 93 unchanged Python launch inputs. Complete staged-helper suite: 1,921 passed, one skipped, 144 subtests; 42 shared preservation checks passed. No source overlay, engine/provider restart, historical rewrite or automation resume. Exact evidence: `docs/steward-notes/2026-10-06-handoff-diagnostics-and-finding-feedback.md`.
+
 - **Candidate: missing-anchor feedback qualification (2026-10-06, Codex).** Extend the real dispatcher/helper regression with a rejected source finding, retained note, rejected placeholder closure, quiet REST and explicit historical review. The shared Rust repair supplies storage feedback without inferring a citation or reopening an inquiry. Python runtime inputs are unchanged; see `docs/steward-notes/2026-10-06-handoff-diagnostics-and-finding-feedback.md`.
 
 - **Question-closure recovery qualification (2026-10-06, Codex).** Exercise the shared-reader rejection of literal finding templates through the real Minime dispatcher with stubbed providers. Verify rejected closure separately from successful recovery delivery, preserved inquiry/bookmark/note, honored REST and later explicitly authored closure. No Python runtime, provider, reservoir or writing-capacity change. Paired status: `docs/steward-notes/2026-10-06-question-closure-recovery.md`.

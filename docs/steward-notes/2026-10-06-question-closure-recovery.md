@@ -33,3 +33,11 @@ no qualifying stable window. Neither attempt installed a hold or stopped a
 service. Agent 25454 and the previous helper remain live; this follow-up is not
 deployed. Main stays aligned with the running source. Candidate-only commits
 retain the repair and evidence; no push or automation resume is included.
+
+Subsequently, the approved renewed paired release passed preservation and
+staged-helper qualification and activated successfully at 22:30:30 UTC.
+Agent 64807 uses the new shared helper with all 93 production inputs unchanged.
+The pending NEXT seal/restore and session are verified, with no newly
+interrupted job or protected-service change. Full follow-through and exact
+hashes: `2026-10-06-handoff-diagnostics-and-finding-feedback.md`. The previous
+failed attempts remain recorded; no historical question finding is rewritten.
