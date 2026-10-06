@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Question-closure recovery qualification (2026-10-06, Codex).** Exercise the shared-reader rejection of literal finding templates through the real Minime dispatcher with stubbed providers. Verify rejected closure separately from successful recovery delivery, preserved inquiry/bookmark/note, honored REST and later explicitly authored closure. No Python runtime, provider, reservoir or writing-capacity change. Paired status: `docs/steward-notes/2026-10-06-question-closure-recovery.md`.
+
 - **Live source-selection recovery (2026-10-06, Codex).** Shared-reader `source_selection_needed` records `needs_choice` and renders as `study_decision`, with no generic host receipt replay. The full new-question, invalid OPEN, search, conflicting final NEXT, recovery and explicit page-delivery chain is tested through the real adapter with a stubbed provider. The already-installed two-file regulation-review repair is preserved; larger capacity/provider work remains excluded. Paired graceful activation loaded all 93 qualified inputs in agent 25454. See `docs/steward-notes/2026-10-06-source-selection-recovery.md` for qualification and live evidence.
 
 - **Live: maintenance durability (2026-10-05, Codex).** Commit `ffa511dc` is on local main and loaded by agent 1499 after the sanctioned graceful transition from 76377. All 93 source inputs match; exact empty-queue restoration and session 5321 are verified, with no newly interrupted job. Bridge/helper, providers, engine and sensory services are unchanged; automations remain paused. Larger writing capacity is not live. Exact receipt and remaining qualification work: `docs/steward-notes/2026-10-05-maintenance-durability-release.md`.

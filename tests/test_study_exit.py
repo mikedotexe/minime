@@ -51,6 +51,54 @@ def test_named_closure_records_reader_effect_separately_from_generation(study_ag
     assert saved["questions"]["entries"]["q1"]["status"] == "resolved by you"
 
 
+def test_literal_finding_preserves_inquiry_and_routes_a_real_recovery_decision(study_agent, monkeypatch):
+    agent, _, client, offers = study_agent
+    answers = iter([
+        "Exact authored uncertainty.\nSTUDY_NOTE: Keep my note.\nNEXT: SELF_STUDY QUESTION RESOLVE q1 [finding]",
+        "NEXT: REST",
+        "NEXT: REST",
+    ])
+
+    def provider(prompt, **kwargs):
+        offers.append(prompt)
+        text = next(answers)
+        response = Mock(status_code=200, text=json.dumps({"message": {"content": text}, "done": True}))
+        prompt.post(Mock(return_value=response), "fake", {"messages": [
+            {"role": "user", "content": str(prompt)}]}, 1)
+        prompt.accepted()
+        return text
+
+    monkeypatch.setattr(agent, "_query_llm", provider)
+    client.prepare("SELF_STUDY QUESTION NEW Does the retry stop?")
+    execute_choice(agent, "SELF_STUDY OPEN minime/minime_autonomy/runtime.py 1")
+    raw = "SELF_STUDY QUESTION RESOLVE q1 [finding]"
+    assert agent._pending_next_action == raw
+    path = client.workspace / "diagnostics/source_first_v3/shared_reader/reader-v1.json"
+    before = json.loads(path.read_text())
+    assert agent._decide_action(dict(STATE)) == "self_study"
+    agent._execute_action("self_study", dict(STATE), _from_llm_job=True)
+    assert offers[-1].output["input_kind"] == "recovery"
+    assert offers[-1].output["continuation_decision"] is True
+    assert "template marker" in offers[-1]
+    assert "without a finding" in offers[-1]
+    assert agent._write_journal_entry.call_args.args[0] == "study_decision"
+    saved = json.loads(path.read_text())
+    for field in ("status", "finding", "question", "sources"):
+        assert saved["questions"]["entries"]["q1"][field] == before["questions"]["entries"]["q1"][field]
+    assert saved["questions"]["active"] == "q1"
+    assert saved["bookmarks"] == before["bookmarks"]
+    assert saved["questions"]["entries"]["q1"]["notebook"]["note"] == before["questions"]["entries"]["q1"]["notebook"]["note"]
+    assert agent._pending_next_action == "REST"
+    assert agent._decide_action(dict(STATE)) is None
+    attempt = next(r for r in StudyFeedback(aa.WORKSPACE_DIR).load()["records"] if r["action"] == raw)
+    assert attempt["reader_outcome"]["status"] == "rejected"
+    assert attempt["status"] == "completed"  # Recovery delivered; closure rejected.
+    execute_choice(agent, "SELF_STUDY QUESTION RESOLVE q1 I remain uncertain.")
+    saved = json.loads(path.read_text())
+    assert saved["questions"]["entries"]["q1"]["finding"] == "I remain uncertain."
+    assert saved["questions"]["entries"]["q1"]["status"] == "resolved by you"
+
+
 def test_rest_then_later_study_uses_eof_decision_and_dispatch_provenance(study_agent, monkeypatch):
     agent, _, client, offers = study_agent
     (client.minime_root / "minime_autonomy/runtime.py").write_text("def entry(): pass\n")
