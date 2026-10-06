@@ -108,7 +108,7 @@ class StudyClient:
             output = self.call(operation="prepare_once", action=action,
                 request_id=request_id, expected_revision=revision)
         feedback = ""
-        if output.get("input_kind") not in {"private_writing", "reflection"}:
+        if output.get("input_kind") not in {"private_writing", "reflection", "source_selection_needed"}:
             available = int(output.get("input_budget_bytes", 16000)) - len((output["text"] + output.get("system_prompt", "")).encode()) - 32
             feedback = StudyFeedback(self.workspace).render(min(3500, available))
         return SourceStudyPrompt(self, output, host_feedback=feedback)

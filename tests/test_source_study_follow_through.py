@@ -470,6 +470,68 @@ def test_map_journal_keeps_navigation_scope_and_does_not_claim_code(study_agent)
     assert "not independently verified code facts" in artifact
 
 
+def test_bookmarkless_choice_chain_recovers_without_replaying_or_selecting(study_agent, monkeypatch):
+    from minime_autonomy.study_feedback import StudyFeedback
+    agent, store, client, offers = study_agent
+    source = aa.BASE_DIR / "minime_autonomy/runtime.py"
+    source.write_text("class RestartTracker:\n    pass\n" + "# source line\n" * 2000)
+    open_command = "SELF_STUDY OPEN minime/minime_autonomy/runtime.py 1"
+    responses = iter([
+        "NEXT: SELF_STUDY OPEN RestartTracker::new [837]",
+        "NEXT: SELF_STUDY FIND RestartTracker",
+        f"RETAINED_NAVIGATION_PROSE is not a cursor.\n{open_command}\nNEXT: SELF_STUDY CONTINUE",
+        "Another RETAINED_NAVIGATION_PROSE.\nNEXT: SELF_STUDY CONTINUE",
+        f"NEXT: {open_command}",
+        "Exact authored page finding.\nNEXT: REST",
+    ])
+
+    def provider(prompt, **kwargs):
+        offers.append(prompt)
+        text = next(responses)
+        messages, _ = prompt.messages(prompt.output["system_prompt"], 16000)
+        response = Mock(status_code=200, text=json.dumps({"message": {"content": text}, "done": True}))
+        prompt.post(Mock(return_value=response), "fake", {"messages": messages}, 1)
+        prompt.accepted()
+        return text
+
+    monkeypatch.setattr(agent, "_query_llm", provider)
+    select_choice(agent, "SELF_STUDY QUESTION NEW Does RestartTracker stop retries?")
+    path = client.workspace / "diagnostics/source_first_v3/shared_reader/reader-v1.json"
+    for index in range(6):
+        assert agent._decide_action(dict(STATE)) == "self_study"
+        context = dict(agent._pending_action_continuity_context)
+        raw = context["raw_next"]
+        event = store.begin_action(raw, raw, "self_study", "self_study", dict(STATE), source="next")
+        with aa.job_outcome.capture(event["action_id"]) as outcome:
+            agent._execute_action("self_study", dict(STATE), _from_llm_job=True,
+                _precreated_continuity_context=context, _precreated_continuity_event=event)
+        assert outcome.finish()[0] == "completed", outcome.finish()
+        if index < 5:
+            assert json.loads(path.read_text())["bookmarks"] == {}
+        if index in (3, 4):
+            prompt = offers[-1]
+            assert prompt.output["input_kind"] == "source_selection_needed"
+            assert prompt.output["continuation_decision"] is True
+            assert prompt.receipt and str(prompt) == prompt.output["text"]
+            assert open_command in prompt
+            assert "was not selected" in prompt
+            assert "RETAINED_NAVIGATION_PROSE" not in prompt
+            assert "NAVIGATION RECEIPT" not in prompt
+            assert len(prompt) < 5000
+            assert any(record.get("reader_outcome", {}).get("status") == "needs_choice"
+                       for record in StudyFeedback(aa.WORKSPACE_DIR).load()["records"])
+    assert [p.output["input_kind"] for p in offers] == [
+        "questions", "recovery", "search", "source_selection_needed", "source_selection_needed", "source_page"]
+    assert offers[-1].receipt
+    assert agent._pending_next_action == "REST"
+    assert agent._decide_action(dict(STATE)) is None
+    decisions = [p.read_text() for p in (aa.WORKSPACE_DIR / "journal").glob("study_decision_*.txt")]
+    assert len(decisions) == 3
+    assert sum("Source selection needed:" in text for text in decisions) == 2
+    assert len(list((aa.WORKSPACE_DIR / "journal").glob("self_study_*.txt"))) == 1
+    assert not list((aa.WORKSPACE_DIR / "journal").glob("introspect_notice_*.txt"))
+
+
 @pytest.mark.parametrize("choice", [
     "SELF_STUDY OPEN astrid/crates/astrid-kernel/src/lib.rs 1",
     "SELF_STUDY LIST minime/minime_autonomy --page 2",

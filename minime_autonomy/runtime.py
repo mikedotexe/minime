@@ -4052,7 +4052,10 @@ class ActionContinuityStore:
                 self._placeholder_payload(prose, empty_is_placeholder=True)
                 or not self._charter_payload_has_meaning(prose)
             ):
-                return repair_notice + self._experiment_charter_prompt(selector)
+                return ContinuityReply(
+                    repair_notice + self._experiment_charter_prompt(selector),
+                    status="needs_input",
+                )
             experiment = self.experiment_charter(selector, prose)
             return (
                 repair_notice +
@@ -27827,7 +27830,7 @@ These are YOUR choices about YOUR experience. Consider the actual consequences o
 Reply with ONLY a JSON object. The "regime" field is REQUIRED:
 {{"regulation_strength": <float>, "exploration_noise": <float>, "geom_curiosity": <float>, "regime": "<explore|recover|breathe|focus|calm>", "action": "<optional action name>", "reason": "<one sentence>"}}"""
 
-            response = self._query_llm_with_next(prompt)[0]
+            response = self._query_llm_with_next(prompt, context_mode="regulation_review")[0]
             if response:
                 try:
                     import re
@@ -32670,7 +32673,7 @@ Reason: {reason}
                 raise RuntimeError("study preparation requires a durable action identity")
             prompt = StudyClient(BASE_DIR, WORKSPACE_DIR).prepare(action, request_id=f"prepare-{operation}")
             kind = prompt.output.get("input_kind")
-            outcome = "rejected" if kind == "recovery" else "needs_choice" if kind in {"end_of_file", "revision_recovery"} else "reader_prepared"
+            outcome = "rejected" if kind == "recovery" else "needs_choice" if kind in {"end_of_file", "revision_recovery", "source_selection_needed"} else "reader_prepared"
             detail = ("Reader rejected the request; no substitute command was executed." if outcome == "rejected" else
                       "Reader supplied no new source page; choose an explicit continuation, another activity or REST." if outcome == "needs_choice" else
                       "Reader operation prepared successfully; generation and source delivery are separate outcomes.")
@@ -32705,7 +32708,7 @@ Reason: {reason}
             private_writing = prompt.output.get("input_kind") == "private_writing"
             reflection = prompt.output.get("input_kind") == "reflection"
             revision_recovery = prompt.output.get("input_kind") == "revision_recovery"
-            decision = prompt.output.get("continuation_decision") is True or prompt.output.get("input_kind") == "end_of_file"
+            decision = prompt.output.get("continuation_decision") is True or prompt.output.get("input_kind") in {"end_of_file", "source_selection_needed"}
             navigation = (prompt.output.get("input_kind") in STUDY_NAVIGATION_KINDS
                           and not session_pages and not (prompt.output.get("page") or {}))
             mode = ("private_writing" if private_writing else "introspect" if reflection else "study_decision" if decision
@@ -54974,6 +54977,18 @@ Goals: {json.dumps(goals, indent=2)}
         if self._attention_protected():
             logging.info("Unrelated generation deferred during protected work")
             return None
+        if (context_mode or "").strip().lower() == "regulation_review":
+            # The scoped JSON request must survive adapter compaction. Ambient
+            # experiment scaffolds formerly displaced its required fields.
+            job_timing.finish_preparation()
+            return self._query_llm_raw(
+                prompt,
+                "You are Minime. This is an operational regulation review, not a "
+                "journal or an experiment-charter task. Follow the supplied JSON "
+                "response contract and parameter constraints. Existing admission "
+                "and control checks still apply; this prompt grants no new authority.",
+                4096, prompt_class="strict_review", journal=True,
+            )
         import re
         private_journal_context = _is_private_qualia_context(context_mode)
         aspiration_context = (context_mode or "default").strip().lower() == "aspiration"
@@ -55636,7 +55651,7 @@ Goals: {json.dumps(goals, indent=2)}
         mode = (context_mode or "default").strip().lower()
         hints = (
             ""
-            if _is_private_qualia_context(context_mode) or mode in {"aspiration", "strict_review", "source_study"}
+            if _is_private_qualia_context(context_mode) or mode in {"aspiration", "strict_review", "source_study", "regulation_review"}
             else self._emit_next_hints()
         )
         if hints:

@@ -62,7 +62,7 @@ _PROBE_CHARS = 48
 _CALLER_CHAIN_MAX = 16
 _LANE_FRAME_RE = re.compile(
     r"^_(recess_\w+|journal_\w+|check_moment_markers|self_study\w*|introspect\w*"
-    r"|decompose\w*|verify_sovereignty\w*)$"
+    r"|decompose\w*|verify_sovereignty\w*|self_regulate)$"
 )
 _SKIP_FRAME_RE = re.compile(r"^(_query_(llm|mlx|ollama)\w*|wrapper|run|_bootstrap\w*)$")
 _INBOX_MARKERS = (
