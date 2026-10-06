@@ -54,7 +54,7 @@ def test_named_closure_records_reader_effect_separately_from_generation(study_ag
 def test_literal_finding_preserves_inquiry_and_routes_a_real_recovery_decision(study_agent, monkeypatch):
     agent, _, client, offers = study_agent
     answers = iter([
-        "Exact authored uncertainty.\nSTUDY_NOTE: Keep my note.\nNEXT: SELF_STUDY QUESTION RESOLVE q1 [finding]",
+        "Exact authored uncertainty.\nSTUDY_NOTE: Keep my note.\nSTUDY_FINDING: The gate is here, without a source citation.\nNEXT: SELF_STUDY QUESTION RESOLVE q1 [finding]",
         "NEXT: REST",
         "NEXT: REST",
     ])
@@ -81,6 +81,9 @@ def test_literal_finding_preserves_inquiry_and_routes_a_real_recovery_decision(s
     assert offers[-1].output["continuation_decision"] is True
     assert "template marker" in offers[-1]
     assert "without a finding" in offers[-1]
+    assert "Finding not saved" in offers[-1]
+    assert "cite a supplied numbered source line" in offers[-1]
+    assert "Keep my note." not in offers[-1]
     assert agent._write_journal_entry.call_args.args[0] == "study_decision"
     saved = json.loads(path.read_text())
     for field in ("status", "finding", "question", "sources"):
@@ -97,6 +100,10 @@ def test_literal_finding_preserves_inquiry_and_routes_a_real_recovery_decision(s
     saved = json.loads(path.read_text())
     assert saved["questions"]["entries"]["q1"]["finding"] == "I remain uncertain."
     assert saved["questions"]["entries"]["q1"]["status"] == "resolved by you"
+    review = client.prepare("SELF_STUDY QUESTION REVIEW q1")
+    assert "Finding not saved" in review
+    assert "Keep my note." in review
+    assert json.loads(path.read_text())["questions"]["active"] is None
 
 
 def test_rest_then_later_study_uses_eof_decision_and_dispatch_provenance(study_agent, monkeypatch):

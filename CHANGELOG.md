@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Candidate: missing-anchor feedback qualification (2026-10-06, Codex).** Extend the real dispatcher/helper regression with a rejected source finding, retained note, rejected placeholder closure, quiet REST and explicit historical review. The shared Rust repair supplies storage feedback without inferring a citation or reopening an inquiry. Python runtime inputs are unchanged; see `docs/steward-notes/2026-10-06-handoff-diagnostics-and-finding-feedback.md`.
+
 - **Question-closure recovery qualification (2026-10-06, Codex).** Exercise the shared-reader rejection of literal finding templates through the real Minime dispatcher with stubbed providers. Verify rejected closure separately from successful recovery delivery, preserved inquiry/bookmark/note, honored REST and later explicitly authored closure. No Python runtime, provider, reservoir or writing-capacity change. Paired status: `docs/steward-notes/2026-10-06-question-closure-recovery.md`.
 
 - **Live source-selection recovery (2026-10-06, Codex).** Shared-reader `source_selection_needed` records `needs_choice` and renders as `study_decision`, with no generic host receipt replay. The full new-question, invalid OPEN, search, conflicting final NEXT, recovery and explicit page-delivery chain is tested through the real adapter with a stubbed provider. The already-installed two-file regulation-review repair is preserved; larger capacity/provider work remains excluded. Paired graceful activation loaded all 93 qualified inputs in agent 25454. See `docs/steward-notes/2026-10-06-source-selection-recovery.md` for qualification and live evidence.
