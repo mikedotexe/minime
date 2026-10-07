@@ -1,5 +1,9 @@
 # Shared Helper: Open Reflection And Verification
 
+Current status: live and locally merged. Earlier candidate checkpoints below
+are retained as history; the final activation section supersedes their pending
+status.
+
 Candidate only, 2026-10-07, Codex. No agent restart or live helper replacement.
 Branch `codex/open-reflection-verification-20261007`, based on
 `754c44b0e7abc72d2b689510f832218dcc8ee9ea`.
@@ -67,3 +71,39 @@ A separate 20-sample read-only engine observation retains valid fresh fill
 59.9181-74.7313% around the configured 68% target. The final restart-gate state
 is not settled and still names `semantic_active`; no stability or subjective
 improvement is inferred, and engine policy remains outside this release.
+
+## Verified Paired Activation
+
+At 2026-10-07 21:04:06 UTC, the sanctioned paired handoff completed successfully.
+Agent 20774 exited at an unchanged verified idle boundary. Replacement 96204
+waited behind the owned launch hold until bridge 96634 and the shared helper
+were verified, then restored the exact native session 5321, cycle 55807 and
+pending NEXT state. Restoration is verified; this receipt does not assert that
+the pending action executed. No new job began during the held transition.
+
+All 93 loaded runtime inputs remain unchanged, including the previously
+installed regulation repair. The adapter selects
+`/Users/v/other/worktrees/mirror-reflection-release-20261007/bridge-stage-01/helpers/astrid-source-study`,
+SHA-256 `32f7b0cec0f867f2d30b4b1bfc2b10de873c7fcb7f87643ee92ea99a94031367`.
+The full Python suite against this exact package again passes 1,923 tests and
+144 subtests, with one pre-existing skip. The paired package passes 54 baseline
+preservation checks, both-owner reflection preservation and frozen adapter
+checks. Tests used synthetic material and stubbed providers.
+
+Receipt directory: `/Users/v/other/worktrees/mirror-reflection-release-20261007`.
+`activation-01.jsonl` SHA-256:
+`acc0449d3325638b2258f58e2a50b45e31303d756f064d64331efddde0aeb9ed`.
+`minime-full.xml` SHA-256:
+`67ad9075889ee69eb76ad9c505324dfe4124e75c8dbdc1fb4f1f7c3eef61241e`.
+
+The engine, gateway, supervisor, providers, camera, microphone, visual service,
+host sensory and feeder keep their original process identities. No force,
+legacy transition, older-state restore or automation resume occurred. The
+paired changes do not alter reservoir policy or activate the isolated scheduling
+RNG and larger-capacity work.
+
+Local main fast-forwarded from `754c44b0e7ab` to `2421a5bc6abb`; final deployment
+documentation is a separate owned commit. No push was performed. Exact bridge
+identities, checkpoint evidence, retained failed preflights, source witnesses
+and observation limitations are in Astrid's
+`docs/steward-notes/2026-10-07-mirror-reflection-release.md`.

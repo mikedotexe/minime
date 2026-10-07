@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Live: paired open-reflection helper (2026-10-07, Codex).** Gracefully reload agent 20774 to 96204 after verified bridge/helper activation, preserving session 5321 and exact pending NEXT state. All 93 runtime launch inputs remain unchanged; the packaged helper passes the complete 1,923-test Python suite plus 144 subtests and paired preservation checks. Tests/docs are fast-forwarded to local main. Engine, providers, sensory services, scheduling RNG and paused automations are unchanged. Exact evidence: `docs/steward-notes/2026-10-07-open-reflection-and-verification.md` and Astrid's paired release packet.
+
 - **Open-reflection immutable qualification (2026-10-07, Codex).** Verify the complete 1,923-test Python suite and frozen adapter against the staged shared helper, preserving exact explicit continuation and source-bound verification. All 93 launch inputs match the running agent; no source overlay is needed. Paired activation approval remains pending; services and paused automations are unchanged. Evidence: `docs/steward-notes/2026-10-07-open-reflection-and-verification.md`.
 
 - **Candidate: voluntary reflection and source verification (2026-10-07, Codex).** Qualify the paired shared helper through the real Minime adapter: fresh reflection excludes automatic public recall while explicit private continuation preserves exact prose; verification help supplies valid source-bound choices without advancing coverage. Python runtime, regulation, provider limits and live services are unchanged. See `docs/steward-notes/2026-10-07-open-reflection-and-verification.md`.
