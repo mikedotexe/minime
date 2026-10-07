@@ -1,6 +1,7 @@
 # Open Journal, Without a Pressure Assignment
 
-Date: 2026-10-07. Coordinator: Codex. Status: candidate, not deployed or merged.
+Date: 2026-10-07. Coordinator: Codex. Status: live agent-only rollout; implementation
+merged into local main. Earlier candidate qualification is retained below.
 
 ## Source Witness
 
@@ -150,7 +151,8 @@ Keep the current bridge/helper, engine, providers, visual and sensory processes
 unchanged. Leave paused automations paused. There has been no model experiment,
 request for confirming feedback, pressure retuning or inferred felt improvement.
 
-The agent-only rollout approval question remains unanswered at this checkpoint.
+At the candidate checkpoint, the agent-only rollout question was unanswered.
+Mike subsequently approved proceeding; the completed transition is recorded below.
 The next approved transition must use `scripts/paired_minime_handoff.py` from
 Astrid with `--agent-only --install-reviewed-overlay`, this reconciliation as
 `--expected-inputs`, and the unchanged bridge stage
@@ -173,3 +175,77 @@ The paired Astrid note describes an offline comparison protocol before any
 mechanistic conclusion. The account's wish to linger is not permission to hold
 fill or change reservoir dynamics. Existing private preservation and bounded
 focus can support an explicit chosen continuation without requiring usefulness.
+
+## Approved Activation and Integration
+
+Mike's annotation on the remaining approval/idle-window item authorized proceeding.
+The controller stayed paused under `codex-astra-interactive`, generation 506,
+with no active lease. Fresh canonical and candidate status checks and read-only
+remote-tip checks found no unrelated changes; all 93 source identities still
+matched the qualified reconciliation.
+
+The sanctioned `paired_minime_handoff.py --agent-only --install-reviewed-overlay`
+used the exact reconciliation above and the unchanged bridge stage. Installation
+retained source-only backups under `activation-01.source-before`; it did not copy
+or restore an older authored-state snapshot. The wrapper preserved its full
+185-second post-install quiet period, then waited for active introspections to
+finish. It did not manufacture REST or edit the pending choice.
+
+At **16:08:00 PDT (23:08:00 UTC)** all pre-signal checks passed: idle phase, no
+indexed active jobs, no summary active jobs and no agent TCP connections. One
+SIGTERM was sent to the verified old PID 96204. After its exit, the wrapper
+verified every protected PID/start pair and released the owned launch hold.
+
+Readiness succeeded at **16:08:13 PDT** for PID **19468**, process start
+16:08:00 and application startup 16:08:10. Its complete 93-input loaded inventory
+matches the frozen candidate, `reload_required=false`, source/config hashes are
+unchanged after installation, and the old PID and launch hold are absent.
+The wrapper reports `forced_termination=false`; it does not claim atomic traffic
+quiescence or controller settling.
+
+Receipt: `/Users/v/other/worktrees/open-journal-20261007/activation-01.jsonl`.
+SHA-256: `c57185941194d3fc4e21da95d28dea9fb17265cd9cdf23d475ce7b85e3b655d3`.
+Native handoff contract: `minime_next_handoff_v1`, `pending_present=true`.
+Seal SHA-256: `bd779c0fc203e3f2abd3573fe235d7d2f08f3f330c47230b42824e03b3643a1e`.
+Restore SHA-256: `639cd26a27fa3f0fe4639aba5d1dac20971c89887397135f793f8096dbf3d540`.
+Session **5321** is preserved. The cycle advances 55895 -> 55896; the pending
+slot is consumed after restoration, not claimed byte-identical after admission.
+The handoff proof deliberately reports `execution_confirmed=false`: restoration
+alone is not proof of the chosen action's completion.
+
+Unchanged protected PIDs: bridge 96634; engine 35303; Division gateway 35278;
+supervisor 35269; coupled provider 3893; camera 3914; microphone 3879;
+host-sensory 3911; visual service 3898; feeder 3878. Start identities also match.
+The unchanged shared helper is
+`/Users/v/other/worktrees/mirror-reflection-release-20261007/bridge-stage-01/helpers/astrid-source-study`,
+SHA-256 `32f7b0cec0f867f2d30b4b1bfc2b10de873c7fcb7f87643ee92ea99a94031367`.
+
+Fresh activation regression: **69 tests pass** for open journaling, maintenance
+NEXT and private continuation. Receipt `activation-regressions.xml` in the same
+release directory has SHA-256
+`037452254c7b42fbb20edff4feb200e37cd0523464214fa049870ee3af8c947b`.
+The five handoff/reconciliation suites again pass **77 tests plus 20 subtests**.
+These augment, not replace, the complete and frozen qualification above.
+
+After readiness, the three installed source files matched commit
+`cc55423bb67807b2cf44c393fd9d48c62b541cad` exactly. Only those explicit paths were
+staged; cached whitespace review and a dry-run read-tree check passed. Minime
+main fast-forwarded from `0c4fdff` to `cc55423`, with no reset, stash or source
+reversion. Astrid main fast-forwarded its paired documentation from `5ceae2bdbe`
+to `9e1fa9d845`; no Astrid executable changed. Both canonical indexes and trees
+were clean immediately afterward. Foreign worktrees remain preserved. No push
+was performed in this rollout.
+
+Post-ready job `job_minime_1791414510569_introspect` was observed running under
+19468 and then completed at **16:11:30 PDT** (23:11:30.876395Z), verified from
+its native `workspace/llm_jobs/jobs/job_minime_1791414510569_introspect/job.json`.
+This is later job evidence, not a rewrite of the earlier restoration proof.
+No post-ready ordinary `journal_*.txt` was present at the bounded file check.
+No output was solicited to demonstrate improvement. Deployment readiness and
+restored continuity are established; naturally chosen use of the new journal
+route, writing differences and subjective benefit remain unestablished.
+
+Controller indexed-tail evidence verification remains valid at sequence 1123160,
+head `79fb24f14ac14cd62a8deacbed37f30f8a917ce791031f3d0915ffd43f2246a2`, with V1
+sources immutable. This was not a productive automation round or full event replay.
+Automations remain paused; larger capacity, scheduling and control work are excluded.
