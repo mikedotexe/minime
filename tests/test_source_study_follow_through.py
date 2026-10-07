@@ -544,6 +544,66 @@ def test_final_bare_source_choice_is_preserved_but_examples_are_not_choices(choi
     assert aa.parse_next_action("NEXT: REST\n" + choice)[0] == "REST"
 
 
+def test_eof_map_continue_chain_stays_quiet_until_explicit_open(study_agent, monkeypatch):
+    agent, store, client, offers = study_agent
+    first = aa.BASE_DIR / "minime_autonomy/runtime.py"
+    first.write_text("def exhausted():\n    pass\n")
+    second = first.with_name("other.py")
+    second.write_text("def other():\n    pass\n" + "# later source\n" * 1200)
+    open_other = "SELF_STUDY OPEN minime/minime_autonomy/other.py 1"
+    responses = iter([
+        "STUDY_NOTE: Exact retained note.\nNEXT: SELF_STUDY CONTINUE",
+        "NEXT: SELF_STUDY MAP minime/minime_autonomy",
+        "NAVIGATION_PROSE_MARKER\nNEXT: SELF_STUDY CONTINUE",
+        f"NEXT: {open_other}",
+        "Exact new source account.\nNEXT: SELF_STUDY CONTINUE",
+        "Another delivered page.\nNEXT: REST",
+    ])
+
+    def provider(prompt, **kwargs):
+        offers.append(prompt)
+        text = next(responses)
+        messages, _ = prompt.messages(prompt.output["system_prompt"], prompt.input_budget_bytes)
+        response = Mock(status_code=200, text=json.dumps({"message": {"content": text}, "done": True}))
+        prompt.post(Mock(return_value=response), "fake", {"messages": messages}, 1)
+        prompt.accepted()
+        return text
+
+    monkeypatch.setattr(agent, "_query_llm", provider)
+    select_choice(agent, "SELF_STUDY OPEN minime/minime_autonomy/runtime.py 1")
+    path = client.workspace / "diagnostics/source_first_v3/shared_reader/reader-v1.json"
+    bookmarks = None
+    for index in range(6):
+        assert agent._decide_action(dict(STATE)) == "self_study"
+        context = dict(agent._pending_action_continuity_context)
+        raw = context["raw_next"]
+        event = store.begin_action(raw, raw, "self_study", "self_study", dict(STATE), source="next")
+        agent._execute_action("self_study", dict(STATE), _from_llm_job=True,
+            _precreated_continuity_context=context, _precreated_continuity_event=event)
+        assert offers[-1].receipt
+        saved = json.loads(path.read_text())
+        if index == 0:
+            bookmarks = saved["bookmarks"]
+        elif index < 4:
+            assert saved["bookmarks"] == bookmarks
+            assert str(offers[-1]) == offers[-1].output["text"]
+            assert "NAVIGATION_PROSE_MARKER" not in offers[-1]
+            assert "NAVIGATION RECEIPT" not in offers[-1]
+            assert "NEXT: SELF_STUDY CONTINUE uses" not in offers[-1]
+    assert [p.output["input_kind"] for p in offers] == [
+        "source_page", "end_of_file", "map", "end_of_file", "source_page", "source_page"]
+    assert "Saved source position: end of" in offers[2]
+    assert open_other in offers[2]
+    assert offers[5].output["page"]["start"] == offers[4].output["page"]["end"]
+    assert agent._pending_next_action == "REST"
+    assert agent._decide_action(dict(STATE)) is None
+    assert "Exact retained note." in client.prepare("SELF_STUDY NOTE")
+    journal = aa.WORKSPACE_DIR / "journal"
+    assert len(list(journal.glob("study_decision_*.txt"))) == 2
+    assert len(list(journal.glob("study_navigation_*.txt"))) == 1
+    assert not list(journal.glob("introspect_notice_*.txt"))
+
+
 @pytest.mark.parametrize("prefix", ["", "NEXT: "])
 def test_list_choice_reaches_shared_reader_and_preserves_pending_source(study_agent, prefix):
     agent, store, client, offers = study_agent

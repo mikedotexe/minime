@@ -133,7 +133,9 @@ def test_rest_then_later_study_uses_eof_decision_and_dispatch_provenance(study_a
     assert offers[-1].output["input_kind"] == "end_of_file"
     assert "continuation decision" in offers[-1].output["system_prompt"]
     assert "RECALLED ACCOUNT" not in offers[-1]
-    assert '"status":"skipped"' in offers[-1]
+    assert offers[-1].output["host_feedback_policy"] == "reader_only"
+    assert '"status":"skipped"' not in offers[-1]
+    assert str(offers[-1]) == offers[-1].output["text"]
     assert len(list((aa.WORKSPACE_DIR / "journal").glob("study_decision_*.txt"))) == 1
     assert agent._write_journal_entry.call_args.kwargs["verified_source_study"] is False
 
