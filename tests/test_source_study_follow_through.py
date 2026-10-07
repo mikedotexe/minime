@@ -106,6 +106,9 @@ def test_source_entry_completes_under_paused_experiment_and_dispatches_its_next(
 @pytest.mark.parametrize("active", [False, True])
 def test_bare_introspection_uses_reflection_without_advancing_source_or_saving_study_claims(study_agent, active):
     agent, store, client, offers = study_agent
+    published = aa.WORKSPACE_DIR / "journal" / "introspect_2000-01-01.txt"
+    published.parent.mkdir(parents=True, exist_ok=True)
+    published.write_text("=== INTROSPECTION ===\n\nPUBLISHED_SENTINEL not chosen.\nNEXT: REST")
     if active:
         store.start_experiment("Active legacy experiment", "An unrelated retained experiment")
     assert store.research_budget_guard_assessment("INTROSPECT", STATE) is None
@@ -119,10 +122,14 @@ def test_bare_introspection_uses_reflection_without_advancing_source_or_saving_s
                           _precreated_continuity_context=context, _precreated_continuity_event=event)
     assert offers[0].output["input_kind"] == "reflection"
     assert "RECALLED ACCOUNT" not in offers[0]
+    assert "PUBLISHED_SENTINEL" not in offers[0]
+    assert "WRITE FROM_REFLECTION" in offers[0]
     assert "TECHNICAL_" not in offers[0]
     assert "studying your system" not in offers[0].output["system_prompt"]
     journals = list((aa.WORKSPACE_DIR / "journal").glob("introspect_*.txt"))
-    assert len(journals) == 1 and "=== INTROSPECTION: open reflection ===" in journals[0].read_text()
+    authored = [path for path in journals if path != published]
+    assert len(authored) == 1 and "=== INTROSPECTION: open reflection ===" in authored[0].read_text()
+    assert "PUBLISHED_SENTINEL not chosen" in published.read_text()
     state = json.loads((aa.WORKSPACE_DIR / "diagnostics/source_first_v3/shared_reader/reader-v1.json").read_text())
     assert not state["bookmarks"]
     assert not state["notebook"]["question"]
@@ -169,6 +176,25 @@ def test_study_can_choose_reflection_with_active_experiment_and_return_to_its_bo
     assert snapshots[0]["notebook"] == snapshots[1]["notebook"]
     assert store.current_thread()["active_experiment_id"] == experiment["experiment_id"]
     assert len(list((aa.WORKSPACE_DIR / "journal").glob("introspect_*.txt"))) == 1
+
+
+def test_verification_help_uses_selected_source_without_advancing_it(study_agent):
+    agent, _, client, offers = study_agent
+    select_choice(agent, "SELF_STUDY OPEN minime/minime_autonomy/runtime.py 1")
+    assert agent._decide_action(dict(STATE)) == "self_study"
+    agent._execute_action("self_study", dict(STATE), _from_llm_job=True)
+    state_path = client.workspace / "diagnostics/source_first_v3/shared_reader/reader-v1.json"
+    before = json.loads(state_path.read_text())
+    select_choice(agent, "SELF_STUDY HELP verification")
+    assert agent._decide_action(dict(STATE)) == "self_study"
+    agent._execute_action("self_study", dict(STATE), _from_llm_job=True)
+    assert offers[1].output["input_kind"] == "help"
+    assert "SELF_STUDY RELATE entry" in offers[1]
+    assert "not resolved consumers or evidence of deployment" in offers[1]
+    assert "RELATE qualified::symbol" not in offers[1]
+    after = json.loads(state_path.read_text())
+    assert after["bookmarks"] == before["bookmarks"]
+    assert after["progress"] == before["progress"]
 
 
 def test_note_revision_uses_actual_reader_delivery_and_remains_voluntary(study_agent, monkeypatch):

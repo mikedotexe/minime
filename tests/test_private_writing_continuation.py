@@ -71,9 +71,10 @@ def test_reflection_can_explicitly_become_private_continuation(writing_agent, mo
     private_call = agent._write_journal_entry.call_args
     assert private_call.kwargs["private_canvas"] is True
     fresh = client.prepare("INTROSPECT")
-    # The deployed reflection-turn helper offers only the prior public passage.
-    assert exact in fresh
-    assert "retained publicly" in fresh and "optional material" in fresh
+    # Exact continuation is chosen through WRITE; fresh reflection imports neither lane.
+    assert exact not in fresh
+    assert "retained publicly" not in fresh
+    assert "WRITE FROM_REFLECTION" in fresh
     assert "A genuinely new passage." not in fresh
     assert "NEXT: WRITE PARK" not in fresh
 
