@@ -45,6 +45,7 @@ class ActionPreflightStore:
 
     schema_version = 1
     ROUTE_BY_BASE = {
+        "JOURNAL": "journal_open",
         "AFTERIMAGE_LIST": "afterimage",
         "AFTERIMAGE_OPEN": "afterimage",
         "AFTERIMAGE_KEEP": "afterimage",
@@ -732,6 +733,10 @@ class CapabilitySelfMap:
 
     def _specs(self) -> List[Dict[str, Any]]:
         return [
+            {"base": "JOURNAL", "route": "journal_open",
+             "continuity_effect": "writes an open journal without automatic spectral measurements or previous-entry recall; explicit inspection and selected continuity remain available",
+             "expected_artifacts": ["journal", "journal_metadata", "action_event", "observation_window"],
+             "known_tests": ["tests.test_open_journal"]},
             {"base": "AFTERIMAGE_LIST", "aliases": ["AFTERIMAGE_OPEN", "AFTERIMAGE_KEEP", "AFTERIMAGE_CUES"],
              "route": "afterimage", "continuity_effect": "reads physical transition archives; writes only owned notes, explicit sharing, capture requests and cue preferences",
              "expected_artifacts": ["transition_afterimage_v1", "transition_afterimage_note_v1"], "known_tests": ["tests.test_afterimages"]},

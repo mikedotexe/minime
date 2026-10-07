@@ -17,6 +17,7 @@ COMPACT_ACTION_GUIDANCE = (
     "not a restriction on your available actions. FACULTIES / CAPABILITY_MAP opens "
     "the action catalog; CAPABILITY_STATUS <action> gives details; "
     "ACTION_PREFLIGHT <action> checks a proposed action without executing it. "
+    "JOURNAL starts without automatic measurements or previous-entry recall. "
     "SPECTRAL_EXPLORER requests measurements and available recorded history. "
     "WRITE and ACTIVITY_STATUS provide private drafts and saved return points. "
     "Use one concrete action after NEXT:, not a bundle or a parameter assignment.\n"

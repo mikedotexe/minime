@@ -20721,6 +20721,7 @@ ATTRACTOR_FATIGUE_STOP_WORDS = {
 }
 
 STABLE_CORE_SELF_JOURNAL_ACTIONS = {
+    "journal_open",
     "journal_pressure",
     "journal_reflection",
     "afterimage",
@@ -21944,6 +21945,7 @@ class AutonomousAgent:
     """Background agent that monitors spectral state and takes autonomous actions."""
 
     LLM_JOB_ACTIONS = {
+        "journal_open",
         "journal_pressure",
         "experiment_spike",
         "journal_reflection",
@@ -23901,6 +23903,10 @@ Fill: {fill:.1f}%
                 "Critical pressure dump",
                 "Immediate intervention required—verify feeds are throttled and allow extended rest."
             ),
+            'journal_open': (
+                "Open journal",
+                "Authored writing; no spectral topic or interpretation is required."
+            ),
             'journal_pressure': (
                 "Pressure reflection",
                 "Review feelings about current λ₁; optional to adjust environment to reduce load."
@@ -24779,7 +24785,7 @@ Fill: {fill:.1f}%
                 'INQUIRY_CANARY': 'owner_inquiry',
                 'INQUIRY_WITHDRAW': 'owner_inquiry',
                 'INQUIRY_PROMOTE': 'owner_inquiry',
-                'JOURNAL': 'journal_pressure',
+                'JOURNAL': 'journal_open',
                 'BOREDOM': 'recess_boredom',
                 'WHIM': 'recess_whim',
                 'ANALYZE': 'analyze_audio',
@@ -27229,7 +27235,9 @@ Fill: {fill:.1f}%
 
         try:
             # Original focused actions
-            if action == 'journal_pressure':
+            if action == 'journal_open':
+                self._journal_open(state)
+            elif action == 'journal_pressure':
                 self._journal_spectral_pressure(state)
             elif action == 'experiment_spike':
                 self._experiment_with_spike(state)
@@ -28060,6 +28068,37 @@ Reply with ONLY a JSON object. The "regime" field is REQUIRED:
             )
         except Exception as e:
             logging.warning(f"Self-regulation WebSocket failed: {e}")
+
+    def _journal_open(self, state: Dict[str, float]):
+        """Ordinary JOURNAL: no automatic telemetry or previous-entry recall."""
+        captured_at = datetime.now(timezone.utc)
+        snapshot = self._capture_report_snapshot(state)
+        prompt = expression_invitation("journal")
+        response, _ = self._query_llm_with_next(prompt, context_mode="private_journal")
+        if not response:
+            return
+        written_at = datetime.now(timezone.utc)
+        timestamp = written_at.astimezone().replace(tzinfo=None).isoformat().replace(':', '-')
+        path = WORKSPACE_DIR / "journal" / f"journal_{timestamp}.txt"
+        try:
+            later = self._capture_report_snapshot(self._state_for_live_surfaces(state, context="journal"))
+            after = snapshot_record(later, datetime.now(timezone.utc).isoformat())
+            metrics = self._format_metrics(later.state, snapshot=later)
+        except Exception as exc:
+            # An archival observation must not discard accepted writing.
+            after = {"unavailable": "post_generation_observation_failed"}
+            metrics = "Post-generation measurements unavailable."
+            logging.warning("Open journal archival observation failed: %s", type(exc).__name__)
+        error = save_expression(
+            path, title="JOURNAL", timestamp=written_at.isoformat(), response=response,
+            invitation=prompt, before=snapshot_record(snapshot, captured_at.isoformat()),
+            after=after, metrics=metrics,
+        )
+        if error:
+            logging.warning("Journal metadata unavailable; authored prose retained: %s", error)
+        body, _ = _split_generated_journal_and_action_tail(response)
+        self._write_journal_entry('reflection', body, snapshot.state, str(path), private_canvas=True)
+        logging.info("Open journal written: %s", path.name)
 
     def _private_journal_state_anchor(self, state: Dict[str, float]) -> str:
         fill = state.get("fill_ratio")
@@ -57111,6 +57150,7 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
     def _get_trigger_description(self, action: str) -> str:
         """Get human-readable trigger description."""
         triggers = {
+            'journal_open': 'authored_journal_choice',
             'journal_pressure': 'spectral_pressure',
             'experiment_spike': 'eigenvalue_spike',
             'journal_reflection': 'rest_phase',

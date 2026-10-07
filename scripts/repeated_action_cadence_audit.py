@@ -164,6 +164,7 @@ def classify(action: str, latest_status: str) -> str:
     if latest_status in RUNNING_STATUSES:
         return "active_inflight"
     if action in {
+        "JOURNAL_OPEN",
         "JOURNAL_PRESSURE",
         "FISSURE_TRACE",
         "RECESS_BOREDOM",
@@ -187,6 +188,7 @@ def recommendation(action: str, classification: str) -> str:
     if classification == "active_inflight":
         return "Wait for the active row to finish before aging cadence evidence."
     if action in {
+        "JOURNAL_OPEN",
         "JOURNAL_PRESSURE",
         "FISSURE_TRACE",
         "RECESS_BOREDOM",
