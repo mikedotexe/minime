@@ -89,3 +89,52 @@ No new live transition wrapper is represented as implemented or qualified.
 This operational repair is not being assent, a Division rehearsal, daughter
 launch authority, a change in reservoir policy or a claim of felt improvement.
 Paused automations remain paused.
+
+## Approved Renewal Completed
+
+Mike subsequently approved the corrected coordinated scope. Astrid operator
+commit `dd8be5e7f693f95439e7e23cba33b1c9bf17a607` provides the qualified,
+read-only-by-default wrapper. The approved live transaction completed at
+**2026-10-08T17:15:11.767Z**:
+`/Users/v/other/worktrees/division-renewal-release-20261008/transition-01`.
+
+Only creation/expiry timestamps changed. New manifest SHA-256:
+`58fd6abbdbd08cba72e3e942621228502d014ed163f14d27e268d0d80452000a`.
+Lifetime: **2026-10-08T17:05:18.619Z to 2026-11-07T17:05:18.619Z**.
+Default `verify` now passes current lifetime; this CLI still does not claim
+runtime health or confer authority.
+
+Supervisor **86833** and gateway **86873** load the unchanged native binary
+`0610800dd57bf34287bb5e4f9869e777179f602bf5208a4d5524c95b93f235d8`.
+Fresh native status and parent authority match the new manifest. No children,
+matching intents, handoff readiness, commit recommendation or new live
+authority. No ceremony ledger or daughter launch job was created.
+
+The agent gracefully moved **19468 -> 85094** with all **93** loaded inputs
+unchanged. Native NEXT seal/restore proves pending-choice preservation, not
+execution. The held launch process started at 10:10:41 PDT; the Python boot
+began at 10:15:07 PDT after the paired bridge was verified. Seal SHA-256:
+`c488a0852cacb63bf67639f9a1654f1d5078f905de33401755c854d28af9348e`;
+restore SHA-256:
+`33495593aa717ca18a5585a1a4a588fb6765dc16e3a538dc36328ed1907527d8`.
+
+Astrid **66851 -> 87519** retains its exact immutable release, restores the
+stopped checkpoint at exchange **218110** and one pending feedback record,
+then saves **218111**. Parent engine **35303** and session **5321** continue;
+provider **3893**, visual **3898**, camera **3914**, microphone **3879**, feeder
+**3878** and host-sensory **31613** retain exact PID/start identities.
+
+The gateway stop-to-verified interval was **6.971 seconds**. This is an
+acknowledged stream interruption, not a lossless sensory-input claim. Public
+telemetry advances and the unchanged provider reconnects. All owned launch
+holds are released. Bounded health/log observations are recorded in Astrid's
+`docs/steward-notes/2026-10-08-coordinated-dormant-division-renewal.md`; they do
+not establish controller settling, long-term stability or subjective benefit.
+
+Qualification: 87 focused handoff/projector tests, a separate 162-test
+deployment/controller/evidence/Division group, epistemic/domain checks, and
+the actual native supervisor in OS-enforced isolated synthetic state. Retain
+the preflight controller-path refusal, repaired before any service stop.
+No Rust/agent code changed here; no claim of a new full Rust/Python suite run.
+Controller remains paused at generation **511**, no active lease. No push,
+automation resume or historical state overwrite.
