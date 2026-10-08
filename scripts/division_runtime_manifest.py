@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import socket
+import stat
 import tempfile
 import time
 from pathlib import Path
@@ -69,6 +70,14 @@ def validate(payload: dict[str, Any], *, require_free_ports: bool = False) -> No
     }
     if set(payload) != required or payload["schema"] != SCHEMA:
         raise ManifestError("manifest fields or schema are invalid")
+    text_fields = required - {"endpoints", "parent_generation", "created_at_unix_ms", "expires_at_unix_ms"}
+    if any(not isinstance(payload[field], str) for field in text_fields):
+        raise ManifestError("manifest identity and path fields must be strings")
+    if type(payload["parent_generation"]) is not int or not 0 <= payload["parent_generation"] <= 2**64 - 1:
+        raise ManifestError("parent generation must be an unsigned 64-bit integer")
+    for field in ("created_at_unix_ms", "expires_at_unix_ms"):
+        if type(payload[field]) is not int or not 0 <= payload[field] <= 2**64 - 1:
+            raise ManifestError("manifest timestamps must be unsigned 64-bit integers")
     if payload["mode"] not in {"dormant", "candidate_bound"}:
         raise ManifestError("mode must be dormant or candidate_bound")
     if payload["mode"] == "dormant" and payload["candidate_hash"] != "unbound":
@@ -149,17 +158,51 @@ def create(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def verify(args: argparse.Namespace) -> dict[str, Any]:
-    payload = json.loads(args.manifest.read_text())
-    validate(payload, require_free_ports=args.require_free_ports)
-    mode = args.manifest.stat().st_mode & 0o777
-    if mode & 0o077:
-        raise ManifestError("manifest must be owner-only")
+def lifetime(payload: dict[str, Any], now_ms: int) -> dict[str, Any]:
+    created, expires = payload["created_at_unix_ms"], payload["expires_at_unix_ms"]
+    # Match the engine's strict greater-than expiry boundary; a clock before
+    # creation is separately unqualified, not falsely described as expired.
+    status = "expired" if now_ms > expires else (
+        "clock_before_creation" if now_ms < created else "current"
+    )
     return {
-        "ok": True,
+        "checked_at_unix_ms": now_ms,
+        "created_at_unix_ms": created,
+        "expires_at_unix_ms": expires,
+        "lifetime_status": status,
+        "current": status == "current",
+        "remaining_ms": max(0, expires - now_ms),
+        "expired_by_ms": max(0, now_ms - expires),
+    }
+
+
+def verify(args: argparse.Namespace) -> dict[str, Any]:
+    fd = os.open(args.manifest, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise ManifestError("manifest must be a regular file owned by the current user")
+        if info.st_mode & 0o077:
+            raise ManifestError("manifest must be owner-only")
+        raw = handle.read(64 * 1024 + 1)
+    if len(raw) > 64 * 1024:
+        raise ManifestError("manifest exceeds 64 KiB")
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ManifestError("manifest must be a JSON object")
+    validate(payload, require_free_ports=args.require_free_ports)
+    timing = lifetime(payload, int(time.time() * 1000))
+    structural_only = args.structural_only
+    return {
+        "ok": structural_only or timing["current"],
         "path": str(args.manifest),
-        "manifest_sha256": sha256(args.manifest.read_bytes()),
+        "manifest_sha256": sha256(raw),
         "mode": payload["mode"],
+        "structurally_valid": True,
+        "verification_scope": "structure_only" if structural_only else "structure_and_lifetime",
+        **timing,
+        "runtime_health_verified": False,
+        "live_authority_granted_by_record": False,
     }
 
 
@@ -188,6 +231,10 @@ def parser() -> argparse.ArgumentParser:
     verify_cmd = commands.add_parser("verify")
     verify_cmd.add_argument("--manifest", type=Path, required=True)
     verify_cmd.add_argument("--require-free-ports", action="store_true")
+    verify_cmd.add_argument(
+        "--structural-only", action="store_true",
+        help="inspect historical structure without treating success as current validity",
+    )
     verify_cmd.set_defaults(func=verify)
     return root
 
@@ -196,11 +243,11 @@ def main() -> int:
     args = parser().parse_args()
     try:
         result = args.func(args)
-    except (OSError, json.JSONDecodeError, ManifestError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ManifestError) as error:
         print(json.dumps({"ok": False, "error": str(error)}, sort_keys=True))
         return 1
     print(json.dumps(result, sort_keys=True))
-    return 0
+    return 0 if result["ok"] else 1
 
 
 if __name__ == "__main__":
