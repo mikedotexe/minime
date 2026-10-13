@@ -1,7 +1,7 @@
 # Selective Historical Context
 
-Current status: approved paired activation succeeded; local Git integration is
-in progress. Earlier sections retain the qualification-only checkpoints; the
+Current status: approved paired activation and local Git integration succeeded.
+Earlier sections retain the qualification-only checkpoints; the
 final section records the successful live transition.
 
 Paired with Astrid's `2026-10-13-writing-context-refinement.md` on isolated
@@ -90,3 +90,18 @@ Receipt: shared evidence `paired-activation-01.jsonl`, SHA-256
 Full checkpoint, seal/restore and bridge receipt hashes are in the paired Astrid
 note. Local integration preserves the exact installed source bytes and pinned
 build-source checkout; it does not rewrite the immutable deployed manifest.
+
+## Local Git Integration
+
+Implementation commit `9a8b9b38e7141ded2c0346e72f86c27f1f050194` is on local
+`main`, paired with Astrid `69eefa3758c09021a12ec68fd112d8d6861fd717`.
+The four exact paths are `CHANGELOG.md`, `minime_autonomy/afterimages.py`,
+`tests/test_afterimages.py` and this steward note. All staged bytes matched the
+reviewed candidate; the 22 afterimage tests passed again before committing.
+
+The first merge refused the installed unstaged afterimage source. Its blob
+exactly matched the destination commit, so staging only that owned file allowed
+the fast-forward with no reset, stash or live-byte change. Post-merge all 97
+loaded/installed inputs still matched qualification and `reload_required=false`.
+Build-source checkouts and larger-capacity work remain preserved. Follow-up
+documentation records these final receipts; no push or automation resume.
