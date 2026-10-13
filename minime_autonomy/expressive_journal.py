@@ -17,7 +17,8 @@ COMPACT_ACTION_GUIDANCE = (
     "not a restriction on your available actions. FACULTIES / CAPABILITY_MAP opens "
     "the action catalog; CAPABILITY_STATUS <action> gives details; "
     "ACTION_PREFLIGHT <action> checks a proposed action without executing it. "
-    "JOURNAL starts without automatic measurements or previous-entry recall. "
+    "JOURNAL starts without automatic measurements or previous-entry recall; your historical-cue preference may supply an optional event. "
+    "JOURNAL FRESH omits automatic historical cues for that entry only, without changing your preference. "
     "SPECTRAL_EXPLORER requests measurements and available recorded history. "
     "WRITE and ACTIVITY_STATUS provide private drafts and saved return points. "
     "Use one concrete action after NEXT:, not a bundle or a parameter assignment.\n"
@@ -43,6 +44,13 @@ def expression_invitation(kind: str, *, form: str | None = None, prior: JournalR
                    "Record and measurement provenance unavailable for this text-only input.\n" + prior)
         invitation += "\n\n" + context + "\nYou may return to it, disagree with it, or leave it aside."
     return invitation
+
+
+def fresh_journal_selected(context) -> bool:
+    """The frozen authored action controls this invocation, not a standing preference."""
+    context = context or {}
+    action = context.get("canonical_action") or context.get("raw_next") or ""
+    return str(action).strip().upper().split() == ["JOURNAL", "FRESH"]
 
 
 def snapshot_record(snapshot, captured_at: str) -> dict:

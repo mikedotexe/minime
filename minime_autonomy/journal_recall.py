@@ -80,7 +80,7 @@ def render_journal_recall(
     recall: JournalRecall | None, *, max_chars: int | None = None, fold_whitespace: bool = True,
 ) -> str:
     """Bound only the historical excerpt; source identity never shares its budget."""
-    prefix = "Optional own-journal context (historical; legacy system annotations may be present):\n"
+    prefix = "Optional own-journal context (previous-entry excerpt; historical; legacy system annotations may be present):\n"
     if recall is None:
         return prefix + "(no recent own-journal excerpt available)"
     excerpt = recall.excerpt(max_chars)

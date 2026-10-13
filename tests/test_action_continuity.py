@@ -446,7 +446,7 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
             self.assertTrue(handled)
             self.assertEqual(captured["context_mode"], "qualia_moment")
             self.assertEqual(captured["max_tokens"], "2048")
-            self.assertIn("Private journal moment.", captured["prompt"])
+            self.assertIn("Public journal moment.", captured["prompt"])
             self.assertIn("Historical event records", captured["prompt"])
             self.assertIn("present effects unknown", captured["prompt"])
             self.assertIn("record_age=82s ago", captured["prompt"])

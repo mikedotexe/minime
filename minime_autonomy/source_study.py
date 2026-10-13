@@ -58,6 +58,12 @@ def selected_reader(astrid_root: Path) -> Path:
     return executable
 
 
+class StudyError(RuntimeError):
+    def __init__(self, message, recovery=None):
+        super().__init__(message)
+        self.writing_recovery = recovery
+
+
 class StudyClient:
     def __init__(self, minime_root: Path, workspace: Path, *, astrid_root: Path | None = None,
                  executable: Path | None = None):
@@ -84,12 +90,18 @@ class StudyClient:
         if not isinstance(value, dict):
             raise RuntimeError("shared source reader returned an invalid response")
         if result.returncode or "error" in value:
-            raise RuntimeError(value.get("error", "shared source reader failed"))
+            raise StudyError(value.get("error", "shared source reader failed"), value.get("writing_recovery"))
         return value
 
     def recover_navigation(self, action: str) -> dict[str, Any] | None:
         """Stateless guidance only: never prepare input or alter reader state."""
         return self.call(operation="recover_navigation", action=action) or None
+
+    def writing_storage_only(self, action: str) -> bool:
+        result = self.call(operation="writing_policy", action=action)
+        if not isinstance(result.get("storage_only"), bool):
+            raise RuntimeError("shared writing policy unavailable")
+        return result["storage_only"]
 
     def analyze_response(self, text: str, *, private_writing: bool = False) -> dict[str, Any]:
         """Stateless shared choice feedback; never queues or executes a choice."""

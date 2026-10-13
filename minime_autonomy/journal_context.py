@@ -11,9 +11,9 @@ from .moment_context import marker_measurements
 
 
 PRIVATE_JOURNAL_INTRO = (
-    "This is Minime's private journal. Write freely in your own first-person voice, "
-    "on any subject and at any length. Use or leave aside the supplied context; "
-    "your interpretation is yours.\n\n"
+    "This is Minime's public journal, distinct from private WRITE drafts. "
+    "Write freely in your own voice, on any subject and at any length. "
+    "Use or leave aside the supplied context; your interpretation is yours.\n\n"
 )
 
 OPEN_REFLECTION_INTRO = (
@@ -119,7 +119,7 @@ def format_prompt_state(state: Mapping[str, Any], *, fill_frame: str) -> str:
 
 
 def moment_prompt(*, captured_at: datetime, state_anchor: str, markers_text: str) -> str:
-    return f"""Private journal moment.
+    return f"""Public journal moment.
 
 Prompt captured at (UTC): {captured_at.astimezone(timezone.utc).isoformat()}
 Measured state at capture:

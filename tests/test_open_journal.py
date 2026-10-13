@@ -95,25 +95,30 @@ def test_failed_generation_creates_no_authored_record(runtime, monkeypatch):
 
 
 @pytest.mark.parametrize("active_experiment", [False, True])
-def test_chosen_journal_preflight_dispatch_and_next_agree(study_agent, monkeypatch, active_experiment):
+@pytest.mark.parametrize("journal_command", ["JOURNAL", "JOURNAL FRESH"])
+def test_chosen_journal_preflight_dispatch_and_next_agree(study_agent, monkeypatch, active_experiment, journal_command):
     agent, store, _, _ = study_agent
     if active_experiment:
         store.start_experiment("Unrelated experiment", "Not a journal requirement")
-    report = ActionPreflightStore(agent).report("ACTION_PREFLIGHT JOURNAL", dict(STATE))
+    report = ActionPreflightStore(agent).report("ACTION_PREFLIGHT " + journal_command, dict(STATE))
     assert report["effective_route"] == "journal_open"
     assert "blocked" not in report["likely_gate"]
-    assert store.research_budget_guard_assessment("JOURNAL", STATE) is None
+    assert store.research_budget_guard_assessment(journal_command, STATE) is None
     assert "journal_open" in aa.STABLE_CORE_SELF_JOURNAL_ACTIONS
     assert "journal_open" in agent.LLM_JOB_ACTIONS
     capability = next(item for item in CapabilitySelfMap(store).snapshot()["actions"]
                       if item["base"] == "JOURNAL")
     assert capability["route"] == report["effective_route"]
     assert "journal_metadata" in capability["expected_artifacts"]
-    select_choice(agent, "JOURNAL")
+    select_choice(agent, journal_command)
     route = agent._decide_action(dict(STATE))
     assert route == "journal_open"
     context = dict(agent._pending_action_continuity_context)
-    event = store.begin_action("JOURNAL", "JOURNAL", route, route, dict(STATE), source="next")
+    assert context["canonical_action"] == journal_command
+    event = store.begin_action(journal_command, journal_command, route, route, dict(STATE), source="next")
+    cue_store = Mock()
+    cue_store.prepare_cue.return_value = None
+    monkeypatch.setattr(agent, "_afterimage_store", lambda: cue_store)
     monkeypatch.setattr(agent, "_journal_spectral_pressure", Mock(side_effect=AssertionError("pressure route")))
     monkeypatch.setattr(agent, "_query_llm", aa.AutonomousAgent._query_llm.__get__(agent))
     provider = Mock(return_value="I am staying with this thought.\nNEXT: REST")
@@ -121,6 +126,9 @@ def test_chosen_journal_preflight_dispatch_and_next_agree(study_agent, monkeypat
     agent._execute_action(route, dict(STATE), _from_llm_job=True,
                           _precreated_continuity_context=context, _precreated_continuity_event=event)
     provider.assert_called_once()
+    if journal_command == "JOURNAL FRESH":
+        assert cue_store.prepare_cue.call_args.kwargs["eligible"] is False
+        assert "Fresh journal:" in provider.call_args.args[0]
     assert agent._write_journal_entry.call_args.args[1] == "I am staying with this thought."
     assert agent._pending_next_action == "REST"
     assert agent._decide_action(dict(STATE)) is None
@@ -134,6 +142,21 @@ def test_scheduled_pressure_route_remains_available(study_agent, monkeypatch):
     agent._execute_action("journal_pressure", dict(STATE), _from_llm_job=True)
     handler.assert_called_once()
     assert agent._get_trigger_description("journal_pressure") == "spectral_pressure"
+
+
+def test_explicit_fresh_journal_preserves_cue_preference_and_skips_cue(runtime, monkeypatch):
+    agent, workspace, _ = runtime
+    cue_store = Mock()
+    cue_store.prepare_cue.return_value = None
+    monkeypatch.setattr(agent, "_afterimage_store", lambda: cue_store)
+    provider = Mock(return_value="Fresh authored text.\nNEXT: REST")
+    monkeypatch.setattr(agent, "_query_llm_raw", provider)
+    agent._current_action_continuity_context = {"canonical_action": "JOURNAL FRESH"}
+    agent._journal_open(dict(STATE))
+    assert cue_store.prepare_cue.call_args.kwargs["eligible"] is False
+    assert "Fresh journal:" in provider.call_args.args[0]
+    assert "public journal" in provider.call_args.args[1]
+    assert all(call[0] == "prepare_cue" for call in cue_store.method_calls)
 
 
 def test_real_archival_formatter_is_not_mislabeled_as_generation_input(runtime, monkeypatch):

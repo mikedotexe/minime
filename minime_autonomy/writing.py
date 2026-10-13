@@ -37,6 +37,7 @@ def completion_metadata(parsed: dict) -> dict:
     }
 
 WRITING_GUIDANCE = (
+    "Private drafts are excluded from automatic public/peer delivery; local operators can inspect them for research. "
     "Bare INTROSPECT starts fresh. An open reflection offers its exact WRITE FROM_REFLECTION <input ID> command to carry that passage into a new private draft; this is separate from automatic recall. "
     "Private writing: NEXT: WRITE START <topic>, WRITE CONTINUE, WRITE REVISE <direction>, "
     'WRITE OBSERVE {"owner":"minime","draft":"dN","present":true,"operation":{"kind":"status"}} for optional private observations on an existing exact draft ID, '

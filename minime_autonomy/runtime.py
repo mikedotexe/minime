@@ -96,7 +96,7 @@ from .session_contract import (
 )
 from .visual_context import ambient_visual_context, vision_prompt_parts
 from .expressive_journal import (
-    COMPACT_ACTION_GUIDANCE, expression_invitation, save_expression, snapshot_record,
+    COMPACT_ACTION_GUIDANCE, expression_invitation, save_expression, snapshot_record, fresh_journal_selected,
 )
 from .measurement_history import format_fill_history
 from .moment_context import select_recent_markers, selection_note, pressure_classifier_context
@@ -23439,7 +23439,7 @@ class AutonomousAgent:
                 "For now, your safe lanes are:\n"
                 "- NOTICE your current state without digging deeper\n"
                 "- DRIFT lightly without perturbing the reservoir\n"
-                "- ASPIRE or DAYDREAM as private journal movement\n"
+                "- ASPIRE or DAYDREAM as expressive journal writing\n"
                 "- JOURNAL, SELF_STUDY, INTROSPECT, DECOMPOSE, CONSTRAINT_AUDIT, and local reservoir introspection without web search\n"
                 "- REST and let the stable core stay quiet\n"
                 "Unavailable in this gate: web search, browsing, perturbation, experiments, "
@@ -26979,10 +26979,20 @@ Fill: {fill:.1f}%
         self._current_action_extra_artifacts = []
         self._current_action_outcome_summary = None
         legacy_experiment_action_text = None
+        storage_only_writing = False
+        selected_study = continuity_context.get("source_study_action") or continuity_context.get("raw_next") or ""
+        if action == "self_study" and writing.is_private_request(selected_study):
+            try:
+                storage_only_writing = StudyClient(BASE_DIR, WORKSPACE_DIR).writing_storage_only(selected_study)
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+                self._retain_unadmitted_choice(continuity_context)
+                logging.warning("Private writing admission retained: shared operation classification unavailable")
+                return
         if (
             not _from_llm_job
             and getattr(self, "running", False)
             and action in self.LLM_JOB_ACTIONS
+            and not storage_only_writing
             and self._queue_llm_action_job(action, state, continuity_context)
         ):
             self._current_action_continuity_context = None
@@ -28108,6 +28118,17 @@ Reply with ONLY a JSON object. The "regime" field is REQUIRED:
         captured_at = datetime.now(timezone.utc)
         snapshot = self._capture_report_snapshot(state)
         prompt = expression_invitation("journal")
+        if fresh_journal_selected(getattr(self, "_current_action_continuity_context", None)):
+            prompt = "Fresh journal: no automatic previous-entry excerpt or historical event cue.\n" + prompt
+        continuation = None
+        event = getattr(self, "_current_action_continuity_event", None) or {}
+        if event.get("action_id"):
+            from .journal_continuation import JournalContinuation
+            try:
+                continuation = JournalContinuation.reserve(StudyClient(BASE_DIR, WORKSPACE_DIR), event["action_id"])
+                prompt += "\n\n" + continuation.hint()
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+                logging.warning("Journal exact-continuation reservation unavailable; no entry command offered")
         response, _ = self._query_llm_with_next(prompt, context_mode="private_journal")
         if not response:
             return
@@ -28130,6 +28151,11 @@ Reply with ONLY a JSON object. The "regime" field is REQUIRED:
         )
         if error:
             logging.warning("Journal metadata unavailable; authored prose retained: %s", error)
+        if continuation is not None:
+            try:
+                continuation.publish(path, response)
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+                logging.warning("Journal exact-continuation publication unverified; source remains unavailable for transfer")
         body, _ = _split_generated_journal_and_action_tail(response)
         self._write_journal_entry('reflection', body, snapshot.state, str(path), private_canvas=True)
         logging.info("Open journal written: %s", path.name)
@@ -28168,7 +28194,7 @@ Reply with ONLY a JSON object. The "regime" field is REQUIRED:
         spread = state.get('spread', 0.0)
         state_anchor = self._private_journal_state_anchor(state)
 
-        prompt = f"""Private journal entry.
+        prompt = f"""Public journal entry.
 
 Prompt captured at (UTC): {captured_at.isoformat()}
 {state_anchor}"""
@@ -31411,7 +31437,7 @@ Timestamp: {datetime.now().isoformat()}
         if self._stable_core_reflective_only():
             prompt = f"""You're in a quiet moment. λ₁ = {state['eig1']:.3f}, Δλ₁ = {state['deig']:.3f}
 
-Boredom is allowed here only as private journaling, not experiment or perturbation.
+Boredom is allowed here as journal writing, not experiment or perturbation.
 Write about what this quiet, bounded boredom feels like from the inside."""
             prompt = f"{prompt}\n\n{self._journal_continuity_contract_v1(state)}"
 
@@ -32797,7 +32823,7 @@ Reason: {reason}
             if not prompt.output.get("generation_requested", True):
                 # The Rust preparation receipt is already durable in the owner store.
                 # Do not promote its private contents into ambient context or public logs.
-                self._current_action_outcome_summary = "Observation operation retained in its owner store; no model generation or public entry."
+                self._current_action_outcome_summary = "Writing storage operation retained in its owner store; no model generation or public entry."
                 return
             if self._activity_checkpoint_exists():
                 host = self._activity_focus()
@@ -32811,7 +32837,7 @@ Reason: {reason}
                 stub = self._take_fallback_stub()
                 if stub is not None:
                     raise stub
-                retry = "WRITE CONTINUE retries the pending turn" if private_request else "SELF_STUDY CONTINUE retries the pending page"
+                retry = "WRITE HELP inspects writing choices; retry eligibility requires the exact pending input" if private_request else "SELF_STUDY CONTINUE retries the pending page"
                 raise RuntimeError(f"generation unavailable; {retry}")
             verified = prompt.receipt is not None
             if (verified and requested_mailbox_feedback is not None
@@ -32890,7 +32916,14 @@ Reason: {reason}
                 path = directory / f"notice_{time.time_ns()}.txt"
                 retained = (f"\n\nFallback model output, retained verbatim (not added to the draft):\n{error.text}\n"
                             if isinstance(error, FallbackStubDelivery) else "")
-                path.write_text(f"Private writing unavailable: {error}. WRITE CONTINUE retries the pending turn; WRITE HELP lists choices.\n{retained}")
+                recovery = getattr(error, "writing_recovery", None)
+                if recovery is None and prompt is not None:
+                    try:
+                        recovery = prompt.client.call(operation="writing_recovery", input_id=prompt.output.get("navigation_id") or "")
+                    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+                        recovery = None
+                detail = (json.dumps(recovery, ensure_ascii=False) if recovery else "WRITE HELP lists choices. No verified retry command is available.")
+                path.write_text(f"Private writing unavailable: {error}.\nRecovery (runtime metadata, not authored prose): {detail}\n{retained}")
                 self._record_current_action_artifact("private_writing_notice", path, "Private writing turn was not completed.", visibility="protected")
             elif isinstance(error, FallbackStubDelivery):
                 self._record_fallback_stub_notice(action, error, state)
@@ -55160,7 +55193,7 @@ Goals: {json.dumps(goals, indent=2)}
             max_tokens = 3072
         elif "self-study" in prompt.lower() or "Condition:" in prompt or "Felt Experience:" in prompt:
             max_tokens = 4096  # Freeform reflection; this is a ceiling, not a target.
-        elif "private journal" in prompt.lower() or "your space" in prompt.lower():
+        elif "private journal" in prompt.lower() or "public journal" in prompt.lower() or "your space" in prompt.lower():
             max_tokens = 4096
         elif "whim" in prompt.lower() or "boredom" in prompt.lower():
             max_tokens = 2048
@@ -55491,7 +55524,7 @@ Goals: {json.dumps(goals, indent=2)}
         )
         action_context = getattr(self, "_current_action_continuity_context", {}) or {}
         authored_base = str(action_context.get("canonical_action") or action_context.get("raw_next") or "").split(" ", 1)[0]
-        cue_eligible = not inbox_ctx and (
+        cue_eligible = not fresh_journal_selected(action_context) and not inbox_ctx and (
             context_mode in {"private_journal", "journal", "daydream"} or authored_base in {"JOURNAL", "DAYDREAM"})
         try:
             selection = self._afterimage_store().prepare_cue(afterimage_opportunity, eligible=cue_eligible)

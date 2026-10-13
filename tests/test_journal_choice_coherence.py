@@ -126,6 +126,7 @@ def test_empty_private_generation_only_offers_writing_retry(tmp_path, monkeypatc
     agent._current_action_continuity_event = {"action_id": "synthetic-dispatch-124"}
     agent._run_shared_source_study({}, "WRITE START An unfinished thought")
     notice = next((client.workspace / "private_writing/journal").glob("notice_*.txt")).read_text()
+    assert "pending_generation_available" in notice
     assert "WRITE CONTINUE" in notice
     assert "SELF_STUDY CONTINUE" not in notice
 
@@ -145,7 +146,8 @@ def test_malformed_private_request_keeps_failure_and_retry_protected(tmp_path, m
     agent._query_llm_with_next.assert_not_called()
     assert not (client.workspace / "diagnostics/source_first_v3/shared_reader/reader-v1.json").exists()
     notice = next((client.workspace / "private_writing/journal").glob("notice_*.txt")).read_text()
-    assert "WRITE CONTINUE" in notice
+    assert "WRITE HELP" in notice and "No verified retry" in notice
+    assert "WRITE CONTINUE" not in notice
     assert "SELF_STUDY CONTINUE" not in notice
     assert agent._record_current_action_artifact.call_args.kwargs["visibility"] == "protected"
 

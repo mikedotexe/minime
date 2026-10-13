@@ -844,7 +844,7 @@ def test_pressure_journal_keeps_original_state_and_unforced_self_history(runtime
     monkeypatch.setattr(agent, "_write_journal_entry", saved)
     agent._journal_spectral_pressure(state)
     assert "I wrote about Astrid earlier." in prompts[0]
-    assert "Optional own-journal context (historical;" in prompts[0]
+    assert "Optional own-journal context (previous-entry excerpt; historical;" in prompts[0]
     assert prompts[0].count(agent._private_journal_state_anchor(original)) == 1
     assert "sand/silt/grit" not in prompts[0]
     assert "Lead with felt texture" not in prompts[0]

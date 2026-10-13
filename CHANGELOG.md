@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Live: dependable writing continuity (2026-10-13, Codex).** Skip the provider queue for shared-Rust-classified save-only WRITE actions, retain private structured recovery, offer exact published JOURNAL-to-draft transfer, and add invocation-scoped JOURNAL FRESH without changing historical-cue preferences. Public journal guidance no longer calls the route private. Approved paired rollout verified PID 66979, all 97 launch inputs and pending-NEXT restoration. Providers, capacity, reservoir and sensory services remain unchanged. Evidence: `docs/steward-notes/2026-10-13-dependable-writing-continuity.md`.
+
 - **Live: drain-v2 first transition (2026-10-13, Codex).** Gracefully replace the old v1 agent at the unchanged idle-only boundary, installing only the reviewed runtime after native NEXT sealing. PID 95712 loads all 96 qualified inputs and acknowledges the preserved pending choice; the prior mailbox correction is now loaded. Engine/provider/bridge/visual/sensory processes and session 5321 remain unchanged. No force, replay, push or automation resume. Evidence: `docs/steward-notes/2026-10-13-drain-v2-first-transition.md`.
 
 - **Candidate: finish-accepted-work drain v2 (2026-10-12, Codex).** Fence queue preparation, moment generation and subsequent visual responses after shutdown while completing accepted calls and retaining exact NEXT. Add real worker/finalizer and SIGTERM qualification. The paired operator verifies terminal worker outcomes before replacement release; timeout alone is not completion. Old loaded v1 remains ineligible for busy drain. No activation, force or automation resume; see `docs/steward-notes/2026-10-12-finish-accepted-work-drain.md`.
