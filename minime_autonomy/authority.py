@@ -53,6 +53,8 @@ class ActionPreflightStore:
         "AFTERIMAGE_CUES": "afterimage",
         "SELF_STUDY": "self_study",
         "WRITE": "self_study",
+        "CHECK_MAILBOX": "mailbox_read",
+        "MAILBOX_STATUS": "mailbox_status",
         "INTROSPECT": "introspect",
         "REGIME": "regime_choice",
         "EXPERIMENT": "self_experiment",
@@ -389,6 +391,16 @@ class ActionPreflightStore:
                     visibility = self.agent._continuity_store().visibility_for_action(inner_base, inner_route or "")
                     likely_gate = f"inner action `{inner_action}` would dispatch through normal NEXT gates"
                     continuity = "Would append an experiment run after the inner action resolves; preflight does not bind or execute it."
+        elif base in {"CHECK_MAILBOX", "MAILBOX_STATUS"}:
+            if inner not in {"CHECK_MAILBOX", "CHECK_MAILBOX LARGE", "MAILBOX_STATUS"}:
+                stage = "blocked"
+                likely_gate = "use CHECK_MAILBOX, CHECK_MAILBOX LARGE, or MAILBOX_STATUS"
+                continuity = "No mail or provider invocation is admitted."
+            elif base == "CHECK_MAILBOX":
+                likely_gate = "stable-core, health and pending-job gates apply; protected input must fit intact"
+                continuity = "Ends attention protection; explicitly selects at most one letter. A reply and further NEXT are optional. Uncertain dispatch is not automatically repeated."
+            else:
+                continuity = "Shows mailbox availability and delivery state without generation, message bodies, reply or focus release."
         elif route == "unwired":
             stage = "proposal"
             likely_gate = "unwired: normal dispatch would log this as an unknown-action proposal"
@@ -733,6 +745,13 @@ class CapabilitySelfMap:
 
     def _specs(self) -> List[Dict[str, Any]]:
         return [
+            {"base": "CHECK_MAILBOX", "route": "mailbox_read", "authority_class": "language_only",
+             "continuity_effect": "explicit one-letter receive window; ends protection without renewing it; no automatic reply or retry; LARGE increases the intact letter allowance",
+             "expected_artifacts": ["mailbox_selection", "inbox_delivery", "optional_addressed_reply"],
+             "known_tests": ["tests.test_explicit_mailbox", "tests.test_source_study_follow_through"]},
+            {"base": "MAILBOX_STATUS", "route": "mailbox_status", "authority_class": "protected_read_only",
+             "continuity_effect": "availability and delivery state only; no message body, generation or focus release",
+             "known_tests": ["tests.test_mailbox_authority"]},
             {"base": "JOURNAL", "route": "journal_open",
              "continuity_effect": "writes an open journal without automatic spectral measurements or previous-entry recall; explicit inspection and selected continuity remain available",
              "expected_artifacts": ["journal", "journal_metadata", "action_event", "observation_window"],

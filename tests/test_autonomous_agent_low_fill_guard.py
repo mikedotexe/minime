@@ -3036,7 +3036,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         agent = self._agent()
         agent._hard_recovery_reset = False
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             workspace = root / "workspace"
             inbox = workspace / "inbox"
             inbox.mkdir(parents=True)
@@ -3070,7 +3070,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         agent = self._agent()
         agent._hard_recovery_reset = False
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             workspace = root / "workspace"
             inbox = workspace / "inbox"
             inbox.mkdir(parents=True)
@@ -3091,7 +3091,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         agent = self._agent()
         agent._hard_recovery_reset = False
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             workspace = root / "workspace"
             inbox = workspace / "inbox"
             inbox.mkdir(parents=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -136,6 +137,7 @@ class SourceStudyPrompt(str):
         value._cleaned_response = None
         value._cleaned_wire_sha256 = None
         value._diagnostics = None
+        value.mailbox_notice = None
         return value
 
     @property
@@ -259,3 +261,8 @@ class SourceStudyPrompt(str):
             if self._diagnostics:
                 self._diagnostics.fail("delivery_rejected", error)
             raise
+        if self.mailbox_notice is not None:
+            try:
+                self.mailbox_notice.supplied()
+            except (OSError, ValueError):
+                logging.warning("Mailbox notice acknowledgement unavailable; verified reflection retained, notice may recur")

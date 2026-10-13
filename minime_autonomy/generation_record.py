@@ -337,8 +337,10 @@ def begin(
     private = (prompt_class == "private_writing"
                or isinstance(output, dict) and output.get("input_kind") == "private_writing")
     # A general diagnostic override is not authorization to disclose draft text.
-    record_dir = (Path(workspace_dir) / "private_writing" / RECORD_SUBDIR
-                  if private else default_record_dir(workspace_dir))
+    correspondence = getattr(prompt, "private_correspondence", False) is True
+    record_dir = (Path(workspace_dir) / "private_writing" / RECORD_SUBDIR if private
+                  else Path(workspace_dir) / "correspondence" / RECORD_SUBDIR if correspondence
+                  else default_record_dir(workspace_dir))
     ctx = GenerationContext(
         record_dir,
         prompt=prompt or "",

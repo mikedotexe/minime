@@ -136,6 +136,82 @@ def test_bare_introspection_uses_reflection_without_advancing_source_or_saving_s
     assert agent._pending_next_action == "SELF_STUDY MAP minime"
 
 
+@pytest.mark.parametrize("active", [False, True])
+def test_reflection_can_notice_choose_receive_then_return_without_repeated_notice(study_agent, monkeypatch, active):
+    from minime_autonomy.human_letters import HumanLetter, submit_letter
+    from minime_autonomy.mailbox import MailboxPrompt
+
+    agent, store, client, offers = study_agent
+    if active:
+        store.start_experiment("Active but unrelated experiment", "An unrelated technical question")
+    letter = HumanLetter("mike", "chosen", "conversation", b"MAIL_BODY_SENTINEL\r\nExact body.")
+    published = submit_letter(letter, workspace=aa.WORKSPACE_DIR,
+                              confirm_sha256=letter.sha256).path
+    monkeypatch.setattr(agent, "_activity_focus", lambda: aa.ActivityFocus(client))
+    for name in ("_stable_core_self_journal_only", "_stable_core_local_reflective_only",
+                 "_stable_core_astrid_contact_only"):
+        monkeypatch.setattr(agent, name, lambda: False)
+    # Use the actual query adapters, with only their provider boundary stubbed.
+    monkeypatch.setattr(agent, "_query_llm", aa.AutonomousAgent._query_llm.__get__(agent))
+    seen = []
+    responses = iter(("An independent reflection.\nNEXT: CHECK_MAILBOX",
+                      "INBOX_REPLY chosen\nAn optional reply.\nNEXT: INTROSPECT",
+                      "A fresh thought.\nNEXT: REST"))
+
+    def provider(prompt, system, tokens, **kwargs):
+        seen.append(prompt)
+        text = next(responses)
+        messages, _ = aa._adapt_ollama_messages_for_model(
+            model="gemma4:12b", system_msg=system, prompt=prompt,
+            num_ctx=16000, num_predict=tokens)
+        if isinstance(prompt, MailboxPrompt):
+            attempt = prompt.inbox.prepared(messages, "fixture")
+            prompt.inbox.accepted(attempt, "fixture")
+            prompt.validate_completion({"message": {"content": text}, "done": True, "done_reason": "stop"})
+        else:
+            response = Mock(status_code=200, text=json.dumps({"message": {"content": text}, "done": True}))
+            prompt.post(Mock(return_value=response), "fixture://no-network", {"messages": messages}, 1)
+            prompt.accepted()
+        return text
+
+    monkeypatch.setattr(agent, "_query_llm_raw", provider)
+    select_choice(agent, "INTROSPECT")
+    for route, expected in (("self_study", "CHECK_MAILBOX"),
+                            ("mailbox_read", "INTROSPECT"), ("self_study", "REST")):
+        assert agent._decide_action(dict(STATE)) == route
+        context = dict(agent._pending_action_continuity_context)
+        raw = context["raw_next"]
+        event = store.begin_action(raw, raw, route, route, dict(STATE), source="next")
+        with aa.job_outcome.capture(event["action_id"]) as outcome:
+            agent._execute_action(route, dict(STATE), _from_llm_job=True,
+                                 _precreated_continuity_context=context,
+                                 _precreated_continuity_event=event)
+        assert outcome.finish()[0] == "completed", outcome.finish()
+        assert agent._pending_next_action == expected
+    assert "Mailbox availability:" in seen[0] and "MAIL_BODY_SENTINEL" not in seen[0]
+    assert letter.body.decode() in seen[1]
+    assert "Mailbox availability:" not in seen[2] and "MAIL_BODY_SENTINEL" not in seen[2]
+    assert not published.exists()
+    assert (published.parent / "read" / published.name).read_bytes() == letter.content
+    assert len(list((aa.WORKSPACE_DIR / "outbox/human/mike").glob("*.txt"))) == 1
+    assert len(list((aa.WORKSPACE_DIR / "journal").glob("introspect_*.txt"))) == 2
+    assert not list((aa.WORKSPACE_DIR / "journal").glob("self_study_*.txt"))
+
+
+def test_explicit_mailbox_status_reaches_reflection_once_without_letter_body(study_agent):
+    agent, _, _, offers = study_agent
+    agent._current_action_continuity_event = {"action_id": "status-choice"}
+    agent._activity_command({"raw_next": "MAILBOX_STATUS"})
+    for _ in range(2):
+        select_choice(agent, "INTROSPECT")
+        assert agent._decide_action(dict(STATE)) == "self_study"
+        agent._execute_action("self_study", dict(STATE), _from_llm_job=True)
+    assert "Earlier explicitly requested mailbox result" in offers[0]
+    assert "waiting_files" in offers[0]
+    assert "Earlier explicitly requested mailbox result" not in offers[1]
+    assert agent._pending_mailbox_feedback is None
+
+
 def test_study_can_choose_reflection_with_active_experiment_and_return_to_its_bookmark(study_agent, monkeypatch):
     agent, store, client, offers = study_agent
     experiment = store.start_experiment("Legacy experiment still active", "Unrelated to reflection")

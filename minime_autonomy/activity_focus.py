@@ -8,7 +8,7 @@ from .source_study import StudyClient
 
 
 COMMANDS = frozenset({"ACTIVITY_FOCUS", "ACTIVITY_STATUS", "END_ACTIVITY_FOCUS",
-                      "PARK_ACTIVITY", "RETURN_ACTIVITY", "CHECK_MAILBOX"})
+                      "PARK_ACTIVITY", "RETURN_ACTIVITY", "CHECK_MAILBOX", "MAILBOX_STATUS"})
 
 
 class ActivityFocus:

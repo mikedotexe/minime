@@ -29,6 +29,8 @@ class CorrespondenceV1Tests(unittest.TestCase):
         return agent
 
     def _patch_paths(self, root: Path):
+        # macOS temporary paths may start at symlinked /var; use the owned real directory.
+        root = root.resolve()
         workspace = root / "workspace"
         astrid_inbox = root / "astrid" / "inbox"
         shared = root / "shared"

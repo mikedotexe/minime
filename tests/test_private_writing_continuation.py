@@ -129,8 +129,9 @@ def test_protected_metadata_park_and_mailbox_do_not_generate(writing_agent, monk
     for action in (status["return_command"], "ACTIVITY_FOCUS WRITE d1", "CHECK_MAILBOX"):
         agent._pending_next_action = action
         agent._persist_pending_next_action(action, reason="synthetic authored choice")
-        assert agent._decide_action(dict(STATE)) == "activity_focus"
-        agent._execute_action("activity_focus", dict(STATE))
+        route = "mailbox_read" if action == "CHECK_MAILBOX" else "activity_focus"
+        assert agent._decide_action(dict(STATE)) == route
+        agent._execute_action(route, dict(STATE), _from_llm_job=True)
     assert not agent._activity_focus().status()["protected"]
     provider.assert_not_called()
 
