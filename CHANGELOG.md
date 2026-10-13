@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Live: drain-v2 first transition (2026-10-13, Codex).** Gracefully replace the old v1 agent at the unchanged idle-only boundary, installing only the reviewed runtime after native NEXT sealing. PID 95712 loads all 96 qualified inputs and acknowledges the preserved pending choice; the prior mailbox correction is now loaded. Engine/provider/bridge/visual/sensory processes and session 5321 remain unchanged. No force, replay, push or automation resume. Evidence: `docs/steward-notes/2026-10-13-drain-v2-first-transition.md`.
+
 - **Candidate: finish-accepted-work drain v2 (2026-10-12, Codex).** Fence queue preparation, moment generation and subsequent visual responses after shutdown while completing accepted calls and retaining exact NEXT. Add real worker/finalizer and SIGTERM qualification. The paired operator verifies terminal worker outcomes before replacement release; timeout alone is not completion. Old loaded v1 remains ineligible for busy drain. No activation, force or automation resume; see `docs/steward-notes/2026-10-12-finish-accepted-work-drain.md`.
 
 - Locally integrate explicit mailbox work as `b51c7e1fa5c2`, paired with Astrid `17dd537bae102d`; fast-forward main without changing live file bytes. Nothing pushed. The final runtime-only NEXT/privacy correction remains qualified/on disk but unloaded, with owned launch-hold recovery documented in the steward note.
