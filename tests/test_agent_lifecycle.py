@@ -4,8 +4,11 @@ import threading
 import subprocess
 import sys
 import signal
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+import pytest
 
 import autonomous_agent as aa
 from minime_autonomy.deployment import source_inputs
@@ -164,7 +167,7 @@ def test_source_status_binds_start_inputs_and_phase(tmp_path):
     agent._lifecycle_phase = "busy"
     with patch.object(aa, "WORKSPACE_DIR", tmp_path):
         result = agent._current_source_status()
-    assert result["lifecycle_contract"] == "agent_drain_v1"
+    assert result["lifecycle_contract"] == "agent_drain_v2"
     assert result["lifecycle_phase"] == "busy"
     assert result["source_inputs_at_start"] == {"runtime.py": "fixture-hash"}
 
@@ -203,3 +206,264 @@ agent.wait_for_llm_jobs()
         if proc.poll() is None:
             proc.terminate()
             proc.wait(timeout=10)
+
+
+@pytest.mark.parametrize("boundary", ["_self_regulate", "_auto_defer_stale_pending_astrid"])
+def test_stop_before_main_moment_does_not_start_generation(tmp_path, boundary):
+    agent = agent_stub(tmp_path)
+    agent._pending_next_action = None
+    agent.check_interval = 0
+    for name in ("_restore_sovereignty_state", "_apply_pending_next_override_if_present",
+                 "_verify_sovereignty", "_refresh_session_context", "_check_source_reload_required",
+                 "_update_hard_recovery_clamp", "_reconcile_stable_core_health_status",
+                 "_self_regulate", "_auto_defer_stale_pending_astrid", "_recover_activity_choice",
+                 "_check_moment_markers", "_check_visual_responses", "_decide_action"):
+        setattr(agent, name, Mock())
+    agent._attention_protected = Mock(return_value=False)
+    agent._get_latest_spectral_state = lambda: {"fill_ratio": 0.68}
+    agent._llm_job_store = lambda: SimpleNamespace(active_primary_job=lambda: None)
+    getattr(agent, boundary).side_effect = lambda *_: agent.stop()
+    agent.start()
+    agent._check_moment_markers.assert_not_called()
+    agent._check_visual_responses.assert_not_called()
+    agent._decide_action.assert_not_called()
+
+
+@pytest.mark.parametrize("boundary", ["begin_action", "budget"])
+@pytest.mark.parametrize("receipt_failure", [False, True])
+def test_queue_preparation_stop_retains_exact_next_and_records_blocked(
+    tmp_path, boundary, receipt_failure,
+):
+    from minime_autonomy import maintenance_next as handoff
+    from tests.test_maintenance_next import agent as owner, checkpoint, clear_for_admission
+
+    agent = owner(tmp_path, 'WRITE REVISE "NEXT: REST" synthetic direction')
+    original = handoff.pending(checkpoint(agent))
+    clear_for_admission(agent, tmp_path)
+    context = {"raw_next": original["pending_next_action"],
+               "_next_admission_token": agent._unadmitted_next_checkpoint["token"]}
+    agent._consume_action_continuity_context = Mock(return_value=context)
+    agent.running = True
+    jobs = Mock()
+    jobs.active_primary_job.return_value = None
+    store = Mock()
+    event = {"action_id": "synthetic-action", "thread_id": "synthetic-thread"}
+    store.begin_action.return_value = event
+    agent._llm_job_store = lambda: jobs
+    agent._continuity_store = lambda: store
+    if receipt_failure:
+        store.finish_action.side_effect = OSError("synthetic blocked receipt failure")
+
+    def stop(value):
+        agent.stop()
+        return value
+
+    if boundary == "begin_action":
+        store.begin_action.side_effect = lambda *a, **kw: stop(event)
+    with patch.object(aa, "_journal_job_timeout_s", side_effect=lambda *a, **kw:
+                      stop(300) if boundary == "budget" else 300), \
+            patch.object(aa.threading, "Thread") as factory:
+        if receipt_failure:
+            with pytest.raises(OSError, match="blocked receipt failure"):
+                agent._execute_action("self_study", {})
+            assert agent._next_handoff_failed
+        else:
+            agent._execute_action("self_study", {})
+            assert agent._current_action_continuity_context is None
+        jobs.submit.assert_not_called()
+        factory.assert_not_called()
+    store.finish_action.assert_called_once_with(
+        event, "blocked", "Shutdown before LLM job admission; unadmitted choice retained.", {},
+    )
+    store.record_running_action.assert_not_called()
+    assert handoff.pending(handoff.parse(handoff.read(
+        agent._sovereignty_state_path(), handoff.MAX_STATE))) == original
+    if not receipt_failure:
+        agent.wait_for_llm_jobs()
+        assert agent._next_handoff_seal["pending_present"] is True
+
+
+@pytest.mark.parametrize("boundary", ["selection", "marker_commit", "provider"])
+def test_moment_admission_preserves_input_or_finishes_current_call(tmp_path, boundary, monkeypatch):
+    agent = agent_stub(tmp_path)
+    agent.session_id = 1
+    agent.cycle_count = 1
+    agent._pending_next_action = None
+    agent._current_fill_frame_label = Mock(return_value="synthetic")
+    agent._format_metrics = Mock(return_value="synthetic metrics")
+    agent._write_journal_entry = Mock()
+    (tmp_path / "journal").mkdir()
+    monkeypatch.setattr(aa, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(aa, "capture_report_snapshot", Mock(return_value=SimpleNamespace(state={})))
+    monkeypatch.setattr(aa, "format_marker_anchors", Mock(return_value="synthetic marker"))
+    monkeypatch.setattr(aa, "format_snapshot_provenance", Mock(return_value="synthetic provenance"))
+    monkeypatch.setattr(aa, "_ap_try_spectral", Mock())
+    monkeypatch.setattr(aa, "_ap_try_prose", Mock())
+    conn = Mock()
+    monkeypatch.setattr(aa.sqlite3, "connect", Mock(return_value=conn))
+
+    def select(*args, **kwargs):
+        if boundary == "selection":
+            agent.stop()
+        return [{"id": 1, "marker_type": "synthetic", "description": "fixture", "spectral_context": None}]
+
+    def provider(*args, **kwargs):
+        if boundary == "provider":
+            agent.stop()
+        agent._pending_next_action = "REST"
+        return "Synthetic accepted journal.\nNEXT: REST", "REST"
+
+    monkeypatch.setattr(aa, "select_recent_markers", select)
+    agent._query_llm_with_next = Mock(side_effect=provider)
+    if boundary == "marker_commit":
+        conn.commit.side_effect = agent.stop
+    accepted = agent._check_moment_markers({})
+    conn.close.assert_called_once()
+    if boundary == "selection":
+        assert accepted is False
+        conn.execute.assert_not_called()
+        aa._ap_try_spectral.assert_not_called()
+        agent._query_llm_with_next.assert_not_called()
+        assert not list((tmp_path / "journal").iterdir())
+    else:
+        assert accepted is True
+        agent._query_llm_with_next.assert_called_once()
+        agent._write_journal_entry.assert_called_once()
+        journals = list((tmp_path / "journal").iterdir())
+        assert len(journals) == 1
+        assert "Synthetic accepted journal." in journals[0].read_text()
+        assert agent._pending_next_action == "REST"
+
+
+@pytest.mark.parametrize("boundary", ["preparation", "provider"])
+def test_visual_stop_retains_unadmitted_sources_and_finishes_accepted_item(tmp_path, boundary, monkeypatch):
+    agent = agent_stub(tmp_path)
+    agent._pending_next_action = None
+    agent._last_state = {}
+    agent._write_journal_entry = Mock()
+    responses = tmp_path / "visual_responses"
+    responses.mkdir()
+    (tmp_path / "journal").mkdir()
+    originals = {}
+    for index in (1, 2):
+        path = responses / f"response_{index}.json"
+        raw = json.dumps({"response_timestamp": f"synthetic-{index}", "description": "fixture"}).encode() + b"\r\n"
+        path.write_bytes(raw)
+        originals[path] = raw
+    monkeypatch.setattr(aa, "WORKSPACE_DIR", tmp_path)
+
+    def prepare(*args, **kwargs):
+        if boundary == "preparation":
+            agent.stop()
+        return "Synthetic visual observation."
+
+    def provider(*args, **kwargs):
+        agent.stop()
+        agent._pending_next_action = "REST"
+        return "Synthetic accepted reflection.\nNEXT: REST", "REST"
+
+    monkeypatch.setattr(aa, "visual_observation", prepare)
+    agent._query_llm_with_next = Mock(side_effect=provider)
+    agent._check_visual_responses()
+    for path, raw in originals.items():
+        expected = responses / "processed" / path.name if boundary == "provider" and path.name == "response_1.json" else path
+        assert expected.read_bytes() == raw
+    if boundary == "preparation":
+        agent._query_llm_with_next.assert_not_called()
+        assert not (responses / "processed").exists()
+    else:
+        agent._query_llm_with_next.assert_called_once()
+        agent._write_journal_entry.assert_called_once()
+        assert agent._pending_next_action == "REST"
+        assert len(list((tmp_path / "journal").iterdir())) == 1
+    agent._check_visual_responses()
+    assert agent._query_llm_with_next.call_count == (boundary == "provider")
+
+
+@pytest.mark.parametrize("response_kind", ["moment", "visual"])
+@pytest.mark.parametrize("failure_site", ["file", "journal_entry"])
+@pytest.mark.parametrize("mode", ["shutdown", "running", "no_identity"])
+def test_synchronous_journal_failure_blocks_shutdown_seal(
+    tmp_path, monkeypatch, response_kind, failure_site, mode,
+):
+    from minime_autonomy import maintenance_next as handoff
+    from tests.test_maintenance_next import agent as owner, checkpoint
+
+    agent = owner(tmp_path, "REST")
+    checkpoint(agent)
+    state_path = Path(agent._sovereignty_state_path())
+    original_state = state_path.read_bytes()
+    if mode == "no_identity":
+        del agent._agent_boot_id
+    agent.running = True
+    agent.cycle_count = 1
+    agent._last_state = {}
+    agent._current_fill_frame_label = Mock(return_value="synthetic")
+    agent._format_metrics = Mock(return_value="synthetic metrics")
+    agent._write_journal_entry = Mock()
+    if failure_site == "journal_entry":
+        agent._write_journal_entry.side_effect = OSError("synthetic journal entry failure")
+    (tmp_path / "journal").mkdir()
+    monkeypatch.setattr(aa, "WORKSPACE_DIR", tmp_path)
+
+    def provider(*args, **kwargs):
+        if mode != "running":
+            agent.stop()
+        return "Synthetic accepted response.", None
+
+    agent._query_llm_with_next = Mock(side_effect=provider)
+    originals = {}
+    if response_kind == "moment":
+        monkeypatch.setattr(aa, "capture_report_snapshot", Mock(return_value=SimpleNamespace(state={})))
+        monkeypatch.setattr(aa, "format_marker_anchors", Mock(return_value="synthetic marker"))
+        monkeypatch.setattr(aa, "format_snapshot_provenance", Mock(return_value="synthetic provenance"))
+        monkeypatch.setattr(aa, "_ap_try_spectral", Mock())
+        monkeypatch.setattr(aa, "_ap_try_prose", Mock())
+        monkeypatch.setattr(aa.sqlite3, "connect", Mock(return_value=Mock()))
+        monkeypatch.setattr(aa, "select_recent_markers", Mock(return_value=[{
+            "id": 1, "marker_type": "synthetic", "description": "fixture", "spectral_context": None,
+        }]))
+    else:
+        responses = tmp_path / "visual_responses"
+        responses.mkdir()
+        for index in (1, 2):
+            path = responses / f"response_{index}.json"
+            raw = json.dumps({"response_timestamp": f"synthetic-{index}", "description": "fixture"}).encode() + b"\r\n"
+            path.write_bytes(raw)
+            originals[path] = raw
+        monkeypatch.setattr(aa, "visual_observation", Mock(return_value="Synthetic visual observation."))
+
+    with monkeypatch.context() as writes:
+        if failure_site == "file":
+            writes.setattr(Path, "write_text", Mock(side_effect=OSError("synthetic journal file failure")))
+        if response_kind == "moment":
+            assert agent._check_moment_markers({}) is False
+        else:
+            agent._check_visual_responses()
+
+    expected_calls = 2 if response_kind == "visual" and mode == "running" else 1
+    assert agent._query_llm_with_next.call_count == expected_calls
+    assert agent._write_journal_entry.call_count == (expected_calls if failure_site == "journal_entry" else 0)
+    assert getattr(agent, "_next_handoff_failed", False) is (mode == "shutdown")
+    assert agent._pending_next_action == "REST"
+    assert state_path.read_bytes() == original_state
+    for path, raw in originals.items():
+        assert path.read_bytes() == raw
+    if response_kind == "visual":
+        assert not (responses / "processed").exists()
+        if mode != "running":
+            agent._check_visual_responses()
+            assert agent._query_llm_with_next.call_count == 1
+
+    agent.stop()
+    if mode == "shutdown":
+        with pytest.raises(handoff.HandoffError, match="recovery_blocked"):
+            agent.wait_for_llm_jobs()
+        assert agent._lifecycle_phase == "recovery_blocked"
+        assert not hasattr(agent, "_next_handoff_seal")
+        assert not handoff.stream_path(state_path).exists()
+        assert "drained" not in [call.args[0] for call in agent._write_source_status.call_args_list]
+    else:
+        agent.wait_for_llm_jobs()
+        assert agent._lifecycle_phase == "exited"
+    assert state_path.read_bytes() == original_state

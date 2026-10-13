@@ -22402,6 +22402,8 @@ class AutonomousAgent:
         state: Dict[str, float],
         continuity_context: Dict[str, Any],
     ) -> bool:
+        if getattr(self, "_shutdown_requested", False):
+            return False
         if getattr(self, "_llm_job_worker_active", False):
             if action == "self_study":
                 self._record_busy_source_study(state, continuity_context)
@@ -22435,7 +22437,7 @@ class AutonomousAgent:
             or continuity_context.get("canonical_action")
             or action
         )
-        job = jobs.submit(
+        submission = dict(
             action_id=event.get("action_id"),
             thread_id=event.get("thread_id"),
             action_text=raw_action,
@@ -22458,6 +22460,23 @@ class AutonomousAgent:
             priority="primary",
             job_key=f"primary:{action}",
         )
+        # This final stop check is the queue admission boundary, after preparation.
+        # Submit/start then finish even if a signal arrives before durable commit;
+        # the signal flag and filesystem publication are not one atomic operation.
+        if getattr(self, "_shutdown_requested", False):
+            self._retain_unadmitted_choice(continuity_context)
+            try:
+                self._last_action_continuity_event = store.finish_action(
+                    event, "blocked",
+                    "Shutdown before LLM job admission; unadmitted choice retained.",
+                    state,
+                )
+            except Exception:
+                if hasattr(self, "_agent_boot_id"):
+                    self._next_handoff_failed = True
+                raise
+            return False
+        job = jobs.submit(**submission)
         job_artifact = {
             "schema_version": ActionContinuityStore.schema_version,
             "artifact_id": f"art_{event['action_id']}_llm_job",
@@ -23206,6 +23225,8 @@ class AutonomousAgent:
                     # based on how the being feels. Runs every cycle, independent
                     # of action cooldown — like autonomic nervous system regulation.
                     self._self_regulate(spectral_state)
+                    if not self.running:
+                        break
 
                     # v3.6.6 mirror: drain stale pending Astrid requests by
                     # auto-deferring them after 30+ minutes without decision.
@@ -23223,7 +23244,8 @@ class AutonomousAgent:
                     # takes priority in _decide_action(). Moments only fire when
                     # the being has no pending NEXT: choice.
                     self._recover_activity_choice()
-                    if not self._pending_next_action and not self._attention_protected():
+                    if (not self._pending_next_action and not self._attention_protected()
+                            and not getattr(self, "_shutdown_requested", False)):
                         self._check_moment_markers(spectral_state)
 
                     # A signal during synchronous journaling finishes that write,
@@ -26971,6 +26993,10 @@ Fill: {fill:.1f}%
             return
         if not _from_llm_job and getattr(self, "_shutdown_requested", False):
             self._retain_unadmitted_choice(continuity_context)
+            self._current_action_continuity_context = None
+            self._current_action_continuity_event = None
+            self._current_action_extra_artifacts = []
+            self._current_action_outcome_summary = None
             return
         # Synchronous admission begins here; an ensuing stop drains this work.
         maintenance_next.admitted(self, continuity_context)
@@ -33109,6 +33135,8 @@ Pressure source: {pressure_source}
 
     def _check_moment_markers(self, state: Dict[str, float]) -> bool:
         """Journal selected recorded events with a frozen pre-generation snapshot."""
+        if getattr(self, "_shutdown_requested", False):
+            return False
         try:
             snapshot = deepcopy(capture_report_snapshot(
                 state=deepcopy(state),
@@ -33126,10 +33154,12 @@ Pressure source: {pressure_source}
                 conn.close()
                 raise
 
-            if not markers:
+            if not markers or getattr(self, "_shutdown_requested", False):
                 conn.close()
                 return False
 
+            # Admission precedes marker effects. A later stop finishes this one
+            # moment's generation and journal, rather than losing consumed input.
             # v5.1 Phase E Track 2: render each marker as prose for the
             # joint shared_thoughts lane (rate-limited; phase_transition
             # filtered out as too noisy). actor='minime:spectral' makes
@@ -33232,6 +33262,8 @@ Header-only telemetry (same pre-generation snapshot; not additional model input)
             return True
 
         except Exception as e:
+            if getattr(self, "_shutdown_requested", False) and hasattr(self, "_agent_boot_id"):
+                self._next_handoff_failed = True
             logging.error(f"Moment marker check failed: {e}")
             return False
 
@@ -48266,6 +48298,8 @@ Sensory gate:
 
     def _check_visual_responses(self):
         """Check for and process any visual frame responses."""
+        if getattr(self, "_shutdown_requested", False):
+            return
         responses_dir = WORKSPACE_DIR / "visual_responses"
         if not responses_dir.exists():
             return
@@ -48274,12 +48308,15 @@ Sensory gate:
         response_files = sorted(responses_dir.glob("response_*.json"))
 
         for response_file in response_files:
+            if getattr(self, "_shutdown_requested", False):
+                return
             try:
                 # Read the response
                 response_data = json.loads(response_file.read_text())
 
                 # Process it
-                self._process_visual_response(response_data)
+                if self._process_visual_response(response_data) is False:
+                    return  # An unadmitted response stays in its original location.
 
                 # Move to processed folder
                 processed_dir = responses_dir / "processed"
@@ -48287,9 +48324,11 @@ Sensory gate:
                 response_file.rename(processed_dir / response_file.name)
 
             except Exception as e:
+                if getattr(self, "_shutdown_requested", False) and hasattr(self, "_agent_boot_id"):
+                    self._next_handoff_failed = True
                 logging.error(f"Error processing visual response {response_file}: {e}")
 
-    def _process_visual_response(self, response_data: Dict[str, Any]):
+    def _process_visual_response(self, response_data: Dict[str, Any]) -> bool:
         """Process a visual response and journal the experience."""
         timestamp = response_data.get('response_timestamp', datetime.now().isoformat())
         visual_available = response_data.get('visual_available', False)
@@ -48306,6 +48345,10 @@ Sensory gate:
                 + json.dumps(str(image_path), ensure_ascii=False)
             )
 
+        # Admit one prepared response; an ensuing stop still finishes its journal
+        # and source retirement, but the caller cannot admit another item.
+        if getattr(self, "_shutdown_requested", False):
+            return False
         reflection = self._query_llm_with_next(prompt)[0]
 
         if reflection:
@@ -48344,6 +48387,7 @@ Description/status supplied by the visual service; reflection authored by Minime
             )
 
             logging.info(f"👁️ Visual experience processed: {'saw the world' if visual_available else 'camera unavailable'}")
+        return True
 
     def _read_whisper_context(self) -> str:
         """Read recent whisper transcriptions for prompt context."""
@@ -48584,7 +48628,7 @@ Goals: {json.dumps(goals, indent=2)}
             "started_at": getattr(self, "_agent_started_at", None),
             "checked_at": datetime.now().isoformat(timespec="seconds"),
             "reason": reason,
-            "lifecycle_contract": "agent_drain_v1",
+            "lifecycle_contract": "agent_drain_v2",
             "next_handoff_contract": maintenance_next.CONTRACT if hasattr(self, "_agent_boot_id") else None,
             "boot_id": getattr(self, "_agent_boot_id", None),
             "next_handoff_seal": getattr(self, "_next_handoff_seal", None),

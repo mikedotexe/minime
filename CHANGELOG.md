@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Candidate: finish-accepted-work drain v2 (2026-10-12, Codex).** Fence queue preparation, moment generation and subsequent visual responses after shutdown while completing accepted calls and retaining exact NEXT. Add real worker/finalizer and SIGTERM qualification. The paired operator verifies terminal worker outcomes before replacement release; timeout alone is not completion. Old loaded v1 remains ineligible for busy drain. No activation, force or automation resume; see `docs/steward-notes/2026-10-12-finish-accepted-work-drain.md`.
+
 - Locally integrate explicit mailbox work as `b51c7e1fa5c2`, paired with Astrid `17dd537bae102d`; fast-forward main without changing live file bytes. Nothing pushed. The final runtime-only NEXT/privacy correction remains qualified/on disk but unloaded, with owned launch-hold recovery documented in the steward note.
 
 - Require the final eligible explicit NEXT in a selected mailbox reply; do not admit bare commands or export unaddressed reply text through generic choice metadata. Retain complete private receipts, unrelated pending choices and normal non-mailbox parsing. Final qualification: 2,137 tests, 162 subtests and 92 immutable paired checks. This last runtime correction is installed but not loaded: no-signal handoff refusals retain an owned replacement hold. Earlier paired repairs are live. Exact restart debt: `docs/steward-notes/2026-10-12-explicit-mailbox.md`.
