@@ -137,3 +137,11 @@ continues, but automatic replacement is blocked until explicit verified recovery
 session/protected identities. See Astrid's paired note for the exact first safe
 read-only command and recovery boundary. No current mail content was exposed,
 converted, resent or used as a test. Local integration records this restart debt.
+
+Local implementation integration completed as
+`b51c7e1fa5c2677e2bac4b43006edf5f235fa050`, paired with Astrid
+`17dd537bae102df9c188a3b1c470689ba0df01e9`. Both were fast-forwarded to local main
+without temporarily checking older source into either live directory. Exact
+22-path Minime and 27-path Astrid sets, clean indexes and file-byte preservation
+were verified. No push or automation resume. This does not complete the final
+agent-only handoff: current agent 26862 remains on the first paired release.

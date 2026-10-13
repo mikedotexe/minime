@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Locally integrate explicit mailbox work as `b51c7e1fa5c2`, paired with Astrid `17dd537bae102d`; fast-forward main without changing live file bytes. Nothing pushed. The final runtime-only NEXT/privacy correction remains qualified/on disk but unloaded, with owned launch-hold recovery documented in the steward note.
+
 - Require the final eligible explicit NEXT in a selected mailbox reply; do not admit bare commands or export unaddressed reply text through generic choice metadata. Retain complete private receipts, unrelated pending choices and normal non-mailbox parsing. Final qualification: 2,137 tests, 162 subtests and 92 immutable paired checks. This last runtime correction is installed but not loaded: no-signal handoff refusals retain an owned replacement hold. Earlier paired repairs are live. Exact restart debt: `docs/steward-notes/2026-10-12-explicit-mailbox.md`.
 
 - **Live: explicit mailbox paired activation (2026-10-12, Codex).** Gracefully replace agent 85094 with 26862 after verified Astrid bridge/shared-helper activation. Verify all 96 loaded source inputs, unchanged launch configuration, native pending-NEXT restoration, session 5321 and unchanged engine/provider/visual/sensory processes. Complete Python suite: 2,113 passed, one existing skip, 162 subtests; paired qualification: 92 checks. No force, automatic replay, letter conversion/resend, push or automation resume. See `docs/steward-notes/2026-10-12-explicit-mailbox.md` and Astrid's paired-release note.
