@@ -403,6 +403,7 @@ class AfterimageStore:
             state["eligible_count"] = counter
             selection = None
             histories = state.setdefault("artifact_opportunities", {})
+            presentations = state.setdefault("presentation_opportunities_v1", {})
             if counter % 3 == 0:
                 for row in self.entries():
                     age = timestamp - row["anchor_unix_ms"]
@@ -416,6 +417,16 @@ class AfterimageStore:
                     if len(text) > limit:
                         continue  # Never truncate an artifact identity or its historical attribution.
                     notes = self._notes(row["id"])
+                    # IDs and timestamps do not make an unchanged coverage notice
+                    # new context. Authored notes have their own exact-text identity.
+                    if notes and age < 6*HOUR_MS:
+                        presentation = ["authored_note", notes[-1]["author"], notes[-1]["text"]]
+                    else:
+                        presentation = ["archive_coverage", row["origin"], row["status"], coverage_description(row)]
+                    presentation_key = fingerprint(json.dumps(presentation, ensure_ascii=False))
+                    last_presentation = presentations.get(presentation_key)
+                    if last_presentation is not None and timestamp - last_presentation < 6*HOUR_MS:
+                        continue
                     if notes and age < 6*HOUR_MS:
                         excerpt = json.dumps(notes[-1]["text"].replace("\n", " "), ensure_ascii=False)
                         text += f" | {notes[-1]['author']} wrote: {excerpt}"
@@ -430,12 +441,17 @@ class AfterimageStore:
                         text = text[:limit-3] + "..."
                     selection = {"id": row["id"], "opportunity_id": opportunity_id, "receiver": self.actor,
                                  "anchor_unix_ms": row["anchor_unix_ms"], "text": text,
-                                 "fingerprint": fingerprint(text), "protected": False}
+                                 "fingerprint": fingerprint(text), "protected": False,
+                                 "presentation_policy": "selective_afterimage_cue_v1",
+                                 "presentation_fingerprint": presentation_key}
                     histories.setdefault(row["id"], []).append(timestamp)
+                    presentations[presentation_key] = timestamp
                     break
             cached[opportunity_id] = {"selection": selection, "created_at_unix_ms": timestamp}
             state["opportunities"] = dict([(key, value) for key, value in cached.items() if timestamp-value["created_at_unix_ms"] <= 48*HOUR_MS][-4096:])
             state["artifact_opportunities"] = {key: value for key, value in histories.items() if value and timestamp-value[-1] <= 48*HOUR_MS}
+            state["presentation_opportunities_v1"] = dict(
+                [(key, value) for key, value in presentations.items() if timestamp-value <= 48*HOUR_MS][-4096:])
             atomic_json(self.private / "cues.json", state)
             return selection
 

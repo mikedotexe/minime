@@ -54,6 +54,48 @@ class AfterimagesTest(unittest.TestCase):
         row["coverage"]["channels"]["body"]["invalid_samples"] = 1
         self.assertIn("invalid values", coverage_description(row))
 
+    def test_new_ids_do_not_replay_the_same_coverage_notice_for_either_owner(self):
+        rows = []
+        for index in range(4):
+            row = self.store._summary(self.fixture)
+            row["id"] = f"ai_2026-09-07_repeat_{index}"
+            row["anchor_unix_ms"] -= index * 1000
+            rows.append(row)
+        atomic_json(self.store.archive / "recent.json", rows)
+        for store in (self.store, self.peer):
+            store.set_cues(True)
+            for index in range(3):
+                selected = store.prepare_cue(f"first_{index}", timestamp_ms=self.timestamp)
+            self.assertIsNotNone(selected)
+            restarted = AfterimageStore(store.workspace, self.minime, store.actor)
+            for index in range(3):
+                self.assertIsNone(restarted.prepare_cue(f"again_{index}", timestamp_ms=self.timestamp+1000))
+            self.assertTrue(read_json(store.private / "cues.json")["enabled"])
+            self.assertEqual(len(store.list_page()["entries"]), 4)
+            self.assertEqual(restarted.prepare_cue("first_2", timestamp_ms=self.timestamp+1000), selected)
+            for index in range(3):
+                returned = restarted.prepare_cue(f"later_{index}", timestamp_ms=self.timestamp+6*HOUR_MS)
+            self.assertIsNotNone(returned)
+
+    def test_changed_coverage_and_authored_notes_remain_eligible(self):
+        self.store.set_cues(True)
+        for index in range(3):
+            self.store.prepare_cue(f"old_{index}", timestamp_ms=self.timestamp)
+        row = self.store._summary(self.fixture)
+        row["id"] = "ai_2026-09-07_changed"
+        row["coverage"] = {"channels": {"body": {"samples": 50}}}
+        row["status"] = "completed"
+        atomic_json(self.store.archive / "recent.json", [row])
+        for index in range(3):
+            changed = self.store.prepare_cue(f"changed_{index}", timestamp_ms=self.timestamp+1000)
+        self.assertIn("meets its coverage checks", changed["text"])
+        saved = self.store.keep("A deliberately retained thought.", timestamp_ms=self.timestamp+2000)
+        for index in range(3):
+            authored = self.store.prepare_cue(f"note_{index}", timestamp_ms=self.timestamp+3000)
+        self.assertEqual(authored["id"], saved["id"])
+        self.assertIn("A deliberately retained thought.", authored["text"])
+        self.assertIn("cadence requirement not met", self.store.open_page(self.identifier)["text"])
+
     def test_explicit_later_note_is_shareable_without_refreshing_trace_age(self):
         text = f"RESIDUE: {self.identifier}\nLater words, still individual."
         source = {"path":"journal/later.txt", "generation_id":"generation_later", "timestamp_unix_ms":self.timestamp+10*HOUR_MS}
