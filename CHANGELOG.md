@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Unfinished-writing adapter qualification (2026-10-13, Codex).** Add a real-adapter synthetic branch/park/return/continue/finish regression for the paired shared-writer presentation repair. Preserve exact prose, explicit choices, private routing, generation-free storage operations and existing limits. No Minime runtime source changed; paired helper qualification and release status: `docs/steward-notes/2026-10-13-unfinished-writing-development.md`.
+
 - **Live: selective-context paired rollout (2026-10-13, Codex).** Approved graceful activation verified PID 26891, all 97 loaded source inputs, exact pending-NEXT-state restoration and the frozen shared helper. Full Python suite: 2,182 passed, one skipped, 163 subtests; paired preservation: 138 checks. Existing cue preferences and archive records remain intact. Capacity, engine, provider and sensory work stays separate; automations remain paused. Receipts: `docs/steward-notes/2026-10-13-writing-context-refinement.md`.
 
 - **Candidate: selective historical cues (2026-10-13, Codex).** Preserve the existing AFTERIMAGE_CUES preference, cadence and explicit retrieval while suppressing the same coverage/origin/status presentation across fresh artifact IDs for six hours. New authored notes and changed coverage remain eligible; private text is not added to diagnostic receipts. Shared by both owners through the existing adapter, with no reservoir or provider changes. Paired qualification and capacity boundaries: `docs/steward-notes/2026-10-13-writing-context-refinement.md`. Not activated.
