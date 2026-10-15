@@ -11,6 +11,9 @@ from tests.test_private_writing_continuation import STATE, writing_agent, delive
 def test_reserved_entry_is_not_readable_until_exact_publication(writing_agent):
     _, client = writing_agent
     selected = JournalContinuation.reserve(client, "synthetic-publication")
+    assert selected.hint().splitlines()[1] == f"NEXT: WRITE FROM_JOURNAL {selected.entry_id}"
+    assert len(selected.hint()) < 360
+    assert "Stopping or another activity" in selected.hint()
     assert JournalContinuation.reserve(client, "synthetic-publication").entry_id == selected.entry_id
     with pytest.raises(RuntimeError):
         client.prepare(f"WRITE FROM_JOURNAL {selected.entry_id}")

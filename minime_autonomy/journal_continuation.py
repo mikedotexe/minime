@@ -34,11 +34,10 @@ class JournalContinuation:
         return json.loads(result["text"])
 
     def hint(self):
-        return ("Exact selected continuation: after this public entry is successfully saved, "
-                f"NEXT: WRITE FROM_JOURNAL {self.entry_id} can start a new private draft "
-                "from its exact authored prose. This is optional; no transfer occurs without your choice. "
-                "WRITE JOURNALS and WRITE JOURNAL_READ make registered passages inspectable. "
-                "Drafts are excluded from automatic public/peer delivery and locally inspectable by the operator.")
+        return ("Optional exact continuation, available after this entry is saved:\n"
+                f"NEXT: WRITE FROM_JOURNAL {self.entry_id}\n"
+                "This copies its prose into a new private draft; no transfer is automatic. "
+                "Stopping or another activity is equally available. WRITE HELP has details.")
 
     def publish(self, path: Path, response: str):
         return self._register(self.client, "publish", self.operation_id, {

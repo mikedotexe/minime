@@ -32919,7 +32919,8 @@ Reason: {reason}
                 recovery = getattr(error, "writing_recovery", None)
                 if recovery is None and prompt is not None:
                     try:
-                        recovery = prompt.client.call(operation="writing_recovery", input_id=prompt.output.get("navigation_id") or "")
+                        recovery = (prompt.final_admission_recovery() or
+                                    prompt.client.call(operation="writing_recovery", input_id=prompt.output.get("navigation_id") or ""))
                     except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
                         recovery = None
                 detail = (json.dumps(recovery, ensure_ascii=False) if recovery else "WRITE HELP lists choices. No verified retry command is available.")
@@ -56157,8 +56158,12 @@ Goals: {json.dumps(goals, indent=2)}
                     return self._strip_model_artifacts(result)
                 generation_record.record_attempt(gen, idx, backend, result="",
                     diagnostics=attempt_prompt.diagnostic_summary if isinstance(attempt_prompt, SourceStudyPrompt) else None)
+                if isinstance(attempt_prompt, SourceStudyPrompt):
+                    attempt_prompt.provider_failed(None)
                 logging.warning(f"LLM query returned empty content ({backend})")
             except Exception as exc:
+                if isinstance(attempt_prompt, SourceStudyPrompt):
+                    attempt_prompt.provider_failed(exc)
                 generation_record.record_attempt(gen, idx, backend, error=exc,
                     diagnostics=attempt_prompt.diagnostic_summary if isinstance(attempt_prompt, SourceStudyPrompt) else None)
                 if isinstance(exc, FallbackStubDelivery):

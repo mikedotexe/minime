@@ -39,6 +39,89 @@ def deliver(prompt, text, *, finish_reason="stop"):
     prompt.accepted()
 
 
+def test_final_admission_recovery_uses_shared_counts_and_preserves_pending(writing_agent):
+    _, client = writing_agent
+    prompt = client.prepare("WRITE START synthetic admission boundary")
+    state_path = client.workspace / "diagnostics/source_first_v3/shared_reader/writing/drafts-v2.json"
+    before = state_path.read_bytes()
+    for system in ("s" * 48_000, "s" * 47_999):
+        with pytest.raises(ValueError, match="does not fit"):
+            prompt.messages(system, 48_000)
+    recovery = prompt.final_admission_recovery()
+    assert recovery["code"] == "final_request_too_large"
+    assert recovery["draft"] == "d1"
+    assert recovery["final_capacity"] == {
+        "prepared_input_bytes": len(prompt.encode("utf-8")),
+        "system_bytes": 47_999, "wrapper_bytes": 0, "allowance_bytes": 48_000,
+    }
+    assert "WRITE READ d1 1" in recovery["commands"]
+    assert "WRITE CONTINUE" not in recovery["commands"]
+    assert state_path.read_bytes() == before
+    assert client.prepare("WRITE CONTINUE").output == prompt.output
+    prompt.messages(prompt.output["system_prompt"], 48_000)
+    assert prompt.final_admission_recovery() is None
+    with pytest.raises(ValueError):
+        prompt.messages("s" * 48_000, 48_000)
+    assert prompt.final_admission_recovery() is None  # Earlier admitted lane may have executed.
+
+
+def test_runtime_capacity_notice_does_not_offer_unchanged_retry(writing_agent, monkeypatch):
+    agent, client = writing_agent
+    offered = []
+
+    def refused(prompt, **kwargs):
+        offered.append(prompt)
+        prompt.messages("s" * 48_000, 48_000)
+
+    monkeypatch.setattr(agent, "_query_llm", refused)
+    agent._pending_next_action = "WRITE START synthetic final request"
+    agent._persist_pending_next_action(agent._pending_next_action, reason="synthetic authored choice")
+    assert agent._decide_action(dict(STATE)) == "self_study"
+    agent._execute_action("self_study", dict(STATE), _from_llm_job=True)
+    notices = list((client.workspace / "private_writing/journal").glob("notice_*.txt"))
+    assert len(notices) == 1
+    text = notices[0].read_text()
+    assert "final_request_too_large" in text
+    assert "WRITE READ d1 1" in text
+    assert '"WRITE CONTINUE"' not in text
+    assert not agent._pending_next_action
+    assert offered[0].receipt is None
+    assert not any("synthetic final request" in p.read_text() for p in (client.workspace / "journal").glob("*.txt"))
+
+
+def test_final_admission_counts_utf8_bytes_and_keeps_fallback_source_exact(writing_agent):
+    _, client = writing_agent
+    prompt = client.prepare("WRITE START synthetic unicode boundary")
+    system = "\u03bb" * 500
+    complete = len((system + prompt).encode("utf-8"))
+    with pytest.raises(ValueError):
+        prompt.messages(system, complete - 1)
+    messages, _ = prompt.messages(system, complete)
+    assert messages[1]["content"] == str(prompt)
+    assert prompt.final_admission_recovery() is None
+
+
+def test_old_helper_cannot_silently_offer_retry_for_final_capacity_refusal():
+    client = Mock()
+    client.call.return_value = {"code": "pending_generation_available", "commands": ["WRITE CONTINUE"]}
+    prompt = SourceStudyPrompt(client, {"text": "Synthetic source", "input_kind": "private_writing", "navigation_id": "writing-1"})
+    with pytest.raises(ValueError):
+        prompt.messages("s" * 100, 50)
+    with pytest.raises(RuntimeError, match="no unchanged retry"):
+        prompt.final_admission_recovery()
+
+
+def test_unknown_lane_failure_is_not_reclassified_as_capacity_only(writing_agent):
+    _, client = writing_agent
+    prompt = client.prepare("WRITE START synthetic fallback uncertainty")
+    with pytest.raises(ValueError) as refusal:
+        prompt.messages("s" * 48_000, 48_000)
+    prompt.provider_failed(refusal.value)
+    assert prompt.final_admission_recovery()["code"] == "final_request_too_large"
+    prompt.provider_failed(RuntimeError("synthetic unknown route failure"))
+    assert prompt.final_admission_recovery() is None
+
+
 def test_reflection_can_explicitly_become_private_continuation(writing_agent, monkeypatch):
     agent, client = writing_agent
     offers = []

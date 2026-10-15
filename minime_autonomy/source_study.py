@@ -64,6 +64,10 @@ class StudyError(RuntimeError):
         self.writing_recovery = recovery
 
 
+class WritingAdmissionRefused(ValueError):
+    """Known final byte-limit refusal, before any submission on this lane."""
+
+
 class StudyClient:
     def __init__(self, minime_root: Path, workspace: Path, *, astrid_root: Path | None = None,
                  executable: Path | None = None):
@@ -150,6 +154,9 @@ class SourceStudyPrompt(str):
         value._cleaned_wire_sha256 = None
         value._diagnostics = None
         value.mailbox_notice = None
+        value._capacity_refusals = []
+        value._lane_admitted = False
+        value._unknown_provider_failure = False
         return value
 
     @property
@@ -162,13 +169,41 @@ class SourceStudyPrompt(str):
 
     def messages(self, system: str, budget: int) -> tuple[list[dict[str, str]], dict[str, Any]]:
         if len((system + self).encode("utf-8")) > budget:
+            if self.output.get("input_kind") == "private_writing":
+                self._capacity_refusals.append({
+                    "prepared_input_bytes": len(self.encode("utf-8")),
+                    "system_bytes": len(system.encode("utf-8")),
+                    "wrapper_bytes": 0, "allowance_bytes": budget,
+                })
+                raise WritingAdmissionRefused("complete private input does not fit this provider lane; draft unchanged")
             raise ValueError("complete source page does not fit this provider lane; bookmark unchanged")
+        self._lane_admitted = True
         return [{"role": "system", "content": system}, {"role": "user", "content": str(self)}], {
             "adapted_prompt_chars": len(self), "adapted_system_chars": len(system),
             "prompt_template_mode": "source_study_intact", "prompt_compacted": False,
             "prompt_compaction": {"applied": False, "parts": [], "budget_chars": budget},
             "protected_inbox_chars": 0,
         }
+
+    def final_admission_recovery(self):
+        """Rust validates the retained identity and owns the recovery commands.
+
+        An admitted lane may have executed; a later fallback refusal must not
+        misclassify that uncertainty as a capacity-only failure.
+        """
+        if self._lane_admitted or self._unknown_provider_failure or not self._capacity_refusals:
+            return None
+        capacity = min(self._capacity_refusals, key=lambda c:
+                       c["prepared_input_bytes"] + c["system_bytes"] - c["allowance_bytes"])
+        recovery = self.client.call(operation="writing_recovery",
+            input_id=self.output.get("navigation_id") or "", final_capacity=capacity)
+        if recovery.get("code") == "pending_generation_available":
+            raise RuntimeError("selected reader lacks final-request capacity recovery; no unchanged retry is offered")
+        return recovery
+
+    def provider_failed(self, error):
+        if not isinstance(error, WritingAdmissionRefused):
+            self._unknown_provider_failure = True
 
     def post(self, post, url: str, payload: dict[str, Any], timeout: float):
         # A reused prompt/fallback cannot retain authorization from an earlier
