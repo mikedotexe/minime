@@ -96,5 +96,21 @@ of operational continuity, not longer writing or subjective improvement.
 Local integration uses a separate `codex/writing-admission-integration-20261015`
 checkout with exactly seven reviewed paths; pinned release-source checkouts and
 unfinished work remain unchanged. One coordinator holds pause generation 525.
-Commit identities and final checks follow after integration; no push is authorized
-by this local-integration approval.
+Local main was fast-forwarded to implementation commit
+`38e0c292e89edcee2f45a27e3c22804b43b173d2`, paired with Astrid
+`eb59e830cb34a5901c35d72e644c6753542fde44`. All staged bytes were checked; the
+three already-installed adapter blobs matched the destination commit exactly
+before explicit-path staging allowed the fast-forward. Both canonical indexes
+and worktrees are clean. Original source pins and unfinished work remain intact.
+
+Pre-commit reruns passed 36 Minime continuation tests from the integration
+checkout against the immutable helper, plus seven shared-writer and four bridge
+admission tests against identical pinned source. Post-merge checks again match
+all 97 loaded/installed Minime inputs, the selected helper, launch configuration,
+pending-NEXT restoration evidence and protected process identities. Receipt
+`rollout-after-git.json` SHA-256:
+`45603be83342d2d7b95808e3da03239255981bf3282a155c05560dfa78942406`.
+
+The controller remains paused at generation 525 with no lease; V2 integrity and
+V1 immutability pass. No push was authorized or performed. This documentation-only
+follow-up does not change runtime source, capacity or the qualified release.

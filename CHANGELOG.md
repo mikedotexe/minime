@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Integrated locally: writing admission (2026-10-15, Codex).** Fast-forward implementation `38e0c292e89e` into main, paired with Astrid `eb59e830cb34`. Verify exact installed adapter blobs, all 97 loaded inputs, helper selection and unchanged protected services. Canonical tree/index clean; no push, capacity change or automation resume. Final receipts: `docs/steward-notes/2026-10-14-writing-admission-and-guidance.md`.
+
 - **Live: truthful final-writing recovery (2026-10-15, Codex).** Approved paired graceful rollout replaces agent PID 96802 with 82314 after a verified idle boundary and native NEXT seal; all 97 loaded inputs and the qualified helper match. Pending choice and session continuity are preserved, with no force, history rollback, capacity increase or automation resume. Protected services remain unchanged. Evidence: `docs/steward-notes/2026-10-14-writing-admission-and-guidance.md`.
 
 - **Qualified, not activated: final writing admission pair (2026-10-14, Codex).** Reconcile all 97 launch inputs, preserving the installed regulation repair, and pass 169 immutable paired checks plus the complete 2,188-test Python suite with 163 subtests against the staged helper. Retain old/new pending inputs, private boundaries and generation-free parking; preserve the initial test-harness failure. No restart, integration, capacity increase or automation resume. Evidence and fresh paired approval boundary: `docs/steward-notes/2026-10-14-writing-admission-and-guidance.md`.
