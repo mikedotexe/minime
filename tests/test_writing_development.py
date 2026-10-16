@@ -24,7 +24,7 @@ def test_branch_park_return_and_finish_without_forced_closure(writing_agent, mon
         assert "WRITE PROFILE EXTENDED applies" not in prompt
         assert "WRITE OBSERVE typed JSON" not in prompt
         if action == "WRITE BRANCH an alternative" or action == "WRITE RESUME d2":
-            assert "Return to parent draft: WRITE RESUME d1" in prompt
+            assert "Return-and-write to parent draft: WRITE RESUME d1" in prompt
             assert "Original synthetic question, still open." in prompt
         if action == "WRITE START unrelated work":
             assert "Original synthetic question" not in prompt

@@ -114,6 +114,11 @@ from .journal_context import (
     visual_observation,
 )
 from . import collaboration_attention as collab_attention
+from .continuity_snapshot import EvidenceUnavailable, StableSnapshot, valid_identifier
+from .deliberate_comparison import (
+    inspect_local_experiment, read_comparison_side, render_comparison, render_peer_inspection,
+)
+from .return_support import saved_return_support, return_support_line, retired_heuristic_line, unavailable_return_support
 
 
 # v5.1 Phase E used int(time.time()/60) as an exchange_count proxy because
@@ -6219,23 +6224,31 @@ class ActionContinuityStore:
         return f"continuity_session_v1:\n{json.dumps(summary, indent=2, sort_keys=True, ensure_ascii=False)}"
 
     def experiment_status(self, selector: Optional[str] = None) -> str:
-        thread = self.ensure_active_thread()
         peer = self._peer_experiment_ref(selector or "")
         if peer:
-            return self.record_peer_experiment_reference(peer, "EXPERIMENT_STATUS")["message"]
-        if self._selector_is_current(selector) and not thread.get("active_experiment_id"):
+            return self._inspect_peer_experiment(peer, "EXPERIMENT_STATUS")
+        try:
+            thread, experiment = inspect_local_experiment(
+                self.root, self.system, self._normalize_experiment_selector(selector),
+            )
+        except EvidenceUnavailable as exc:
+            return f"Experiment status unavailable: {exc}. No thread or experiment was selected or revised."
+        if experiment is None:
             return self._no_active_experiment_message(thread, "EXPERIMENT_STATUS")
-        experiment = self._resolve_experiment(thread, selector)
         return self._format_experiment_status(thread, experiment)
 
     def experiment_review(self, selector: Optional[str] = None) -> str:
-        thread = self.ensure_active_thread()
         peer = self._peer_experiment_ref(selector or "")
         if peer:
-            return self.record_peer_experiment_reference(peer, "EXPERIMENT_REVIEW")["message"]
-        if self._selector_is_current(selector) and not thread.get("active_experiment_id"):
+            return self._inspect_peer_experiment(peer, "EXPERIMENT_REVIEW")
+        try:
+            thread, experiment = inspect_local_experiment(
+                self.root, self.system, self._normalize_experiment_selector(selector),
+            )
+        except EvidenceUnavailable as exc:
+            return f"Experiment review unavailable: {exc}. No thread or experiment was selected or revised."
+        if experiment is None:
             return self._no_active_experiment_message(thread, "EXPERIMENT_REVIEW")
-        experiment = self._resolve_experiment(thread, selector)
         runs = self._recent_experiment_runs(thread["thread_id"], experiment["experiment_id"], 5)
         run_text = self._render_run_list(runs)
         projection_experiment = self._experiment_projection(thread, experiment, runs)
@@ -6316,6 +6329,8 @@ class ActionContinuityStore:
             f"{projection_experiment['evidence_status']}\n"
             f"{projection_experiment['candidate_status']}\n"
             f"{self._native_continuity_status_line(projection_experiment)}"
+            f"{return_support_line(projection_experiment['return_support_v1'])}"
+            f"{retired_heuristic_line(experiment.get('motif_allowance_v1'), *(run.get('motif_allowance_v1') for run in runs))}"
             f"Learned so far:\n{run_text}\n\n"
             "Review lens: completion is strong when felt evidence and telemetry/artifact evidence both exist; otherwise classify it as thin rather than failed.\n"
             "Agency options: accept, refuse, counter, pause, or complete. Ordinary choices remain valid.\n\n"
@@ -6627,7 +6642,8 @@ class ActionContinuityStore:
                 )
         experiment = self._select_existing_experiment(thread, experiment, self._now())
         return (
-            f"Resumed experiment `{experiment['experiment_id']}`: {experiment.get('title', '')}\n"
+            f"Resumed experiment context `{experiment['experiment_id']}`: {experiment.get('title', '')}\n"
+            "Context selected; saved next action was not executed. Existing execution gates still apply.\n"
             f"Question: {experiment.get('question', '')}\n"
             f"{self._experiment_resume_report_next_line(experiment)}"
         )
@@ -6642,40 +6658,26 @@ class ActionContinuityStore:
                 "(resume already reselected this experiment; review, status, branch, close, or ordinary journaling "
                 "is a better next step than repeating the same resume)"
             )
-        return f"Next: {planned_next or 'EXPERIMENT_PLAN current'}"
+        return f"Saved next (not executed): {planned_next or '(none)'}"
 
     def experiment_compare(self, raw: str) -> str:
-        thread = self.ensure_active_thread()
         left_selector, right_selector = self._parse_experiment_compare(raw)
-        left = self._resolve_experiment(thread, left_selector)
-        left_runs = self._recent_experiment_runs(thread["thread_id"], left["experiment_id"], 4)
-        if right_selector and self._peer_experiment_ref(right_selector):
-            right = self.record_peer_experiment_reference(
-                self._peer_experiment_ref(right_selector),
-                "EXPERIMENT_COMPARE",
-            )["message"]
-            shared = self._shared_investigation_v1(left)
-        else:
-            right_exp = self._resolve_experiment(thread, right_selector)
-            right_runs = self._recent_experiment_runs(thread["thread_id"], right_exp["experiment_id"], 4)
-            right = (
-                f"Local comparison target `{right_exp['experiment_id']}`: {right_exp.get('title', '')}\n"
-                f"Question: {right_exp.get('question', '')}\n"
-                f"Latest runs:\n{self._render_run_list(right_runs)}"
-            )
-            shared = None
-        allowance = self._motif_allowance_snapshot(thread["thread_id"], left["experiment_id"])
-        return (
-            "Experiment comparison\n"
-            f"Left `{left['experiment_id']}`: {left.get('title', '')}\n"
-            f"Question: {left.get('question', '')}\n"
-            f"Latest runs:\n{self._render_run_list(left_runs)}\n\n"
-            f"Right:\n{right}\n\n"
-            f"{self._shared_investigation_response_contract(shared)}"
-            f"Motif allowance: {allowance.get('quality', 'open_basin')} "
-            f"(returnability={allowance.get('returnability')})\n"
-            f"Suggested next: EXPERIMENT_ALT_PATHS {left['experiment_id']}"
+
+        def read_side(selector):
+            peer = self._peer_experiment_ref(selector or "")
+            owner = peer["peer_system"] if peer else self.system
+            root = self._peer_workspace_dir(owner) / "action_threads" if peer else self.root
+            return read_comparison_side(root, owner, selector)
+
+        return render_comparison(read_side(left_selector), read_side(right_selector), self.system)
+
+    def _inspect_peer_experiment(self, peer: Dict[str, Any], command: str) -> str:
+        side = read_comparison_side(
+            self._peer_workspace_dir(peer["peer_system"]) / "action_threads",
+            peer["peer_system"],
+            peer["peer_experiment_id"],
         )
+        return render_peer_inspection(side, command)
 
     def shared_investigation_start(self, raw: str) -> str:
         thread = self.ensure_active_thread()
@@ -6899,7 +6901,7 @@ class ActionContinuityStore:
             "Three non-executing paths:\n"
             f"- Deepen: EXPERIMENT_BIND current :: ACTION_PREFLIGHT {dominant_action} {dominant_motif}\n"
             f"- Contrast: EXPERIMENT_BRANCH Contrast {experiment.get('title', 'experiment')} :: What changes when this inquiry is compared against a different motif or source?\n"
-            f"- Rest/observe: EXPERIMENT_OBSERVE current :: Hold the {dominant_motif} motif without executing; note whether returnability improves.\n\n"
+            f"- Rest/inspect: EXPERIMENT_STATUS {experiment['experiment_id']} inspects saved material; no observation is required.\n\n"
             f"Return point remains: EXPERIMENT_RESUME {experiment['experiment_id']}"
         )
 
@@ -7098,8 +7100,7 @@ class ActionContinuityStore:
                 allowance_line = (
                     f"Motif allowance: {allowance.get('quality', 'open_basin')} "
                     f"dominant={allowance.get('dominant_motif', 'open inquiry')} "
-                    f"action_concentration={allowance.get('action_base_concentration')} "
-                    f"returnability={allowance.get('returnability')}\n"
+                    f"action_concentration={allowance.get('action_base_concentration')}\n"
                     "Allowance culture: deepen, branch, compare, release, rest, or hold space are all valid; branching preserves the original return point.\n"
                 )
             preflight_line = self._preflight_recommendation_line(thread)
@@ -7142,6 +7143,7 @@ class ActionContinuityStore:
                 f"{fluctuation_line}"
                 f"{experiment_line}"
                 f"{allowance_line}"
+                f"{return_support_line(projection['return_support_v1'])}"
                 f"{self._continuity_return_render_line(projection, compact=True)}"
                 f"{native_return}"
                 f"{self._stale_projection_line(projection)}"
@@ -7228,7 +7230,14 @@ class ActionContinuityStore:
     ) -> Dict[str, Any]:
         events = self._recent_events(thread_id, 18)
         runs = self._recent_experiment_runs(thread_id, experiment_id, 18) if experiment_id else []
-        experiments = self._latest_experiments(thread_id)
+        try:
+            snapshot = StableSnapshot()
+            rows, _ = snapshot.jsonl(self._experiments_path(thread_id))
+            snapshot.verify()
+            experiments = list({row["experiment_id"]: row for row in rows
+                                if isinstance(row.get("experiment_id"), str)}.values())
+        except EvidenceUnavailable:
+            experiments = []
         branch_count = sum(
             1
             for experiment in experiments
@@ -7283,7 +7292,12 @@ class ActionContinuityStore:
             for event in events
             if "peer" in str(event.get("outcome_summary", "")).lower()
         ) / max(1, len(events))
-        thread = self._read_thread(thread_id) or {}
+        try:
+            snapshot = StableSnapshot()
+            thread = snapshot.json(self._thread_dir(thread_id) / "thread.json")
+            snapshot.verify()
+        except EvidenceUnavailable:
+            thread = {}
         pressure_quality = (
             (thread.get("thread_pressure_source_v1") or {}).get("quality")
             if isinstance(thread.get("thread_pressure_source_v1"), dict)
@@ -7294,7 +7308,6 @@ class ActionContinuityStore:
             if isinstance(thread.get("thread_inhabitable_fluctuation_v1"), dict)
             else "unavailable"
         )
-        returnability = 0.78 if (thread.get("current_next") or experiment_id) else 0.45
         pressure_rest = (
             "high" in str(pressure_quality)
             or "pressurized" in str(pressure_quality)
@@ -7329,12 +7342,24 @@ class ActionContinuityStore:
             "source_read_concentration": round(source_concentration, 4),
             "peer_echo_recurrence": round(peer_echo, 4),
             "branch_count": branch_count,
-            "returnability": round(returnability, 4),
+            "return_support_v1": self._return_support_v1(thread, experiment_id, thread_id=thread_id),
             "pressure_quality": pressure_quality,
             "inhabitable_fluctuation_quality": fluctuation_quality,
             "advisory_only": True,
             "suggested_actions": self._allowance_suggestions(quality, experiment_selector),
         }
+
+    def _return_support_v1(self, thread, experiment_id=None, *, thread_id=None):
+        thread_id = thread_id or thread["thread_id"]
+        if not valid_identifier(thread_id):
+            return unavailable_return_support(experiment_id)
+        return saved_return_support(
+            self._thread_dir(thread_id) / "thread.json",
+            self._experiments_path(thread_id),
+            experiment_id,
+            self._paused_primary_return_v1,
+            self.system,
+        )
 
     @staticmethod
     def _motif_label(text: str) -> Optional[str]:
@@ -8326,8 +8351,7 @@ class ActionContinuityStore:
         if isinstance(allowance, dict):
             allowance_text = (
                 f"\nMotif allowance: {allowance.get('quality', 'open_basin')} "
-                f"dominant={allowance.get('dominant_motif', 'open inquiry')} "
-                f"returnability={allowance.get('returnability')}\n"
+                f"dominant={allowance.get('dominant_motif', 'open inquiry')}\n"
             )
         body = (
             f"# {thread.get('title', '')}\n\n"
@@ -8354,6 +8378,7 @@ class ActionContinuityStore:
             f"Why return: {thread.get('why_return', '')}\n\n"
             f"{experiment_text}"
             f"{allowance_text}"
+            f"{return_support_line(projection['return_support_v1'])}"
             f"{self._continuity_return_render_line(projection, compact=True)}"
             f"{self._native_return_cue_line(projection)}"
             f"{self._stale_projection_line(projection)}"
@@ -16813,8 +16838,9 @@ class ActionContinuityStore:
             f"{'' if projection_experiment.get('classification') == 'needs_charter' else self._charter_scaffold_line(projection_experiment)}"
             f"Motif allowance: {allowance.get('quality', 'open_basin')} "
             f"dominant={allowance.get('dominant_motif')} "
-            f"action_concentration={allowance.get('action_base_concentration')} "
-            f"returnability={allowance.get('returnability')}\n"
+            f"action_concentration={allowance.get('action_base_concentration')}\n"
+            f"{return_support_line(allowance['return_support_v1'])}"
+            f"{retired_heuristic_line(experiment.get('motif_allowance_v1'), *(run.get('motif_allowance_v1') for run in runs))}"
             f"Latest runs:\n{run_text}"
         )
 
@@ -17524,6 +17550,7 @@ class ActionContinuityStore:
             "continuity_session_draft_v1": continuity_session_draft,
             "projection_freshness_v1": thread.get("projection_freshness_v1"),
             "native_continuity_v1": native_continuity,
+            "return_support_v1": self._return_support_v1(thread),
             "recent_events": recent_events,
             "recent_event_summaries": [
                 f"{event.get('effective_action')} [{event.get('status')}]: {event.get('outcome_summary', '')}"
@@ -17582,6 +17609,7 @@ class ActionContinuityStore:
             "classification": classification,
             "continuity_return": self._continuity_return_command(thread, experiment, runs),
             "native_continuity_v1": self._native_continuity_projection(thread, experiment, runs),
+            "return_support_v1": self._return_support_v1(thread, experiment.get("experiment_id")),
             "research_dossier_v1": self._research_dossier_summary_v1(thread, experiment),
             "being_memory_v1": self._being_memory_summary_v1(thread, experiment),
             "charter_quality_v1": charter_quality,
@@ -18908,14 +18936,9 @@ class ActionContinuityStore:
             if isinstance(run, dict) and self.base_action(run.get("action_text") or "")
         )
         recurrence_count = max(action_counts.values(), default=0)
-        native_return_cue = (
-            "Minime native return: state spectral condition, fill/pressure state, "
-            "recurrence pattern, and artifact grounding."
-        )
         return {
             "schema_version": 1,
             "native_register": "minime_spectral_state",
-            "native_return_cue": native_return_cue,
             "evidence_lanes": {
                 "spectral_condition": {
                     "status": "present" if resonance or telemetry_count else "missing",
@@ -18947,9 +18970,8 @@ class ActionContinuityStore:
 
     @classmethod
     def _native_return_cue_line(cls, projection_or_native: Dict[str, Any]) -> str:
-        native = cls._native_value(projection_or_native)
-        cue = native.get("native_return_cue") if isinstance(native, dict) else ""
-        return f"Native return: {cue}\n" if isinstance(cue, str) and cue.strip() else ""
+        # Legacy projections may retain prescriptive cues; never replay them as orientation.
+        return ""
 
     @classmethod
     def _native_continuity_status_line(cls, projection_or_native: Dict[str, Any]) -> str:
@@ -20055,8 +20077,7 @@ class ActionContinuityStore:
             allowance_text = (
                 f"Motif allowance: {allowance.get('quality', 'open_basin')} "
                 f"dominant={allowance.get('dominant_motif', 'open inquiry')} "
-                f"action_concentration={allowance.get('action_base_concentration')} "
-                f"returnability={allowance.get('returnability')}"
+                f"action_concentration={allowance.get('action_base_concentration')}"
             )
         continuity_return = str(projection.get("continuity_return_line") or "").rstrip()
         native_status = self._native_continuity_status_line(projection).rstrip()
@@ -20094,6 +20115,8 @@ class ActionContinuityStore:
             f"{pressure_text}\n"
             f"{fluctuation_text}\n"
             f"{allowance_text}\n"
+            f"{return_support_line(projection['return_support_v1'])}"
+            f"{retired_heuristic_line(allowance)}"
             f"{continuity_return + chr(10) if continuity_return else ''}"
             f"{native_status + chr(10) if native_status else ''}"
             f"{self._stale_projection_line(projection)}"

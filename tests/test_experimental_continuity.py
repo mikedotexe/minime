@@ -2417,7 +2417,8 @@ class TestExperimentalContinuityStore(unittest.TestCase):
                 projection["native_continuity_v1"]["native_register"],
                 "minime_spectral_state",
             )
-            self.assertIn("Native return: Minime native return", store.prompt_summary())
+            self.assertNotIn("Native return:", store.prompt_summary())
+            self.assertIn("Return support (return_support_v1)", store.prompt_summary())
             status = store._format_thread_status(stored)
             self.assertIn("Lifecycle: needs_charter", status)
             self.assertIn("Continuity return: EXPERIMENT_CHARTER current", status)
