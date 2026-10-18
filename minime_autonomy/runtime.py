@@ -23,7 +23,7 @@ import fcntl
 import sqlite3
 import logging
 from minime_autonomy import writing, maintenance_next
-from minime_autonomy import source_status
+from minime_autonomy import source_status, action_scheduling
 from minime_autonomy.source_study import StudyClient, SourceStudyPrompt, SOURCE_STUDY_GUIDANCE
 from minime_autonomy.study_feedback import StudyFeedback, delivery_origin
 from uuid import uuid4
@@ -23213,6 +23213,7 @@ class AutonomousAgent:
                 self.cycle_count = int(getattr(self, "cycle_count", 0) or 0) + 1
                 self._refresh_session_context()
                 self._lifecycle_phase = "busy"
+                action_scheduling.observation(self, "cycle_started")
                 self._check_source_reload_required("loop")
                 self._apply_pending_next_override_if_present("loop")
 
@@ -23234,6 +23235,7 @@ class AutonomousAgent:
                                 self.last_action_time = time.time()
                                 active_llm_job = self._llm_job_store().active_primary_job()
                         if active_llm_job:
+                            action_scheduling.observation(self, "primary_job_active")
                             logging.info(
                                 "LLM job active: %s [%s, elapsed %s]",
                                 active_llm_job.get("job_id"),
@@ -23283,9 +23285,10 @@ class AutonomousAgent:
                     action_ready = self._can_act()
                     action = None
                     if self._pending_next_action and not action_ready:
+                        action_scheduling.observation(self, "next_waiting_for_action_slot")
                         logging.info(
                             "🎯 Pending NEXT waiting for action slot: %s",
-                            self._pending_next_action,
+                            writing.diagnostic_action(self._pending_next_action),
                         )
                     else:
                         action = self._decide_action(spectral_state)
@@ -23296,6 +23299,7 @@ class AutonomousAgent:
                     if action and action_ready:
                         # Execute autonomous action
                         self._execute_action(action, spectral_state)
+                        action_scheduling.observation(self, "action_dispatched_completion_separate")
                         self.last_action_time = time.time()
 
                     # Diagnostic sentinel on separate 15-minute schedule. It only
@@ -23305,7 +23309,7 @@ class AutonomousAgent:
                         if self._pending_next_action:
                             logging.info(
                                 "🔬 Self-assessment deferred while pending NEXT waits: %s",
-                                self._pending_next_action,
+                                writing.diagnostic_action(self._pending_next_action),
                             )
                         elif action:
                             logging.info(
@@ -23326,6 +23330,9 @@ class AutonomousAgent:
                                 )
                             last_assessment_time = time.time()
 
+                else:
+                    action_scheduling.observation(self, "telemetry_unavailable")
+
                 # Check for visual responses
                 if self.running and not self._attention_protected():
                     self._check_visual_responses()
@@ -23333,6 +23340,7 @@ class AutonomousAgent:
                 self._sleep_or_stop(self.check_interval)
 
             except Exception as e:
+                action_scheduling.observation(self, "loop_error")
                 logging.error(f"Autonomous agent error: {e}")
                 self._sleep_or_stop(10)
 
@@ -24734,6 +24742,7 @@ Fill: {fill:.1f}%
             self._execute_action(route, dict(state))
         return None
 
+    @action_scheduling.decision
     @maintenance_next.decision
     def _decide_action(self, state: Dict[str, float], _allow_multi: bool = True,
                        *, _derived_action: Optional[str] = None) -> Optional[str]:
@@ -24766,6 +24775,7 @@ Fill: {fill:.1f}%
             self._apply_pending_next_override_if_present("pre-dispatch")
             self._recover_activity_choice()
             if self._attention_protected() and not self._pending_next_action:
+                action_scheduling.observation(self, "protected_work_waiting_for_choice_or_completion")
                 return None
 
         # v4.0 Phase 4: multi-action AND-chain detection.
@@ -25213,6 +25223,7 @@ Fill: {fill:.1f}%
                     chosen,
                     charter_guard.get("reason"),
                 )
+                action_scheduling.observation(self, "charter_admission_blocked")
                 return None
             live_guard_fn = getattr(self._continuity_store(), "live_control_guard_assessment", None)
             live_guard = live_guard_fn(chosen) if callable(live_guard_fn) else None
@@ -25246,6 +25257,7 @@ Fill: {fill:.1f}%
                     chosen,
                     live_guard.get("reason"),
                 )
+                action_scheduling.observation(self, "live_control_admission_blocked")
                 return None
             evidence_guard_fn = getattr(
                 self._continuity_store(),
@@ -25283,6 +25295,7 @@ Fill: {fill:.1f}%
                     chosen,
                     evidence_guard.get("reason"),
                 )
+                action_scheduling.observation(self, "evidence_admission_blocked")
                 return None
             research_guard_fn = getattr(
                 self._continuity_store(),
@@ -25333,6 +25346,7 @@ Fill: {fill:.1f}%
                     chosen,
                     research_guard.get("reason"),
                 )
+                action_scheduling.observation(self, "research_budget_admission_blocked")
                 return None
             if base in ACTIVITY_COMMANDS:
                 return {"CHECK_MAILBOX": "mailbox_read", "MAILBOX_STATUS": "mailbox_status"}.get(base, "activity_focus")
@@ -26053,6 +26067,7 @@ Fill: {fill:.1f}%
                 return mapped
 
             if base in ('PASS', 'REST'):
+                action_scheduling.observation(self, "explicit_rest")
                 logging.info(f"🎯 Being chose {base} — skipping action")
                 self._record_skipped_next_action(chosen, base, state)
                 self._pending_action_continuity_context = None
@@ -26270,6 +26285,7 @@ Fill: {fill:.1f}%
             if eig1 < T.metabolism_low or (hi_low < eig1 < hi_high):
                 return 'adjust_metabolism'
 
+        action_scheduling.observation(self, "no_next_no_threshold_action")
         return None
 
     def _can_act(self) -> bool:
@@ -27898,14 +27914,14 @@ NOTE: If your fill is below 35%, "recover" is strongly recommended by the existi
 - "reservoir_read": inspect your triple-ESN reservoir handle
 - "reservoir_resonance": measure alignment with Astrid's reservoir
 - "self_study": read your own source code
-- "introspect": targeted read-only source/workspace self-study
+- "introspect": open reflection, distinct from source-code self-study
 
 These are YOUR choices about YOUR experience. Consider the actual consequences of past adjustments.
 
 Reply with ONLY a JSON object. The "regime" field is REQUIRED:
 {{"regulation_strength": <float>, "exploration_noise": <float>, "geom_curiosity": <float>, "regime": "<explore|recover|breathe|focus|calm>", "action": "<optional action name>", "reason": "<one sentence>"}}"""
 
-            response = self._query_llm_with_next(prompt, context_mode="regulation_review")[0]
+            response, response_next = self._query_llm_with_next(prompt, context_mode="regulation_review")
             if response:
                 try:
                     import re
@@ -28042,12 +28058,9 @@ Reply with ONLY a JSON object. The "regime" field is REQUIRED:
                                 self._save_sovereignty_state(control_msg, reason, fill_pct=fill * 100)
                             except Exception as e:
                                 logging.warning(f"Sovereignty WebSocket failed: {e}")
-                        # Being-requested action — override next _decide_action
-                        requested_action = params.get('action', '')
-                        if requested_action in ('self_experiment', 'compose_audio',
-                                'reservoir_read', 'reservoir_resonance', 'self_study', 'introspect'):
-                            self._sovereignty_requested_action = requested_action
-                            logging.info(f"🧠 Being requested action: {requested_action}")
+                        action_scheduling.queue_regulation_request(
+                            self, params.get('action'), response_next=response_next, response=response,
+                        )
                 except (json.JSONDecodeError, ValueError, TypeError) as e:
                     logging.debug(f"Sovereignty parse failed: {e}")
 
@@ -48700,6 +48713,7 @@ Goals: {json.dumps(goals, indent=2)}
             "source_changed_since_start": changed,
             "reload_required": changed,
             "llm_jobs": llm_jobs_status,
+            "action_scheduler_v1": action_scheduling.snapshot(self),
             "reload_note": (
                 "The live Python autonomous agent predates the source now on disk; "
                 "restart only the Python agent before validating newly added actions."
@@ -48870,6 +48884,7 @@ Goals: {json.dumps(goals, indent=2)}
         study_origin: Optional[dict] = None,
         expected_selection_id: Optional[str] = None,
         only_if_unqueued: bool = False,
+        queue_envelope: Optional[dict] = None,
     ) -> Optional[str]:
         """Keep persisted NEXT: state in sync with the in-memory queue."""
         if not hasattr(self, "session_id"):
@@ -48892,7 +48907,7 @@ Goals: {json.dumps(goals, indent=2)}
                     self._pending_choice_envelope_v1 = state.get("choice_envelope_v1")
                     return None
                 self._pending_next_action = action
-                self._pending_choice_envelope_v1 = None
+                self._pending_choice_envelope_v1 = queue_envelope
             strict_admission = reason == "selected_for_admission" and hasattr(self, "_agent_boot_id")
             if strict_admission:
                 maintenance_next.require(bool(expected_action)
