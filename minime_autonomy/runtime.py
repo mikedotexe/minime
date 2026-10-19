@@ -8481,15 +8481,18 @@ class ActionContinuityStore:
         if journal_dir.exists():
             latest_mtime = 0
             total_size = 0
-            for path in journal_dir.glob("*.txt"):
-                if not path.is_file():
-                    continue
-                try:
-                    stat = path.stat()
-                except FileNotFoundError:
-                    continue
-                latest_mtime = max(latest_mtime, int(stat.st_mtime_ns))
-                total_size += int(stat.st_size)
+            # DirEntry reuses this scan's stat for symlink/type checks; every
+            # fingerprint call still enumerates and observes the directory anew.
+            with os.scandir(journal_dir) as entries:
+                for entry in entries:
+                    if not entry.name.endswith(".txt") or not entry.is_file():
+                        continue
+                    try:
+                        stat = entry.stat()
+                    except FileNotFoundError:
+                        continue
+                    latest_mtime = max(latest_mtime, int(stat.st_mtime_ns))
+                    total_size += int(stat.st_size)
             fingerprints["journal/*.txt"] = {"mtime_ns": latest_mtime, "size": total_size}
         else:
             fingerprints["journal/*.txt"] = {"mtime_ns": 0, "size": 0}
@@ -16978,6 +16981,8 @@ class ActionContinuityStore:
         self,
         thread_id: Optional[str],
         recent_events: List[Dict[str, Any]],
+        *,
+        terminal_jobs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         grouped: Dict[str, set[str]] = defaultdict(set)
         counts: Counter[str] = Counter()
@@ -16987,7 +16992,8 @@ class ActionContinuityStore:
         latest_status: Dict[str, str] = {}
         latest_action_id: Dict[str, str] = {}
         latest_terminal_job: Dict[str, Dict[str, Any]] = {}
-        terminal_jobs = self._terminal_jobs_by_action_id() if thread_id else {}
+        if terminal_jobs is None:
+            terminal_jobs = self._terminal_jobs_by_action_id() if thread_id else {}
         for event in recent_events or []:
             action = str(
                 event.get("effective_action")
@@ -17308,7 +17314,10 @@ class ActionContinuityStore:
     def _thread_projection(self, thread: Dict[str, Any]) -> Dict[str, Any]:
         """Canonical continuity projection for prompt/status/next surfaces."""
         thread_id = thread["thread_id"]
-        recent_events = self._recent_display_events(thread_id, 8)
+        # These diagnostic views share one bounded observation, never a cache
+        # across projections, writes, authority checks, or worker transactions.
+        display_events = self._recent_display_events(thread_id, 200)
+        recent_events = display_events[-8:]
         experiment_id = thread.get("active_experiment_id")
         last_summary = self._last_experiment_summary_v1(thread)
         active_experiment = None
@@ -17316,7 +17325,9 @@ class ActionContinuityStore:
             try:
                 experiment = self._resolve_experiment(thread, str(experiment_id))
                 runs = self._recent_experiment_runs(thread_id, experiment["experiment_id"], 8)
-                active_experiment = self._experiment_projection(thread, experiment, runs)
+                active_experiment = self._experiment_projection(
+                    thread, experiment, runs, recent_events=recent_events,
+                )
             except Exception:
                 active_experiment = None
         continuity_return = (
@@ -17336,7 +17347,7 @@ class ActionContinuityStore:
         )
         resume_loop_events = recent_events
         if current_next_status.get("status") == "shadowed_by_paused_summary":
-            resume_loop_events = self._recent_display_events(thread_id, 32)
+            resume_loop_events = display_events[-32:]
         paused_resume_loop_cue = self._paused_resume_loop_cue_v1(
             current_next_status,
             resume_loop_events,
@@ -17353,7 +17364,7 @@ class ActionContinuityStore:
                 continuity_return = str(current_next_status.get("effective_next") or "")
         review_loop_events = recent_events
         if current_next_status.get("status") == "shadowed_by_paused_summary":
-            review_loop_events = self._recent_display_events(thread_id, 96)
+            review_loop_events = display_events[-96:]
         paused_review_loop_cue = self._paused_review_loop_cue_v1(
             current_next_status,
             review_loop_events,
@@ -17469,10 +17480,12 @@ class ActionContinuityStore:
             if isinstance(active_experiment, dict)
             else self._being_memory_summary_v1(thread, None)
         )
-        thread_load_events = self._recent_display_events(thread_id, 96)
+        thread_load_events = display_events[-96:]
+        terminal_jobs = self._terminal_jobs_by_action_id()
         repeated_action_cadence = self._repeated_action_cadence_v1(
             thread_id,
             thread_load_events,
+            terminal_jobs=terminal_jobs,
         )
         thread_load_triage = self._thread_load_triage_v1(
             thread,
@@ -17515,7 +17528,9 @@ class ActionContinuityStore:
         continuity_session_draft = (
             continuity_session_drafts[-1] if continuity_session_drafts else None
         )
-        stale_running_diagnostics = self._stale_running_action_diagnostics(thread_id)
+        stale_running_diagnostics = self._stale_running_action_diagnostics(
+            thread_id, terminal_jobs=terminal_jobs,
+        )
         projection = {
             "schema_version": 1,
             "thread_id": thread_id,
@@ -17561,7 +17576,9 @@ class ActionContinuityStore:
                 for item in stale_running_diagnostics
             ),
             "stale_running_diagnostics": stale_running_diagnostics,
-            "top_actionable_proposals": self._proposal_diagnostics(thread_id, 6),
+            "top_actionable_proposals": self._proposal_diagnostics(
+                thread_id, 6, recent_events=display_events,
+            ),
         }
         projection["continuity_control_plane_v1"] = build_continuity_control_plane_v1(
             projection,
@@ -17584,6 +17601,8 @@ class ActionContinuityStore:
         thread: Dict[str, Any],
         experiment: Dict[str, Any],
         runs: Optional[List[Dict[str, Any]]] = None,
+        *,
+        recent_events: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         runs = runs if runs is not None else self._recent_experiment_runs(
             thread["thread_id"], experiment["experiment_id"], 8
@@ -17651,10 +17670,12 @@ class ActionContinuityStore:
         )
         if shared_investigation_object:
             projected["shared_investigation_object_v1"] = shared_investigation_object
+        if recent_events is None:
+            recent_events = self._recent_display_events(thread["thread_id"], 8)
         paused_replan_loop_cue = self._paused_replan_loop_cue_v1(
             thread,
             experiment,
-            self._recent_display_events(thread["thread_id"], 8),
+            recent_events,
         )
         first_dossier_claim_cue = self._first_dossier_claim_cue_v1(
             thread,
@@ -17670,7 +17691,7 @@ class ActionContinuityStore:
         decision_plan_loop = self._needs_decision_plan_loop_cue_v1(
             thread,
             projected,
-            self._recent_display_events(thread["thread_id"], 8),
+            recent_events,
         )
         if decision_plan_loop:
             projected["needs_decision_plan_loop_cue_v1"] = decision_plan_loop
@@ -18832,10 +18853,13 @@ class ActionContinuityStore:
         self,
         thread_id: str,
         stale_minutes: int = 45,
+        *,
+        terminal_jobs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=stale_minutes)
         events = self._recent_events(thread_id, 200)
-        terminal_jobs = self._terminal_jobs_by_action_id()
+        if terminal_jobs is None:
+            terminal_jobs = self._terminal_jobs_by_action_id()
         diagnostics = []
         for idx, event in enumerate(events):
             if event.get("status") not in {"running", "llm_running"}:
@@ -18884,9 +18908,17 @@ class ActionContinuityStore:
             if item.get("reconciliation_state") == "unreconciled"
         ]
 
-    def _proposal_diagnostics(self, thread_id: str, limit: int = 6) -> List[Dict[str, Any]]:
+    def _proposal_diagnostics(
+        self,
+        thread_id: str,
+        limit: int = 6,
+        *,
+        recent_events: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
         counts: Counter[str] = Counter()
-        for event in self._recent_display_events(thread_id, 200):
+        if recent_events is None:
+            recent_events = self._recent_display_events(thread_id, 200)
+        for event in recent_events:
             if "unwired" not in str(event.get("status") or "") and "unwired" not in str(event.get("route") or ""):
                 continue
             base = self.base_action(event.get("canonical_action") or event.get("raw_next") or "")

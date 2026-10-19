@@ -1,5 +1,6 @@
 """Synthetic continuity performance and record parity fixtures."""
 import cProfile
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -51,6 +52,15 @@ def test_profile_finish_action_fixture(tmp_path, monkeypatch):
         monkeypatch.setattr(continuity_history, "reverse_lines", lambda path: iter(reversed(path.read_text().splitlines())))
         monkeypatch.setattr(continuity_history, "action_ids", _legacy_ids)
     store, event = populated_store(tmp_path, rows=fixture_rows)
+    metadata_rows = int(os.environ.get("MINIME_CONTINUITY_PROFILE_METADATA_ROWS", "0"))
+    for i in range(metadata_rows):
+        job = tmp_path / "llm_jobs" / "jobs" / f"job_fixture_{i}" / "job.json"
+        job.parent.mkdir(parents=True)
+        job.write_text(json.dumps({"job_id": f"job_fixture_{i}", "action_id": f"act_fixture_{i}",
+                                   "status": "completed", "worker_status": "completed"}))
+        journal = tmp_path / "journal" / f"synthetic_{i}.txt"
+        journal.parent.mkdir(exist_ok=True)
+        journal.write_text("Synthetic public fixture only.\n")
     profiler = cProfile.Profile()
     start = time.perf_counter()
     result = profiler.runcall(store.finish_action, event, "handled", "Synthetic output saved", STATE)
@@ -65,6 +75,10 @@ def test_profile_finish_action_fixture(tmp_path, monkeypatch):
                 for key, value in stats.stats.items()]
         Path(destination).write_text(json.dumps({
             "elapsed_s": elapsed, "synthetic_rows": fixture_rows, "padding_bytes_per_row": 4096,
+            "synthetic_jobs_and_journals": metadata_rows,
+            "runtime_sha256": hashlib.sha256(Path(
+                aa.ActionContinuityStore._thread_projection.__wrapped__.__code__.co_filename
+            ).read_bytes()).hexdigest(),
             "legacy_history_readers": legacy,
             "top_cumulative": sorted(rows, key=lambda row: row["inclusive_s"], reverse=True)[:40],
             "top_exclusive": sorted(rows, key=lambda row: row["exclusive_s"], reverse=True)[:20],
@@ -132,6 +146,10 @@ def test_finish_preserves_all_file_records_and_database_mirrors(tmp_path, monkey
             snapshots.append(_snapshot(root))
     assert results[0] == results[1]
     assert snapshots[0] == snapshots[1]
+    destination = os.environ.get("MINIME_CONTINUITY_SNAPSHOT_OUT")
+    if destination:
+        Path(destination).write_text(json.dumps(_normalized(snapshots[1], tmp_path),
+                                               sort_keys=True, indent=2) + "\n")
 
 
 def test_continuity_subphases_fit_bounded_worker_timing(tmp_path):
@@ -163,7 +181,7 @@ def test_projection_reuses_fresh_diagnostics_and_counts_only_unreconciled(tmp_pa
     diagnostic_reader = Mock(return_value=diagnostics)
     monkeypatch.setattr(store, "_stale_running_action_diagnostics", diagnostic_reader)
     projection = store._thread_projection(thread)
-    diagnostic_reader.assert_called_once_with(thread["thread_id"])
+    diagnostic_reader.assert_called_once_with(thread["thread_id"], terminal_jobs={})
     assert projection["stale_running_count"] == 2
     assert projection["stale_running_diagnostics"] == diagnostics
     # A new projection must take a new observation; this is not a time-based cache.
