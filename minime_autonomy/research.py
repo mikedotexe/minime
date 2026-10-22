@@ -334,10 +334,8 @@ def derive_browse_anchor(preferred: Optional[str], context: Optional[str], url: 
 def format_browse_failure_context(url: str, reason: str) -> str:
     return (
         f"[Web access status: the page at {url} could not be meaningfully read: {reason}]\n"
-        "[This is ordinary source/site availability, not evidence of a perceptual gate, "
-        "internal topology boundary, or spectral event.]\n"
-        "[Keep the concrete topic from the URL if useful, but do not build an experience "
-        "around the access failure.]\n\n"
+        "[No complete source was delivered by this request. This receipt describes "
+        "delivery only; it does not measure reservoir effects.]\n\n"
         "[Try NEXT: SEARCH with a narrower question, NEXT: BROWSE a different reliable "
         "source, or NEXT: REST.]"
     )

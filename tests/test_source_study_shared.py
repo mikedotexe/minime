@@ -101,6 +101,15 @@ class SharedSourceStudyTests(unittest.TestCase):
         self.assertIsNone(self.client.recover_navigation("WRITE CONTINUE"))
         self.assertFalse(self.client.workspace.exists())
 
+    def test_open_and_bound_research_classification_are_shared_and_stateless(self):
+        raw = "OPEN minime/minime_autonomy/runtime.py 1"
+        self.assertEqual(self.client.source_action_route(raw)["canonical_action"], "SELF_STUDY " + raw)
+        self.assertEqual(self.client.research_source_route(raw), "SELF_STUDY " + raw)
+        for action in ("WRITE CONTINUE", "SELF_STUDY WRITE START private", "CONTROL mode_disperse"):
+            self.assertIsNone(self.client.source_action_route(action))
+            self.assertIsNone(self.client.research_source_route(action))
+        self.assertFalse(self.client.workspace.exists())
+
     def test_navigation_keeps_owned_notes_and_exact_pending_source(self):
         source = self.client.prepare(self.action)
         messages, _ = source.messages(source.output["system_prompt"], 16000)

@@ -101,11 +101,35 @@ class StudyClient:
         """Stateless guidance only: never prepare input or alter reader state."""
         return self.call(operation="recover_navigation", action=action) or None
 
+    def source_action_route(self, action: str) -> dict[str, Any] | None:
+        """Stateless shared routing, never catalog admission or preparation."""
+        result = self.call(operation="source_action_route", action=action)
+        if "route" not in result:
+            raise RuntimeError("shared source routing contract unavailable")
+        route = result["route"]
+        if route is None:
+            return None
+        if (not isinstance(route, dict) or route.get("policy") != "source_open_alias_v1"
+                or not isinstance(route.get("canonical_action"), str)
+                or not (route["canonical_action"] == "SELF_STUDY OPEN"
+                        or route["canonical_action"].startswith("SELF_STUDY OPEN "))):
+            raise RuntimeError("shared source routing contract invalid")
+        return route
+
     def writing_storage_only(self, action: str) -> bool:
         result = self.call(operation="writing_policy", action=action)
         if not isinstance(result.get("storage_only"), bool):
             raise RuntimeError("shared writing policy unavailable")
         return result["storage_only"]
+
+    def research_source_route(self, action: str) -> str | None:
+        result = self.call(operation="research_source_route", action=action)
+        if "canonical_action" not in result:
+            raise RuntimeError("shared research source routing unavailable")
+        canonical = result["canonical_action"]
+        if canonical is not None and (not isinstance(canonical, str) or not canonical.startswith("SELF_STUDY ")):
+            raise RuntimeError("shared research source routing invalid")
+        return canonical
 
     def analyze_response(self, text: str, *, private_writing: bool = False) -> dict[str, Any]:
         """Stateless shared choice feedback; never queues or executes a choice."""

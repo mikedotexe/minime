@@ -25,6 +25,19 @@ TERMINAL_RESEARCH_BUDGET_STAGES = {
 }
 
 
+def retired_lexical_session_draft(record: Any) -> bool:
+    """Identify generated legacy drafts, never an authored or accepted session."""
+    return (
+        isinstance(record, dict)
+        and record.get("record_schema") == "continuity_session_v1"
+        and record.get("record_type") == "session_draft"
+        and record.get("status") == "draft"
+        and record.get("draft_v1") is True
+        and record.get("ignored_until_accepted") is True
+        and record.get("reason") in ("single_motif_overfit_risk", "map_release_before_intervening")
+    )
+
+
 def local_research_budget_request_scaffold(
     selector: str = "current",
     *,
@@ -548,7 +561,7 @@ def _route_stack(projection: Dict[str, Any]) -> List[Dict[str, Any]]:
         routes.append(_route("Continuity Session", command, "latest continuity session", 20, "continuity_session_v1", "continuity_capture"))
 
     session_draft = projection.get("continuity_session_draft_v1")
-    if isinstance(session_draft, dict):
+    if isinstance(session_draft, dict) and not retired_lexical_session_draft(session_draft):
         command = _text(session_draft.get("accept_next") or session_draft.get("generic_accept_next"))
         if command:
             routes.append(_route("Continuity Session", command, "pending continuity draft awaits optional acceptance", 19, "continuity_session_draft_v1", "continuity_capture"))
@@ -556,15 +569,6 @@ def _route_stack(projection: Dict[str, Any]) -> List[Dict[str, Any]]:
     memory = projection.get("being_memory_v1")
     if isinstance(memory, dict) and memory.get("latest_memory"):
         routes.append(_route("Memory/Dossier", "MEMORY_RECALL latest :: focus: current thread", "owned memory available", 35, "being_memory_v1", "memory_recall"))
-
-    if projection.get("constraint_release_trajectory_v1") or projection.get("interpretation_risk_v1"):
-        capture_priority = 24 if isinstance(session_draft, dict) else 10
-        capture_reason = (
-            "cue already has a pending draft; accept, defer, or recapture deliberately"
-            if isinstance(session_draft, dict)
-            else "interpretation or release cue needs capture"
-        )
-        routes.append(_route("Continuity Session", "CONTINUITY_SESSION_CAPTURE latest", capture_reason, capture_priority, "self_study_cue", "continuity_capture"))
 
     exact_seen: Dict[tuple[Any, Any], Dict[str, Any]] = {}
     normalized_seen: Dict[tuple[Any, ...], Dict[str, Any]] = {}

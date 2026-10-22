@@ -588,7 +588,7 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
             "inbox_reply",
         )
 
-    def test_repeated_operational_next_is_acknowledged_without_queueing(self):
+    def test_repeated_read_only_status_is_retained_without_editorial_cooldown(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
             db_path = Path(tmp) / "minime.db"
@@ -620,16 +620,12 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
             ):
                 response, next_action = agent._query_llm_with_next("journal")
 
-            self.assertIsNone(next_action)
+            self.assertEqual(next_action, "EXPERIMENT_RESEARCH_BUDGET_STATUS resbud_old")
             self.assertIn("The status loop is still humming.", response)
-            self.assertIn("Operational tail cooldown", response)
-            self.assertIn("JOURNAL, DAYDREAM, or ASPIRE", response)
-            self.assertIsNone(agent._pending_next_action)
+            self.assertNotIn("Operational tail cooldown", response)
+            self.assertEqual(agent._pending_next_action, next_action)
             state_path = workspace / "state" / "operational_tail_cooldown_v1.json"
-            self.assertTrue(state_path.exists())
-            payload = json.loads(state_path.read_text())
-            self.assertIsNone(payload["queued_next"])
-            self.assertEqual(payload["policy"], "operational_tail_cooldown_v1")
+            self.assertFalse(state_path.exists())
 
     def test_write_journal_entry_remains_non_gating_and_preserves_content(self):
         with tempfile.TemporaryDirectory() as tmp:

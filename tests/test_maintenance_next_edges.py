@@ -719,7 +719,7 @@ def test_outer_executor_propagates_nested_handoff_failure_after_recording_failur
 
 
 @pytest.mark.parametrize("blocked", [False, True])
-def test_baseline_experiment_bind_derived_route_preserves_newer_durable_choice(routing_agent, blocked):
+def test_baseline_experiment_bind_derived_route_preserves_newer_durable_choice(routing_agent, monkeypatch, blocked):
     value = routing_agent
     inner = "JOURNAL" if blocked else "QUESTION q2"
     store = value._continuity_store()
@@ -728,10 +728,16 @@ def test_baseline_experiment_bind_derived_route_preserves_newer_durable_choice(r
     store._peer_experiment_ref = Mock(return_value=None)
     store.base_action = Mock(return_value=inner.split()[0])
     store._live_control_binding_key = Mock(return_value=None)
+    store.resolve_experiment_bind_target = Mock(return_value="synthetic-experiment")
+    # This fixture isolates queue preservation. Native allowance transactions
+    # are exercised with real stores in test_research_transactions.py.
+    from minime_autonomy import research_transactions
+    monkeypatch.setattr(research_transactions, "is_metered", lambda *args: False)
     store.record_experiment_bind_run = Mock(return_value={"run_id": "synthetic", "status": "handled"})
     store.record_charter_required_guard_block = Mock(return_value={"status": "blocked"})
     store.charter_required_guard_assessment.return_value = {"suggested_next": "REST", "reason": "synthetic"}
     value._current_action_continuity_context = {"raw_next": f"EXPERIMENT_BIND current :: {inner}"}
+    value._current_action_continuity_event = {"action_id": "synthetic-bound-queue"}
     value._execute_action = Mock()
     path = checkpoint(value)
     before = path.read_bytes()
@@ -747,7 +753,7 @@ def test_baseline_experiment_bind_derived_route_preserves_newer_durable_choice(r
     if blocked:
         store.charter_required_guard_assessment.assert_called_once_with(inner)
         value._execute_action.assert_not_called()
-        assert store.record_experiment_bind_run.call_args.args[3] == "skipped"
+        store.record_experiment_bind_run.assert_not_called()
     else:
         value._execute_action.assert_called_once_with("self_study", {})
         assert store.record_experiment_bind_run.call_args.args[1] == inner

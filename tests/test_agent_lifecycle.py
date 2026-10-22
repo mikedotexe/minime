@@ -393,6 +393,13 @@ def test_synchronous_journal_failure_blocks_shutdown_seal(
     checkpoint(agent)
     state_path = Path(agent._sovereignty_state_path())
     original_state = state_path.read_bytes()
+    if response_kind == "visual":
+        # A preexisting REST must defer visual admission. Instead, accept from
+        # an empty queue and introduce REST during the synchronous provider call.
+        agent._pending_next_action = None
+        agent._pending_next_selection_id = None
+        agent._pending_choice_envelope_v1 = None
+        checkpoint(agent)
     if mode == "no_identity":
         del agent._agent_boot_id
     agent.running = True
@@ -407,6 +414,11 @@ def test_synchronous_journal_failure_blocks_shutdown_seal(
     monkeypatch.setattr(aa, "WORKSPACE_DIR", tmp_path)
 
     def provider(*args, **kwargs):
+        if response_kind == "visual":
+            agent._pending_next_action = "REST"
+            agent._pending_next_selection_id = "selection-1"
+            agent._pending_choice_envelope_v1 = {"exact": "private synthetic context"}
+            checkpoint(agent)
         if mode != "running":
             agent.stop()
         return "Synthetic accepted response.", None
@@ -441,7 +453,7 @@ def test_synchronous_journal_failure_blocks_shutdown_seal(
         else:
             agent._check_visual_responses()
 
-    expected_calls = 2 if response_kind == "visual" and mode == "running" else 1
+    expected_calls = 1  # The newly pending REST also defers the second visual source.
     assert agent._query_llm_with_next.call_count == expected_calls
     assert agent._write_journal_entry.call_count == (expected_calls if failure_site == "journal_entry" else 0)
     assert getattr(agent, "_next_handoff_failed", False) is (mode == "shutdown")
@@ -451,9 +463,8 @@ def test_synchronous_journal_failure_blocks_shutdown_seal(
         assert path.read_bytes() == raw
     if response_kind == "visual":
         assert not (responses / "processed").exists()
-        if mode != "running":
-            agent._check_visual_responses()
-            assert agent._query_llm_with_next.call_count == 1
+        agent._check_visual_responses()
+        assert agent._query_llm_with_next.call_count == 1
 
     agent.stop()
     if mode == "shutdown":

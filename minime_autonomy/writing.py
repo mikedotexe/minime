@@ -60,7 +60,12 @@ def is_private_request(action: str) -> bool:
 
 def diagnostic_action(action: str) -> str:
     """Privacy classification only; never parse or change executable commands."""
-    return "WRITE [private payload withheld]" if is_private_request(action) else action
+    if is_private_request(action):
+        return "WRITE [private payload withheld]"
+    if any(word.rstrip(":").upper() in {"SEARCH", "RESEARCH", "BROWSE"} or "://" in word
+           for word in str(action or "").split()):
+        return "WEB [request arguments withheld]"
+    return action
 
 
 def selected_profile(workspace: Path) -> str:

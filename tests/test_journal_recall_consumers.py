@@ -118,7 +118,11 @@ def test_browse_provenance_reaches_summary_continuation_and_saved_record(runtime
     expected = latest_journal_file_recall(original.parent)
     html = '<html><title>Fixture</title><body>' + 'Source text on geometry. ' * 700 + '</body></html>'
     response = Mock(status_code=200, headers={'content-type': 'text/html'}, content=html.encode(), text=html)
-    monkeypatch.setattr(aa.requests, 'get', Mock(return_value=response))
+    from minime_autonomy import public_web
+    monkeypatch.setattr(public_web, 'fetch', Mock(return_value={
+        'final_url': 'https://example.test/geometry', 'content_type': 'text/html',
+        'body': list(html.encode()), 'receipt': {'complete': True, 'http_status': 200},
+    }))
     compact = Mock(return_value='Why it may matter: relevant\nWhat it seems to suggest: a source claim\nBest next move: continue')
     monkeypatch.setattr(agent, '_query_llm_compact_raw', compact)
     query = Mock(return_value=(None, None))
@@ -131,10 +135,12 @@ def test_browse_provenance_reaches_summary_continuation_and_saved_record(runtime
     agent._browse_url({})
     provenance = expected.metadata()
     serialized = json.dumps(provenance, ensure_ascii=False, sort_keys=True)
-    assert serialized in query.call_args.args[0]
     if failed:
-        assert 'page itself was not readable' in query.call_args.args[0]
+        query.assert_not_called()
+        compact.assert_not_called()
+        assert 'no reflection was generated' in agent._current_action_outcome_summary
         return
+    assert serialized in query.call_args.args[0]
     prompt = compact.call_args.args[0]
     assert expected.excerpt()[:160] in prompt
     assert serialized in prompt  # not clipped to the 160-character anchor

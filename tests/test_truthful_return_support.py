@@ -225,5 +225,9 @@ def test_resume_receipt_selects_context_without_a_run(tmp_path):
     exp.update(status="paused", planned_next="THREAD_STATUS current")
     store._append_jsonl(store._experiments_path(thread["thread_id"]), exp)
     receipt = store.experiment_resume(exp["experiment_id"])
-    assert "guarded by hold; not reactivated" in receipt
+    assert "Context selected; saved next action was not executed" in receipt
+    assert "Saved next (not executed): THREAD_STATUS current" in receipt
+    retained = store._find_experiment_by_id(thread["thread_id"], exp["experiment_id"])
+    assert retained["status"] == "active"
+    assert retained["planned_next"] == "THREAD_STATUS current"
     assert store._experiment_runs_path(thread["thread_id"]).read_bytes() == before

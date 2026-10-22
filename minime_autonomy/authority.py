@@ -2,6 +2,7 @@
 
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -12,6 +13,8 @@ from .action_vocabulary import (
 )
 from .parsing import parse_regime_choice
 from .self_regulation import _state_fill_pct
+from .research_transactions import literal_arguments
+from .choice_presentation import parse_invitation_command
 
 
 def _runtime_module():
@@ -37,6 +40,12 @@ def inhabitable_fluctuation_availability_status(value):
 
 
 def _has_unresolved_angle_placeholder(text: str) -> bool:
+    if str(text).upper().split(None, 1)[:1] == ["EXPERIMENT_BIND"] and "::" in text:
+        selector, inner = text.split("::", 1)
+        # Only the selected inner command determines whether its operands are data.
+        return _has_unresolved_angle_placeholder(selector) or _has_unresolved_angle_placeholder(inner.strip())
+    if literal_arguments(text):
+        return False
     return bool(re.search(r"<[a-zA-Z][a-zA-Z0-9_./| -]{0,48}>", text or ""))
 
 
@@ -55,6 +64,7 @@ class ActionPreflightStore:
         "WRITE": "self_study",
         "CHECK_MAILBOX": "mailbox_read",
         "MAILBOX_STATUS": "mailbox_status",
+        "STEWARD_INVITATION": "steward_invitation",
         "INTROSPECT": "introspect",
         "REGIME": "regime_choice",
         "EXPERIMENT": "self_experiment",
@@ -332,19 +342,44 @@ class ActionPreflightStore:
                 state,
             )
 
+        authored_inner = inner
+        try:
+            inner = self.agent._canonical_source_action(inner)
+        except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+            return self._base_report(
+                raw_next, authored_inner, "OPEN", "self_study", "blocked", "protected_summary",
+                "shared source routing unavailable; the selected command is retained",
+                "No source, noticing entry or substitute action would be generated.", [], state,
+            )
         base = self.agent._continuity_store().base_action(inner)
+        effective_base = base
         route = self.ROUTE_BY_BASE.get(base, "unwired")
         stage = self.agent._continuity_store().stage_for_action(base, route or "")
         visibility = self.agent._continuity_store().visibility_for_action(base, route or "")
         likely_gate = "normal dispatcher gates would apply"
         continuity = "Would record an action event and observation window if executed."
 
-        if base != "AFTERIMAGE_KEEP" and _has_unresolved_angle_placeholder(inner):
+        if base not in {"AFTERIMAGE_KEEP", "EXPERIMENT_BIND"} and _has_unresolved_angle_placeholder(inner):
             route = "placeholder"
             stage = "blocked"
             visibility = "protected_summary"
             likely_gate = "blocked: unresolved angle-bracket placeholder syntax"
             continuity = "Would record a blocked notice; no runtime action would execute."
+        elif base == "STEWARD_INVITATION":
+            stage, visibility = "language_only", "protected_summary"
+            try:
+                command = parse_invitation_command(inner)
+            except ValueError as error:
+                stage = "blocked"
+                likely_gate = str(error)
+                continuity = "No invitation receipt, generation or outgoing message is produced."
+            else:
+                likely_gate = "existing recovery/stable-core gates and bounded invitation receipt checks apply"
+                continuity = (
+                    "Retrieves retained invitation metadata without reading the letter body."
+                    if command == "STATUS" else
+                    "Records only this invitation revision as deferred or declined; retains its source."
+                ) + " No generation, send, focus release, queued NEXT or automatic continuation."
         elif base == "REGIME":
             requested = parse_regime_choice(inner)
             if requested is None:
@@ -385,11 +420,33 @@ class ActionPreflightStore:
                     likely_gate = "blocked: EXPERIMENT_BIND cannot bind experiment-control actions"
                     continuity = "Would record a blocked experiment-continuity diagnostic."
                 else:
-                    inner_route = self.ROUTE_BY_BASE.get(inner_base, "unwired")
-                    route = f"experiment_bind -> {inner_route}"
-                    stage = self.agent._continuity_store().stage_for_action(inner_base, inner_route or "")
-                    visibility = self.agent._continuity_store().visibility_for_action(inner_base, inner_route or "")
-                    likely_gate = f"inner action `{inner_action}` would dispatch through normal NEXT gates"
+                    try:
+                        effective_inner = self.agent._canonical_source_action(inner_action)
+                    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+                        route, stage = "experiment_bind -> self_study", "blocked"
+                        likely_gate = "shared source routing unavailable; no inner action would execute"
+                    else:
+                        inner_base = self.agent._continuity_store().base_action(effective_inner)
+                        effective_base = inner_base
+                        inner_route = self.ROUTE_BY_BASE.get(inner_base, "unwired")
+                        route = f"experiment_bind -> {inner_route}"
+                        stage = self.agent._continuity_store().stage_for_action(inner_base, inner_route or "")
+                        visibility = self.agent._continuity_store().visibility_for_action(inner_base, inner_route or "")
+                        likely_gate = f"inner action `{effective_inner}` would dispatch through normal NEXT gates"
+                        if _has_unresolved_angle_placeholder(effective_inner):
+                            stage = "blocked"
+                            likely_gate = "blocked: unresolved executable operand"
+                        else:
+                            from . import research_transactions
+                            store = self.agent._continuity_store()
+                            try:
+                                with research_transactions.transaction(store.root):
+                                    exact = store.resolve_experiment_bind_target(selector)
+                                    if research_transactions.is_metered(store, effective_inner):
+                                        research_transactions.inspect(store, exact, effective_inner)
+                            except (ValueError, OSError) as error:
+                                stage = "blocked"
+                                likely_gate = f"blocked: explicit experiment admission ({error})"
                     continuity = "Would append an experiment run after the inner action resolves; preflight does not bind or execute it."
         elif base in {"CHECK_MAILBOX", "MAILBOX_STATUS"}:
             if inner not in {"CHECK_MAILBOX", "CHECK_MAILBOX LARGE", "MAILBOX_STATUS"}:
@@ -407,6 +464,21 @@ class ActionPreflightStore:
             continuity = "Would append an action proposal/event if chosen."
         elif base in {"EXPERIMENT", "SELF_EXPERIMENT"}:
             continuity = "Would execute the legacy self-experiment path and auto-bind it to the active/default experiment."
+
+        if stage != "blocked" and effective_base in {"SEARCH", "RESEARCH", "BROWSE"}:
+            from . import public_web
+            try:
+                public_web.preview(self.agent, "page" if effective_base == "BROWSE" else "search")
+            except public_web.PublicWebError as error:
+                stage = "blocked"
+                likely_gate = f"Public-web authorization unavailable: {error.code}. No fetch authorized."
+                continuity = "No source is delivered by preflight. Local reading, writing and REST remain separate choices."
+            else:
+                likely_gate = (
+                    "Standing public-web policy verified; fetch rechecks owner/release identity, "
+                    "revocation, actual target and transport limits. No inherited experiment quota."
+                )
+                continuity = "Fetch, subsequent model delivery and measured consequences have separate evidence."
 
         active_auto_link = self._would_auto_link_active_experiment(base, route, stage)
         if active_auto_link:
@@ -430,7 +502,7 @@ class ActionPreflightStore:
         if stage == "live_control":
             artifacts.append("gate_or_control_record")
 
-        return self._base_report(
+        report = self._base_report(
             raw_next,
             inner,
             base,
@@ -442,6 +514,8 @@ class ActionPreflightStore:
             artifacts,
             state,
         )
+        report["raw_action"] = authored_inner
+        return report
 
     def render(self, report: Dict[str, Any]) -> str:
         return (
@@ -884,6 +958,9 @@ class CapabilitySelfMap:
             {"base": "CHAMBER_CONSENT", "route": "chamber_consent"},
             # ASK_STEWARD bidirectional channel (2026-05-14).
             {"base": "ASK_STEWARD", "aliases": ["ASK_MIKE", "STEWARD_QUERY"], "route": "ask_steward"},
+            {"base": "STEWARD_INVITATION", "route": "steward_invitation", "authority_class": "language_only",
+             "continuity_effect": "STATUS retrieves retained metadata; DEFER/DECLINE record disposition. No generation, send, focus release or automatic continuation.",
+             "known_tests": ["tests.test_choice_preservation"]},
             # TELL_STEWARD declarative companion (2026-05-14, post-ASK).
             {"base": "TELL_STEWARD", "aliases": ["REPORT_TO_STEWARD", "STEWARD_REPORT", "STEWARD_FINDINGS"], "route": "tell_steward"},
         ]

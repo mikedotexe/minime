@@ -4,6 +4,7 @@ Only provider HTTP is faked; pytest's live-write/network guard stays enabled.
 """
 import json
 import os
+import time
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -66,18 +67,26 @@ def study_agent(monkeypatch, tmp_path):
     ("INTROSPECT .", True),
     ('SELF_STUDY of the "spectral_tuning" mechanisms in the current system.', True),
     ("SELF_STUDY OPEN minime/minime_autonomy/runtime.py 1", False),
+    ("OPEN minime/minime_autonomy/runtime.py 1", False),
+    ("OPEN minime/minime_autonomy/missing.py 1", True),
+    ("OPEN", True),
+    ("OPEN minime/minime_autonomy/runtime.py 0", True),
+    ("OPEN ../workspace/private.txt 1", True),
     ("SELF_STUDY REPLACE OPEN minime/minime_autonomy/runtime.py 1", False),
 ])
 def test_source_entry_completes_under_paused_experiment_and_dispatches_its_next(study_agent, raw, recovery):
     agent, store, client, offers = study_agent
     if raw.startswith("INTROSPECT"):
-        assert store.research_budget_guard_assessment(raw, STATE) is not None
-        assert not store.research_budget_preflight_for_action(raw, STATE)[0]
+        assert store.research_budget_guard_assessment(raw, STATE) is None
+        assert store.research_budget_preflight_for_action(raw, STATE)[0]
     select_choice(agent, raw)
     route = agent._decide_action(dict(STATE))
     assert route == "self_study"
     context = dict(agent._pending_action_continuity_context)
     assert context["raw_next"] == raw
+    if raw.split()[0] == "OPEN":
+        assert context["canonical_action"] == "SELF_STUDY " + raw
+        assert context["source_study_action"] == "SELF_STUDY " + raw
     # A queued source job owns its resolved command even if another offer arrives.
     agent._pending_source_study_action = "SELF_STUDY OPEN do-not-read.rs 1"
     event = store.begin_action(raw, raw, route, route, dict(STATE), source="next")
@@ -100,7 +109,125 @@ def test_source_entry_completes_under_paused_experiment_and_dispatches_its_next(
     assert len(offers) == 2 and offers[1].output["page"] is None
     assert "Who calls entry?" in offers[1]
     assert "SELF_STUDY MAP minime/minime_autonomy" in offers[1]
-    assert store.research_budget_guard_assessment("READ_MORE", STATE) is not None
+    assert store.research_budget_guard_assessment("READ_MORE", STATE) is None
+
+
+def test_open_preflight_matches_dispatch_and_nested_route_without_reading(study_agent):
+    agent, store, client, offers = study_agent
+    raw = "OPEN minime/minime_autonomy/runtime.py 1"
+    from minime_autonomy.authority import ActionPreflightStore
+    preflight = ActionPreflightStore(agent)
+    report = preflight.report("ACTION_PREFLIGHT " + raw, dict(STATE))
+    qualified = preflight.report("SELF_STUDY " + raw, dict(STATE))
+    assert report["raw_action"] == raw
+    assert report["canonical_action"] == "SELF_STUDY " + raw
+    assert report["effective_route"] == qualified["effective_route"] == "self_study"
+    assert report["stage"] == qualified["stage"]
+    nested = preflight.report("EXPERIMENT_BIND current :: " + raw, dict(STATE))
+    assert nested["effective_route"] == "experiment_bind -> self_study"
+    assert not offers
+    select_choice(agent, raw)
+    assert agent._decide_action(dict(STATE)) == report["effective_route"]
+
+
+def test_unavailable_open_helper_retains_exact_choice_without_substitution(study_agent, monkeypatch):
+    agent, store, client, offers = study_agent
+    raw = "OPEN minime/minime_autonomy/runtime.py 1"
+    select_choice(agent, raw)
+    before = Path(agent._sovereignty_state_path()).read_bytes()
+    monkeypatch.setattr(client, "source_action_route", Mock(side_effect=RuntimeError("unavailable")))
+    assert agent._decide_action(dict(STATE)) is None
+    assert agent._pending_next_action == raw
+    assert Path(agent._sovereignty_state_path()).read_bytes() == before
+    assert not offers
+    from minime_autonomy.authority import ActionPreflightStore
+    report = ActionPreflightStore(agent).report(raw, dict(STATE))
+    assert report["stage"] == "blocked" and report["effective_route"] == "self_study"
+
+
+def test_final_next_selection_not_an_earlier_open_controls_dispatch(study_agent):
+    agent, _, _, _ = study_agent
+    text = "I could inspect this.\nNEXT: OPEN minime/minime_autonomy/runtime.py 1\nNEXT: REST"
+    selected, _ = aa.parse_next_action(text)
+    assert selected == "REST"
+    select_choice(agent, selected)
+    assert agent._decide_action(dict(STATE)) is None
+
+
+def activate_synthetic_research(agent, store):
+    experiment = store.start_experiment("Explicit synthetic reading", "Inspect a chosen source")
+    thread = store.current_thread()
+    row = store._research_budget_record("research_budget_approval", "synthetic-reading", thread, experiment, {}, {
+        "scope": "read_only_research", "status": "active", "max_actions": 4,
+        "allowed_sources": ["local"], "expires_at_unix_s": time.time() + 3600,
+    })
+    store._append_jsonl(store._authority_gate_path(thread["thread_id"]), row)
+    agent._current_action_continuity_event = {"action_id": "synthetic-bound-open"}
+
+
+def test_bound_open_keeps_resolved_command_in_owned_job_context(study_agent, monkeypatch):
+    agent, store, _, offers = study_agent
+    activate_synthetic_research(agent, store)
+    raw = "OPEN minime/minime_autonomy/runtime.py 1"
+    agent._current_action_continuity_context = {"raw_next": "EXPERIMENT_BIND current :: " + raw}
+    captured = []
+    def execute(route, state):
+        captured.append((route, dict(agent._pending_action_continuity_context)))
+    monkeypatch.setattr(agent, "_execute_action", execute)
+    message = agent._experiment_bind(dict(STATE))
+    assert len(captured) == 1, message
+    route, context = captured[0]
+    assert route == "self_study"
+    assert context["raw_next"] == raw
+    assert context["canonical_action"] == context["source_study_action"] == "SELF_STUDY " + raw
+    assert context["base_action"] == "SELF_STUDY"
+    assert not offers
+
+
+def test_bound_open_helper_failure_is_not_recorded_as_rest(study_agent, monkeypatch):
+    agent, store, client, offers = study_agent
+    activate_synthetic_research(agent, store)
+    agent._current_action_continuity_context = {"raw_next": "EXPERIMENT_BIND current :: OPEN minime/minime_autonomy/runtime.py 1"}
+    monkeypatch.setattr(client, "source_action_route", Mock(side_effect=RuntimeError("unavailable")))
+    record = Mock(side_effect=AssertionError("no skipped rest/run may be manufactured"))
+    monkeypatch.setattr(store, "record_experiment_bind_run", record)
+    with aa.job_outcome.capture("synthetic-bound-open") as outcome:
+        message = agent._experiment_bind(dict(STATE))
+    assert "did not execute" in message
+    assert outcome.finish()[0] == "failed"
+    assert outcome.finish()[2] == "source_navigation_helper_unavailable"
+    assert not offers and not record.called
+
+
+def test_bare_open_normalizes_catalog_path_then_explicitly_continues(study_agent, monkeypatch):
+    agent, store, client, offers = study_agent
+    source = client.astrid_root / "capsules/spectral-bridge/src/action_continuity/runtime.rs"
+    source.parent.mkdir(parents=True)
+    source.write_text("pub fn entry() {}\n" * 1200)
+    raw = "OPEN astrid/capsules/spectral_bridge/src/action_continuity/runtime.rs 1"
+    def provider(prompt, **kwargs):
+        offers.append(prompt)
+        text = "Synthetic account.\nNEXT: SELF_STUDY CONTINUE"
+        messages, _ = aa._adapt_ollama_messages_for_model(
+            model="gemma4:12b", system_msg=prompt.output["system_prompt"], prompt=prompt,
+            num_ctx=8192, num_predict=768,
+        )
+        response = Mock(status_code=200, text=json.dumps({"message": {"content": text}, "done": True}))
+        prompt.post(Mock(return_value=response), "fake", {"messages": messages}, 1)
+        prompt.accepted()
+        return text
+    monkeypatch.setattr(agent, "_query_llm", provider)
+    select_choice(agent, raw)
+    assert agent._decide_action(dict(STATE)) == "self_study"
+    agent._execute_action("self_study", dict(STATE), _from_llm_job=True)
+    assert offers[0].receipt and offers[0].output["page"]["source"].endswith("spectral-bridge/src/action_continuity/runtime.rs")
+    assert "spectral_bridge" in offers[0]
+    assert agent._pending_next_action == "SELF_STUDY CONTINUE"
+    assert agent._decide_action(dict(STATE)) == "self_study"
+    agent._execute_action("self_study", dict(STATE), _from_llm_job=True)
+    assert offers[1].receipt
+    assert offers[1].output["page"]["start"] == offers[0].output["page"]["end"]
+    assert not list((aa.WORKSPACE_DIR / "journal").glob("notice_*"))
 
 
 @pytest.mark.parametrize("active", [False, True])
@@ -313,20 +440,19 @@ def test_note_revision_uses_actual_reader_delivery_and_remains_voluntary(study_a
     assert not json.loads(path.read_text())["questions"]["entries"]
 
 
-def test_artifact_and_external_routes_keep_research_policy(study_agent):
+def test_artifact_and_external_routes_do_not_inherit_held_research(study_agent):
     agent, store, _, offers = study_agent
     artifact = aa.WORKSPACE_DIR / "journal/return.txt"
     artifact.parent.mkdir(exist_ok=True)
     artifact.write_text("Preserved experiment observation.")
     for raw in [f"INTROSPECT {artifact} 0", "INTROSPECT journal/missing.txt 0", "READ_MORE", "SEARCH reservoir continuity"]:
         select_choice(agent, raw)
-        assert agent._decide_action(dict(STATE)) is None, raw
-        assert not store.research_budget_preflight_for_action(raw, STATE)[0]
+        assert agent._decide_action(dict(STATE)) is not None, raw
+        assert store.research_budget_preflight_for_action(raw, STATE)[0]
     assert not offers
 
 
-@pytest.mark.parametrize("raw", ["INTROSPECT journal/missing.txt", "INTROSPECT .", "INTROSPECT 0",
-                                 "INTROSPECT AND SEARCH example", "SEARCH example", "AR_START example"])
+@pytest.mark.parametrize("raw", ["AR_START example"])
 def test_reflection_exemption_is_not_a_prefix_or_a_control_bypass(study_agent, raw):
     _, store, _, _ = study_agent
     assert store.research_budget_guard_assessment(raw, STATE) is not None
@@ -396,16 +522,18 @@ def test_bare_relate_gives_exact_recovery_without_executing_a_guess(study_agent,
 
 
 @pytest.mark.parametrize("verb", ["SEARCH", "RESEARCH"])
-def test_code_search_block_keeps_authority_and_offers_local_recovery(study_agent, verb):
+def test_code_search_has_independent_web_authority_not_inherited_quota(study_agent, monkeypatch, verb):
     agent, store, _, offers = study_agent
     raw = f"{verb} dispatch.rs"
     select_choice(agent, raw)
-    assert agent._decide_action(dict(STATE)) is None
-    assert not store.research_budget_preflight_for_action(raw, STATE)[0]
-    assert "SELF_STUDY FIND dispatch.rs" in agent._pending_notice_prompt
-    event = agent._last_action_continuity_event
-    assert event["raw_next"] == raw
-    assert "SELF_STUDY FIND dispatch.rs" in event["research_budget_v1"]["local_navigation_recovery"]["commands"]
+    assert agent._decide_action(dict(STATE)) == "research_exploration"
+    assert store.research_budget_preflight_for_action(raw, STATE)[0]
+    from minime_autonomy import public_web
+    from minime_autonomy.authority import ActionPreflightStore
+    monkeypatch.setattr(public_web, "preview", Mock(side_effect=public_web.PublicWebError("revoked")))
+    report = ActionPreflightStore(agent).report(raw, dict(STATE))
+    assert report["stage"] == "blocked"
+    assert "revoked" in report["likely_gate"]
     assert not offers
     assert agent._pending_source_study_action is None
 

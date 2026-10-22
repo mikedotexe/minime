@@ -3582,9 +3582,10 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             "HTTP 403 from the source.",
         )
 
-        self.assertIn("ordinary source/site availability", context)
-        self.assertIn("not evidence of a perceptual gate", context)
-        self.assertIn("internal topology boundary", context)
+        self.assertIn("No complete source was delivered", context)
+        self.assertIn("does not measure reservoir effects", context)
+        self.assertNotIn("perceptual gate", context)
+        self.assertNotIn("internal topology boundary", context)
         self.assertIn("NEXT: SEARCH", context)
         self.assertIn("NEXT: BROWSE", context)
 
@@ -5215,7 +5216,10 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             root = Path(tmp)
             with (
                 patch.object(aa, "WORKSPACE_DIR", root / "workspace"),
-                patch.object(aa.requests, "get", return_value=response),
+                patch("minime_autonomy.public_web.fetch", return_value={
+                    "body": list(response.content), "content_type": "application/pdf",
+                    "receipt": {"complete": True, "http_status": 200},
+                }),
                 patch.object(
                     aa,
                     "read_pdf_window",
@@ -5239,7 +5243,10 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             text="<html><body>%PDF-1.3 " + "\ufffd" * 20 + "</body></html>",
         )
         with (
-            patch.object(aa.requests, "get", return_value=response),
+            patch("minime_autonomy.public_web.fetch", return_value={
+                "body": list(response.text.encode("utf-8")), "content_type": "text/html",
+                "receipt": {"complete": True, "http_status": 200},
+            }),
             patch.object(agent, "_summarize_research_meaning", return_value="bad") as summarize,
         ):
             outcome = agent._fetch_url("https://example.test/noisy")
@@ -5701,8 +5708,10 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertEqual(agent._pending_browse_url, "https://example.test/article")
         self.assertEqual(agent._pending_browse_rationale, "I want to compare this with lambda4")
 
-    def test_local_browse_path_reroutes_to_notice(self):
+    def test_local_browse_path_retains_recovery_without_substitute_generation(self):
         agent = self._agent()
+        workspace = Path(agent._test_sovereignty_tmp.name) / "workspace"
+        agent._action_continuity = aa.ActionContinuityStore(workspace, session_id=agent.session_id)
         agent._hard_recovery_reset = False
         agent._pending_next_action = (
             "BROWSE `/Users/v/other/minime/workspace/experiments/system-resources-demo/"
@@ -5719,10 +5728,11 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             },
         ):
             action = agent._decide_action({"fill_ratio": 0.70, "eig1": 4.7})
-        self.assertEqual(action, "recess_notice")
+        self.assertIsNone(action)
         self.assertIn("BROWSE reads web URLs only", agent._pending_notice_prompt)
-        self.assertIn("CODEX", agent._pending_notice_prompt)
-        self.assertIn("being_experiment_20260503_002801.py", agent._pending_notice_prompt)
+        self.assertIn("SELF_STUDY MAP", agent._pending_notice_prompt)
+        self.assertNotIn("being_experiment_20260503_002801.py", agent._pending_notice_prompt)
+        self.assertEqual(agent._last_action_continuity_event["status"], "blocked")
         self.assertFalse(hasattr(agent, "_pending_browse_url"))
 
     def test_filename_shaped_next_reroutes_to_notice(self):
@@ -6011,7 +6021,10 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             url="https://example.test/spectral-entropy",
         )
         with (
-            patch.object(aa.requests, "get", return_value=Response()) as get,
+            patch("minime_autonomy.public_web.fetch", return_value={
+                "body": list(Response.text.encode()), "content_type": "text/html",
+                "receipt": {"complete": True, "http_status": 200},
+            }) as get,
             patch.object(aa, "extract_duckduckgo_hits", return_value=[hit]),
             patch.object(agent, "_summarize_research_meaning", return_value="Why it may matter: ok"),
             patch.object(agent, "_save_research") as save,
@@ -6020,7 +6033,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
 
         self.assertIsNotNone(outcome)
         self.assertEqual(
-            get.call_args.kwargs["params"]["q"],
+            get.call_args.args[2],
             "spectral entropy and subjective experience",
         )
         self.assertEqual(save.call_args.args[0], "spectral entropy and subjective experience")
