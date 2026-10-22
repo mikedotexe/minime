@@ -249,6 +249,47 @@ class PublicWebTests(unittest.TestCase):
             self.reject("adapter_failed")
         self.assertEqual(output.getvalue(), "")
 
+    def test_old_failure_without_http_status_and_explicit_null_are_supported(self):
+        for code in ("http_status", "search_challenge", "deadline"):
+            for metadata in ({}, {"http_status": None}):
+                with self.subTest(code=code, metadata=metadata):
+                    self.invoke.return_value = (1, wire({"complete": False, "code": code, **metadata}))
+                    with self.assertRaises(web.PublicWebError) as caught:
+                        web.fetch(self.agent, "search", "synthetic query")
+                    self.assertEqual(caught.exception.code, code)
+                    self.assertIsNone(caught.exception.http_status)
+                    self.assertNotIn("HTTP", caught.exception.delivery_message())
+
+    def test_failure_preserves_validated_http_status_and_only_safe_delivery_detail(self):
+        for code in ("search_challenge", "http_status"):
+            for status in (100, 200, 202, 403, 599):
+                with self.subTest(code=code, status=status):
+                    self.invoke.return_value = (1, wire({
+                        "complete": False, "code": code, "http_status": status,
+                        "error": "PRIVATE_RAW_ERROR", "body": "PRIVATE_RESPONSE_BODY",
+                    }))
+                    with self.assertRaises(web.PublicWebError) as caught:
+                        web.fetch(self.agent, "search", "PRIVATE_QUERY")
+                    error = caught.exception
+                    self.assertEqual((error.code, error.http_status), (code, status))
+                    self.assertEqual(str(error), code)
+                    message = error.delivery_message()
+                    self.assertIn(code, message)
+                    self.assertIn(f"HTTP {status}", message)
+                    self.assertEqual("human-verification challenge" in message, code == "search_challenge")
+                    self.assertNotIn("PRIVATE_", message)
+
+    def test_invalid_failure_http_status_is_rejected_without_coercion(self):
+        for status in (False, True, "202", "PRIVATE_STATUS", 202.0, 99, 600, -1, [], {}):
+            with self.subTest(status=status):
+                self.invoke.return_value = (1, wire({"complete": False, "code": "search_challenge",
+                                                     "http_status": status}))
+                self.reject("invalid_helper_response", "search", "synthetic query")
+                with self.assertRaises(web.PublicWebError) as caught:
+                    web.PublicWebError("search_challenge", http_status=status)
+                self.assertEqual(caught.exception.code, "invalid_helper_response")
+                self.assertIsNone(caught.exception.http_status)
+
     def test_nonzero_exit_cannot_return_success_and_failure_request_cannot_drift(self):
         self.invoke.return_value = (1, wire(self.response()))
         self.reject("invalid_helper_response")
