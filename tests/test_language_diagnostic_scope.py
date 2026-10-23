@@ -490,8 +490,9 @@ def test_non_numeric_delta_values_are_not_control_evidence(context):
         assert store._sticky_mode_v1(state) == baseline
 
 
-def test_quiet_latest_draft_does_not_promote_an_older_unselected_draft(context):
+def test_quiet_latest_draft_does_not_promote_an_older_unselected_draft(context, monkeypatch):
     store, thread = context
+    monkeypatch.setattr(aa.time, "time", lambda: 1_700_000_000.125)
     earlier = store._append_continuity_session_draft(thread, None, "research_budget_required", "READ", "earlier")
     latest = store._append_continuity_session_draft(thread, None, "map_release_before_intervening", "READ", "latest")
     assert earlier["record_id"] != latest["record_id"]
@@ -500,3 +501,21 @@ def test_quiet_latest_draft_does_not_promote_an_older_unselected_draft(context):
     assert projection["continuity_session_draft_v1"]["record_id"] == latest["record_id"]
     assert not any(route["source"] == "continuity_session_draft_v1" for route in projection["continuity_control_plane_v1"]["route_stack"])
     assert store._resolve_continuity_session_draft(thread, earlier["record_id"]) == earlier
+    reopened = aa.ActionContinuityStore(store.workspace_dir, session_id=17)
+    assert reopened._resolve_continuity_session_draft(thread, earlier["record_id"]) == earlier
+    assert reopened._resolve_continuity_session_draft(thread, latest["record_id"]) == latest
+
+
+def test_legacy_continuity_record_ids_remain_exactly_retrievable(context):
+    store, thread = context
+    legacy = store._continuity_session_record(
+        "session_draft", "legacy-session", thread, None, "draft",
+        summary="Synthetic historical record", extra={"draft_v1": True},
+    )
+    legacy["record_id"] = "cs_minime_1700000000125_session-draft"
+    path = store._continuity_sessions_path(thread["thread_id"])
+    store._append_jsonl(path, legacy)
+    before = path.read_bytes()
+    reopened = aa.ActionContinuityStore(store.workspace_dir, session_id=17)
+    assert reopened._resolve_continuity_session_draft(thread, legacy["record_id"]) == legacy
+    assert path.read_bytes() == before
