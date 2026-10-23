@@ -13,7 +13,8 @@ from .journal_recall import JournalRecall, render_journal_recall
 
 
 COMPACT_ACTION_GUIDANCE = (
-    "NEXT: options: DAYDREAM, ASPIRE, JOURNAL, SELF_STUDY, REST; these are examples, "
+    "NEXT: options: DAYDREAM, ASPIRE, JOURNAL, SELF_STUDY, SEARCH <topic>, "
+    "BROWSE <url>, CHECK_MAILBOX, MAILBOX_STATUS, REST; these are examples, "
     "not a restriction on your available actions. FACULTIES / CAPABILITY_MAP opens "
     "the action catalog; CAPABILITY_STATUS <action> gives details; "
     "ACTION_PREFLIGHT <action> checks a proposed action without executing it. "

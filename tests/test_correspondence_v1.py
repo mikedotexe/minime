@@ -351,13 +351,17 @@ class CorrespondenceV1Tests(unittest.TestCase):
 
             self.assertIn("CORRESPONDENCE FROM ASTRID", context)
             self.assertIn("I am addressing you as a peer.", context)
-            self.assertTrue((inbox / "read" / "from_astrid_correspondence_corr_astrid_minime_seed.txt").exists())
+            self.assertFalse((inbox / "read" / "from_astrid_correspondence_corr_astrid_minime_seed.txt").exists())
+            self.assertTrue((inbox / "from_astrid_correspondence_corr_astrid_minime_seed.txt").exists())
+            self.assertFalse(context.supplied)
             records = [
                 json.loads(line)
                 for line in (shared / "correspondence_v1.jsonl").read_text().splitlines()
             ]
             self.assertEqual(records[-1]["record_type"], "read_receipt")
             self.assertEqual(records[-1]["reader"], "minime")
+            self.assertEqual(records[-1]["read_semantics"], "file_inspected_not_model_visibility_or_acknowledgement")
+            self.assertFalse(records[-1]["source_retirement_verified"])
 
     def test_outbox_generation_does_not_inherit_previous_astrid_headers(self):
         with tempfile.TemporaryDirectory() as tmp:
