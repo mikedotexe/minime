@@ -25,6 +25,8 @@ HELPER_TIMEOUT = 125.0
 MAX_METADATA = 65_536
 REQUEST_SCHEMA = "astrid.public_web.request.v2"
 RECEIPT_SCHEMA = "astrid.public_web.receipt.v2"
+SEARCH_CONTENT_TYPE = "application/vnd.astrid.search+json"
+SEARCH_SCHEMA = "astrid.search.results.v1"
 HELPER_CODES = frozenset("""
 invalid_request invalid_config authority_unavailable untrusted_issuer
 invalid_capability invalid_policy owner_mismatch invalid_state state_pending
@@ -32,7 +34,9 @@ invalid_approval stale_approval publication_failed revoked operation_not_granted
 authority_changed unsafe_filesystem owner_busy storage_headroom unsafe_url
 unsafe_address dns_failed transport_failed deadline body_limit incomplete_body
 unsupported_encoding unsupported_media invalid_headers redirect_limit
-invalid_redirect http_status
+invalid_redirect http_status search_challenge credential_unavailable
+search_authentication search_rate_limited search_response_invalid
+search_spending_limit search_spending_state
 """.split())
 LOCAL_CODES = frozenset("""
 source_identity_unavailable source_changed owner_identity_unavailable
@@ -45,9 +49,20 @@ config_changed adapter_failed
 class PublicWebError(RuntimeError):
     """Content-free stable reason; never contains helper stderr or request text."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, http_status: int | None = None):
+        _require(http_status is None or _integer(http_status, 100, 599),
+                 "invalid_helper_response")
         self.code = code if code in HELPER_CODES | LOCAL_CODES else "adapter_failed"
+        self.http_status = http_status
         super().__init__(self.code)
+
+    def delivery_message(self) -> str:
+        """Safe recovery detail derived only from validated helper metadata."""
+        status = f" (HTTP {self.http_status})" if self.http_status is not None else ""
+        if self.code == "search_challenge":
+            return (f"Search provider returned a human-verification challenge: {self.code}{status}; "
+                    "no search results were delivered")
+        return f"Public web request incomplete: {self.code}{status}"
 
 
 def _require(condition: bool, code: str) -> None:
@@ -111,7 +126,7 @@ def _pairs(items):
     return result
 
 
-def _parse(raw: bytes, code: str) -> dict:
+def _parse(raw: bytes | str, code: str) -> dict:
     try:
         def invalid_constant(_):
             raise ValueError()
@@ -206,7 +221,7 @@ def _context(agent) -> dict:
     config_path = Path(configured)
     raw = _read(config_path, "invalid_config", private=True)
     config = _parse(raw, "invalid_config")
-    _require(config.get("schema") == "astrid.public_web.config.v2"
+    _require(config.get("schema") in ("astrid.public_web.config.v2", "astrid.public_web.config.v3")
              and _hex(config.get("expected_policy_sha256")), "invalid_config")
     _require(config.get("expected_owner") == owner, "owner_mismatch")
     return {"owner": owner, "helper": helper, "pin": pin, "identity": identity,
@@ -286,7 +301,7 @@ def _result(status: int, raw: bytes, request_hash: str | None = None) -> dict:
                  and code in HELPER_CODES, "invalid_helper_response")
         if "request_sha256" in value:
             _require(value["request_sha256"] == request_hash, "invalid_helper_response")
-        raise PublicWebError(code)
+        raise PublicWebError(code, http_status=value.get("http_status"))
     _require("code" not in value and "error" not in value, "invalid_helper_response")
     return value
 
@@ -298,6 +313,35 @@ def _integer(value: Any, lower: int, upper: int) -> bool:
 def _owner_hash(context: dict) -> str:
     owner = context["owner"]
     return _hash(_json([owner["being"], owner["principal"], owner["public_key_hex"]]))
+
+
+def normalized_search_results(response: dict, query: str) -> list[dict] | None:
+    """Validate the shared envelope only; raw provider JSON belongs to Rust.
+
+    None selects legacy HTML handling. An empty list is a successful search.
+    URLs are navigation candidates, not verified page evidence.
+    """
+    if response["content_type"] != SEARCH_CONTENT_TYPE:
+        return None
+    try:
+        body = bytes(response["body"])
+        _require(len(body) <= MAX_BODY, "invalid_helper_response")
+        value = _parse(body.decode("utf-8"), "invalid_helper_response")
+        _require(set(value) == {"schema", "provider", "query", "results"}
+                 and value["schema"] == SEARCH_SCHEMA
+                 and value["provider"] == "brave_web_v1"
+                 and value["query"] == query
+                 and isinstance(value["results"], list)
+                 and len(value["results"]) <= 5, "invalid_helper_response")
+        for hit in value["results"]:
+            _require(isinstance(hit, dict) and set(hit) == {"title", "url", "snippet"}
+                     and all(isinstance(item, str) for item in hit.values()),
+                     "invalid_helper_response")
+            for item in hit.values():
+                item.encode("utf-8")
+        return value["results"]
+    except (ValueError, TypeError, KeyError, OverflowError):
+        raise PublicWebError("invalid_helper_response") from None
 
 
 def fetch(agent, operation: str, target: str) -> dict:
@@ -320,8 +364,10 @@ def fetch(agent, operation: str, target: str) -> dict:
                  and all(_integer(byte, 0, 255) for byte in body), "invalid_helper_response")
         _require(isinstance(value["final_url"], str) and len(value["final_url"]) <= 16_384
                  and value["content_type"] in ("text/html", "text/plain", "application/xhtml+xml",
-                                                "application/json", "application/pdf"),
+                                                "application/json", "application/pdf", SEARCH_CONTENT_TYPE),
                  "invalid_helper_response")
+        normalized_search = value["content_type"] == SEARCH_CONTENT_TYPE
+        _require(not normalized_search or operation == "search", "invalid_helper_response")
         expected = {"schema": RECEIPT_SCHEMA, "complete": True,
                     "request_sha256": _hash(wire), "policy_sha256": context["policy_sha256"],
                     "owner_sha256": _owner_hash(context),
@@ -332,9 +378,13 @@ def fetch(agent, operation: str, target: str) -> dict:
                  and receipt.get("complete") is True
                  and all(receipt.get(key) == item for key, item in expected.items())
                  and _integer(receipt.get("http_status"), 200, 200)
-                 and _integer(receipt.get("decoded_bytes_observed"), len(body), MAX_BODY)
+                 # Search counts describe raw provider bytes, not the normalized body.
+                 and _integer(receipt.get("decoded_bytes_observed"),
+                              0 if normalized_search else len(body), MAX_BODY)
                  and _integer(receipt.get("wire_bytes_observed"), 0, MAX_BODY)
                  and _integer(receipt.get("redirects_followed"), 0, 5), "invalid_helper_response")
+        if normalized_search:
+            normalized_search_results(value, target)
         return value
     except PublicWebError:
         raise

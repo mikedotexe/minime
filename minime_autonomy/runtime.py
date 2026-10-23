@@ -23293,12 +23293,14 @@ class AutonomousAgent:
                 "echo state network reservoir computing spectral runtime",
                 anchor="echo state network reservoir computing spectral runtime",
             )
-            if test_result:
+            if test_result and test_result.succeeded() and test_result.hits:
                 search_snippet = (
                     "\n\nYour web search returned:\n"
                     f"{trim_chars(test_result.prompt_body(), 300)}"
                 )
                 logging.info("✅ Web search confirmed working at boot")
+            elif test_result and test_result.succeeded():
+                logging.info("Web search completed at boot with zero results")
             else:
                 logging.warning("⚠️ Web search unavailable at boot")
 
@@ -25448,7 +25450,7 @@ Fill: {fill:.1f}%
                 prefix_len = len(base)
                 topic = chosen[prefix_len:].strip() if len(chosen) > prefix_len else None
                 if topic:
-                    self._pending_search_topic = _normalize_search_topic(topic)
+                    self._pending_search_topic = topic
                 logging.info("Selected web search route=%s target_hash=%s", base, target_fingerprint(topic or ""))
                 return 'research_exploration'
 
@@ -32276,24 +32278,35 @@ Reason: {reason}
         return normalize_meaning_summary(response, source_kind, anchor, subject, raw_excerpt)
 
     def _web_search(self, query: str, anchor: Optional[str] = None) -> Optional[ResearchOutcome]:
-        """Search the web via DuckDuckGo HTML and return structured results."""
+        """Consume shared normalized results or the legacy HTML response."""
         from . import public_web
-        search_query = _normalize_search_topic(query) or query.strip()
+        search_query = query
         try:
             response = public_web.fetch(self, "search", search_query)
             logging.info("Public web fetch receipt: %s", json.dumps(response["receipt"], sort_keys=True))
-            html = bytes(response["body"]).decode("utf-8")
-            hits = extract_duckduckgo_hits(html)
-            if not hits:
-                return None
+            normalized = public_web.normalized_search_results(response, search_query)
+            if normalized is None:
+                html = bytes(response["body"]).decode("utf-8")
+                hits = extract_duckduckgo_hits(html)
+                if not hits:
+                    return None
+            else:
+                hits = [ResearchHit(**hit) for hit in normalized]
 
             resolved_anchor = anchor or search_query
+            if not hits:
+                return ResearchOutcome(source_kind="search", raw_text="", anchor=resolved_anchor,
+                    meaning_summary="Search completed with zero results. No page evidence was delivered.")
             raw_text = render_hits_plain(hits)
-            meaning_summary = self._summarize_research_meaning(
+            navigation_notice = (
+                "Search-provider snippets and links are navigation candidates, "
+                "not verified page evidence."
+            )
+            meaning_summary = navigation_notice + "\n" + self._summarize_research_meaning(
                 "search",
                 resolved_anchor,
                 search_query,
-                trim_chars(raw_text, 1800),
+                navigation_notice + "\n" + trim_chars(raw_text, 1800),
             )
             outcome = ResearchOutcome(
                 source_kind="search",
@@ -32309,7 +32322,7 @@ Reason: {reason}
         except public_web.PublicWebError as error:
             logging.info("Public web search incomplete: %s", error.code)
             return ResearchOutcome(source_kind="search", raw_text="", anchor=anchor or search_query,
-                meaning_summary="", soft_failure_reason=f"Public web request incomplete: {error.code}")
+                meaning_summary="", soft_failure_reason=error.delivery_message())
         except Exception as error:
             logging.debug("Web search failed: %s", type(error).__name__)
             return None
@@ -32846,7 +32859,7 @@ Reason: {reason}
         else:
             web_context = self._web_search(search_query, anchor=f"{label}: {search_query}")
         web_block = ""
-        if web_context:
+        if web_context and web_context.succeeded() and web_context.hits:
             web_block = (
                 f"\n\nOptional related knowledge from the web:\n{web_context.prompt_body()}\n\n"
                 "Use this context only if it helps identify concrete implementation snags. "
@@ -33159,6 +33172,19 @@ Header-only telemetry (same pre-generation snapshot; not additional model input)
             self._pending_search_topic = None
             web_result = self._web_search(search_topic, anchor=search_topic)
             if web_result and web_result.succeeded():
+                if not web_result.hits:
+                    self._current_action_outcome_summary = (
+                        "Requested web search completed with zero results. No page evidence was "
+                        "delivered, no local source was substituted and no reflection was generated. "
+                        "The previous reading position is unchanged."
+                    )
+                    event = getattr(self, "_current_action_continuity_event", None)
+                    if isinstance(event, dict):
+                        event["continuity_action_result_v1"] = {
+                            "status": "handled", "reason": "web_search_zero_results",
+                            "source_delivered": False, "generation_requested": False,
+                        }
+                    return
                 evidence_hint = self._continuity_store().active_experiment_evidence_hint(
                     "SEARCH",
                     search_topic,
