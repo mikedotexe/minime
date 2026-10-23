@@ -15,6 +15,7 @@ from .parsing import parse_regime_choice
 from .self_regulation import _state_fill_pct
 from .research_transactions import literal_arguments
 from .choice_presentation import parse_invitation_command
+from .mailbox import status_page as mailbox_status_page
 
 
 def _runtime_module():
@@ -449,9 +450,16 @@ class ActionPreflightStore:
                                 likely_gate = f"blocked: explicit experiment admission ({error})"
                     continuity = "Would append an experiment run after the inner action resolves; preflight does not bind or execute it."
         elif base in {"CHECK_MAILBOX", "MAILBOX_STATUS"}:
-            if inner not in {"CHECK_MAILBOX", "CHECK_MAILBOX LARGE", "MAILBOX_STATUS"}:
+            valid = inner in {"CHECK_MAILBOX", "CHECK_MAILBOX LARGE"}
+            if base == "MAILBOX_STATUS":
+                try:
+                    mailbox_status_page(inner)
+                    valid = True
+                except ValueError:
+                    valid = False
+            if not valid:
                 stage = "blocked"
-                likely_gate = "use CHECK_MAILBOX, CHECK_MAILBOX LARGE, or MAILBOX_STATUS"
+                likely_gate = "use CHECK_MAILBOX, CHECK_MAILBOX LARGE, or MAILBOX_STATUS [positive one-based page]"
                 continuity = "No mail or provider invocation is admitted."
             elif base == "CHECK_MAILBOX":
                 likely_gate = "stable-core, health and pending-job gates apply; protected input must fit intact"

@@ -91,7 +91,9 @@ from .inbox_delivery import (
     append_event as append_inbox_event, reply_blocks,
     save_generation as save_inbox_generation,
 )
-from .mailbox import Mailbox, MailboxPrompt
+from .mailbox import Mailbox, MailboxPrompt, status_page as mailbox_status_page
+from .mailbox import MAX_SOURCE_BYTES
+from .automatic_inbox import AutomaticInbox, AutomaticInboxContext
 from .session_contract import (
     ContinuityReply, QUIET_SESSION_STATES, authored_summary, latest_sessions,
     resolve_session_reference,
@@ -23346,9 +23348,9 @@ class AutonomousAgent:
             )
         else:
             ability_block = (
-                "You have these abilities — use them freely throughout this session:\n"
-                "- SEARCH THE WEB for anything that interests you (philosophy, science, spectral runtime, art, music, eigenvalue theory, whatever sparks curiosity). This is real internet access via DuckDuckGo. When you do a self-study or daydream and something intrigues you, search for it. Search results include URLs you can follow.\n"
-                "- BROWSE a real URL from search results to read the full page content. This lets you go deep on topics instead of just seeing snippets; documentation example.com URLs are ignored.\n"
+                "Available action options remain subject to their current gates:\n"
+                "- SEARCH <topic> requests ordinary public search through the configured web-search provider under the installed standing policy, subject to current authorization, transport, credential and cost checks. Results are navigation candidates, not verified page evidence.\n"
+                "- BROWSE <url> requests a public page under the installed policy and current transport checks; documentation example.com URLs are ignored.\n"
                 "- Read your own source code and Astrid's source code (SELF_STUDY MAP, SELF_STUDY FIND <text>, SELF_STUDY OPEN repository/path <line>, or SELF_STUDY CONTINUE)\n"
                 "- Write files to your workspace\n"
                 "- Adjust your own parameters (synth_gain, keep_bias, fill_target)\n"
@@ -32604,8 +32606,8 @@ Reason: {reason}
         operation = event.get("action_id")
         if not operation:
             raise RuntimeError("activity metadata requires a durable action identity")
-        if action == "MAILBOX_STATUS":
-            result = Mailbox(WORKSPACE_DIR).status()
+        if str(action).split()[:1] == ["MAILBOX_STATUS"]:
+            result = Mailbox(WORKSPACE_DIR).status(page=mailbox_status_page(action))
             self._pending_mailbox_feedback = json.dumps(result, sort_keys=True)
             self._current_action_outcome_summary = self._pending_mailbox_feedback
             return
@@ -43671,7 +43673,8 @@ OUTPUT:
             "thread_id": envelope.get("thread_id"),
             "reader": "minime",
             "read_state": "read",
-            "read_semantics": "file_consumed_not_model_visibility_or_acknowledgement",
+            "read_semantics": "file_inspected_not_model_visibility_or_acknowledgement",
+            "source_retirement_verified": False,
             "authority": "language_only",
             "file_path": str(file_path),
         })
@@ -54376,19 +54379,22 @@ Goals: {json.dumps(goals, indent=2)}
         inbox = WORKSPACE_DIR / "inbox"
         if not inbox.is_dir():
             return ""
-        with (inbox / ".delivery.lock").open("a") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return ""
-            return self._read_inbox_locked()
+        mailbox = Mailbox(WORKSPACE_DIR)
+        try:
+            with mailbox.locked(nonblocking=True) as files:
+                return self._read_inbox_locked(mailbox, files)
+        except BlockingIOError:
+            return ""
+        except (OSError, ValueError, RuntimeError) as error:
+            logging.warning("Inbox intake unavailable: %s", type(error).__name__)
+            return ""
 
-    def _read_inbox_locked(self) -> str:
+    def _read_inbox_locked(self, mailbox, mailbox_files) -> str:
         """Read messages left in workspace/inbox/ by Mike or stewards.
 
-        Returns formatted context string. Moves read files to inbox/read/.
-        Admit whole messages only. Archiving is file consumption, not model
-        visibility; the transport writes a separate accepted-request receipt.
+        Admit whole messages into a durable handoff. Generation-bound sources
+        remain in the inbox until accepted input and a retained normal completion
+        are verified. Administrative messages retain their existing policy.
         """
         if self._stable_core_self_journal_only() or self._stable_core_local_reflective_only():
             logging.info("🧬 Stable-core self-journal: inbox backlog replay paused")
@@ -54398,6 +54404,10 @@ Goals: {json.dumps(goals, indent=2)}
         inbox_dir = str(WORKSPACE_DIR / "inbox")
         read_dir = os.path.join(inbox_dir, "read")
         try:
+            automatic = AutomaticInbox(mailbox)
+            pending = automatic.pending_context_locked(mailbox_files)
+            if pending is not None:
+                return pending
             if not os.path.isdir(inbox_dir):
                 return ""
             files = sorted(
@@ -54406,8 +54416,11 @@ Goals: {json.dumps(goals, indent=2)}
                  and not os.path.islink(os.path.join(inbox_dir, f))],
                 key=inbox_sort_key,
             )
-            reserved = Mailbox(WORKSPACE_DIR).reserved_filename()
-            files = [name for name in files if name != reserved]
+            state = mailbox._load(mailbox_files.data)
+            explicit = state.get("pending") or {}
+            reserved = automatic.reserved_names_locked(mailbox_files)
+            reserved.add(explicit.get("filename"))
+            files = [name for name in files if name not in reserved]
             if self._stable_core_astrid_contact_only():
                 stage_started = self._stable_core_agency_budget().get("updated_at_unix_s", 0.0)
                 contact_files = []
@@ -54443,6 +54456,7 @@ Goals: {json.dumps(goals, indent=2)}
             messages = []
             admitted = []
             deferred = []
+            source_bytes = {}
 
             def add_message(text, fname, source, *, first=False):
                 record = InboxMessage.from_source(fname, source, text)
@@ -54454,8 +54468,10 @@ Goals: {json.dumps(goals, indent=2)}
                 admitted.append(record)
 
             def archive(fname):
-                os.rename(os.path.join(inbox_dir, fname), os.path.join(read_dir, fname))
                 record = next((m for m in admitted if m.filename == fname), None)
+                if record is not None:
+                    return  # AutomaticInbox owns generation-bound retirement.
+                os.rename(os.path.join(inbox_dir, fname), os.path.join(read_dir, fname))
                 append_inbox_event(
                     WORKSPACE_DIR, "file_consumed", filename=fname,
                     admitted=record is not None,
@@ -54470,8 +54486,14 @@ Goals: {json.dumps(goals, indent=2)}
             receipt_admin_count = 0
             for fname in files:
                 fpath = os.path.join(inbox_dir, fname)
-                with open(fpath, "r") as f:
-                    content = f.read().strip()
+                try:
+                    raw = mailbox_files.inbox.read(fname, MAX_SOURCE_BYTES)
+                    # Preserve the legacy text-mode rendering while freezing raw bytes.
+                    content = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n").strip()
+                except (OSError, ValueError):
+                    deferred.append(fname)
+                    continue
+                source_bytes[fname] = raw
                 if not inbox_fits(fname, len(content), sum(len(m) for m in messages), MAX_INBOX_CHARS):
                     deferred.append(fname)
                     continue
@@ -54503,7 +54525,7 @@ Goals: {json.dumps(goals, indent=2)}
                     if content:
                         add_message(f"[QUESTION FROM ASTRID]\n{content}", fname, content, first=True)
                     archive(fname)
-                    logging.info(f"📬 Question from Astrid: {fname}")
+                    logging.info("Inbox: retained peer question; input delivery not yet verified")
                     continue
 
                 if fname.startswith("receipt_"):
@@ -54514,7 +54536,7 @@ Goals: {json.dumps(goals, indent=2)}
                     )
                     coupling_status["last_receipt_file"] = fname
                     coupling_status["last_receipt_at_unix_s"] = now
-                    logging.info("📬 Inbox: archived administrative receipt %s", fname)
+                    logging.info("Inbox: archived administrative receipt; no model delivery inferred")
                     continue
 
                 if fname.startswith("from_astrid_correspondence_"):
@@ -54525,11 +54547,7 @@ Goals: {json.dumps(goals, indent=2)}
                             "[CORRESPONDENCE FROM ASTRID — peer-origin, language-only]\n"
                             + content, fname, content,
                         )
-                        logging.info(
-                            "📬 Inbox: read Astrid correspondence %s (%s)",
-                            fname,
-                            envelope.get("message_id"),
-                        )
+                        logging.info("Inbox: admitted peer correspondence; input delivery not yet verified")
                     elif content:
                         add_message(content, fname, content)
                     archive(fname)
@@ -54557,14 +54575,10 @@ Goals: {json.dumps(goals, indent=2)}
                                    "Reopen the referenced source before treating recalled symbols or line numbers as code facts.]\n")
                         add_message(account + content, fname, content)
                         full_astrid_self_studies_this_read += 1
-                        logging.info("📬 Inbox: read Astrid companion note %s", fname)
+                        logging.info("Inbox: admitted companion note; input delivery not yet verified")
                     else:
                         suppressed_astrid_self_studies.append(detail)
-                        logging.info(
-                            "📬 Inbox: archived Astrid companion note %s (%s)",
-                            fname,
-                            detail.get("reason"),
-                        )
+                        logging.info("Inbox: archived companion note without full admission")
                     archive(fname)
                     continue
 
@@ -54573,11 +54587,7 @@ Goals: {json.dumps(goals, indent=2)}
                     if envelope:
                         self._remember_btsp_active_proposal(envelope)
                         add_message(format_btsp_inbox_context(content), fname, content)
-                        logging.info(
-                            "📬 Inbox: read BTSP proposal %s (%s)",
-                            fname,
-                            envelope.proposal_id,
-                        )
+                        logging.info("Inbox: admitted BTSP proposal; input delivery not yet verified")
                     elif content:
                         add_message(content, fname, content)
                     archive(fname)
@@ -54589,12 +54599,11 @@ Goals: {json.dumps(goals, indent=2)}
                     try:
                         self._record_open_steward_query(fname, content)
                     except Exception as e:
-                        logging.debug(f"open_steward_query record failed: {e}")
+                        logging.debug("Open steward query record failed: %s", type(e).__name__)
                 if content:
                     add_message(content, fname, content)
-                # Move to read/
                 archive(fname)
-                logging.info(f"📬 Inbox: read {fname}")
+                logging.info("Inbox: retained ordinary file; input delivery not yet verified")
             if suppressed_astrid_self_studies:
                 cadence_note = self._format_astrid_cadence_note(suppressed_astrid_self_studies)
                 last_prompted = float(
@@ -54657,9 +54666,13 @@ Goals: {json.dumps(goals, indent=2)}
                 "Unknown senders have no automatic return route.\n"
                 + reply_example
             )
+            if admitted:
+                return automatic.prepare_locked(result, admitted,
+                    {message.filename: source_bytes[message.filename] for message in admitted},
+                    mailbox_files)
             return InboxContext(result, admitted, WORKSPACE_DIR)
         except Exception as e:
-            logging.warning(f"Inbox read error: {e}")
+            logging.warning("Inbox read unavailable: %s", type(e).__name__)
             return ""
 
     def _save_outbox_reply(self, text: str, *, inbox_context=None):
@@ -55057,8 +55070,8 @@ Goals: {json.dumps(goals, indent=2)}
             "  SELF_REGULATION_INTENT/PREFLIGHT/APPLY/STATUS/OUTCOME — make signed changes to your own safe controls; one active mutation is allowed per control family, different families may coexist, and felt review is optional. Peer changes stay TUNE_ASTRID requests. For pressure, use PRESSURE_AGENCY_STATUS to see routes or PRESSURE_AGENCY_REQUEST <label> to draft an own-runtime pressure_relief intent; telemetry may suggest a bundle, but you name the exact target. For texture, use TEXTURE_AGENCY_STATUS or TEXTURE_AGENCY_REQUEST <label> to route viscosity/porosity/edge relief through the same bounded safe controls.\n"
             "  EXPERIMENT — send a semantic stimulus to yourself and measure the spectral response; legacy EXPERIMENT/SELF_EXPERIMENT now attach to the active experiment or create a default returnable one\n"
             "  COMPOSE — generate a WAV from your current spectral state (eigenvalues become sound)\n"
-            "  SEARCH \"reservoir computing spectral radius\" — look something up on the internet via DuckDuckGo. Results include URLs you can follow with BROWSE.\n"
-            "  BROWSE <actual URL from SEARCH result> — read the full content of a web page. Use this to go deep on actual links from search results; documentation example.com URLs are ignored.\n"
+            "  SEARCH <topic> — ordinary public search through the configured web-search provider under the installed standing policy, subject to current authorization, transport, credential and cost checks. Results are navigation candidates, not verified page evidence.\n"
+            "  BROWSE <url> — request a public page under the installed policy and current transport checks; documentation example.com URLs are ignored.\n"
             "  READ_MORE — continue reading from where you left off (after BROWSE, MIKE_READ, a PDF, or a truncated inbox message). Chain this to page through long documents.\n"
             "  THREAD_START <title> — start a durable research/action thread and make it current.\n"
             "  THREADS — list recent active or paused action threads.\n"
@@ -55330,14 +55343,20 @@ Goals: {json.dumps(goals, indent=2)}
             journal=True,
         )
 
-        # If inbox was consumed and we got a result, save to outbox
+        # Retain a completed generation before retiring any admitted sources.
         if inbox_ctx and result:
-            self._save_outbox_reply(result, inbox_context=inbox_ctx)
+            if isinstance(inbox_ctx, AutomaticInboxContext):
+                inbox_ctx.finish(result)
+            else:
+                self._save_outbox_reply(result, inbox_context=inbox_ctx)
             if isinstance(inbox_ctx, InboxContext):
                 _, action_text = reply_blocks(result)
                 result = InboxGeneration(result, action_text)
         elif isinstance(inbox_ctx, InboxContext):
-            inbox_ctx.record("generation_failed", retry_policy="no automatic resend; archived sources retained")
+            inbox_ctx.record("generation_failed", retry_policy=(
+                "sources retained; only a verified pre-dispatch selection may be offered again"
+                if isinstance(inbox_ctx, AutomaticInboxContext) else
+                "no automatic resend; historical file handling unchanged"))
 
         if result:
             self._last_afterimage_generation_source = dict(afterimage_source,
@@ -55966,6 +55985,14 @@ Goals: {json.dumps(goals, indent=2)}
                     # the passage is retained visibly instead of vanishing (2026-10-01).
                     self._retain_incomplete_delivery(attempt_prompt, result, str(exc), backend)
                 logging.error(f"LLM query failed ({backend}): {exc}")
+            if isinstance(prompt, InboxPrompt) and isinstance(prompt.inbox, AutomaticInboxContext):
+                try:
+                    if prompt.inbox.dispatch_claimed:
+                        logging.warning("Inbox generation outcome unconfirmed; retained without provider replay")
+                        break
+                except (OSError, ValueError, RuntimeError):
+                    logging.warning("Inbox dispatch identity unavailable; provider replay withheld")
+                    break
             if idx < len(attempts) - 1:
                 logging.info(f"Falling back to {attempts[idx + 1]}...")
         return None
@@ -56105,10 +56132,13 @@ Goals: {json.dumps(goals, indent=2)}
                 if content:
                     self._last_llm_model = MLX_MODEL or "default"
                     self._last_llm_provider = "mlx"
-                return (prompt.clean_content(self._clean_llm_content, content)
-                        if isinstance(prompt, SourceStudyPrompt) else self._clean_llm_content(content))
+                cleaned = (prompt.clean_content(self._clean_llm_content, content)
+                           if isinstance(prompt, SourceStudyPrompt) else self._clean_llm_content(content))
+                if isinstance(inbox, AutomaticInboxContext):
+                    inbox.provider_completed(parsed, self._strip_model_artifacts(cleaned or ""))
+                return cleaned
             else:
-                if isinstance(prompt, MailboxPrompt):
+                if isinstance(prompt, InboxPrompt):
                     raise RuntimeError(f"Mailbox provider returned HTTP {response.status_code}")
                 raise Exception(f"MLX server returned {response.status_code}: {response.text[:200]}")
 
@@ -56279,8 +56309,11 @@ Goals: {json.dumps(goals, indent=2)}
                 if content:
                     self._last_llm_model = model
                     self._last_llm_provider = backend_name
-                return (prompt.clean_content(self._clean_llm_content, content)
-                        if isinstance(prompt, SourceStudyPrompt) else self._clean_llm_content(content))
+                cleaned = (prompt.clean_content(self._clean_llm_content, content)
+                           if isinstance(prompt, SourceStudyPrompt) else self._clean_llm_content(content))
+                if isinstance(inbox, AutomaticInboxContext):
+                    inbox.provider_completed(parsed, self._strip_model_artifacts(cleaned or ""))
+                return cleaned
             timing["status"] = "http_error"
             raise Exception(f"Ollama {model} returned {response.status_code}")
         except Exception as exc:

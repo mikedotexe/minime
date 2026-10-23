@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+import fcntl
 import hashlib
 import json
 import os
@@ -16,15 +17,19 @@ import stat
 from .inbox_delivery import InboxContext, InboxMessage, InboxPrompt, save_generation
 from .mailbox_fs import Directory, FileTooLarge, letter_text
 
-SCHEMA = "minime_mailbox_v1"
+SCHEMA = "minime_mailbox_v2"
+LEGACY_SCHEMA = "minime_mailbox_v1"
 # Sanctioned release wrappers inspect this literal without importing the runtime.
-MAILBOX_COMPATIBILITY_VERSION = 1
+MAILBOX_COMPATIBILITY_VERSION = 2
 MAX_FILES = 20_000
 MAX_SEEN = 65_536
 MAX_SOURCE_BYTES = 64_000
 NORMAL_CHARS = 4_000
 LARGE_CHARS = 12_000
 MAX_PROVIDER_BYTES = 8_000_000
+MAX_HISTORY_BYTES = 8_000_000
+STATUS_PAGE_SIZE = 8
+MAX_STATUS_PAGE = (1 << 64) - 1
 REJECTION_REASONS = {"unreadable", "invalid_utf8", "empty", "rtf", "oversize"}
 
 
@@ -37,11 +42,27 @@ def _hash(value):
             and all(c in "0123456789abcdef" for c in value))
 
 
+def status_page(action: str) -> int:
+    """Match the Rust metadata command's trimmed, positive ASCII usize64 page."""
+    parts = action.split(maxsplit=1)
+    if parts and parts[0] == "MAILBOX_STATUS":
+        argument = parts[1].strip() if len(parts) > 1 else ""
+        if not argument:
+            return 1
+        if argument.isascii() and argument.isdecimal():
+            digits = argument.lstrip("0") or "0"
+            if len(digits) <= 20:
+                page = int(digits)
+                if 1 <= page <= MAX_STATUS_PAGE:
+                    return page
+    raise ValueError("use MAILBOX_STATUS [positive one-based page]")
+
+
 @dataclass
 class _Files:
     root: Directory
-    inbox: Directory
-    data: Directory
+    inbox: Directory | None
+    data: Directory | None
 
 
 @dataclass(frozen=True)
@@ -102,22 +123,62 @@ class Mailbox:
         self.path = self.directory / "state.json"
 
     @contextmanager
-    def locked(self):
+    def locked(self, *, nonblocking=False):
         with Directory(self.workspace, create=True) as root:
             inbox = root.child("inbox", create=True)
             data = root.child("correspondence", create=True).child("mailbox_v1", create=True)
-            with inbox.lock(".delivery.lock"):
+            with inbox.lock(".delivery.lock", nonblocking=nonblocking):
                 data.check()
                 yield _Files(root, inbox, data)
                 data.check()
 
+    @contextmanager
+    def _observed(self):
+        """Join an existing delivery lock without initializing any mailbox artifacts."""
+        with Directory(self.workspace) as root:
+            try:
+                inbox = root.child("inbox")
+            except FileNotFoundError:
+                root.check()
+                inbox = None
+            lock = None
+            try:
+                if inbox is not None:
+                    try:
+                        lock = os.open(".delivery.lock", os.O_RDONLY | os.O_NOFOLLOW
+                                       | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=inbox.fd)
+                    except FileNotFoundError:
+                        inbox.check()
+                    if lock is not None:
+                        info = os.fstat(lock)
+                        if not stat.S_ISREG(info.st_mode):
+                            raise ValueError("correspondence lock is not a regular file")
+                        fcntl.flock(lock, fcntl.LOCK_SH)
+                        current = inbox.stat(".delivery.lock")
+                        if (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino):
+                            raise ValueError("correspondence lock changed")
+                try:
+                    data = root.child("correspondence").child("mailbox_v1")
+                except FileNotFoundError:
+                    root.check()
+                    data = None
+                yield _Files(root, inbox, data)
+                root.check()
+                if inbox is not None:
+                    inbox.check()
+                if data is not None:
+                    data.check()
+            finally:
+                if lock is not None:
+                    os.close(lock)
+
     def _load(self, data):
-        if not data.exists("state.json"):
-            if data.names():
+        if data is None or not data.exists("state.json"):
+            if data is not None and data.names():
                 raise ValueError("mailbox manifest missing with retained artifacts; reconciliation required")
-            return {"schema": SCHEMA, "seen": [], "completed": {}, "pending": None}
+            return {"schema": SCHEMA, "seen": [], "completed": {}, "pending": None, "automatic": {}}
         value = json.loads(data.read("state.json", 8_000_000))
-        if (not isinstance(value, dict) or value.get("schema") != SCHEMA
+        if (not isinstance(value, dict) or value.get("schema") not in {LEGACY_SCHEMA, SCHEMA}
                 or not isinstance(value.get("seen"), list)
                 or not all(_hash(x) for x in value["seen"])
                 or not isinstance(value.get("completed"), dict)
@@ -153,17 +214,32 @@ class Mailbox:
                 or any(type(n) is not int or not 0 <= n <= MAX_FILES
                        for n in selection["rejection_counts"].values())):
             raise ValueError("corrupt mailbox selection history; retained unchanged")
+        from .automatic_inbox import reserved_names, validate_automatic
+        if value["schema"] == LEGACY_SCHEMA:
+            if "automatic" in value and value["automatic"] != {}:
+                raise ValueError("automatic inbox history requires mailbox v2; retained unchanged")
+            value["automatic"] = {}
+        validate_automatic(value.get("automatic"))
+        if pending and pending["filename"] in reserved_names(value["automatic"]):
+            raise ValueError("overlapping inbox reservations; retained unchanged")
         return value
 
     def _save(self, value, files):
+        from .automatic_inbox import validate_automatic
+        value["schema"] = SCHEMA
+        value.setdefault("automatic", {})
+        validate_automatic(value["automatic"])
         content = json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")
         if len(content) > 8_000_000:
             raise ValueError("mailbox history byte limit reached; retained unchanged")
-        files.data.atomic("initialized", SCHEMA.encode())
+        # The namespace marker is immutable; schema migration lives in state.json.
+        files.data.atomic("initialized", LEGACY_SCHEMA.encode())
         files.data.atomic("state.json", content, replace=True)
 
     def _inventory(self, inbox):
         result = []
+        if inbox is None:
+            return result
         for name in inbox.names():
             if not name.endswith(".txt") or name.startswith(("receipt_", "ping_")):
                 continue
@@ -171,17 +247,19 @@ class Mailbox:
             if not stat.S_ISREG(info.st_mode):
                 continue
             identity = _sha(f"{name}\0{info.st_size}\0{info.st_mtime_ns}".encode())
-            result.append((name, identity))
+            result.append((name, identity, info.st_size))
             if len(result) > MAX_FILES:
                 raise ValueError("mailbox inventory limit reached; no sources consumed")
         return result
 
     def notice(self):
+        from .automatic_inbox import reserved_names
         with self.locked() as files:
             state = self._load(files.data)
-            inventory = self._inventory(files.inbox)
+            held = reserved_names(state["automatic"])
+            inventory = [item for item in self._inventory(files.inbox) if item[0] not in held]
             seen = set(state["seen"])
-            fresh = tuple(sorted(identity for _, identity in inventory if identity not in seen))
+            fresh = tuple(sorted(identity for _, identity, _ in inventory if identity not in seen))
             return MailboxNotice(self, fresh, len(inventory)) if fresh else None
 
     def acknowledge_notice(self, identities):
@@ -204,20 +282,126 @@ class Mailbox:
             pending = self._load(data).get("pending")
         return pending["filename"] if pending else None
 
-    def status(self):
-        with self.locked() as files:
+    def status(self, page=1):
+        from .automatic_inbox import phase_by_name, status_projection
+        if type(page) is not int or not 1 <= page <= MAX_STATUS_PAGE:
+            raise ValueError("use MAILBOX_STATUS [positive one-based page]")
+        with self._observed() as files:
             state = self._load(files.data)
             pending = state["pending"]
-            return {"waiting_files": len(self._inventory(files.inbox)),
+            automatic_phases = phase_by_name(state["automatic"])
+            automatic_status = status_projection(state["automatic"])
+            inventory = sorted(self._inventory(files.inbox))
+            start = (page - 1) * STATUS_PAGE_SIZE
+            total_pages = max(1, (len(inventory) + STATUS_PAGE_SIZE - 1) // STATUS_PAGE_SIZE)
+            return {"waiting_files": len(inventory),
+                    "inventory_semantics": "ordinary queued files, including reservations; eligibility not checked; receipt_/ping_ administrative files excluded",
+                    "page": page, "page_size": STATUS_PAGE_SIZE, "total_pages": total_pages,
+                    "next_page": page + 1 if page < total_pages else None,
+                    "next_page_command": f"MAILBOX_STATUS {page + 1}" if page < total_pages else None,
+                    "inventory_revision": _sha("\n".join(identity for _, identity, _ in inventory).encode()),
+                    "inventory_identity_semantics": "opaque filename/size/mtime reference, not sender Message-Id; pages are separate observations; reservation matches filename only, not current bytes",
+                    "queued_files": [
+                        {"inventory_id": identity, "bytes": size,
+                         "reservation_phase": pending["phase"] if pending and name == pending["filename"] else automatic_phases.get(name),
+                         "reservation_owner": "explicit" if pending and name == pending["filename"] else "automatic" if name in automatic_phases else None}
+                        for name, identity, size in inventory[start:start + STATUS_PAGE_SIZE]
+                    ],
+                    "reserved_name_present": any(name == pending["filename"] for name, _, _ in inventory) if pending else False,
                     "pending_phase": pending["phase"] if pending else None,
-                    "reconciliation_required": bool(pending and (
+                    "pending_delivery": {
+                        "input_delivery_verified": pending["phase"] in {"supplied", "response_retained"},
+                        "provider_stop_verified": bool(pending.get("completion_validated")),
+                        "response_retained": pending["phase"] == "response_retained",
+                    } if pending else None,
+                    "delivery_history": self._delivery_history(files),
+                    "automatic_batches": automatic_status,
+                    "reconciliation_required": automatic_status["reconciliation_required"] or bool(pending and (
                         pending["phase"] in {"started", "supplied", "response_retained"}
                         or pending.get("retirement_debt"))),
                     "retirement_debt": pending.get("retirement_debt") if pending else None,
                     "last_selection": state.get("last_selection"),
                     "last_selection_is_historical": True,
                     "choices": ["CHECK_MAILBOX", "CHECK_MAILBOX LARGE", "INTROSPECT", "REST"],
-                    "semantics": "availability and delivery state, not attention, understanding or reply intent"}
+                    "semantics": "recorded delivery evidence, not read/understood, attention or reply intent; file consumption is not delivery; reply publication is not recipient delivery"}
+
+    def _delivery_history(self, files):
+        """Project metadata only; neither legacy consumption nor output proves input delivery."""
+        summary = {
+            "state": "available",
+            "scope": "recorded explicit and legacy inbox events; absence of a receipt is not proof of non-delivery",
+            "provider_stop": "unknown",
+            "semantics": "accepted input means protected text in an accepted request; retained output alone does not verify provider stop; addressed replies are optional",
+        }
+        counts = {"file_consumption_events": 0, "accepted_input_submissions": 0,
+                  "retained_generations": 0, "retained_generations_with_verified_input": 0,
+                  "addressed_reply_publications": 0}
+        try:
+            if not files.root.exists("correspondence"):
+                return dict(summary, state="no_receipts", **counts)
+            directory = files.root.child("correspondence")
+            if not directory.exists("inbox_delivery_v1.jsonl"):
+                return dict(summary, state="no_receipts", **counts)
+            before = directory.stat("inbox_delivery_v1.jsonl")
+            raw = directory.read("inbox_delivery_v1.jsonl", MAX_HISTORY_BYTES)
+            accepted, retained, delivered, replies = set(), set(), set(), set()
+            for line in raw.splitlines():
+                row = json.loads(line)
+                if (not isinstance(row, dict) or row.get("schema") != "inbox_delivery_v1"
+                        or row.get("authority") != "language_only"):
+                    raise ValueError("unsupported inbox history")
+                stage = row.get("stage")
+                if stage == "file_consumed":
+                    counts["file_consumption_events"] += 1
+                    continue
+                if stage not in {"supplied_to_model", "unaddressed_generation", "authored_reply"}:
+                    continue
+                messages = row["messages"]
+                if not isinstance(messages, list):
+                    raise ValueError("invalid inbox messages")
+                if not messages:
+                    # A legacy cadence summary can have no admitted letter.
+                    continue
+                identities = tuple(tuple(message[key] for key in (
+                    "message_id", "sender", "thread_id", "filename",
+                    "source_text_sha256", "rendered_text_sha256")) for message in messages)
+                if (any(not isinstance(value, str) for identity in identities for value in identity)
+                        or any(not _hash(identity[-1]) or not _hash(identity[-2]) for identity in identities)
+                        or not isinstance(row.get("batch_id"), str)):
+                    raise ValueError("incomplete inbox identity")
+                attempt = row.get("attempt_id" if stage == "supplied_to_model" else "supplied_attempt_id")
+                if attempt is not None and not isinstance(attempt, str):
+                    raise ValueError("invalid inbox attempt")
+                submission = (row["batch_id"], attempt, identities)
+                if stage == "supplied_to_model":
+                    if not attempt:
+                        raise ValueError("missing accepted attempt")
+                    accepted.add(submission)
+                    continue
+                if not _hash(row.get("raw_generation_sha256")):
+                    raise ValueError("missing retained generation identity")
+                generation = (submission, row["raw_generation_sha256"])
+                retained.add(generation)
+                if submission in accepted:
+                    delivered.add(generation)
+                    if stage == "authored_reply":
+                        address = (row.get("reply_to"), row.get("recipient"))
+                        if (address[1] not in {"mike", "steward", "astrid"}
+                                or sum(identity[:2] == address for identity in identities) != 1):
+                            raise ValueError("ambiguous reply identity")
+                        replies.add((generation, address))
+            counts.update(accepted_input_submissions=len(accepted), retained_generations=len(retained),
+                          retained_generations_with_verified_input=len(delivered),
+                          addressed_reply_publications=len(replies))
+            # Directory.read guards the byte read; also cover the projection interval.
+            after = directory.stat("inbox_delivery_v1.jsonl")
+            if any(getattr(before, field) != getattr(after, field) for field in
+                   ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")):
+                raise ValueError("inbox history changed during inspection")
+        except (OSError, ValueError, KeyError, TypeError):
+            # A partial, oversized or changing ledger is unknown, never an empty inbox history.
+            return dict(summary, state="unavailable", **dict.fromkeys(counts))
+        return dict(summary, **counts)
 
     def _context(self, pending, files):
         raw = files.data.read(pending["source_sha256"] + ".txt", MAX_SOURCE_BYTES)
@@ -242,6 +426,7 @@ class Mailbox:
         return context
 
     def open(self, operation, *, large=False, sort_key):
+        from .automatic_inbox import reserved_names
         if not isinstance(operation, str) or not operation or len(operation) > 256:
             raise ValueError("mailbox requires a bounded durable action identity")
         with self.locked() as files:
@@ -268,7 +453,10 @@ class Mailbox:
                          "character_limit": LARGE_CHARS if large else NORMAL_CHARS,
                          "rejection_counts": dict.fromkeys(sorted(REJECTION_REASONS), 0)}
             state["last_selection"] = selection
-            for name, _ in sorted(self._inventory(files.inbox), key=lambda item: sort_key(item[0])):
+            automatic_reserved = reserved_names(state["automatic"])
+            for name, _, _ in sorted(self._inventory(files.inbox), key=lambda item: sort_key(item[0])):
+                if name in automatic_reserved:
+                    continue
                 selection["inspected"] += 1
                 try:
                     raw = files.inbox.read(name, MAX_SOURCE_BYTES)
@@ -373,8 +561,9 @@ class Mailbox:
         state["pending"] = None
         self._save(state, files)
 
-    def _retire_source(self, state, files):
-        pending = state["pending"]
+    def _retire_source(self, state, files, pending=None):
+        if pending is None:
+            pending = state["pending"]
         name = pending["filename"]
         retirement = None
         if pending.get("retirement"):
