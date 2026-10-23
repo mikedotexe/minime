@@ -5985,7 +5985,7 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertEqual(action, "research_exploration")
         self.assertEqual(agent._pending_search_topic, "reservoir computing spectral radius")
 
-    def test_search_next_strips_wrapping_quotes_from_topic(self):
+    def test_search_next_preserves_authored_wrapping_quotes(self):
         agent = self._agent()
         agent._hard_recovery_reset = False
         agent._pending_next_action = 'SEARCH "spectral entropy and subjective experience"'
@@ -6006,9 +6006,9 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
             action = agent._decide_action({"fill_ratio": 0.68})
 
         self.assertEqual(action, "research_exploration")
-        self.assertEqual(agent._pending_search_topic, "spectral entropy and subjective experience")
+        self.assertEqual(agent._pending_search_topic, '"spectral entropy and subjective experience"')
 
-    def test_web_search_normalizes_wrapping_quotes_before_request(self):
+    def test_web_search_preserves_authored_wrapping_quotes_in_request(self):
         agent = self._agent()
 
         class Response:
@@ -6034,9 +6034,9 @@ class TestHardRecoveryResetClamp(unittest.TestCase):
         self.assertIsNotNone(outcome)
         self.assertEqual(
             get.call_args.args[2],
-            "spectral entropy and subjective experience",
+            '"spectral entropy and subjective experience"',
         )
-        self.assertEqual(save.call_args.args[0], "spectral entropy and subjective experience")
+        self.assertEqual(save.call_args.args[0], '"spectral entropy and subjective experience"')
 
     def test_attractor_fatigue_records_repeated_journal_motif(self):
         agent = self._agent()
