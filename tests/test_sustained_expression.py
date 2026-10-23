@@ -45,7 +45,8 @@ def test_aspiration_with_mail_keeps_room_and_explicit_reply_authority(
     assert (writing.SUSTAINED_WRITING_INVITATION in system) == (profile != "short")
     assert system.count("1,500-3,000") == (0 if profile == "short" else 1)
     events = rows(aa.WORKSPACE_DIR)
-    assert [row["stage"] for row in events[:3]] == ["file_consumed", "request_prepared", "supplied_to_model"]
+    assert [row["stage"] for row in events[:2]] == ["request_prepared", "supplied_to_model"]
+    assert not path.exists() and (path.parent / "read" / path.name).read_text() == source
     replies = list((aa.WORKSPACE_DIR / "outbox/human/mike").glob("*.txt"))
     assert bool(replies) == (reply_id == "human_seed")
     assert not list((aa.WORKSPACE_DIR / "outbox").glob("reply_*.txt"))
@@ -76,16 +77,19 @@ def test_short_or_unfinished_aspiration_does_not_create_continuation(agent, monk
     chosen.assert_not_called()
 
 
-def test_aspiration_fallback_keeps_mail_and_only_accepts_successful_attempt(agent, monkeypatch):
+def test_aspiration_pre_dispatch_fallback_keeps_mail_and_only_accepts_successful_attempt(agent, monkeypatch):
     _, source = seed_inbox()
     body = "INBOX_REPLY human_seed\nThank you.\nNEXT: REST"
-    post = Mock(side_effect=[TimeoutError("synthetic timeout"), Mock(status_code=200,
-        json=lambda: {"message": {"content": body}, "done_reason": "stop"})])
+    post = Mock(return_value=Mock(status_code=200,
+        json=lambda: {"message": {"content": body}, "done": True, "done_reason": "stop"}))
     monkeypatch.setattr(aa.requests, "post", post)
+    primary = Mock(side_effect=ValueError("synthetic admission failure before dispatch"))
+    monkeypatch.setattr(agent, "_query_ollama", primary)
     monkeypatch.setattr(aa, "_llm_backend_attempts", lambda *args: ["ollama", "ollama_fast"])
     monkeypatch.setattr(aa, "MODEL", "gemma4:12b")
     monkeypatch.setattr(aa, "FALLBACK_MODEL", "gemma3:4b")
     assert agent._query_llm("My aspiration", context_mode="aspiration") == body
+    assert primary.call_count == post.call_count == 1
     for call in post.call_args_list:
         payload = call.kwargs["json"]
         assert payload["options"]["num_predict"] == 8192
@@ -93,7 +97,7 @@ def test_aspiration_fallback_keeps_mail_and_only_accepts_successful_attempt(agen
         assert source in payload["messages"][1]["content"]
         assert writing.SUSTAINED_WRITING_INVITATION in payload["messages"][0]["content"]
     events = rows(aa.WORKSPACE_DIR)
-    assert [row["stage"] for row in events] == ["file_consumed", "request_prepared", "submission_unconfirmed",
+    assert [row["stage"] for row in events] == [
         "request_prepared", "supplied_to_model", "unaddressed_generation", "authored_reply"]
     attempts = [row["attempt_id"] for row in events if row["stage"] == "request_prepared"]
-    assert attempts[0] != attempts[1] and events[-1]["supplied_attempt_id"] == attempts[1]
+    assert len(attempts) == 1 and events[-1]["supplied_attempt_id"] == attempts[0]

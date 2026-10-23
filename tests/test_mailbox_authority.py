@@ -11,6 +11,7 @@ from tests.test_source_study_follow_through import STATE, study_agent, select_ch
     ("CHECK_MAILBOX", "mailbox_read", "language_only"),
     ("CHECK_MAILBOX LARGE", "mailbox_read", "language_only"),
     ("MAILBOX_STATUS", "mailbox_status", "read_only"),
+    ("MAILBOX_STATUS 2", "mailbox_status", "read_only"),
 ])
 def test_preflight_capability_dispatch_and_visibility_agree(study_agent, command, route, stage):
     agent, store, _, _ = study_agent
@@ -48,3 +49,15 @@ def test_status_does_not_release_focus_or_invoke_provider(study_agent, monkeypat
     assert "waiting_files" in agent._pending_mailbox_feedback
     bad = ActionPreflightStore(agent).report("CHECK_MAILBOX all", STATE)
     assert bad["stage"] == "blocked" and not bad["stable_core_gate"]["allowed"]
+
+
+@pytest.mark.parametrize("command", ["MAILBOX_STATUS 0", "MAILBOX_STATUS -1",
+                                    "MAILBOX_STATUS +1", "MAILBOX_STATUS all",
+                                    "MAILBOX_STATUS 1 2", "MAILBOX_STATUS 18446744073709551616"])
+def test_status_preflight_rejects_same_invalid_pages_as_dispatch(study_agent, command):
+    from minime_autonomy.mailbox import status_page
+    agent, _, _, _ = study_agent
+    with pytest.raises(ValueError):
+        status_page(command)
+    report = ActionPreflightStore(agent).report(command, STATE)
+    assert report["stage"] == "blocked" and not report["stable_core_gate"]["allowed"]

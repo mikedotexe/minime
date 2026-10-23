@@ -250,15 +250,15 @@ def test_reader_defers_oversized_letter_without_archiving(agent):
     assert agent._write_astrid_inbox_coupling_status.call_args.args[0]["last_batch"]["deferred_whole_message_files"] == [path.name]
 
 
-def test_read_is_not_supply_and_batch_does_not_leak_to_next_read(agent):
+def test_read_is_not_supply_and_pre_dispatch_batch_is_retained_exactly(agent):
     path, source = seed_inbox()
     inbox = agent._read_inbox()
     assert isinstance(inbox, InboxContext)
     assert source in inbox
     assert not inbox.supplied
-    assert [r["stage"] for r in rows(aa.WORKSPACE_DIR)] == ["file_consumed"]
-    assert not path.exists()
-    assert agent._read_inbox() == ""
+    assert path.exists()
+    assert agent._read_inbox() == inbox
+    assert not inbox.dispatch_claimed
 
 
 @pytest.mark.parametrize("mode,prompt", [
@@ -275,10 +275,11 @@ def test_unrelated_or_private_lanes_do_not_consume_mail(agent, monkeypatch, mode
 
 
 def test_actual_query_adapter_and_save_keep_sender_and_stage(agent, monkeypatch):
-    _, source = seed_inbox()
+    path, source = seed_inbox()
     agent._last_correspondence_inbox_message = {"message_id": "stale_peer", "thread_id": "old"}
     body = "INBOX_REPLY human_seed\nHello Mike. I might answer differently than expected."
-    post = Mock(return_value=Mock(status_code=200, json=lambda: {"message": {"content": body}}))
+    post = Mock(return_value=Mock(status_code=200, json=lambda: {
+        "message": {"content": body}, "done": True, "done_reason": "stop"}))
     monkeypatch.setattr(aa.requests, "post", post)
     monkeypatch.setattr(aa, "LLM_BACKEND", "ollama")
     monkeypatch.setattr(aa, "MODEL", "gemma4:12b")
@@ -286,7 +287,9 @@ def test_actual_query_adapter_and_save_keep_sender_and_stage(agent, monkeypatch)
     assert source in post.call_args.kwargs["json"]["messages"][1]["content"]
     assert post.call_args.kwargs["json"]["options"]["num_ctx"] == max(aa.OLLAMA_NUM_CTX, aa.JOURNAL_CONTEXT_FLOOR)
     stages = [r["stage"] for r in rows(aa.WORKSPACE_DIR)]
-    assert stages == ["file_consumed", "request_prepared", "supplied_to_model", "authored_reply"]
+    assert stages.index("request_prepared") < stages.index("supplied_to_model") < stages.index("authored_reply")
+    assert not path.exists()
+    assert (path.parent / "read" / path.name).read_text() == source
     assert list((aa.WORKSPACE_DIR / "outbox" / "human" / "mike").glob("*.txt"))
     assert not list((aa.WORKSPACE_DIR / "outbox").glob("reply_*.txt"))
 
@@ -299,8 +302,9 @@ def test_failed_http_does_not_claim_supply_or_reply(agent, monkeypatch):
     monkeypatch.setattr(aa.requests, "post", Mock(side_effect=TimeoutError("fixture timeout")))
     assert agent._query_llm("A possible correspondence turn.") is None
     stages = [r["stage"] for r in rows(aa.WORKSPACE_DIR)]
-    assert stages == ["file_consumed", "request_prepared", "submission_unconfirmed", "generation_failed"]
-    assert (path.parent / "read" / path.name).exists()
+    assert "file_consumed" not in stages and "supplied_to_model" not in stages
+    assert stages.index("request_prepared") < stages.index("submission_unconfirmed") < stages.index("generation_failed")
+    assert path.exists() and not (path.parent / "read" / path.name).exists()
     assert not (aa.WORKSPACE_DIR / "outbox").exists()
 
 
@@ -310,7 +314,8 @@ def test_mixed_sender_batch_routes_selected_human_only(agent):
     (path.parent / "from_astrid_correspondence_peer_seed.txt").write_text(peer)
     inbox = agent._read_inbox()
     assert {m.sender for m in inbox.messages} == {"mike", "astrid"}
-    inbox.accepted("fixture_attempt", "fixture")
+    attempt = inbox.prepared([{"content": str(inbox)}], "fixture")
+    inbox.accepted(attempt, "fixture")
     reply = agent._save_outbox_reply("INBOX_REPLY human_seed\nHi Mike.", inbox_context=inbox)
     assert reply.parent.name == "mike"
     assert not list((aa.WORKSPACE_DIR / "outbox").glob("reply_*.txt"))
@@ -324,7 +329,7 @@ def test_duplicate_ids_do_not_create_ambiguous_reply(tmp_path):
     assert declared_reply("INBOX_REPLY human_seed\nHi", ambiguous) is None
 
 
-def test_fallback_preserves_same_message_and_records_separate_attempts(agent, monkeypatch):
+def test_uncertain_automatic_dispatch_does_not_repeat_letter_on_fallback(agent, monkeypatch):
     _, source = seed_inbox()
     body = "INBOX_REPLY human_seed\nHi Mike."
     post = Mock(side_effect=[TimeoutError("fixture timeout"),
@@ -333,14 +338,14 @@ def test_fallback_preserves_same_message_and_records_separate_attempts(agent, mo
     monkeypatch.setattr(aa, "LLM_BACKEND", "ollama")
     monkeypatch.setattr(aa, "MODEL", "gemma4:12b")
     monkeypatch.setattr(aa, "FALLBACK_MODEL", "gemma3:4b")
-    assert agent._query_llm("Ambient context " * 1000) == body
-    assert post.call_count == 2
+    assert agent._query_llm("Ambient context " * 1000) is None
+    assert post.call_count == 1
     for call in post.call_args_list:
         assert source in call.kwargs["json"]["messages"][1]["content"]
     events = rows(aa.WORKSPACE_DIR)
     attempts = [r["attempt_id"] for r in events if r["stage"] == "request_prepared"]
-    assert len(set(attempts)) == 2
-    assert events[-1]["supplied_attempt_id"] == attempts[-1]
+    assert len(set(attempts)) == 1
+    assert not any(row["stage"] == "supplied_to_model" for row in events)
 
 
 def test_mlx_transport_also_witnesses_exact_message(agent, monkeypatch):
@@ -427,7 +432,7 @@ def test_actual_next_wrapper_does_not_queue_reply_blocks_or_apply_their_dials(ag
     seed_inbox()
     text = "Independent prose.\nNEXT: INBOX_REPLY human_seed\nHello Mike.\nREGIME=focus"
     monkeypatch.setattr(aa.requests, "post", Mock(return_value=Mock(
-        status_code=200, json=lambda: {"message": {"content": text}})))
+        status_code=200, json=lambda: {"message": {"content": text}, "done": True, "done_reason": "stop"})))
     monkeypatch.setattr(aa, "LLM_BACKEND", "ollama")
     monkeypatch.setattr(aa, "MODEL", "gemma4:12b")
     monkeypatch.setattr(agent, "_emit_next_hints", Mock(return_value=""))
@@ -528,7 +533,7 @@ def test_bare_reply_blocks_preserve_actual_native_next_without_footer_leak(agent
     text = ("Independent prose.\n***\nINBOX_REPLY human_seed\n"
             "Hello Mike.\nexploration_noise=0.1\nNEXT: NOTICE")
     monkeypatch.setattr(aa.requests, "post", Mock(return_value=Mock(
-        status_code=200, json=lambda: {"message": {"content": text}})))
+        status_code=200, json=lambda: {"message": {"content": text}, "done": True, "done_reason": "stop"})))
     monkeypatch.setattr(aa, "LLM_BACKEND", "ollama")
     monkeypatch.setattr(aa, "MODEL", "gemma4:12b")
     monkeypatch.setattr(agent, "_emit_next_hints", Mock(return_value=""))
