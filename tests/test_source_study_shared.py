@@ -11,6 +11,40 @@ from minime_autonomy.source_study import StudyClient, selected_reader
 BINARY = Path(os.environ.get("ASTRID_SOURCE_STUDY_BIN", str(Path(__file__).resolve().parents[2] / "astrid/target/debug/astrid-source-study")))
 
 class SharedSourceStudyTests(unittest.TestCase):
+    def test_explicit_verification_help_does_not_turn_suggestions_into_actions(self):
+        pending = self.client.prepare(self.action)
+        help_prompt = self.client.prepare("SELF_STUDY HELP verification")
+        self.assertIn("A field named next_safe_command is not itself a command execution", help_prompt)
+        self.assertIn("A peer's account is attributed interpretation", help_prompt)
+        self.assertIn("No correction, investigation or agreement is required", help_prompt)
+        self.assertEqual(pending.output["page"], self.client.prepare("SELF_STUDY CONTINUE").output["page"])
+        reflection = self.client.prepare("INTROSPECT")
+        self.assertNotIn("next_safe_command", reflection)
+        self.assertNotIn("A peer's account", reflection)
+
+    def test_bracketed_line_recovery_preserves_exact_choice_and_requires_selection(self):
+        raw = "OPEN minime/minime_autonomy/runtime.py [47]"
+        action = self.client.source_action_route(raw)["canonical_action"]
+        pending = self.client.prepare(self.action)
+        recovery = self.client.prepare(action, request_id="bracket-recovery")
+        self.assertEqual(recovery.output["input_kind"], "recovery")
+        self.assertTrue(recovery.output["continuation_decision"])
+        self.assertIsNone(recovery.output["page"])
+        self.assertIn("Available choice: SELF_STUDY OPEN minime/minime_autonomy/runtime.py 47", recovery)
+        self.assertNotIn("path is not in the shared source catalog", recovery)
+        self.assertEqual(recovery.output, self.client.prepare(action, request_id="bracket-recovery").output)
+        self.assertEqual(pending.output["page"], self.client.prepare("SELF_STUDY CONTINUE").output["page"])
+        messages, _ = recovery.messages(recovery.output["system_prompt"], 16000)
+        response = Mock(status_code=200, text=json.dumps({"message": {"content": "NEXT: SELF_STUDY OPEN minime/minime_autonomy/runtime.py 47"}, "done": True}))
+        recovery.post(Mock(return_value=response), "fake", {"messages": messages}, 1)
+        recovery.accepted()
+        selected = self.client.prepare("SELF_STUDY OPEN minime/minime_autonomy/runtime.py 47")
+        self.assertEqual(selected.output["page"]["start"]["line"], 47)
+        messages, _ = selected.messages(selected.output["system_prompt"], 16000)
+        selected.post(Mock(return_value=response), "fake", {"messages": messages}, 1)
+        selected.accepted()
+        self.assertEqual(self.client.prepare("SELF_STUDY CONTINUE").output["page"]["start"], selected.output["page"]["end"])
+
     def test_explicit_review_preserves_active_inquiry_through_real_wire_adapter(self):
         self.client.prepare("SELF_STUDY QUESTION NEW Retained question?")
         self.client.prepare("SELF_STUDY QUESTION PARK q1")

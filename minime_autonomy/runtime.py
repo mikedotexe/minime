@@ -9438,7 +9438,7 @@ class ActionContinuityStore:
             "schema_version": 1,
             "record_schema": "continuity_session_v1",
             "record_type": record_type,
-            "record_id": f"cs_{self.system}_{int(time.time() * 1000)}_{self._slug(record_type)}",
+            "record_id": f"cs_{self.system}_{int(time.time() * 1000)}_{uuid4().hex}_{self._slug(record_type)}",
             "session_id": session_id,
             "being": self.system,
             "thread_id": thread.get("thread_id"),
