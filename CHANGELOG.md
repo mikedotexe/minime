@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Candidate: concise voluntary writing invitation (2026-10-24, Codex).** Replace the unselected "This is your space" framing with "Choose what to write, continue a thought, or rest." Preserve selected form, aspiration framing, exact recall/provenance, historical-cue preferences, fresh writing, continuation and all input/output limits. Synthetic matched-input comparisons test presentation and preservation, not subjective or literary effects. No live activation or automation resume. Paired qualification: Astrid's `docs/steward-notes/2026-10-24-numerical-qualification-and-concise-invitations.md`.
+
 - **Live: durable ordinary mail and truthful status (2026-10-23, Codex).** Gracefully replace only the agent alongside the qualified Astrid bridge/shared helper; verify all 106 loaded inputs and exact pending-NEXT restoration after accepted journal work completes. Preserve signed web authorization without extending expiry or resetting spending. No blind replay of old archived letters, queue promotion, provider/engine/sensory change or automation resume. Numerical fallback and larger-capacity work remain separate. Paired receipts: Astrid's `docs/steward-notes/2026-10-23-mailbox-graceful-rollout.md`.
 
 - **Qualified candidate, not activated (2026-10-23, Codex).** Freeze the 106-input mailbox adapter and qualify legacy-state preservation, completion recovery without regeneration, uncertain-attempt retention, pending NEXT and v2 downgrade refusal. The shared reader adds advisory-versus-enforced distinctions only on requested verification. No numerical weight, reflection, receiving-policy, capacity or service change. Paired identities and tests: Astrid's `docs/steward-notes/2026-10-23-mailbox-qualification-and-verification.md`.

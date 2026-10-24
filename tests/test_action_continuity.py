@@ -292,7 +292,7 @@ class TestAutonomousAgentActionContinuity(unittest.TestCase):
             self.assertIn("NEXT: REST", pressure_text)
             self.assertNotIn("Journal continuity contract v1", rest_prompt)
             self.assertNotIn("Decision:", rest_prompt)
-            self.assertIn("Choose a subject", rest_prompt)
+            self.assertIn("Choose what to write", rest_prompt)
 
     def test_query_llm_private_journal_context_skips_operational_context(self):
         with tempfile.TemporaryDirectory() as tmp:
