@@ -69,6 +69,33 @@ def test_invitation_keeps_explicit_form_and_history_exact_without_metrics():
     assert "Include one" not in text and "fill=" not in text
 
 
+@pytest.mark.parametrize("kind", ["journal", "daydream", "rest"])
+@pytest.mark.parametrize("prior", [None, "Exact earlier passage.\nNEXT: REST is quoted material."])
+def test_concise_invitation_changes_only_unselected_metaphor(kind, prior):
+    old_base = "This is your space. Choose a subject, continue a thought, or rest."
+    new_base = "Choose what to write, continue a thought, or rest."
+    suffix = ("\n\nOptional own-journal excerpt (historical; system annotations may be present):\n"
+              "Record and measurement provenance unavailable for this text-only input.\n" + prior +
+              "\nYou may return to it, disagree with it, or leave it aside.") if prior else ""
+    parent = old_base + suffix
+    candidate = expression_invitation(kind, prior=prior)
+    assert candidate == new_base + suffix
+    assert parent[len(old_base):] == candidate[len(new_base):]
+    assert "space" not in candidate
+    assert "continue a thought, or rest" in candidate
+    print(f"synthetic {kind} prompt bytes: parent={len(parent.encode())} candidate={len(candidate.encode())}")
+
+
+def test_simplification_preserves_chosen_form_and_aspiration_invitation():
+    assert expression_invitation("aspiration") == (
+        "What, if anything, would you like to imagine or explore? "
+        "An aspiration need not become a request or an investigation."
+    )
+    assert expression_invitation("journal", form="a brief note") == (
+        "You chose FORM: a brief note. You may use that form for this writing."
+    )
+
+
 @pytest.mark.parametrize("kind", ["aspiration", "daydream", "rest"])
 def test_later_state_refresh_is_archival_not_generation_input(runtime, monkeypatch, kind):
     agent, workspace, _ = runtime

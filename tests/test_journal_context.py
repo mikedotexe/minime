@@ -391,7 +391,7 @@ def test_reflection_routes_leave_measurement_interpretation_open(runtime, monkey
     query.assert_called_once()
     prompt = query.call_args.args[0]
     if route == "_journal_rest_reflection":
-        assert "Choose a subject" in prompt
+        assert "Choose what to write" in prompt
         assert "CURRENT STATE:" not in prompt
     else:
         assert OPEN_OBSERVATION_INVITATION in prompt
