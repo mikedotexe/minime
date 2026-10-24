@@ -37,7 +37,7 @@ def expression_invitation(kind: str, *, form: str | None = None, prior: JournalR
             "An aspiration need not become a request or an investigation."
         )
     else:
-        invitation = "This is your space. Choose a subject, continue a thought, or rest."
+        invitation = "Choose what to write, continue a thought, or rest."
     if prior:
         context = (render_journal_recall(prior, fold_whitespace=False)
                    if isinstance(prior, JournalRecall) else
