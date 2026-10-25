@@ -32659,7 +32659,10 @@ Reason: {reason}
                     and not self._stable_core_local_reflective_only()
                     and not self._stable_core_astrid_contact_only()):
                 try:
-                    notice = Mailbox(WORKSPACE_DIR).notice()
+                    # Retained old preparations keep their presentation contract.
+                    quiet_mail = prompt.output.get("evidence_scope", "").endswith(
+                        "Presentation: fresh-reflection-v2.")
+                    notice = None if quiet_mail else Mailbox(WORKSPACE_DIR).notice()
                     requested_mailbox_feedback = getattr(self, "_pending_mailbox_feedback", None)
                     feedback = ("\n\nEarlier explicitly requested mailbox result (runtime metadata, not a letter or current measurement):\n"
                                 + requested_mailbox_feedback if requested_mailbox_feedback else "")
@@ -32668,7 +32671,7 @@ Reason: {reason}
                             host_feedback=feedback + (notice.text if notice else ""))
                         prompt.mailbox_notice = notice
                 except (OSError, ValueError):
-                    logging.warning("Mailbox availability unavailable; reflection remains independent; inspect MAILBOX_STATUS")
+                    logging.warning("Mailbox feedback unavailable; reflection remains independent; inspect MAILBOX_STATUS")
             outcome = "rejected" if kind == "recovery" else "needs_choice" if kind in {"end_of_file", "revision_recovery", "source_selection_needed"} else "reader_prepared"
             detail = ("Reader rejected the request; no substitute command was executed." if outcome == "rejected" else
                       "Reader supplied no new source page; choose an explicit continuation, another activity or REST." if outcome == "needs_choice" else

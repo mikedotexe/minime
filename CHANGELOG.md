@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Candidate: quieter fresh reflection (2026-10-25, Codex).** Consume the shared Rust `fresh-reflection-v2` frame without automatic mailbox inventory or arrival notices. Keep explicit mailbox results, ordinary receiving, exact continuation, quiet parking, retained preparations and existing limits intact. No source-state migration or live activation. Paired qualification: Astrid `docs/steward-notes/2026-10-25-lighter-reflection-and-leak.md`.
+
 - **Live: concise voluntary invitation (2026-10-24, Codex).** Gracefully activate the one-file invitation change alongside Astrid's qualified numerical/absent-context repair. Verify all 106 loaded inputs, exact pending-NEXT restoration and unchanged providers, engine and sensory services. Preserve cue preferences, form overrides, continuation, limits and existing web authorization. Local main includes the candidate tests; no capacity work or automation resume. Paired evidence: Astrid's `docs/steward-notes/2026-10-24-numerical-invitation-graceful-rollout.md`.
 
 - **Candidate: concise voluntary writing invitation (2026-10-24, Codex).** Replace the unselected "This is your space" framing with "Choose what to write, continue a thought, or rest." Preserve selected form, aspiration framing, exact recall/provenance, historical-cue preferences, fresh writing, continuation and all input/output limits. Synthetic matched-input comparisons test presentation and preservation, not subjective or literary effects. No live activation or automation resume. Paired qualification: Astrid's `docs/steward-notes/2026-10-24-numerical-qualification-and-concise-invitations.md`.
