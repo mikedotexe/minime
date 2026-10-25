@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Offline packet: four-cell reflection comparison (2026-10-25, Codex).** Freeze 24 isolated Gemma reflections crossing old/lighter shared frames and synthetic mailbox notice presence, with fixed seeds/order, exact provider/model identities and blinded review. Preserve both failed setup/loading attempts; the 10 GiB resource guard stopped the pilot before any completion. No live provider or framing change; model comparison remains unfinished pending a reviewed resource window. See `docs/steward-notes/2026-10-25-reflection-comparison.md`.
+
 - **Candidate: quieter fresh reflection (2026-10-25, Codex).** Consume the shared Rust `fresh-reflection-v2` frame without automatic mailbox inventory or arrival notices. Keep explicit mailbox results, ordinary receiving, exact continuation, quiet parking, retained preparations and existing limits intact. No source-state migration or live activation. Paired qualification: Astrid `docs/steward-notes/2026-10-25-lighter-reflection-and-leak.md`.
 
 - **Live: concise voluntary invitation (2026-10-24, Codex).** Gracefully activate the one-file invitation change alongside Astrid's qualified numerical/absent-context repair. Verify all 106 loaded inputs, exact pending-NEXT restoration and unchanged providers, engine and sensory services. Preserve cue preferences, form overrides, continuation, limits and existing web authorization. Local main includes the candidate tests; no capacity work or automation resume. Paired evidence: Astrid's `docs/steward-notes/2026-10-24-numerical-invitation-graceful-rollout.md`.
