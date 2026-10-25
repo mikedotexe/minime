@@ -66,3 +66,10 @@ with 13% system-free reserve requires a separate decision; it is not implemented
 or approved by this note. A new execution packet must preserve the same design
 and failed-attempt provenance. Do not expand the sample based on output.
 Two synthetic harness tests pass; they are not model-outcome qualification.
+
+The closeout inventory identified alternate engine ports 7900-7902 and a
+separate reservoir service at 7881. The harness now denies those and 3040 as
+well as the original protected ports. No calls to these services were made.
+This changes the harness identity: old failed packets remain immutable and
+cannot be resumed with the changed harness. A future run requires a fresh
+identity-bound packet with the same preregistered sample design.

@@ -17,6 +17,7 @@ def test_fixed_sample_counterbalanced_and_identical_repeats():
 
 def test_no_live_endpoints_and_no_writes_outside_owned_output(tmp_path):
     profile = sandbox_profile(tmp_path, tmp_path / "assets", 12345)
+    assert {7878, 7879, 7880, 7881, 7900, 7901, 7902, 11434} <= set(PROTECTED_PORTS)
     assert "(deny network*)" in profile
     assert "(deny file-write*)" in profile
     for port in PROTECTED_PORTS:

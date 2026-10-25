@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Offline isolation follow-through (2026-10-25, Codex).** Deny the alternate engine ports and separate reservoir endpoint in the comparison sandbox. Preserve failed packets under their original harness identities; require a new packet before any future execution. No live service connection or model rerun.
+
 - **Offline evidence: production ESN leak study (2026-10-25, Codex).** Add a native runner linked to production construction, stepping and snapshot restoration. Retain 96 synthetic trajectories across three adaptive base-leak settings, four seeds and matched controls; all 12 replay/restart/override-expiry controls pass. Record complete snapshots, implementation identities and bounded descriptive metrics. This does not qualify the live controller/covariance loop, language effects or a live leak change. See `docs/steward-notes/2026-10-25-production-esn-leak-study.md`.
 
 - **Offline packet: four-cell reflection comparison (2026-10-25, Codex).** Freeze 24 isolated Gemma reflections crossing old/lighter shared frames and synthetic mailbox notice presence, with fixed seeds/order, exact provider/model identities and blinded review. Preserve both failed setup/loading attempts; the 10 GiB resource guard stopped the pilot before any completion. No live provider or framing change; model comparison remains unfinished pending a reviewed resource window. See `docs/steward-notes/2026-10-25-reflection-comparison.md`.

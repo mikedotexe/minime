@@ -27,7 +27,7 @@ POLICY = "fresh-reflection-four-cell-v1"
 SEEDS = [7, 17, 29, 43, 61]
 MODEL = "gemma4:12b"
 OPTIONS = {"temperature": 0.7, "top_p": 0.95, "num_predict": 4096, "num_ctx": 65536}
-PROTECTED_PORTS = [7878, 7879, 7880, 8090, 8091, 8092, 11434]
+PROTECTED_PORTS = [3040, 7878, 7879, 7880, 7881, 7900, 7901, 7902, 8090, 8091, 8092, 11434]
 NOTICE = ("\n\nMailbox availability: 2 file(s) await inspection. "
           "No message contents were supplied in this reflection. "
           "NEXT: CHECK_MAILBOX opens one eligible letter; CHECK_MAILBOX LARGE "
