@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Completed offline reflection comparison (2026-10-25, Codex with independent blind review).** Retain all 24 fixed synthetic completions, four exact-text repeat controls, monitored resource receipts and prior failed attempts. Add reproducible descriptive analysis and source reconciliation. Lighter framing reduces supplied input; recurring openings remain, and the synthetic notice changes selected NEXT choices without execution. No subjective, reservoir or live-behavior conclusion. Full Python suite: 2,881 passed plus 342 subtests. Prompt activation still requires fresh approval. See `docs/steward-notes/2026-10-25-reflection-comparison-results.md`.
+
 - **Offline packaged-provider repair (2026-10-25, Codex).** Permit read-only bundled runner libraries in the isolated comparison and independently verify process-group absence after macOS exit-probe permission errors. All 66 focused harness tests pass. Preserve the failed launch and original cleanup uncertainty, plus the later empty-group witness; never regenerate the already retained first completion. Runtime prompting and live services remain unchanged.
 
 - **Offline comparison recovery (2026-10-25, Codex with Raman review).** Qualify 61 synthetic failure-path checks for owned-group cleanup, wall deadlines, interruption retention, bounded raw response evidence, read allowlisting and digest-pinned packets. Preserve one completed response from the contained trial and explicitly bind its stopped successor; keep the original 24-result design. Accept silence and label ceiling-limited text without resampling. Mike approved 14 GiB monitored RSS with 13% free reserve, not service interruption or a hard allocation cap. See the comparison note; model study completion remains separate.

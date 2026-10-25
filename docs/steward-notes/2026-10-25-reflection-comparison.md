@@ -1,5 +1,10 @@
 # Isolated Reflection Comparison
 
+Completed October 25: all 24 results, four exact-repeat controls and verified
+owned-provider cleanup. See `2026-10-25-reflection-comparison-results.md` for the
+blind review, source reconciliation, resource measurements and limitations.
+The chronological failed-attempt notes below are preserved.
+
 This offline tranche is independent of the lighter-frame adapter release. It
 does not change live prompting, providers, weights, limits or reservoir settings.
 Paired prompt/preservation evidence is in Astrid's
