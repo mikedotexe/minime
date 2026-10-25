@@ -154,3 +154,11 @@ No service activation, main-branch integration or push has occurred in this
 tranche. Fresh approval and cooperative preflight remain required. Paused
 automations remain paused. Current caches remain referenced by qualification;
 the closeout audit is within budget, with about 367 GB free and no deletion.
+
+## Subsequent Runtime Rollout
+
+After this report, Mike separately approved and the coordinator verified the
+paired prompt rollout. See `2026-10-25-lighter-reflection-live.md`. The runtime
+candidate, frozen study inputs, retained outputs and conclusions above did not
+change. Research commits integrated separately; no live leak or provider change
+was made and no result was treated as evidence of subjective improvement.
