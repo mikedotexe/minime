@@ -96,7 +96,9 @@ def sandbox_profile(root, models, port, provider=None, *, network=True):
     directories = [root, Path("/System/Library"), Path("/usr/lib"),
                    Path("/Library/Apple/System/Library"), Path("/private/var/db/dyld"), provider.parent / "lib"]
     if provider.parent.name == "Resources" and provider.parent.parent.name == "Contents":
-        directories.append(provider.parent.parent / "Frameworks")
+        # The packaged llama-server and Metal backends are siblings of ollama,
+        # not necessarily under lib/. This is application code, not user state.
+        directories.extend([provider.parent, provider.parent.parent / "Frameworks"])
     # macOS process startup needs the root directory itself, not its contents
     # recursively; denying this aborts before exec even for a permitted /bin/cat.
     literals = [Path("/"), provider, Path("/bin/cat"), Path("/dev/null"), Path("/dev/urandom"),
@@ -441,6 +443,15 @@ def signal_group(pgid, sig):
         return True
     except ProcessLookupError:
         return False
+    except PermissionError:
+        # Darwin can report EPERM while the last process is exiting. Establish
+        # absence independently; never interpret a denied signal as termination.
+        rows = subprocess.check_output(["/bin/ps", "-axo", "pgid="], text=True, timeout=MEASURE_TIMEOUT)
+        if not any(int(row.strip()) == pgid for row in rows.splitlines() if row.strip()):
+            return False
+        if sig == 0:
+            return True
+        raise
 
 
 def stop_owned(process):

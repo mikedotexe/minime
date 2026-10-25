@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Offline packaged-provider repair (2026-10-25, Codex).** Permit read-only bundled runner libraries in the isolated comparison and independently verify process-group absence after macOS exit-probe permission errors. All 66 focused harness tests pass. Preserve the failed launch and original cleanup uncertainty, plus the later empty-group witness; never regenerate the already retained first completion. Runtime prompting and live services remain unchanged.
+
 - **Offline comparison recovery (2026-10-25, Codex with Raman review).** Qualify 61 synthetic failure-path checks for owned-group cleanup, wall deadlines, interruption retention, bounded raw response evidence, read allowlisting and digest-pinned packets. Preserve one completed response from the contained trial and explicitly bind its stopped successor; keep the original 24-result design. Accept silence and label ceiling-limited text without resampling. Mike approved 14 GiB monitored RSS with 13% free reserve, not service interruption or a hard allocation cap. See the comparison note; model study completion remains separate.
 
 - **Offline control review (2026-10-25, Codex).** Strengthen the leak study's expiry assertion to verify the remaining budget after every update and adaptive resumption on update four. Add a regression rejecting delayed expiry or restart replenishment; all 12 strengthened production-ESN controls pass. Preserve prior evidence and document the shared production noise seed. No production algorithm or live parameter changes.

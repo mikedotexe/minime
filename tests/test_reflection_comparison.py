@@ -119,8 +119,9 @@ def test_sandbox_read_allowlist_and_explicit_localhost_exception(tmp_path):
     assert '(literal "/")' in profile and '(subpath "/")' not in profile
     assert f'(literal "{blob}")' in profile
     assert f'(subpath "{blob.parent}")' not in profile
-    for path in ("/Users", "/Users/v", "/private/var", str(tmp_path), str(provider.parent)):
+    for path in ("/Users", "/Users/v", "/private/var", str(tmp_path)):
         assert f'(subpath "{path}")' not in profile
+    assert f'(subpath "{provider.parent}")' in profile
     for port in r.PROTECTED_PORTS:
         assert f'(remote ip "localhost:{port}")' in profile
         assert f'(local ip "localhost:{port}")' in profile
@@ -286,6 +287,30 @@ def test_cleanup_escalates_after_leader_exit(monkeypatch):
 def test_cleanup_missing_group_is_idempotent(monkeypatch):
     monkeypatch.setattr(r.os, "killpg", Mock(side_effect=ProcessLookupError))
     assert r.stop_owned(Mock(pid=12345))
+
+
+@pytest.mark.parametrize("sig", [0, signal.SIGTERM, signal.SIGKILL])
+def test_permission_race_requires_independently_empty_group(monkeypatch, sig):
+    monkeypatch.setattr(r.os, "killpg", Mock(side_effect=PermissionError))
+    check = Mock(return_value="42\n43\n")
+    monkeypatch.setattr(r.subprocess, "check_output", check)
+    assert r.signal_group(12345, sig) is False
+    assert check.call_args.kwargs["timeout"] == r.MEASURE_TIMEOUT
+
+
+def test_denied_signal_never_claims_existing_group_was_stopped(monkeypatch):
+    monkeypatch.setattr(r.os, "killpg", Mock(side_effect=PermissionError))
+    monkeypatch.setattr(r.subprocess, "check_output", Mock(return_value="12345\n"))
+    assert r.signal_group(12345, 0) is True
+    with pytest.raises(PermissionError):
+        r.signal_group(12345, signal.SIGKILL)
+
+
+def test_unavailable_process_inventory_does_not_prove_cleanup(monkeypatch):
+    monkeypatch.setattr(r.os, "killpg", Mock(side_effect=PermissionError))
+    monkeypatch.setattr(r.subprocess, "check_output", Mock(side_effect=subprocess.TimeoutExpired("ps", 3)))
+    with pytest.raises(subprocess.TimeoutExpired):
+        r.signal_group(12345, 0)
 
 
 def test_monitor_subprocesses_have_timeouts(monkeypatch):

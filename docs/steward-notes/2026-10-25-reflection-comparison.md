@@ -146,3 +146,36 @@ Previous setup serialized the same model manifest differently; its exact raw
 identity and equal parsed manifest/layer hashes are retained in continuation
 provenance. New setup preserves original manifest bytes. No weights or sampling
 settings changed, and no completed sample was excluded.
+
+## Packaged-Provider Follow-Through
+
+Packet 04 produced no new completion: the restricted reader omitted Ollama's
+sibling `llama-server` and backend libraries. Its failed job 02 and cleanup
+receipt are preserved. TERM was sent to owned group 79815, but macOS returned
+EPERM during the subsequent exit probe. A separate read-only process inventory
+confirmed the group empty; `cleanup-followup.json` records this without changing
+the original unconfirmed-cleanup receipt. No further signal was required.
+
+The sandbox now allows read-only access to the installed application's Resources
+and Frameworks, not user homes or research stores. A denied process-group signal
+is treated as absence only when a bounded independent process inventory confirms
+absence. Existing or unverifiable groups never become successful cleanup claims.
+All 66 focused harness tests pass, including the permission-race cases.
+
+Packet 05 SHA-256:
+`b689ef872bb0faa1382c8fabc48a4ae4f7a674f5936a5b97c83726b4290459a5`.
+It imports the same job 01 unchanged from packet 03 and retains packet 04 as a
+failed setup attempt, not an excluded model outcome. No prose was reviewed before
+this retry. The complete sample remains 24, with exactly 23 results still to
+generate at its start. Provider-bundle hashes are additionally observed during
+the run and must be checked afterward; this is not retroactive preregistration
+of those library hashes. The prompt release still requires fresh activation
+approval independently of this study.
+
+The complete Python suite passes 2,878 tests plus 342 subtests, with two existing
+skips (`minime-suite-final-04.log`). The preceding reruns are retained: one omitted
+the helper environment and another omitted two paired-checkout fixture paths.
+The passing invocation explicitly sets `ASTRID_SOURCE_STUDY_BIN`,
+`QUALIFICATION_OLD_READER`, `ASTRID_SOURCE_ROOT` and `ASTRID_CHOICE_FIXTURES` to the
+qualified stage-02 helper, old stage-04 helper and owned Astrid worktree. No test
+assertions were weakened to accommodate the layout.
