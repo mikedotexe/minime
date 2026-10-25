@@ -264,7 +264,7 @@ def test_bare_introspection_uses_reflection_without_advancing_source_or_saving_s
 
 
 @pytest.mark.parametrize("active", [False, True])
-def test_reflection_can_notice_choose_receive_then_return_without_repeated_notice(study_agent, monkeypatch, active):
+def test_fresh_reflection_can_choose_receive_then_return_without_inventory(study_agent, monkeypatch, active):
     from minime_autonomy.human_letters import HumanLetter, submit_letter
     from minime_autonomy.mailbox import MailboxPrompt
 
@@ -315,7 +315,8 @@ def test_reflection_can_notice_choose_receive_then_return_without_repeated_notic
                                  _precreated_continuity_event=event)
         assert outcome.finish()[0] == "completed", outcome.finish()
         assert agent._pending_next_action == expected
-    assert "Mailbox availability:" in seen[0] and "MAIL_BODY_SENTINEL" not in seen[0]
+    assert "Mailbox availability:" not in seen[0] and "MAIL_BODY_SENTINEL" not in seen[0]
+    assert "CHECK_MAILBOX" in seen[0] and "MAILBOX_STATUS" in seen[0]
     assert letter.body.decode() in seen[1]
     assert "Mailbox availability:" not in seen[2] and "MAIL_BODY_SENTINEL" not in seen[2]
     assert not published.exists()
