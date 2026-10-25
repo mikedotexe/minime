@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Offline comparison recovery (2026-10-25, Codex with Raman review).** Qualify 61 synthetic failure-path checks for owned-group cleanup, wall deadlines, interruption retention, bounded raw response evidence, read allowlisting and digest-pinned packets. Preserve one completed response from the contained trial and explicitly bind its stopped successor; keep the original 24-result design. Accept silence and label ceiling-limited text without resampling. Mike approved 14 GiB monitored RSS with 13% free reserve, not service interruption or a hard allocation cap. See the comparison note; model study completion remains separate.
+
 - **Offline control review (2026-10-25, Codex).** Strengthen the leak study's expiry assertion to verify the remaining budget after every update and adaptive resumption on update four. Add a regression rejecting delayed expiry or restart replenishment; all 12 strengthened production-ESN controls pass. Preserve prior evidence and document the shared production noise seed. No production algorithm or live parameter changes.
 
 - **Offline isolation follow-through (2026-10-25, Codex).** Deny the alternate engine ports and separate reservoir endpoint in the comparison sandbox. Preserve failed packets under their original harness identities; require a new packet before any future execution. No live service connection or model rerun.

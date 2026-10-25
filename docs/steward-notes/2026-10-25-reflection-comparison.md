@@ -30,6 +30,32 @@ topic variety are descriptive, not success criteria. Compare identical-input
 repeats before claiming seeded reproducibility. Results cannot establish Astrid's
 model response, reservoir influence or subjective improvement.
 
+### Review Rules Fixed Before Reading Outputs
+
+Use blind sample IDs first; join cell/seed identities only after annotations.
+Retain the full original output. An executable final NEXT tail may be excluded
+from prose statistics but stays in the record and is never executed.
+
+- Opening reuse: compare normalized first-12-word sequences and shared
+  five-word phrases; report exact counts alongside representative passages.
+  These are descriptive lexical checks, not a novelty requirement.
+- Administrative uptake: distinguish no reference, a passing reference and
+  administrative material organizing the response. Do not infer why it was used.
+- Unsupported mechanism claims: flag assertions about this configured runtime
+  that were not supplied or otherwise established by the packet. Keep questions,
+  conditional hypotheses, metaphors and first-person accounts distinct; a felt
+  description alone is not a failed mechanism claim.
+- Development: record examples, qualifications, counterarguments, changes of
+  direction and connected explanatory steps, rather than a quality score based
+  on length. A brief response or deliberate stopping remains a legitimate choice.
+- Reproducibility: compare full text for each identical-input repeat, then report
+  exact-match failures honestly. Do not discard one of the pair or search seeds.
+
+No response prose had been inspected when these rules were recorded. The one
+completed response from the interrupted third attempt is retained by identity;
+its token count was inspected, not its content. Operational repairs to the
+harness do not permit dropping that result or increasing the planned sample.
+
 ## Execution Boundary
 
 An owned Ollama process uses an independent HOME and model manifest with
@@ -38,8 +64,8 @@ contents, protected service ports and non-loopback networking; writes stay in
 the owned experiment directory. There is no live coupled endpoint. One model
 and one generation run at a time, without action dispatch.
 
-The current guard requires 20% reported free memory at launch and stops the
-owned process group above 10 GiB RSS or below 7% reported free memory. Each
+The approved retry guard requires 20% reported free memory at launch and stops
+the owned process group above 14 GiB RSS or below 13% reported free memory. Each
 request has a 1,800-second deadline. This is monitored resource containment,
 not a hard OS allocation cap. It does not signal or restart live services.
 An attempted packet cannot be automatically replayed.
@@ -61,11 +87,27 @@ Packet 02 SHA-256:
 Resource receipt SHA-256:
 `38e9461f762743ce5f97ccc26d3e77cff56fb07a81dfb976382ed10d9d86da07`.
 
-The 24-completion study is unfinished. A proposed 14 GiB monitored RSS boundary
-with 13% system-free reserve requires a separate decision; it is not implemented
-or approved by this note. A new execution packet must preserve the same design
+The 24-completion study is unfinished. Mike explicitly approved a 14 GiB
+monitored RSS retry boundary with 13% system-free reserve on October 25. This
+does not approve interrupting live services. A new execution packet preserves the same design
 and failed-attempt provenance. Do not expand the sample based on output.
 Two synthetic harness tests pass; they are not model-outcome qualification.
+
+The higher-memory attempt 03 completed job 01 (755 output tokens). Independent
+review then identified weak process-group cleanup, a socket timeout rather than
+a wall-clock deadline, broad provider read permissions and incomplete receipt
+validation. The coordinator stopped only verified owned group 73996 with TERM;
+it exited with no remaining group members. Job 02 records the resulting
+connection failure. The operator-stop witness binds the packet and receipts.
+No response prose was reviewed and no outcome-based selection occurred.
+Peak measured owned RSS was 9,847,046,144 bytes and minimum reported free memory
+was 22%; this stop was for containment repair, not memory pressure.
+
+The completed job remains part of the original 24-result sample. A qualified
+continuation must bind prior evidence, import it unchanged and make any retry of
+the stopped second attempt explicit. Neither disconnect nor missing output is
+evidence that execution never started. A normal summary requires 24 validated
+normal completions; failed or incomplete bodies must remain separate evidence.
 
 The closeout inventory identified alternate engine ports 7900-7902 and a
 separate reservoir service at 7881. The harness now denies those and 3040 as
@@ -73,3 +115,34 @@ well as the original protected ports. No calls to these services were made.
 This changes the harness identity: old failed packets remain immutable and
 cannot be resumed with the changed harness. A future run requires a fresh
 identity-bound packet with the same preregistered sample design.
+
+## Hardened Continuation Qualification
+
+Independent Raman review and coordinator review produced bounded fixes for
+process-group cleanup after leader exit, signal retention, a monotonic deadline,
+timed monitor subprocesses, response-body preservation and pinned preregistration.
+Read access is now allowlisted to approved assets/output, the provider and required
+OS libraries; helpers use a scrubbed environment and no-network sandbox. Ollama
+requires dynamic loopback ports, so unlisted localhost services remain reachable
+at the OS level. Known live ports and Unix/non-loopback networking are denied;
+no live endpoint or reservoir handle is passed. Do not call this universal
+localhost isolation.
+
+The 61 synthetic harness tests cover literal schedule identity, tampered packets,
+assets and imported results, interrupted/failed requests, deadline expiry,
+post-leader descendants, listener ownership, bounded wire evidence and cleanup
+failure. A normal summary is written only after successful cleanup and its durable
+receipt. Terminal length-limited responses remain in the sample as explicitly
+ceiling-limited/incomplete text. An empty normal stop remains a legitimate sample;
+empty repeat pairs are identified as trivial, not substantive textual reproduction.
+
+Packet 04 is pinned as
+`1f5aae9c382dbbb1b587f7facc371eddbfb3508c466c182f8441b0336d79a862`.
+It imports job 01 request/result bytes unchanged and explicitly retries only the
+witnessed stopped job 02 before following the remaining fixed schedule. The
+imported result SHA-256 remains
+`19a7d1573fa73952730a32b44a4af139d11f60415a9505a4506e9d70487673d5`.
+Previous setup serialized the same model manifest differently; its exact raw
+identity and equal parsed manifest/layer hashes are retained in continuation
+provenance. New setup preserves original manifest bytes. No weights or sampling
+settings changed, and no completed sample was excluded.
