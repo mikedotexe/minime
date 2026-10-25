@@ -192,10 +192,20 @@ fn control(name: &str, left: &Trace, right: &Trace) -> Result<Value> {
     )
 }
 
+fn override_expired_after_three(leaks: &[f32], remaining: &[Option<u32>]) -> bool {
+    leaks.len() == 5
+        && remaining == [Some(2), Some(1), None, None, None]
+        && leaks[..3].iter().all(|x| (*x - 0.3).abs() <= 1e-6)
+        && leaks[3..]
+            .iter()
+            .all(|x| x.is_finite() && (*x - 0.3).abs() > 1e-6)
+}
+
 fn override_control(snapshot: &EsnSnapshotV2, gpu: &Gpu) -> Result<Value> {
     let mut esn = ESN::from_snapshot_v2(snapshot, gpu)?;
     esn.set_leak_override(0.3, 3, "offline-expiry".into());
     let mut leaks = Vec::new();
+    let mut remaining = Vec::new();
     let zero = vec![0.0; INPUTS];
     for tick in 0..5 {
         if tick == 1 {
@@ -203,11 +213,15 @@ fn override_control(snapshot: &EsnSnapshotV2, gpu: &Gpu) -> Result<Value> {
         }
         esn.step(&zero)?;
         leaks.push(esn.last_step_trace().leak);
+        remaining.push(
+            esn.leak_override_status()
+                .map(|value| value.remaining_ticks),
+        );
     }
-    let final_snapshot = esn.snapshot_v2()?;
     Ok(
         json!({"name":"bounded_override_restart_expiry", "effective_leaks":leaks,
-        "passed":leaks[..3].iter().all(|x| (*x-0.3).abs()<=1e-6) && final_snapshot.leak_override.is_none(),
+        "remaining_ticks_after_update":remaining,
+        "passed":override_expired_after_three(&leaks, &remaining),
         "scope":"Direct ESN only; stable-core clears direct overrides in live orchestration."}),
     )
 }
@@ -350,6 +364,20 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn expiry_control_rejects_late_or_replenished_override() {
+        let correct = [Some(2), Some(1), None, None, None];
+        assert!(override_expired_after_three(
+            &[0.3, 0.3, 0.3, 0.65, 0.65],
+            &correct
+        ));
+        assert!(!override_expired_after_three(&[0.3; 5], &correct));
+        assert!(!override_expired_after_three(
+            &[0.3, 0.3, 0.3, 0.3, 0.65],
+            &[Some(2), Some(2), Some(1), None, None],
+        ));
+        assert!(!override_expired_after_three(&[0.3; 3], &correct));
+    }
     #[test]
     fn fixtures_are_bounded_repeatable_and_companion_free() {
         for kind in ["warmup", "impulse", "step_reversal", "broadband", "zero"] {

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Offline control review (2026-10-25, Codex).** Strengthen the leak study's expiry assertion to verify the remaining budget after every update and adaptive resumption on update four. Add a regression rejecting delayed expiry or restart replenishment; all 12 strengthened production-ESN controls pass. Preserve prior evidence and document the shared production noise seed. No production algorithm or live parameter changes.
+
 - **Offline isolation follow-through (2026-10-25, Codex).** Deny the alternate engine ports and separate reservoir endpoint in the comparison sandbox. Preserve failed packets under their original harness identities; require a new packet before any future execution. No live service connection or model rerun.
 
 - **Offline evidence: production ESN leak study (2026-10-25, Codex).** Add a native runner linked to production construction, stepping and snapshot restoration. Retain 96 synthetic trajectories across three adaptive base-leak settings, four seeds and matched controls; all 12 replay/restart/override-expiry controls pass. Record complete snapshots, implementation identities and bounded descriptive metrics. This does not qualify the live controller/covariance loop, language effects or a live leak change. See `docs/steward-notes/2026-10-25-production-esn-leak-study.md`.

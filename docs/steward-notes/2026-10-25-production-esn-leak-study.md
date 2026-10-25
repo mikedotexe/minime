@@ -76,3 +76,27 @@ covariance loop are outside this runner. This study does not qualify that full
 feedback loop, changes in published fill, language output or experience, and
 authorizes no live parameter change. The companion 24-completion prompt study
 remains independent and incomplete; it supplies no reservoir-state comparison.
+
+## Independent Review Follow-Through
+
+Review identified a weak expiry assertion: checking three override values and
+absence after five updates could incorrectly accept a four- or five-update
+override. The original traces were correct; the acceptance test was incomplete.
+The control now retains each post-update remaining budget and requires
+`[2, 1, null, null, null]`, with adaptive leak resumed on update four. A fourth
+unit test rejects delayed expiry and a replenished restart budget.
+
+Run 03 passes all 12 strengthened controls, all four runner tests and focused
+strict Clippy. It ran after the isolated language provider was stopped, not
+concurrently with it. Manifest SHA-256:
+`a4faf14c143a8bda62936cc5bb085fdc4185c80f703aefe61be620b6a3fb86bb`.
+Report SHA-256:
+`20255918d37024bbf5c030e8bd43cd8ad1920a5717fda40f4aae8a758d77ecd5`.
+Earlier evidence is preserved. The independent review also confirmed all 96
+trajectories, 96 paired comparisons, 72 matched-zero comparisons and exact
+replay/restart equality against a float32-aware metric recomputation.
+
+The four seeds vary construction and synthetic inputs; exploration noise uses
+production's common fixed seed. They are not four independently sampled noise
+histories. This limitation does not change the paired comparison or authorize
+a broader controller or language claim.
