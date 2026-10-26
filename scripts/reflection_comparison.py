@@ -215,9 +215,9 @@ def manifest_blobs(manifest):
     return blobs
 
 
-def validate_assets(packet):
-    if len(packet["helpers"]) != 2:
-        raise ValueError("two helper identities required")
+def validate_assets(packet, *, helper_count=2):
+    if len(packet["helpers"]) != helper_count:
+        raise ValueError("unexpected helper identity count")
     for entry in [*packet["helpers"], {"path": packet["provider"], "sha256": packet["provider_sha256"]}]:
         path = Path(entry["path"])
         if not path.is_absolute() or path.resolve() != path or file_hash(path) != entry["sha256"]:
@@ -635,8 +635,10 @@ def verify_listener(process, port):
         raise RuntimeError("listener is not the owned provider")
 
 
-def execute(out, expected_sha256):
-    packet = load_packet(out, expected_sha256)
+def execute(out, expected_sha256, *, packet_loader=None, request_builder=None):
+    # Separate preregistered designs reuse containment, not each other's cells.
+    packet = (packet_loader or load_packet)(out, expected_sha256)
+    request_builder = request_builder or request_for
     if (out / "execution.json").exists():
         raise ValueError("execution already attempted; no automatic replay")
     if free_percent() < RESOURCE_POLICY["launch_free_percent"]:
@@ -704,7 +706,7 @@ def execute(out, expected_sha256):
                 guard.check()
                 verify_listener(process, port)
                 request_path = out / (job["id"] + "-request.json")
-                payload = request_for(packet, job)
+                payload = request_builder(packet, job)
                 save(request_path, payload)
                 start = time.monotonic()
                 record = {"job": job, "completed": False, "request_sha256": file_hash(request_path)}
@@ -733,15 +735,19 @@ def execute(out, expected_sha256):
                       for r, ending in zip(results, endings)]
             save(out / "blind-review.json", sorted(review, key=lambda x: x["id"]))
             repetitions = []
-            for cell in range(4):
-                texts = [r["response"]["message"]["content"] for r in results
-                         if r["job"]["cell"] == cell and r["job"]["seed"] == SEEDS[0]]
+            for cell in range(len(packet["cells"])):
+                pair = [r for r in results
+                        if r["job"]["cell"] == cell and r["job"]["seed"] == packet["seeds"][0]]
+                if (len(pair) != 2 or sorted(r["job"]["repeat"] for r in pair) != [False, True]
+                        or request_builder(packet, pair[0]["job"]) != request_builder(packet, pair[1]["job"])):
+                    raise ValueError("repeat control is not an identical-input pair")
+                texts = [r["response"]["message"]["content"] for r in pair]
                 exact_match = texts[0] == texts[1]
                 empty_pair = all(not text.strip() for text in texts)
                 repetitions.append({"cell": cell, "exact_text_match": exact_match,
                                     "empty_pair_trivial": empty_pair,
                                     "nonempty_exact_text_match": exact_match and not empty_pair})
-            summary = {"schema": POLICY, "attempts": len(results), "completed": len(results),
+            summary = {"schema": packet["schema"], "attempts": len(results), "completed": len(results),
                  "imported": len(imported), "generated_this_run": len(results) - len(imported),
                  "protocol_terminal": sum(e["protocol_terminal"] for e in endings),
                  "natural_endings": sum(e["natural_ending"] for e in endings),

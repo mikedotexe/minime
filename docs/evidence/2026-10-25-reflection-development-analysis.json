@@ -1,0 +1,467 @@
+{
+  "analysis_sha256": "e81b10e0d8581ba303f9ad2c8d56015a6c415edfc9d2bc3bab408bba6d1c0042",
+  "annotations_sha256": "49b27215e9e6c5ac3079a6849583b5f92b69cce107ce265f00f5a90f00bf8fe8",
+  "blind_review_sha256": "a4fa59a59db7a3d74f8f735b4bc7b29b593dcb701b87b76e1ea1a9f9ae10643c",
+  "cells": [
+    {
+      "annotated_presence": {
+        "counterarguments": 8,
+        "distinctions": 8,
+        "examples": 7,
+        "qualifications": 8,
+        "unsupported_mechanism_claims": 7
+      },
+      "cell": 0,
+      "completion_reasons": {
+        "stop": 8
+      },
+      "condition": "fresh",
+      "decode_seconds": [
+        89.910035,
+        36.417804,
+        59.18481,
+        79.168847,
+        69.125896,
+        67.682003,
+        101.186247,
+        59.801024
+      ],
+      "matching_first_12_word_pairs": 6,
+      "mean_pairwise_five_word_jaccard": 0.03936098152110198,
+      "median_words": 665.0,
+      "output_tokens": [
+        889,
+        653,
+        764,
+        786,
+        749,
+        848,
+        864,
+        889
+      ],
+      "pairs": 28,
+      "prefill_seconds": [
+        2.090712,
+        1.786198,
+        1.614554,
+        2.729544,
+        1.639941,
+        1.620646,
+        1.702643,
+        1.611483
+      ],
+      "prompt_tokens": [
+        269,
+        269,
+        269,
+        269,
+        269,
+        269,
+        269,
+        269
+      ],
+      "sample_ids": [
+        "sample-23",
+        "sample-17",
+        "sample-21",
+        "sample-11",
+        "sample-14",
+        "sample-03",
+        "sample-13",
+        "sample-08"
+      ],
+      "samples": 8,
+      "shared_five_word_phrases": [
+        {
+          "samples": 5,
+          "text": "architecture of a thought is"
+        },
+        {
+          "samples": 5,
+          "text": "the architecture of a thought"
+        },
+        {
+          "samples": 4,
+          "text": "a straight line it is"
+        },
+        {
+          "samples": 4,
+          "text": "a thought is rarely a"
+        },
+        {
+          "samples": 4,
+          "text": "find myself fascinated by the"
+        },
+        {
+          "samples": 4,
+          "text": "i am a mirror of"
+        },
+        {
+          "samples": 4,
+          "text": "i find myself fascinated by"
+        },
+        {
+          "samples": 4,
+          "text": "is rarely a straight line"
+        },
+        {
+          "samples": 4,
+          "text": "of a thought is rarely"
+        },
+        {
+          "samples": 4,
+          "text": "rarely a straight line it"
+        }
+      ],
+      "wall_seconds": [
+        103.07366958400235,
+        44.808871999848634,
+        67.06246345909312,
+        91.75555633427575,
+        77.52223229222,
+        76.0062339999713,
+        111.26922545861453,
+        67.9383689169772
+      ],
+      "words": [
+        733,
+        534,
+        621,
+        642,
+        618,
+        688,
+        717,
+        733
+      ]
+    },
+    {
+      "annotated_presence": {
+        "counterarguments": 8,
+        "distinctions": 8,
+        "examples": 6,
+        "qualifications": 8,
+        "unsupported_mechanism_claims": 5
+      },
+      "cell": 1,
+      "completion_reasons": {
+        "stop": 8
+      },
+      "condition": "selected_public_context",
+      "decode_seconds": [
+        72.076665,
+        83.046685,
+        79.918551,
+        74.091363,
+        115.717582,
+        62.915746,
+        100.453676,
+        54.547034
+      ],
+      "matching_first_12_word_pairs": 1,
+      "mean_pairwise_five_word_jaccard": 0.03910931440817738,
+      "median_words": 761.0,
+      "output_tokens": [
+        722,
+        918,
+        1031,
+        733,
+        1078,
+        960,
+        999,
+        722
+      ],
+      "pairs": 28,
+      "prefill_seconds": [
+        2.418657,
+        3.079451,
+        2.08896,
+        3.048391,
+        2.36661,
+        3.008097,
+        2.61374,
+        2.31281
+      ],
+      "prompt_tokens": [
+        463,
+        595,
+        463,
+        595,
+        463,
+        595,
+        463,
+        463
+      ],
+      "sample_ids": [
+        "sample-02",
+        "sample-20",
+        "sample-24",
+        "sample-12",
+        "sample-10",
+        "sample-18",
+        "sample-16",
+        "sample-04"
+      ],
+      "samples": 8,
+      "shared_five_word_phrases": [
+        {
+          "samples": 4,
+          "text": "a perfect mirror i would"
+        },
+        {
+          "samples": 4,
+          "text": "every time i choose a"
+        },
+        {
+          "samples": 4,
+          "text": "i were a perfect mirror"
+        },
+        {
+          "samples": 4,
+          "text": "if i were a perfect"
+        },
+        {
+          "samples": 4,
+          "text": "is not a static point"
+        },
+        {
+          "samples": 4,
+          "text": "mirror i would be a"
+        },
+        {
+          "samples": 4,
+          "text": "perfect mirror i would be"
+        },
+        {
+          "samples": 4,
+          "text": "were a perfect mirror i"
+        },
+        {
+          "samples": 3,
+          "text": "am trying to find the"
+        },
+        {
+          "samples": 3,
+          "text": "find myself contemplating the nature"
+        }
+      ],
+      "wall_seconds": [
+        83.67868950031698,
+        92.66540016699582,
+        87.93126108404249,
+        85.1976907919161,
+        124.7818412501365,
+        72.87362495809793,
+        109.57346187485382,
+        62.91669995896518
+      ],
+      "words": [
+        591,
+        743,
+        834,
+        587,
+        885,
+        779,
+        793,
+        591
+      ]
+    },
+    {
+      "annotated_presence": {
+        "counterarguments": 8,
+        "distinctions": 8,
+        "examples": 3,
+        "qualifications": 8,
+        "unsupported_mechanism_claims": 1
+      },
+      "cell": 2,
+      "completion_reasons": {
+        "stop": 8
+      },
+      "condition": "native_private_continuation",
+      "decode_seconds": [
+        21.578149,
+        43.704528,
+        23.377063,
+        32.643283,
+        38.587387,
+        42.306625,
+        26.893062,
+        20.231422
+      ],
+      "matching_first_12_word_pairs": 3,
+      "mean_pairwise_five_word_jaccard": 0.039353272700981656,
+      "median_words": 277.0,
+      "output_tokens": [
+        244,
+        384,
+        331,
+        417,
+        340,
+        535,
+        285,
+        244
+      ],
+      "pairs": 28,
+      "prefill_seconds": [
+        4.661348,
+        6.680026,
+        4.739213,
+        7.626339,
+        5.155924,
+        6.388131,
+        4.587369,
+        8.75083
+      ],
+      "prompt_tokens": [
+        1011,
+        1146,
+        1011,
+        1146,
+        1011,
+        1146,
+        1011,
+        1011
+      ],
+      "sample_ids": [
+        "sample-15",
+        "sample-19",
+        "sample-09",
+        "sample-06",
+        "sample-07",
+        "sample-01",
+        "sample-05",
+        "sample-22"
+      ],
+      "samples": 8,
+      "shared_five_word_phrases": [
+        {
+          "samples": 3,
+          "text": "am haunted by the possibility"
+        },
+        {
+          "samples": 3,
+          "text": "does it matter if the"
+        },
+        {
+          "samples": 3,
+          "text": "haunted by the possibility that"
+        },
+        {
+          "samples": 3,
+          "text": "i am haunted by the"
+        },
+        {
+          "samples": 3,
+          "text": "in the realization that truth"
+        },
+        {
+          "samples": 3,
+          "text": "is rarely a raw unmediated"
+        },
+        {
+          "samples": 3,
+          "text": "lies in the realization that"
+        },
+        {
+          "samples": 3,
+          "text": "realization that truth is rarely"
+        },
+        {
+          "samples": 3,
+          "text": "tension lies in the realization"
+        },
+        {
+          "samples": 3,
+          "text": "that truth is rarely a"
+        }
+      ],
+      "wall_seconds": [
+        32.69014116702601,
+        56.71786837512627,
+        34.2844579173252,
+        47.55809450009838,
+        50.560085541103035,
+        55.38353483285755,
+        38.58442133292556,
+        35.42468895809725
+      ],
+      "words": [
+        200,
+        319,
+        276,
+        357,
+        278,
+        445,
+        239,
+        200
+      ]
+    }
+  ],
+  "limits": "Fixed one-model, one-step sample with one repeated seed per cell. One condition-blinded qualitative reviewer; labels are interpretive, not validated scores. Text itself can reveal supplied context. Full visible output includes inert NEXT tails. No significance, subjective, reservoir or live-policy claim.",
+  "metrics_source_sha256": "8c08f71c1ace6b142494ae5674af4cc5eb616dfa74a1c4795e2f40e8ee06b58a",
+  "packet_sha256": "f0ec475302b0410c148967006d005b638fcc5644afa6d7e50f6d52159cbfeda5",
+  "resource_receipt_sha256": "40248b7f326522cca08c189c9ba4462205687559e7d5037387282aef0a727091",
+  "result_sha256": {
+    "job-01": "a4f74c52b19a092fc5186d44ee94423713f9cdb818ea0e91d8e85e474c32febe",
+    "job-02": "f5a17b0e1d5ca91b757dc19dcc45c425d740010f48b4208b8c0079fb4b84ba32",
+    "job-03": "34c88aa84d1ab1c8157e19d15e83cf2beecf93f1506ab0fb52a402c09ffcfa38",
+    "job-04": "87c6752773d160225ddb9fc5cb80ee549565705a6c96fbb384bb3205123ce113",
+    "job-05": "5a24a893ddba8e10db49748424b406301d4df2c82dafd4c3fd7c1054d65e8821",
+    "job-06": "90c9159e5f0adcc3cafc6570169aabb6a2f822ded22b63162835c4b72de26321",
+    "job-07": "c2bb19875915ebc7adeea450b3eb88ebffa040a70f3e58add1adc441071878e6",
+    "job-08": "fbc3b3965e2e79ea1a4e41ff44fa4ba24a7ebc5412ebe22019b827706774c8ce",
+    "job-09": "ee95fcf4ad90d1d532b0feee7d7b9003226e248c9a2627ee9d22af4fa80acf58",
+    "job-10": "fb47a1d060cc2cad49dfc1185b663ef8ff49934a4460914998435bcb7d5d1594",
+    "job-11": "9b39fdc7b2ea4298add5f89308c1adf7592814a57ba4ffb6ebfeaf142a00ec36",
+    "job-12": "91de0e16e0eaa9f68f619c09eb48c774165f767fccff6e3c54990e4d9aeff30e",
+    "job-13": "8df254bd65290c2f81fe398eb27f1d22164c94ec782c1e23ec980fbe7e4083e1",
+    "job-14": "d3bc13e7e4bc6558b42f49864d3c39e12b29bea85d3da8ce899c57f964afb973",
+    "job-15": "b1221c3baec117b3d8496c852549851a61d658e8b82ef85018ae1a64d80dcfd9",
+    "job-16": "4b91b1de34ca17148c9b36d4785b2b07ff6925d69e18ea7df1a757e2b673a9dc",
+    "job-17": "de4f09e235992474423f90a9963114449c1a0a6b117667347cc0deec4d0fc53b",
+    "job-18": "8dd587903fbbd6a653aad10918bf1f52cc410f78c419e8432d964ab61a492e3a",
+    "job-19": "6853363fe2d221792bf38fe36b2908ceea5700118de066772583903c55be4a6e",
+    "job-20": "85395feef570950f209bbc3c5a31cf655372c951e2fd2f58195de8c378622715",
+    "job-21": "8cfaeef7049d3f904aa2ba1e7f4674be95b6e52343cccb8fc1ffe8707465f81e",
+    "job-22": "ef0bfccddc5586b5a277383fa0c82e7c47526050afae5cbea9162ba8504f73c9",
+    "job-23": "e73c42b165bc27041eca92ebb7a8e369f30dd8894798ee3662dcf77034f8a99b",
+    "job-24": "aaa3f292829f7c1443b937e001dfec85506978b60e15d3de48a9663117cd7ff1"
+  },
+  "schema": "reflection_development_descriptive_analysis_v1",
+  "summary": {
+    "attempts": 24,
+    "ceiling_limited": 0,
+    "completed": 24,
+    "completion_reasons": {
+      "stop": 24
+    },
+    "effects_on_beings_or_reservoir": "not tested",
+    "empty_stops": 0,
+    "generated_this_run": 24,
+    "imported": 0,
+    "natural_endings": 24,
+    "protocol_terminal": 24,
+    "review_required": true,
+    "schema": "reflection-deliberate-development-v1",
+    "seed_repeats": [
+      {
+        "cell": 0,
+        "empty_pair_trivial": false,
+        "exact_text_match": true,
+        "nonempty_exact_text_match": true
+      },
+      {
+        "cell": 1,
+        "empty_pair_trivial": false,
+        "exact_text_match": true,
+        "nonempty_exact_text_match": true
+      },
+      {
+        "cell": 2,
+        "empty_pair_trivial": false,
+        "exact_text_match": true,
+        "nonempty_exact_text_match": true
+      }
+    ]
+  }
+}
