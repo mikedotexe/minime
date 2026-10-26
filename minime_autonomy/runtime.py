@@ -124,6 +124,7 @@ from .deliberate_comparison import (
     inspect_local_experiment, read_comparison_side, render_comparison, render_peer_inspection,
 )
 from .return_support import saved_return_support, return_support_line, retired_heuristic_line, unavailable_return_support
+from .reflection_publication import ReflectionPublication
 
 
 # v5.1 Phase E used int(time.time()/60) as an exchange_count proxy because
@@ -32642,6 +32643,9 @@ Reason: {reason}
         admission = None
         host = None
         prompt = None
+        publication = None
+        provider_returned = False
+        response = None
         try:
             # The generic reader can recover malformed text to a public map.
             # Private intent must fail privately before that source fallback.
@@ -32653,6 +32657,13 @@ Reason: {reason}
                 raise RuntimeError("study preparation requires a durable action identity")
             prompt = StudyClient(BASE_DIR, WORKSPACE_DIR).prepare(action, request_id=f"prepare-{operation}")
             kind = prompt.output.get("input_kind")
+            if kind == "reflection":
+                publication = ReflectionPublication.begin(WORKSPACE_DIR, operation, prompt.output.get("navigation_id"))
+                if publication.completed:
+                    self._current_action_outcome_summary = "Reflection publication already completed; verified retained artifacts, no provider call or NEXT replay."
+                    self._study_action_outcome("applied", self._current_action_outcome_summary,
+                                               input_id=prompt.output["navigation_id"], reader=True)
+                    return
             requested_mailbox_feedback = None
             if (kind == "reflection" and not self._attention_protected()
                     and not self._stable_core_self_journal_only()
@@ -32692,6 +32703,7 @@ Reason: {reason}
                     raise RuntimeError("protected generation requires a durable host job identity")
                 admission = host.admit(prompt, action, job_id)
             response = self._query_llm_with_next(prompt, context_mode="source_study")[0]
+            provider_returned = True
             if not response:
                 stub = self._take_fallback_stub()
                 if stub is not None:
@@ -32699,6 +32711,8 @@ Reason: {reason}
                 retry = "WRITE HELP inspects writing choices; retry eligibility requires the exact pending input" if private_request else "SELF_STUDY CONTINUE retries the pending page"
                 raise RuntimeError(f"generation unavailable; {retry}")
             verified = prompt.receipt is not None
+            if publication is not None:
+                publication.accepted(prompt.receipt)
             if (verified and requested_mailbox_feedback is not None
                     and getattr(self, "_pending_mailbox_feedback", None) == requested_mailbox_feedback):
                 self._pending_mailbox_feedback = None
@@ -32727,7 +32741,8 @@ Reason: {reason}
             elif prompt.output.get("input_kind") == "geometry":
                 source = "chosen geometry evidence"
             directory = WORKSPACE_DIR / ("private_writing/journal" if private_writing else "journal")
-            directory.mkdir(parents=True, exist_ok=True)
+            if publication is None:
+                directory.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().isoformat().replace(":", "-")
             path = directory / f"{mode}_{timestamp}.txt"
             page = prompt.output.get("page") or {}
@@ -32740,8 +32755,12 @@ Reason: {reason}
                 revision = "not applicable; no source or measurements supplied"
             heading = ("PRIVATE WRITING" if private_writing else "INTROSPECTION" if reflection else "STUDY DECISION" if decision
                        else "STUDY NAVIGATION RESPONSE" if revision_recovery else "STUDY NAVIGATION" if navigation else "SELF-STUDY")
-            path.write_text(f"=== {heading}: {source} ===\nSource revision: {revision}\nInput evidence: {scope}\n"
-                            f"Account: Minime’s response to this input, not independently verified code facts.\nDelivery: {status}\n\n{response}\n")
+            record_text = (f"=== {heading}: {source} ===\nSource revision: {revision}\nInput evidence: {scope}\n"
+                           f"Account: Minime’s response to this input, not independently verified code facts.\nDelivery: {status}\n\n{response}\n")
+            if publication is not None:
+                path = publication.publish(path.name, record_text)
+            else:
+                path.write_text(record_text)
             self._record_current_action_artifact(mode, path, f"{mode}: {status}", visibility="protected" if private_writing else "summary" if verified else "protected")
             self._write_journal_entry(mode, response,
                 self._state_for_live_surfaces(state, context=mode), str(path),
@@ -32758,9 +32777,16 @@ Reason: {reason}
                     "private_writing_notice", notice,
                     "Private writing choice needs explicit command recovery.", visibility="protected")
             self._current_action_outcome_summary = f"{heading.title()} {source}: {status}."
+            if publication is not None:
+                publication.complete()
             if not verified:
                 job_outcome.fail_action("source_study_delivery_unverified", self._current_action_outcome_summary)
         except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+            if publication is not None and provider_returned and not response:
+                try:
+                    publication.failed_unaccepted()
+                except (RuntimeError, OSError, ValueError):
+                    logging.warning("Reflection input retains unresolved execution/publication debt; no automatic replay")
             self._study_action_outcome("failed", "Study generation or delivery did not complete; any earlier reader outcome remains recorded separately.")
             if admission is not None and host is not None:
                 # A committed native delivery survives later presentation failure.
