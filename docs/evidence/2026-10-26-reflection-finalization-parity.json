@@ -1,0 +1,766 @@
+{
+  "all_passed": true,
+  "golden": [
+    {
+      "all_passed": true,
+      "candidate": {
+        "counters": {
+          "after_index_calls": 1,
+          "before_index_calls": 1,
+          "control_handler_calls": 1,
+          "generic_journal_calls": 0,
+          "next_handler_calls": 1,
+          "provider_calls": 1
+        },
+        "sha256": {
+          "authored": "9cee5d62dbea53f2479f9d68086031cff820e61c0d7cafa48f715addce3d68ed",
+          "native": "c39be3c5fbae9895e2d2a6303a1e2f68b87c0cc05304f12315d7254e7a15c568",
+          "prompt": "ef830993b2852ac3781199be41075f262eb41f6cc12c3cd55810c98346ae7273",
+          "public": "0bb27d62a455a2b5ff6aa8710fc9e0043937a396dca67f9168a863963ea1723f",
+          "queue": "e794abb7e0302f509ee1e3a867ef9d023157882508a976edf975b97a71a8f11d",
+          "request": "b5f6dc4ec72aaa49c6e09c5e9f214d2ce3b31badc87e912353422a94a8f2e3b3"
+        }
+      },
+      "case": "introspect",
+      "checks": {
+        "authored_exact": true,
+        "before_exact": true,
+        "candidate_adds_identity_parent_unchanged": true,
+        "historical_rows_preserved": true,
+        "native_exact": true,
+        "new_db_original_columns_exact": true,
+        "next_exact": true,
+        "prompt_exact": true,
+        "public_exact": true,
+        "queue_exact": true,
+        "receipt_exact": true,
+        "request_exact": true
+      },
+      "parent": {
+        "counters": {
+          "after_index_calls": 0,
+          "before_index_calls": 0,
+          "control_handler_calls": 1,
+          "generic_journal_calls": 1,
+          "next_handler_calls": 1,
+          "provider_calls": 1
+        },
+        "sha256": {
+          "authored": "9cee5d62dbea53f2479f9d68086031cff820e61c0d7cafa48f715addce3d68ed",
+          "native": "c39be3c5fbae9895e2d2a6303a1e2f68b87c0cc05304f12315d7254e7a15c568",
+          "prompt": "ef830993b2852ac3781199be41075f262eb41f6cc12c3cd55810c98346ae7273",
+          "public": "0bb27d62a455a2b5ff6aa8710fc9e0043937a396dca67f9168a863963ea1723f",
+          "queue": "e794abb7e0302f509ee1e3a867ef9d023157882508a976edf975b97a71a8f11d",
+          "request": "b5f6dc4ec72aaa49c6e09c5e9f214d2ce3b31badc87e912353422a94a8f2e3b3"
+        }
+      }
+    },
+    {
+      "all_passed": true,
+      "candidate": {
+        "counters": {
+          "after_index_calls": 1,
+          "before_index_calls": 1,
+          "control_handler_calls": 1,
+          "generic_journal_calls": 0,
+          "next_handler_calls": 1,
+          "provider_calls": 1
+        },
+        "sha256": {
+          "authored": "8de25d27d061721fd890a97baec4ae891533afdae49118366a38f510021121b7",
+          "native": "bbb680cb116d93a64913452fcea9a42a900122e0040aaec6d2cb134ffb2e1d97",
+          "prompt": "ef830993b2852ac3781199be41075f262eb41f6cc12c3cd55810c98346ae7273",
+          "public": "c1fcd80e0e3d45996950a5c16f9e90f0b44afca678ee2a86aceffa15b3f888a7",
+          "queue": "a10316babe696b72769e26eae92581703f27f36fe962510f35af44d477f24816",
+          "request": "b5f6dc4ec72aaa49c6e09c5e9f214d2ce3b31badc87e912353422a94a8f2e3b3"
+        }
+      },
+      "case": "rest",
+      "checks": {
+        "authored_exact": true,
+        "before_exact": true,
+        "candidate_adds_identity_parent_unchanged": true,
+        "historical_rows_preserved": true,
+        "native_exact": true,
+        "new_db_original_columns_exact": true,
+        "next_exact": true,
+        "prompt_exact": true,
+        "public_exact": true,
+        "queue_exact": true,
+        "receipt_exact": true,
+        "request_exact": true
+      },
+      "parent": {
+        "counters": {
+          "after_index_calls": 0,
+          "before_index_calls": 0,
+          "control_handler_calls": 1,
+          "generic_journal_calls": 1,
+          "next_handler_calls": 1,
+          "provider_calls": 1
+        },
+        "sha256": {
+          "authored": "8de25d27d061721fd890a97baec4ae891533afdae49118366a38f510021121b7",
+          "native": "bbb680cb116d93a64913452fcea9a42a900122e0040aaec6d2cb134ffb2e1d97",
+          "prompt": "ef830993b2852ac3781199be41075f262eb41f6cc12c3cd55810c98346ae7273",
+          "public": "c1fcd80e0e3d45996950a5c16f9e90f0b44afca678ee2a86aceffa15b3f888a7",
+          "queue": "a10316babe696b72769e26eae92581703f27f36fe962510f35af44d477f24816",
+          "request": "b5f6dc4ec72aaa49c6e09c5e9f214d2ce3b31badc87e912353422a94a8f2e3b3"
+        }
+      }
+    },
+    {
+      "all_passed": true,
+      "candidate": {
+        "counters": {
+          "after_index_calls": 1,
+          "before_index_calls": 1,
+          "control_handler_calls": 1,
+          "generic_journal_calls": 0,
+          "next_handler_calls": 0,
+          "provider_calls": 1
+        },
+        "sha256": {
+          "authored": "62ce08dae0c61f14b6d14101c41ffb7116f23a6ed34107c017bced6a24e46837",
+          "native": "9d326dfea5fc04fc407c16094fb563cfd5e4fcb1e9ab66d43b0711269dd6f5d3",
+          "prompt": "ef830993b2852ac3781199be41075f262eb41f6cc12c3cd55810c98346ae7273",
+          "public": "3aafb3e89249108a7ecc1567127023a03696ed719f7391cd2b3f4fb47f3698c3",
+          "queue": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "request": "b5f6dc4ec72aaa49c6e09c5e9f214d2ce3b31badc87e912353422a94a8f2e3b3"
+        }
+      },
+      "case": "no_next",
+      "checks": {
+        "authored_exact": true,
+        "before_exact": true,
+        "candidate_adds_identity_parent_unchanged": true,
+        "historical_rows_preserved": true,
+        "native_exact": true,
+        "new_db_original_columns_exact": true,
+        "next_exact": true,
+        "prompt_exact": true,
+        "public_exact": true,
+        "queue_exact": true,
+        "receipt_exact": true,
+        "request_exact": true
+      },
+      "parent": {
+        "counters": {
+          "after_index_calls": 0,
+          "before_index_calls": 0,
+          "control_handler_calls": 1,
+          "generic_journal_calls": 1,
+          "next_handler_calls": 0,
+          "provider_calls": 1
+        },
+        "sha256": {
+          "authored": "62ce08dae0c61f14b6d14101c41ffb7116f23a6ed34107c017bced6a24e46837",
+          "native": "9d326dfea5fc04fc407c16094fb563cfd5e4fcb1e9ab66d43b0711269dd6f5d3",
+          "prompt": "ef830993b2852ac3781199be41075f262eb41f6cc12c3cd55810c98346ae7273",
+          "public": "3aafb3e89249108a7ecc1567127023a03696ed719f7391cd2b3f4fb47f3698c3",
+          "queue": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "request": "b5f6dc4ec72aaa49c6e09c5e9f214d2ce3b31badc87e912353422a94a8f2e3b3"
+        }
+      }
+    }
+  ],
+  "parent_revision": "e86801d98c5aa4a2b1725fba99356049f647d674",
+  "recovery_cost": [
+    {
+      "fault": "intent-ack",
+      "mode": "startup",
+      "new_database_rows": 1,
+      "provider_control_choice_callback_replay": 0,
+      "publication_files": 1,
+      "queue_private_native_history_unchanged": true,
+      "receipt_storage_bytes_after_recovery": 3679,
+      "samples": [
+        {
+          "elapsed_ms": 8.044,
+          "io": {
+            "atomic_calls": 5,
+            "atomic_payload_bytes": 2938,
+            "public_atomic_calls": 1,
+            "receipt_atomic_calls": 4,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "ALTER": 1,
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "INSERT": 1,
+            "PRAGMA": 3,
+            "SELECT": 3
+          }
+        },
+        {
+          "elapsed_ms": 0.943,
+          "io": {},
+          "sql_statement_counts": {}
+        },
+        {
+          "elapsed_ms": 1.042,
+          "io": {},
+          "sql_statement_counts": {}
+        }
+      ]
+    },
+    {
+      "fault": "file-before",
+      "mode": "startup",
+      "new_database_rows": 1,
+      "provider_control_choice_callback_replay": 0,
+      "publication_files": 1,
+      "queue_private_native_history_unchanged": true,
+      "receipt_storage_bytes_after_recovery": 3681,
+      "samples": [
+        {
+          "elapsed_ms": 7.251,
+          "io": {
+            "atomic_calls": 4,
+            "atomic_payload_bytes": 2448,
+            "public_atomic_calls": 1,
+            "receipt_atomic_calls": 3,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "ALTER": 1,
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "INSERT": 1,
+            "PRAGMA": 3,
+            "SELECT": 3
+          }
+        },
+        {
+          "elapsed_ms": 1.011,
+          "io": {},
+          "sql_statement_counts": {}
+        },
+        {
+          "elapsed_ms": 1.093,
+          "io": {},
+          "sql_statement_counts": {}
+        }
+      ]
+    },
+    {
+      "fault": "file-after",
+      "mode": "startup",
+      "new_database_rows": 1,
+      "provider_control_choice_callback_replay": 0,
+      "publication_files": 1,
+      "queue_private_native_history_unchanged": true,
+      "receipt_storage_bytes_after_recovery": 3679,
+      "samples": [
+        {
+          "elapsed_ms": 5.897,
+          "io": {
+            "atomic_calls": 3,
+            "atomic_payload_bytes": 1870,
+            "receipt_atomic_calls": 3,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "ALTER": 1,
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "INSERT": 1,
+            "PRAGMA": 3,
+            "SELECT": 3
+          }
+        },
+        {
+          "elapsed_ms": 1.024,
+          "io": {},
+          "sql_statement_counts": {}
+        },
+        {
+          "elapsed_ms": 0.973,
+          "io": {},
+          "sql_statement_counts": {}
+        }
+      ]
+    },
+    {
+      "fault": "db-before",
+      "mode": "startup",
+      "new_database_rows": 1,
+      "provider_control_choice_callback_replay": 0,
+      "publication_files": 1,
+      "queue_private_native_history_unchanged": true,
+      "receipt_storage_bytes_after_recovery": 3674,
+      "samples": [
+        {
+          "elapsed_ms": 5.206,
+          "io": {
+            "atomic_calls": 2,
+            "atomic_payload_bytes": 1374,
+            "receipt_atomic_calls": 2,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "ALTER": 1,
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "INSERT": 1,
+            "PRAGMA": 3,
+            "SELECT": 3
+          }
+        },
+        {
+          "elapsed_ms": 1.005,
+          "io": {},
+          "sql_statement_counts": {}
+        },
+        {
+          "elapsed_ms": 0.958,
+          "io": {},
+          "sql_statement_counts": {}
+        }
+      ]
+    },
+    {
+      "fault": "db-after",
+      "mode": "startup",
+      "new_database_rows": 1,
+      "provider_control_choice_callback_replay": 0,
+      "publication_files": 1,
+      "queue_private_native_history_unchanged": true,
+      "receipt_storage_bytes_after_recovery": 3672,
+      "samples": [
+        {
+          "elapsed_ms": 5.634,
+          "io": {
+            "atomic_calls": 2,
+            "atomic_payload_bytes": 1373,
+            "receipt_atomic_calls": 2,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "PRAGMA": 3,
+            "SELECT": 2
+          }
+        },
+        {
+          "elapsed_ms": 1.467,
+          "io": {},
+          "sql_statement_counts": {}
+        },
+        {
+          "elapsed_ms": 1.168,
+          "io": {},
+          "sql_statement_counts": {}
+        }
+      ]
+    },
+    {
+      "fault": "intent-ack",
+      "mode": "reentry",
+      "new_database_rows": 1,
+      "provider_control_choice_callback_replay": 0,
+      "publication_files": 1,
+      "queue_private_native_history_unchanged": true,
+      "receipt_storage_bytes_after_recovery": 3679,
+      "samples": [
+        {
+          "elapsed_ms": 24.462,
+          "io": {
+            "atomic_calls": 5,
+            "atomic_payload_bytes": 2938,
+            "public_atomic_calls": 1,
+            "receipt_atomic_calls": 4,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "ALTER": 1,
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "INSERT": 1,
+            "PRAGMA": 3,
+            "SELECT": 3
+          }
+        },
+        {
+          "elapsed_ms": 20.565,
+          "io": {
+            "atomic_calls": 1,
+            "atomic_payload_bytes": 886,
+            "receipt_atomic_calls": 1,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "PRAGMA": 3,
+            "SELECT": 2
+          }
+        },
+        {
+          "elapsed_ms": 20.383,
+          "io": {
+            "atomic_calls": 1,
+            "atomic_payload_bytes": 886,
+            "receipt_atomic_calls": 1,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "PRAGMA": 3,
+            "SELECT": 2
+          }
+        }
+      ]
+    },
+    {
+      "fault": "file-before",
+      "mode": "reentry",
+      "new_database_rows": 1,
+      "provider_control_choice_callback_replay": 0,
+      "publication_files": 1,
+      "queue_private_native_history_unchanged": true,
+      "receipt_storage_bytes_after_recovery": 3681,
+      "samples": [
+        {
+          "elapsed_ms": 23.239,
+          "io": {
+            "atomic_calls": 4,
+            "atomic_payload_bytes": 2448,
+            "public_atomic_calls": 1,
+            "receipt_atomic_calls": 3,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "ALTER": 1,
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "INSERT": 1,
+            "PRAGMA": 3,
+            "SELECT": 3
+          }
+        },
+        {
+          "elapsed_ms": 20.997,
+          "io": {
+            "atomic_calls": 1,
+            "atomic_payload_bytes": 887,
+            "receipt_atomic_calls": 1,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "PRAGMA": 3,
+            "SELECT": 2
+          }
+        },
+        {
+          "elapsed_ms": 20.008,
+          "io": {
+            "atomic_calls": 1,
+            "atomic_payload_bytes": 887,
+            "receipt_atomic_calls": 1,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "PRAGMA": 3,
+            "SELECT": 2
+          }
+        }
+      ]
+    },
+    {
+      "fault": "file-after",
+      "mode": "reentry",
+      "new_database_rows": 1,
+      "provider_control_choice_callback_replay": 0,
+      "publication_files": 1,
+      "queue_private_native_history_unchanged": true,
+      "receipt_storage_bytes_after_recovery": 3679,
+      "samples": [
+        {
+          "elapsed_ms": 21.566,
+          "io": {
+            "atomic_calls": 3,
+            "atomic_payload_bytes": 1870,
+            "receipt_atomic_calls": 3,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "ALTER": 1,
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "INSERT": 1,
+            "PRAGMA": 3,
+            "SELECT": 3
+          }
+        },
+        {
+          "elapsed_ms": 18.992,
+          "io": {
+            "atomic_calls": 1,
+            "atomic_payload_bytes": 886,
+            "receipt_atomic_calls": 1,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "PRAGMA": 3,
+            "SELECT": 2
+          }
+        },
+        {
+          "elapsed_ms": 18.543,
+          "io": {
+            "atomic_calls": 1,
+            "atomic_payload_bytes": 886,
+            "receipt_atomic_calls": 1,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "PRAGMA": 3,
+            "SELECT": 2
+          }
+        }
+      ]
+    },
+    {
+      "fault": "db-before",
+      "mode": "reentry",
+      "new_database_rows": 1,
+      "provider_control_choice_callback_replay": 0,
+      "publication_files": 1,
+      "queue_private_native_history_unchanged": true,
+      "receipt_storage_bytes_after_recovery": 3674,
+      "samples": [
+        {
+          "elapsed_ms": 20.426,
+          "io": {
+            "atomic_calls": 2,
+            "atomic_payload_bytes": 1374,
+            "receipt_atomic_calls": 2,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "ALTER": 1,
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "INSERT": 1,
+            "PRAGMA": 3,
+            "SELECT": 3
+          }
+        },
+        {
+          "elapsed_ms": 19.968,
+          "io": {
+            "atomic_calls": 1,
+            "atomic_payload_bytes": 885,
+            "receipt_atomic_calls": 1,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "PRAGMA": 3,
+            "SELECT": 2
+          }
+        },
+        {
+          "elapsed_ms": 24.239,
+          "io": {
+            "atomic_calls": 1,
+            "atomic_payload_bytes": 885,
+            "receipt_atomic_calls": 1,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "PRAGMA": 3,
+            "SELECT": 2
+          }
+        }
+      ]
+    },
+    {
+      "fault": "db-after",
+      "mode": "reentry",
+      "new_database_rows": 1,
+      "provider_control_choice_callback_replay": 0,
+      "publication_files": 1,
+      "queue_private_native_history_unchanged": true,
+      "receipt_storage_bytes_after_recovery": 3672,
+      "samples": [
+        {
+          "elapsed_ms": 21.35,
+          "io": {
+            "atomic_calls": 2,
+            "atomic_payload_bytes": 1373,
+            "receipt_atomic_calls": 2,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "PRAGMA": 3,
+            "SELECT": 2
+          }
+        },
+        {
+          "elapsed_ms": 19.69,
+          "io": {
+            "atomic_calls": 1,
+            "atomic_payload_bytes": 884,
+            "receipt_atomic_calls": 1,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "PRAGMA": 3,
+            "SELECT": 2
+          }
+        },
+        {
+          "elapsed_ms": 20.882,
+          "io": {
+            "atomic_calls": 1,
+            "atomic_payload_bytes": 884,
+            "receipt_atomic_calls": 1,
+            "sqlite_connections": 1
+          },
+          "sql_statement_counts": {
+            "BEGIN": 1,
+            "COMMIT": 1,
+            "CREATE": 1,
+            "PRAGMA": 3,
+            "SELECT": 2
+          }
+        }
+      ]
+    }
+  ],
+  "recovery_cost_summary": {
+    "interpretation": "Local fixture timings only. Startup skips fully indexed receipts on repeat. Action reentry still verifies the database and stages an idempotent recovery receipt; it is not a write-free scan. No repeated publication, DB insert, inference, choice, control, or journal hook.",
+    "reentry_first_recovery": {
+      "atomic_calls_range": [
+        2,
+        5
+      ],
+      "insert_statements_total": 4,
+      "max_ms": 24.462,
+      "median_ms": 21.566,
+      "min_ms": 20.426,
+      "sample_count": 5,
+      "sqlite_connections_range": [
+        1,
+        1
+      ]
+    },
+    "reentry_idempotent_repeat": {
+      "atomic_calls_range": [
+        1,
+        1
+      ],
+      "insert_statements_total": 0,
+      "max_ms": 24.239,
+      "median_ms": 20.195,
+      "min_ms": 18.543,
+      "sample_count": 10,
+      "sqlite_connections_range": [
+        1,
+        1
+      ]
+    },
+    "startup_first_recovery": {
+      "atomic_calls_range": [
+        2,
+        5
+      ],
+      "insert_statements_total": 4,
+      "max_ms": 8.044,
+      "median_ms": 5.897,
+      "min_ms": 5.206,
+      "sample_count": 5,
+      "sqlite_connections_range": [
+        1,
+        1
+      ]
+    },
+    "startup_idempotent_repeat": {
+      "atomic_calls_range": [
+        0,
+        0
+      ],
+      "insert_statements_total": 0,
+      "max_ms": 1.467,
+      "median_ms": 1.018,
+      "min_ms": 0.943,
+      "sample_count": 10,
+      "sqlite_connections_range": [
+        0,
+        0
+      ]
+    }
+  },
+  "schema": "synthetic_reflection_comparison_v1",
+  "scope": {
+    "cost_limit": "One synthetic case per fault and entry mode, followed by two idempotent repeats; local timings, not a production latency benchmark.",
+    "db_comparison": "Exact original columns before/after; historical rows preserved; candidate-only nullable publication identity expected.",
+    "determinism": "Identical cloned native pending preparation at the same absolute sandbox path; frozen Python clock and queue UUID; untouched frozen native helper.",
+    "live_provider_calls": 0,
+    "parent_execution": "Two runtime methods and v1 publication module extracted from immutable Git revision into evidence directory; canonical module never imported.",
+    "retained_stores": "Paired active sandbox renamed after each run; recorded absolute paths intentionally retain the shared comparison path.",
+    "service_operations": 0,
+    "shared_runtime": "Unchanged query/cleanup/NEXT/control methods AST-verified; candidate fixture initializes isolated stores for both variants.",
+    "synthetic_only": true
+  },
+  "source_and_helper_sha256": {
+    "/Users/v/other/minime/minime_autonomy/reflection_publication.py": "babfc8e406416531cc7b63aff6fe28ee09310850245daa2071946c8bea36debe",
+    "/Users/v/other/minime/minime_autonomy/runtime.py": "668ce1d816db37fe8b24fedfe04e56846405fdd1c43356bcd35f592a71649a7f",
+    "/Users/v/other/worktrees/lighter-reflection-20261025/bridge-stage-02/helpers/astrid-source-study": "35fd37904ba9605cb0a27936a6d6e84ff852c17078b23686fbf4cd394187c1f9",
+    "/Users/v/other/worktrees/reflection-finalization-20261026/minime/minime_autonomy/reflection_publication.py": "57afb9a1583776bdcea0fc654179f707794e7eab1f781a6f714799fbc9452db5",
+    "/Users/v/other/worktrees/reflection-finalization-20261026/minime/minime_autonomy/runtime.py": "d24ff136977913b5607c6dd96e448b05febb1f7d7824752308b6b3cd9f280b33",
+    "/Users/v/other/worktrees/reflection-finalization-20261026/minime/scripts/qualify_reflection_parity.py": "554ebb482540d1dc62c8e218b63119351b71bc1e07a97c97f297b41340fd1c1c",
+    "/Users/v/other/worktrees/reflection-finalization-20261026/minime/tests/test_reflection_finalization_adapter.py": "c5940da635a0d27cd62f099e313272c6b7fc6e457afba31d0e045a855c8a8ac7"
+  },
+  "source_and_helper_unchanged": true,
+  "source_study_module_byte_identical": true,
+  "unchanged_shared_method_ast": {
+    "_apply_footer_directives": true,
+    "_clean_llm_content": true,
+    "_maybe_compress_journal_entry": true,
+    "_persist_pending_next_action": true,
+    "_query_llm": true,
+    "_query_llm_with_next": true,
+    "_record_llm_next_action_choice": true,
+    "_strip_model_artifacts": true
+  }
+}

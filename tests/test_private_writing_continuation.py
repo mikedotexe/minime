@@ -1,6 +1,7 @@
 """Verified private choices reach the real queue/dispatcher, using isolated state."""
 import json
 import os
+import sqlite3
 import threading
 from pathlib import Path
 from unittest.mock import Mock
@@ -17,6 +18,10 @@ STATE = {"eig1": 4.7, "deig": 0.01, "fill_ratio": 0.68, "spread": 3.0, "cov_lamb
 def writing_agent(monkeypatch, tmp_path):
     agent = aa.AutonomousAgent(1, check_interval=999.0, recess_mode=True)
     agent.running = False
+    with sqlite3.connect(aa.DB_PATH) as db:
+        db.execute("CREATE TABLE IF NOT EXISTS sovereignty_journal "
+                   "(id INTEGER PRIMARY KEY, session_id INTEGER, timestamp REAL, entry_type TEXT, "
+                   "content TEXT, spectral_context TEXT, file_path TEXT)")
     monkeypatch.setattr(agent, "_low_fill_guard_status", lambda state: {"active": False, "fill_ratio": .68})
     monkeypatch.setattr(agent, "_write_journal_entry", Mock())
     monkeypatch.setattr(agent, "_log_decision", Mock())

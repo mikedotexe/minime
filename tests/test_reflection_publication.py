@@ -1,5 +1,6 @@
 """Reflection invocation boundaries in synthetic stores; no live provider calls."""
 import json
+import sqlite3
 from pathlib import Path
 import subprocess
 import sys
@@ -38,10 +39,19 @@ def retained_delivery(workspace, input_id=INPUT):
 def complete(workspace):
     operation = publication.ReflectionPublication.begin(workspace, "act_fixture", INPUT)
     receipt, artifact = retained_delivery(workspace)
-    operation.accepted(receipt)
-    path = operation.publish(FILENAME, TEXT)
-    operation.complete()
+    result = operation.finalize(receipt, filename=FILENAME, text=TEXT, content=TEXT,
+                                metadata=metadata(workspace))
+    path = Path(result.path)
     return operation, path, artifact
+
+
+def metadata(workspace):
+    database = workspace / "test.db"
+    with sqlite3.connect(database) as db:
+        db.execute("CREATE TABLE IF NOT EXISTS sovereignty_journal "
+                   "(session_id INTEGER,timestamp REAL,entry_type TEXT,content TEXT,spectral_context TEXT,file_path TEXT)")
+    return dict(database=str(database), session_id=1, timestamp=100.0, entry_type="introspect",
+                spectral_context="{}", implementation_sha256="c" * 64)
 
 
 def guard_files(workspace):
@@ -51,24 +61,21 @@ def guard_files(workspace):
 def test_completed_restart_is_read_only_and_receipts_are_content_free(tmp_path):
     operation, path, _ = complete(tmp_path)
     before = guard_files(tmp_path)
-    reopened = publication.ReflectionPublication.begin(tmp_path, "act_fixture", INPUT)
+    reopened = publication.ReflectionPublication.begin(tmp_path, "act_fixture", INPUT, database=tmp_path / "test.db")
     assert reopened.completed and path.read_text() == TEXT
     assert guard_files(tmp_path) == before
-    assert all(TEXT.encode() not in raw and b"NEXT:" not in raw for raw in before.values())
-    assert len(before) == 2
+    assert all(TEXT.encode() not in raw and b"NEXT:" not in raw for name, raw in before.items() if not name.startswith("intent-"))
+    assert len([n for n in before if n.startswith(("action-", "input-"))]) == 2
     assert operation.completed
 
 
-@pytest.mark.parametrize("stage", ["reserved", "accepted", "published"])
+@pytest.mark.parametrize("stage", ["reserved", "accepted"])
 def test_interrupted_stage_never_implicitly_restarts(tmp_path, stage):
     operation = publication.ReflectionPublication.begin(tmp_path, "act_fixture", INPUT)
     if stage != "reserved":
-        receipt, _ = retained_delivery(tmp_path)
-        operation.accepted(receipt)
-    if stage == "published":
-        operation.publish(FILENAME, TEXT)
+        retained_delivery(tmp_path)
     before = guard_files(tmp_path)
-    with pytest.raises(publication.RecoveryRequired, match=stage):
+    with pytest.raises(publication.RecoveryRequired, match="reserved"):
         publication.ReflectionPublication.begin(tmp_path, "act_fixture", INPUT)
     assert guard_files(tmp_path) == before
 
@@ -88,7 +95,7 @@ def test_tamper_or_newer_schema_is_not_overwritten(tmp_path, target):
     operation, path, artifact = complete(tmp_path)
     record_path = tmp_path / "runtime/reflection_publications" / operation.name
     if target == "receipt":
-        record_path.write_bytes(record_path.read_bytes().replace(b'"completed"', b'"reserved"'))
+        record_path.write_bytes(record_path.read_bytes().replace(b'"published"', b'"reserved"'))
     elif target == "newer_schema":
         record = publication._record(record_path.read_bytes())
         record["schema"] = "minime_reflection_publication_v99"
@@ -98,7 +105,7 @@ def test_tamper_or_newer_schema_is_not_overwritten(tmp_path, target):
         selected.write_bytes(selected.read_bytes() + b"changed")
     before = guard_files(tmp_path), path.read_bytes(), artifact.read_bytes()
     with pytest.raises(ValueError):
-        publication.ReflectionPublication.begin(tmp_path, "act_fixture", INPUT)
+        publication.ReflectionPublication.begin(tmp_path, "act_fixture", INPUT, database=tmp_path / "test.db")
     assert (guard_files(tmp_path), path.read_bytes(), artifact.read_bytes()) == before
 
 
@@ -123,7 +130,6 @@ def test_partial_claim_fails_closed_and_preserves_receipt(tmp_path, monkeypatch)
 def test_post_link_failure_retains_public_file_and_no_replay(tmp_path, monkeypatch):
     operation = publication.ReflectionPublication.begin(tmp_path, "act_fixture", INPUT)
     receipt, _ = retained_delivery(tmp_path)
-    operation.accepted(receipt)
     atomic = Directory.atomic
 
     def interrupt(directory, name, raw, **kwargs):
@@ -132,23 +138,23 @@ def test_post_link_failure_retains_public_file_and_no_replay(tmp_path, monkeypat
             raise OSError("synthetic loss of publication acknowledgement")
         return result
 
-    monkeypatch.setattr(Directory, "atomic", interrupt)
-    with pytest.raises(OSError):
-        operation.publish(FILENAME, TEXT)
+    with monkeypatch.context() as patch:
+        patch.setattr(Directory, "atomic", interrupt)
+        result = operation.finalize(receipt, filename=FILENAME, text=TEXT, content=TEXT, metadata=metadata(tmp_path))
+    assert result.publication == "published"
     assert (tmp_path / "journal" / FILENAME).read_text() == TEXT
-    with pytest.raises(publication.RecoveryRequired, match="publishing"):
-        publication.ReflectionPublication.begin(tmp_path, "act_fixture", INPUT)
+    reopened = publication.ReflectionPublication.begin(tmp_path, "act_fixture", INPUT, database=tmp_path / "test.db")
+    assert reopened.result.indexing == "indexed"
 
 
 def test_filename_collision_is_not_ownership_evidence(tmp_path):
     operation = publication.ReflectionPublication.begin(tmp_path, "act_fixture", INPUT)
     receipt, _ = retained_delivery(tmp_path)
-    operation.accepted(receipt)
     (tmp_path / "journal").mkdir()
     path = tmp_path / "journal" / FILENAME
     path.write_text(TEXT)
     with pytest.raises(ValueError, match="already exists"):
-        operation.publish(FILENAME, TEXT)
+        operation.finalize(receipt, filename=FILENAME, text=TEXT, content=TEXT, metadata=metadata(tmp_path))
     assert path.read_text() == TEXT
 
 
@@ -159,6 +165,27 @@ def test_symlink_cannot_redirect_receipt_storage(tmp_path):
     with pytest.raises(OSError):
         publication.ReflectionPublication.begin(tmp_path, "act_fixture", INPUT)
     assert not list(elsewhere.iterdir())
+
+
+def test_first_claim_exclusively_establishes_lock_before_locking(tmp_path, monkeypatch):
+    original = publication.os.open
+    observed = []
+
+    def checked_open(path, flags, mode=0o777, *, dir_fd=None):
+        if path == ".transaction.lock":
+            assert flags & publication.os.O_NOFOLLOW
+            assert dir_fd is not None
+            if flags & publication.os.O_EXCL:
+                observed.append("exclusive-create")
+            else:
+                info = publication.os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
+                assert info.st_size == 0
+                observed.append("existing-lock")
+        return original(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(publication.os, "open", checked_open)
+    publication.ReflectionPublication.begin(tmp_path, "act_initial_lock", INPUT)
+    assert observed == ["exclusive-create", "existing-lock"]
 
 
 @pytest.mark.parametrize("same_action", [False, True])
@@ -181,7 +208,7 @@ except RecoveryRequired:
 """
     workers = [subprocess.Popen([sys.executable, "-B", "-c", program, str(tmp_path),
                f"act_race_{0 if same_action else i}", INPUT],
-               cwd=Path(__file__).resolve().parents[1], stdin=subprocess.PIPE,
+               cwd=Path(publication.__file__).resolve().parents[1], stdin=subprocess.PIPE,
                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for i in range(2)]
     try:
         for worker in workers:
@@ -202,6 +229,23 @@ except RecoveryRequired:
             worker.communicate(timeout=5)
 
 
+@pytest.mark.parametrize("kind", ["symlink", "directory"])
+def test_exclusive_lock_creation_does_not_adopt_unsafe_existing_path(tmp_path, kind):
+    directory = tmp_path / "runtime/reflection_publications"
+    directory.mkdir(parents=True)
+    target = tmp_path / "foreign.txt"
+    target.write_text("unchanged")
+    lock = directory / ".transaction.lock"
+    if kind == "symlink":
+        lock.symlink_to(target)
+    else:
+        lock.mkdir()
+    with pytest.raises((OSError, ValueError)):
+        publication.ReflectionPublication.begin(tmp_path, "act_unsafe_lock", INPUT)
+    assert target.read_text() == "unchanged"
+    assert not list(directory.glob("action-*.json"))
+
+
 def test_returned_unaccepted_failure_allows_only_new_deliberate_action(tmp_path):
     failed = publication.ReflectionPublication.begin(tmp_path, "act_failed", INPUT)
     failed.failed_unaccepted()
@@ -214,9 +258,7 @@ def test_returned_unaccepted_failure_allows_only_new_deliberate_action(tmp_path)
     with pytest.raises(publication.RecoveryRequired, match="failed_unaccepted"):
         publication.ReflectionPublication.begin(tmp_path, "act_failed", INPUT)
     receipt, _ = retained_delivery(tmp_path)
-    retry.accepted(receipt)
-    retry.publish(FILENAME, TEXT)
-    retry.complete()
+    retry.finalize(receipt, filename=FILENAME, text=TEXT, content=TEXT, metadata=metadata(tmp_path))
     with pytest.raises(publication.RecoveryRequired, match="already_reserved"):
         publication.ReflectionPublication.begin(tmp_path, "act_third", INPUT)
 
@@ -333,7 +375,7 @@ def test_crash_after_delivery_preserves_next_and_does_not_regenerate(writing_age
     post = Mock(return_value=stub_response(TEXT))
     monkeypatch.setattr(aa.requests, "post", post)
     with monkeypatch.context() as patch:
-        patch.setattr(publication.ReflectionPublication, "accepted", Mock(side_effect=KeyboardInterrupt))
+        patch.setattr(publication.ReflectionPublication, "finalize", Mock(side_effect=KeyboardInterrupt))
         with pytest.raises(KeyboardInterrupt):
             agent._run_shared_source_study(dict(STATE), "INTROSPECT")
     before = evidence_snapshot(client)

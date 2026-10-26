@@ -21925,6 +21925,7 @@ class AutonomousAgent:
             Path(self._sovereignty_state_path())
         )
         self._save_condition_metrics(self._load_condition_metrics())
+        self._recover_reflection_publications()
         self._compact_managed_directories()
 
         mode_str = "RECESS (playful, unstructured)" if recess_mode else "FOCUSED (goal-directed)"
@@ -32680,11 +32681,9 @@ Reason: {reason}
             prompt = StudyClient(BASE_DIR, WORKSPACE_DIR).prepare(action, request_id=f"prepare-{operation}")
             kind = prompt.output.get("input_kind")
             if kind == "reflection":
-                publication = ReflectionPublication.begin(WORKSPACE_DIR, operation, prompt.output.get("navigation_id"))
+                publication = ReflectionPublication.begin(WORKSPACE_DIR, operation, prompt.output.get("navigation_id"), database=DB_PATH)
                 if publication.completed:
-                    self._current_action_outcome_summary = "Reflection publication already completed; verified retained artifacts, no provider call or NEXT replay."
-                    self._study_action_outcome("applied", self._current_action_outcome_summary,
-                                               input_id=prompt.output["navigation_id"], reader=True)
+                    self._reflection_finalization_result(publication.result, prompt, recovered=True)
                     return
             requested_mailbox_feedback = None
             if (kind == "reflection" and not self._attention_protected()
@@ -32724,7 +32723,7 @@ Reason: {reason}
                 if host.status().get("protected") and not job_id:
                     raise RuntimeError("protected generation requires a durable host job identity")
                 admission = host.admit(prompt, action, job_id)
-            response = self._query_llm_with_next(prompt, context_mode="source_study")[0]
+            response, selected_next = self._query_llm_with_next(prompt, context_mode="source_study")
             provider_returned = True
             if not response:
                 stub = self._take_fallback_stub()
@@ -32733,29 +32732,27 @@ Reason: {reason}
                 retry = "WRITE HELP inspects writing choices; retry eligibility requires the exact pending input" if private_request else "SELF_STUDY CONTINUE retries the pending page"
                 raise RuntimeError(f"generation unavailable; {retry}")
             verified = prompt.receipt is not None
-            if publication is not None:
-                publication.accepted(prompt.receipt)
             if (verified and requested_mailbox_feedback is not None
                     and getattr(self, "_pending_mailbox_feedback", None) == requested_mailbox_feedback):
                 self._pending_mailbox_feedback = None
             if host is not None:
                 host.finish(admission, verified=verified)
                 admission = None
+            if publication is not None:
+                self._finalize_reflection(publication, prompt, response, state, selected_next)
+                return
             status = "verified input delivery; response claims and understanding not verified" if verified else "unverified; bookmark unchanged"
             session_pages = prompt.output.get("session_pages", [])
             private_writing = prompt.output.get("input_kind") == "private_writing"
-            reflection = prompt.output.get("input_kind") == "reflection"
             revision_recovery = prompt.output.get("input_kind") == "revision_recovery"
             decision = prompt.output.get("continuation_decision") is True or prompt.output.get("input_kind") in {"end_of_file", "source_selection_needed"}
             navigation = (prompt.output.get("input_kind") in STUDY_NAVIGATION_KINDS
                           and not session_pages and not (prompt.output.get("page") or {}))
-            mode = ("private_writing" if private_writing else "introspect" if reflection else "study_decision" if decision
+            mode = ("private_writing" if private_writing else "study_decision" if decision
                     else "study_navigation" if navigation else "self_study")
             source = (prompt.output.get("page") or {}).get("source", f"study session ({len(session_pages)} source pages)" if session_pages else "source catalog")
             if private_writing:
                 source = "private draft"
-            elif reflection:
-                source = "open reflection"
             elif decision:
                 source = "study continuation choice"
             elif revision_recovery:
@@ -32763,8 +32760,7 @@ Reason: {reason}
             elif prompt.output.get("input_kind") == "geometry":
                 source = "chosen geometry evidence"
             directory = WORKSPACE_DIR / ("private_writing/journal" if private_writing else "journal")
-            if publication is None:
-                directory.mkdir(parents=True, exist_ok=True)
+            directory.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().isoformat().replace(":", "-")
             path = directory / f"{mode}_{timestamp}.txt"
             page = prompt.output.get("page") or {}
@@ -32773,20 +32769,15 @@ Reason: {reason}
             scope = prompt.output.get("evidence_scope") or "Older retained input; consult the exact offered input."
             if prompt.output.get("input_kind") == "geometry":
                 revision = "frozen observation hashes in supplied evidence; no new source page"
-            elif reflection:
-                revision = "not applicable; no source or measurements supplied"
-            heading = ("PRIVATE WRITING" if private_writing else "INTROSPECTION" if reflection else "STUDY DECISION" if decision
+            heading = ("PRIVATE WRITING" if private_writing else "STUDY DECISION" if decision
                        else "STUDY NAVIGATION RESPONSE" if revision_recovery else "STUDY NAVIGATION" if navigation else "SELF-STUDY")
             record_text = (f"=== {heading}: {source} ===\nSource revision: {revision}\nInput evidence: {scope}\n"
                            f"Account: Minime’s response to this input, not independently verified code facts.\nDelivery: {status}\n\n{response}\n")
-            if publication is not None:
-                path = publication.publish(path.name, record_text)
-            else:
-                path.write_text(record_text)
+            path.write_text(record_text)
             self._record_current_action_artifact(mode, path, f"{mode}: {status}", visibility="protected" if private_writing else "summary" if verified else "protected")
             self._write_journal_entry(mode, response,
                 self._state_for_live_surfaces(state, context=mode), str(path),
-                private_canvas=private_writing, verified_source_study=verified and not private_writing and not reflection and not decision)
+                private_canvas=private_writing, verified_source_study=verified and not private_writing and not decision)
             feedback = (prompt.receipt or {}).get("choice_feedback") or {}
             if private_writing and str(feedback.get("selected_next") or "").upper() == "FINISH":
                 notice = directory / f"notice_{time.time_ns()}.txt"
@@ -32799,8 +32790,6 @@ Reason: {reason}
                     "private_writing_notice", notice,
                     "Private writing choice needs explicit command recovery.", visibility="protected")
             self._current_action_outcome_summary = f"{heading.title()} {source}: {status}."
-            if publication is not None:
-                publication.complete()
             if not verified:
                 job_outcome.fail_action("source_study_delivery_unverified", self._current_action_outcome_summary)
         except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
@@ -32809,7 +32798,10 @@ Reason: {reason}
                     publication.failed_unaccepted()
                 except (RuntimeError, OSError, ValueError):
                     logging.warning("Reflection input retains unresolved execution/publication debt; no automatic replay")
-            self._study_action_outcome("failed", "Study generation or delivery did not complete; any earlier reader outcome remains recorded separately.")
+            accepted_reflection = publication is not None and prompt is not None and prompt.receipt is not None
+            self._study_action_outcome("failed", (
+                "Reflection delivery was accepted; local finalization requires reconciliation. No regeneration or NEXT replay."
+                if accepted_reflection else "Study generation or delivery did not complete; any earlier reader outcome remains recorded separately."))
             if admission is not None and host is not None:
                 # A committed native delivery survives later presentation failure.
                 # Otherwise this returned provider attempt ends priority, not prose.
@@ -32838,8 +32830,78 @@ Reason: {reason}
             else:
                 self._record_introspect_notice(action, str(error), state)
             job_outcome.fail_action(
+                "reflection_finalization_unresolved" if accepted_reflection else
                 "source_study_fallback_stub" if isinstance(error, FallbackStubDelivery) else "source_study_unavailable",
                 "Private writing unavailable; details retained only in the private notice." if private_request else str(error))
+
+    def _recover_reflection_publications(self):
+        try:
+            results = ReflectionPublication.recover_pending(WORKSPACE_DIR, DB_PATH)
+            self._reflection_recovery_status = {
+                "examined": len(results),
+                "published": sum(r.get("publication") == "published" for r in results),
+                "indexed": sum(r.get("indexing") == "indexed" for r in results),
+                "unresolved": sum(r.get("publication") != "published" or r.get("indexing") != "indexed" for r in results),
+            }
+        except (OSError, ValueError, RuntimeError, sqlite3.Error):
+            self._reflection_recovery_status = {"reason": "reflection_recovery_unavailable"}
+        if self._reflection_recovery_status.get("examined") or self._reflection_recovery_status.get("reason"):
+            logging.info("Reflection local recovery: %s", self._reflection_recovery_status)
+
+    def _reflection_choice_disposition(self, prompt, selected_next):
+        if not selected_next:
+            feedback = (prompt.receipt or {}).get("choice_feedback") or {}
+            return "unknown" if feedback.get("selected_next") else "none"
+        try:
+            state = maintenance_next.parse(maintenance_next.read(self._sovereignty_state_path(), maintenance_next.MAX_STATE))
+            if (state.get("pending_next_action") == selected_next
+                    and state.get("pending_next_selection_id") == getattr(self, "_pending_next_selection_id", None)
+                    and state.get("pending_next_selection_id") and not getattr(self, "_next_handoff_failed", False)):
+                return "recorded"
+        except (OSError, ValueError, RuntimeError):
+            pass
+        return "unknown"
+
+    def _finalize_reflection(self, publication, prompt, response, state, selected_next):
+        timestamp = datetime.now().isoformat().replace(":", "-")
+        filename = f"introspect_{timestamp}.txt"
+        scope = prompt.output.get("evidence_scope") or "Older retained input; consult the exact offered input."
+        status = "verified input delivery; response claims and understanding not verified"
+        text = ("=== INTROSPECTION: open reflection ===\n"
+                "Source revision: not applicable; no source or measurements supplied\n"
+                f"Input evidence: {scope}\n"
+                f"Account: Minime’s response to this input, not independently verified code facts.\nDelivery: {status}\n\n{response}\n")
+        journal_state = self._state_for_live_surfaces(state, context="introspect")
+        source_identity = getattr(self, "_agent_inputs_at_start", {})
+        implementation = hashlib.sha256(json.dumps(source_identity, sort_keys=True).encode()).hexdigest()
+        metadata = {"database": str(Path(DB_PATH).absolute()), "session_id": self.session_id,
+                    "timestamp": time.time(), "entry_type": "introspect",
+                    "spectral_context": self._journal_spectral_context(journal_state),
+                    "implementation_sha256": implementation,
+                    "job_id": (getattr(self, "_current_action_continuity_event", None) or {}).get("llm_job_id")}
+        path = str(WORKSPACE_DIR / "journal" / filename)
+        result = publication.finalize(prompt.receipt, filename=filename, text=text, content=response,
+            metadata=metadata, choice=self._reflection_choice_disposition(prompt, selected_next),
+            before_index=lambda: self._journal_before_index("introspect", response, journal_state, path),
+            after_index=lambda: self._journal_after_index("introspect", response, path))
+        self._reflection_finalization_result(result, prompt)
+
+    def _reflection_finalization_result(self, result, prompt, *, recovered=False):
+        self._last_reflection_finalization = result.status()
+        summary = ("Reflection publication already completed or reconciled from retained evidence; " if recovered else
+                   "Reflection delivery accepted; ")
+        summary += f"publication={result.publication}, indexing={result.indexing}, choice_at_freeze={result.choice}, diagnostics={result.diagnostics}."
+        if result.reason:
+            summary += f" {result.reason}."
+        if recovered:
+            summary += " No provider call or NEXT replay."
+        self._current_action_outcome_summary = summary
+        self._study_action_outcome("applied" if result.publication == "published" else "failed", summary,
+                                   input_id=prompt.output["navigation_id"], reader=True)
+        if result.path and result.publication == "published":
+            self._record_current_action_artifact("introspect", Path(result.path), "Verified reflection publication", visibility="summary")
+        else:
+            job_outcome.fail_action("reflection_publication_incomplete", summary)
 
     def _introspect(self, state: Dict[str, float]):
         """Read a targeted source/workspace text window and reflect on concrete snags."""
@@ -48585,6 +48647,8 @@ Goals: {json.dumps(goals, indent=2)}
             "source_changed_since_start": changed,
             "reload_required": changed,
             "llm_jobs": llm_jobs_status,
+            "reflection_recovery": getattr(self, "_reflection_recovery_status", None),
+            "reflection_finalization": getattr(self, "_last_reflection_finalization", None),
             "action_scheduler_v1": action_scheduling.snapshot(self),
             "reload_note": (
                 "The live Python autonomous agent predates the source now on disk; "
@@ -57105,6 +57169,27 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
             )
             return
         try:
+            content = self._journal_before_index(entry_type, content, state, file_path,
+                private_canvas=private_canvas, verified_source_study=verified_source_study)
+            spectral_context = self._journal_spectral_context(state)
+            with job_timing.phase("journal.database"):
+                conn = sqlite3.connect(DB_PATH)
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO sovereignty_journal
+                    (session_id, timestamp, entry_type, content, spectral_context, file_path)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (self.session_id, time.time(), entry_type, content, spectral_context, file_path))
+                conn.commit()
+                conn.close()
+        except Exception as e:
+            logging.error(f"Journal logging failed: {e}")
+        self._journal_after_index(entry_type, content, file_path)
+
+    def _journal_before_index(self, entry_type, content, state, file_path, *,
+                              private_canvas=False, verified_source_study=False):
+        """Existing first-run diagnostics; never called by publication recovery."""
+        try:
             store = self._afterimage_store()
             if (store.archive / "status.json").exists() or (store.private / "index.json").exists():
                 source = dict(getattr(self, "_last_afterimage_generation_source", {}) or {})
@@ -57115,71 +57200,39 @@ Cov λ₁: {cov_lambda1:.1f}{' [stale]' if cov_stale else ''}"""
                 store.link_context(source, content)
         except (ValueError, OSError, TypeError) as error:
             logging.warning("Afterimage source association unavailable: %s", error)
-        try:
-            # Public replay hygiene must not become instructions in a private canvas.
-            if not private_canvas:
-                self._register_pressure_vocabulary_fatigue_if_needed(
+        # Public replay hygiene must not become instructions in a private canvas.
+        if not private_canvas:
+            self._register_pressure_vocabulary_fatigue_if_needed(
+                entry_type=entry_type, content=content, file_path=file_path)
+            source_study = verified_source_study and entry_type == "self_study"
+            if not source_study:
+                self._register_agency_vernacular_notice_if_needed(
                     entry_type=entry_type,
                     content=content,
                     file_path=file_path,
                 )
-                # The shared reader's receipt verifies a research input. Repeated
-                # technical vocabulary across its pages is expected study continuity.
-                source_study = verified_source_study and entry_type == "self_study"
-                if not source_study:
-                    self._register_agency_vernacular_notice_if_needed(
-                        entry_type=entry_type,
-                        content=content,
-                        file_path=file_path,
-                    )
-                self._register_afterimage_absence_notice_if_needed(
-                    entry_type=entry_type,
-                    content=content,
-                    file_path=file_path,
-                )
-                self._register_internal_topology_fatigue_if_needed(
-                    entry_type=entry_type,
-                    content=content,
-                    file_path=file_path,
-                )
-                content = self._maybe_compress_journal_entry(
-                    entry_type, content, state, file_path, verified_source_study=source_study)
-            eig1 = float(state.get('eig1', 0.0))
-            deig = float(state.get('deig', 0.0))
-            leak = float(state.get('leak', 0.0))
-            lambda_val = float(state.get('lambda', state.get('esn_lambda', 0.0)))
+            self._register_afterimage_absence_notice_if_needed(
+                entry_type=entry_type, content=content, file_path=file_path)
+            self._register_internal_topology_fatigue_if_needed(
+                entry_type=entry_type, content=content, file_path=file_path)
+            content = self._maybe_compress_journal_entry(
+                entry_type, content, state, file_path, verified_source_study=source_study)
+        return content
 
-            spectral_context = json.dumps({
-                'eig1': eig1,
-                'deig': deig,
-                'leak': leak,
-                'lambda': lambda_val,
-                'cov_lambda1': float(state.get('cov_lambda1', 0.0)),
-                'fill_ratio': float(state.get('fill_ratio', 0.0)),
-                'spread': float(state.get('spread', 0.0)),
-                'covariance_stale': bool(state.get('covariance_stale', False)),
-            })
+    @staticmethod
+    def _journal_spectral_context(state):
+        return json.dumps({
+            'eig1': float(state.get('eig1', 0.0)),
+            'deig': float(state.get('deig', 0.0)),
+            'leak': float(state.get('leak', 0.0)),
+            'lambda': float(state.get('lambda', state.get('esn_lambda', 0.0))),
+            'cov_lambda1': float(state.get('cov_lambda1', 0.0)),
+            'fill_ratio': float(state.get('fill_ratio', 0.0)),
+            'spread': float(state.get('spread', 0.0)),
+            'covariance_stale': bool(state.get('covariance_stale', False)),
+        })
 
-            with job_timing.phase("journal.database"):
-                conn = sqlite3.connect(DB_PATH)
-                cur = conn.cursor()
-                cur.execute("""
-                    INSERT INTO sovereignty_journal
-                    (session_id, timestamp, entry_type, content, spectral_context, file_path)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (
-                    self.session_id,
-                    time.time(),
-                    entry_type,
-                    content,
-                    spectral_context,
-                    file_path
-                ))
-                conn.commit()
-                conn.close()
-        except Exception as e:
-            logging.error(f"Journal logging failed: {e}")
-
+    def _journal_after_index(self, entry_type, content, file_path):
         try:
             path = Path(file_path)
             if path.parent == (WORKSPACE_DIR / "journal"):

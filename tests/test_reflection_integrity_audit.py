@@ -248,7 +248,8 @@ def test_real_adapter_preserves_splice_and_publishes_once(writing_agent, monkeyp
     assert audit.authored_public(entries[0].read_bytes()) == SPLICE
     assert post.call_count == (2 if failed_attempt else 1)
     assert agent._pending_next_action == "INTROSPECT"
-    agent._write_journal_entry.assert_called_once()
+    agent._write_journal_entry.assert_not_called()
+    assert agent._last_reflection_finalization["indexing"] == "indexed"
     receipts = list((client.workspace / audit.NAVIGATION).glob("*/*.json"))
     assert len(receipts) == 1
     retained = json.loads(receipts[0].read_text())
@@ -283,7 +284,7 @@ def test_publication_failure_does_not_concatenate_or_rewrite_provider_response(w
     if failure_stage == "file":
         monkeypatch.setattr(Directory, "atomic", refuse)
     else:
-        agent._write_journal_entry.side_effect = OSError("synthetic journal record failure")
+        monkeypatch.setattr(agent, "_journal_before_index", Mock(side_effect=OSError("synthetic diagnostic failure")))
     agent._run_shared_source_study(dict(STATE), "INTROSPECT")
     entries = list((client.workspace / "journal").glob("introspect_*.txt"))
     assert len(entries) == (0 if failure_stage == "file" else 1)
@@ -292,7 +293,10 @@ def test_publication_failure_does_not_concatenate_or_rewrite_provider_response(w
     assert len(receipts) == 1
     assert json.loads(json.loads(receipts[0].read_text())["response_json"])["message"]["content"] == SPLICE
     aa.requests.post.assert_called_once()
-    assert agent._write_journal_entry.call_count == (0 if failure_stage == "file" else 1)
+    agent._write_journal_entry.assert_not_called()
+    if failure_stage != "file":
+        assert agent._last_reflection_finalization["indexing"] == "indexed"
+        assert agent._last_reflection_finalization["diagnostics"] == "incomplete"
     assert agent._pending_next_action == "INTROSPECT"  # Accepted choice survives publication debt.
     before = evidence_snapshot(client)
     agent._run_shared_source_study(dict(STATE), "INTROSPECT")
@@ -346,7 +350,8 @@ def test_conflicting_completion_cannot_replace_accepted_delivery(writing_agent, 
     entries = list((client.workspace / "journal").glob("introspect_*.txt"))
     assert len(entries) == 1
     assert audit.authored_public(entries[0].read_bytes()) == SPLICE
-    agent._write_journal_entry.assert_called_once()
+    agent._write_journal_entry.assert_not_called()
+    assert agent._last_reflection_finalization["indexing"] == "indexed"
     assert agent._pending_next_action == "INTROSPECT"
 
 

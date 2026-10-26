@@ -1,0 +1,638 @@
+{
+  "schema": "minime_reflection_lock_qualification_v1",
+  "evidence_root": "/Users/v/other/worktrees/reflection-finalization-20261026",
+  "scope": "Host-specific synthetic first-creation concurrency. No claim of an OS-version-general defect.",
+  "baseline_revision": "e86801d98c5aa4a2b1725fba99356049f647d674",
+  "probe": {
+    "original": "/Users/v/other/worktrees/reflection-finalization-20261026/reflection_lock_probe.py",
+    "packaged": "scripts/qualify_reflection_lock.py",
+    "sha256": "c1a532749704584aa45622826e3909499fec86f4a43b2bfb0464b46ce6b50d86",
+    "byte_identical_copy": true,
+    "command": [
+      "python3",
+      "-I",
+      "-B",
+      "/Users/v/other/worktrees/reflection-finalization-20261026/reflection_lock_probe.py",
+      "--rounds",
+      "100",
+      "--output",
+      "/Users/v/other/worktrees/reflection-finalization-20261026/reflection-lock-probe-production-03"
+    ],
+    "protocol": "Exactly two workers at once; both confirm imports/source hashes before one shared pipe barrier immediately preceding begin. Every round gets fresh retained owned temporary state. Production mode does not replace runtime functions or alter flags.",
+    "cache_identity": "Workers use -I -B, explicit source roots, and an absent owned pycache prefix to avoid stale source bytecode.",
+    "comparison_exit_status": 1,
+    "exit_status_explanation": "The paired probe intentionally exits nonzero for retained baseline failures. Final candidate has 100 successes and zero errors."
+  },
+  "conclusion": {
+    "final_candidate_passed": true,
+    "candidate_rounds": 100,
+    "candidate_errors": 0,
+    "parent_rounds": 100,
+    "parent_errors": 74,
+    "final_candidate_reflection_sha256": "57afb9a1583776bdcea0fc654179f707794e7eab1f781a6f714799fbc9452db5",
+    "shared_directory_helper_sha256": "45aa94ae77469c342ee1f3eda2674d21050c35dca9bd9e05c53a052220829505",
+    "production01": "All 79 parent and 77 candidate errors were FileNotFoundError errno 2 for .transaction.lock at Directory.lock os.open.",
+    "production02": "Atomic empty-lock seeding removed observed candidate ENOENT but caused 56 candidate ValueErrors in Directory.read during the FileExistsError verification branch of Directory.atomic.",
+    "atomic_failure_mechanism": "Inference from the traceback and source: unlinking the winner's temporary hard link changes the lock inode ctime while the loser freshness-checks that inode. No weakening of receipt freshness checks was applied.",
+    "production03": "Exclusive creation before the existing data.lock passed all candidate rounds while the same baseline error remained reproducible.",
+    "reviewed_mechanism": "Candidate _locked uses O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC and handles only FileExistsError. Successful creation fsyncs the descriptor and directory. Existing Directory.lock flags, regular-file validation, flock and identity checks are unchanged. There is no unconditional retry.",
+    "mutations": "Only the probe and this evidence report were packaged by the reviewing agent. No runtime/test edits, git mutations, services, models, or live state access.",
+    "preservation": "All original failed and successful synthetic states remain retained. Post-run inspection did not change receipt bytes or recorded metadata."
+  },
+  "first_collision_witness": {
+    "loser": "/Users/v/other/worktrees/reflection-finalization-20261026/reflection-lock-probe-trace-01/candidate-0000-wt772yhr/worker-0.json",
+    "winner": "/Users/v/other/worktrees/reflection-finalization-20261026/reflection-lock-probe-trace-01/candidate-0000-wt772yhr/worker-1.json",
+    "flags": 16777990,
+    "flag_names": [
+      "O_RDWR",
+      "O_CREAT",
+      "O_NOFOLLOW",
+      "O_NONBLOCK",
+      "O_CLOEXEC"
+    ],
+    "loser_start_ns": 2227218639324708,
+    "loser_end_ns": 2227218639361333,
+    "winner_start_ns": 2227218639324208,
+    "winner_end_ns": 2227218639382583,
+    "directory_identity_before": {
+      "st_ctime_ns": 1793030835384679000,
+      "st_dev": 16777234,
+      "st_ino": 428039897,
+      "st_mode": 16832,
+      "st_mtime_ns": 1793030835384663000,
+      "st_nlink": 2,
+      "st_size": 64
+    },
+    "directory_identity_after": {
+      "st_ctime_ns": 1793030835384893200,
+      "st_dev": 16777234,
+      "st_ino": 428039897,
+      "st_mode": 16832,
+      "st_mtime_ns": 1793030835384893200,
+      "st_nlink": 3,
+      "st_size": 96
+    },
+    "lock_identity_visible_after_error": {
+      "st_ctime_ns": 1793030835384911400,
+      "st_dev": 16777234,
+      "st_ino": 428039898,
+      "st_mode": 33152,
+      "st_mtime_ns": 1793030835384891600,
+      "st_nlink": 1,
+      "st_size": 0
+    },
+    "winner_opened_lock_identity": {
+      "st_ctime_ns": 1793030835384911400,
+      "st_dev": 16777234,
+      "st_ino": 428039898,
+      "st_mode": 33152,
+      "st_mtime_ns": 1793030835384891600,
+      "st_nlink": 1,
+      "st_size": 0
+    },
+    "error": {
+      "errno": 2,
+      "filename": ".transaction.lock",
+      "filename2": null,
+      "message": "[Errno 2] No such file or directory: '.transaction.lock'",
+      "type": "FileNotFoundError"
+    }
+  },
+  "limitations": [
+    "This probe exercises fresh state, different action identities, and one common input identity only.",
+    "It does not itself qualify same-action retries, previously failed reservations, malicious path substitution, or symlink/FIFO negative cases.",
+    "Trace mode observes unchanged os.open calls but adds stat/listing work that can affect timing; production modes contain no such wrapper.",
+    "A passing rerun alone is not exoneration: retained baseline reproduction, traced identities and distinct failed-fix evidence accompany the final comparison.",
+    "Counts describe these bounded host-specific runs, not a universal failure rate."
+  ],
+  "runs": [
+    {
+      "name": "reflection-lock-probe-smoke-01",
+      "evidence_directory": "/Users/v/other/worktrees/reflection-finalization-20261026/reflection-lock-probe-smoke-01",
+      "manifest": {
+        "created_ns": 1793030803803839000,
+        "executable": "/opt/homebrew/opt/python@3.14/bin/python3.14",
+        "flags_policy": "unchanged_single_os_open_no_retry_no_nofollow_weakening",
+        "max_workers": 2,
+        "mode": "production",
+        "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+        "python": "3.14.3 (main, Feb  3 2026, 15:32:20) [Clang 17.0.0 (clang-1700.6.3.2)]",
+        "rounds_per_source": 2,
+        "schema": "reflection_lock_probe_v1",
+        "script_sha256": "c1a532749704584aa45622826e3909499fec86f4a43b2bfb0464b46ce6b50d86",
+        "sources": {
+          "candidate": {
+            "files": {
+              "minime_autonomy/__init__.py": {
+                "bytes": 194,
+                "sha256": "38c665e0637c2ea65941b018a5b7bda1cb5a52caa800f11248a908841d8603f7"
+              },
+              "minime_autonomy/mailbox_fs.py": {
+                "bytes": 8621,
+                "sha256": "45aa94ae77469c342ee1f3eda2674d21050c35dca9bd9e05c53a052220829505"
+              },
+              "minime_autonomy/reflection_publication.py": {
+                "bytes": 31521,
+                "sha256": "0da15290334cd8a444705fba8f0487798ca504b43800f70f87c41b30734cb0cb"
+              }
+            },
+            "path": "/Users/v/other/worktrees/reflection-finalization-20261026/minime"
+          },
+          "parent": {
+            "files": {
+              "minime_autonomy/__init__.py": {
+                "bytes": 194,
+                "sha256": "38c665e0637c2ea65941b018a5b7bda1cb5a52caa800f11248a908841d8603f7"
+              },
+              "minime_autonomy/mailbox_fs.py": {
+                "bytes": 8621,
+                "sha256": "45aa94ae77469c342ee1f3eda2674d21050c35dca9bd9e05c53a052220829505"
+              },
+              "minime_autonomy/reflection_publication.py": {
+                "bytes": 12893,
+                "sha256": "babfc8e406416531cc7b63aff6fe28ee09310850245daa2071946c8bea36debe"
+              }
+            },
+            "path": "/Users/v/other/minime"
+          }
+        },
+        "state_policy": "fresh_owned_retained_each_round_no_cleanup_no_live_state",
+        "timeout_seconds": 20
+      },
+      "summary": {
+        "counters": {
+          "candidate": {
+            "failed": 1,
+            "ok": 1,
+            "rounds": 2,
+            "worker_error": 1,
+            "worker_refused": 1,
+            "worker_reserved": 2
+          },
+          "parent": {
+            "failed": 1,
+            "ok": 1,
+            "rounds": 2,
+            "worker_error": 1,
+            "worker_refused": 1,
+            "worker_reserved": 2
+          }
+        },
+        "failure_count": 2,
+        "max_workers": 2,
+        "all_state_retained": true,
+        "production_changes": false
+      },
+      "validation": {
+        "rounds": 4,
+        "error_groups": [
+          {
+            "count": 1,
+            "error": {
+              "type": "FileNotFoundError",
+              "errno": 2,
+              "filename": ".transaction.lock",
+              "message": "[Errno 2] No such file or directory: '.transaction.lock'",
+              "boundary": "  File \"/Users/v/other/minime/minime_autonomy/mailbox_fs.py\", line 182, in lock"
+            }
+          },
+          {
+            "count": 1,
+            "error": {
+              "type": "FileNotFoundError",
+              "errno": 2,
+              "filename": ".transaction.lock",
+              "message": "[Errno 2] No such file or directory: '.transaction.lock'",
+              "boundary": "  File \"/Users/v/other/worktrees/reflection-finalization-20261026/minime/minime_autonomy/mailbox_fs.py\", line 182, in lock"
+            }
+          }
+        ],
+        "one_owner_rounds": 4,
+        "preserved_after_inspection_rounds": 4,
+        "stable_source_rounds": 4,
+        "harness_failures": 0
+      },
+      "retained_details": "manifest.json, summary.json, and every round workspace, worker JSON and round.json are retained in evidence_directory."
+    },
+    {
+      "name": "reflection-lock-probe-production-01",
+      "evidence_directory": "/Users/v/other/worktrees/reflection-finalization-20261026/reflection-lock-probe-production-01",
+      "manifest": {
+        "created_ns": 1793030814526324000,
+        "executable": "/opt/homebrew/opt/python@3.14/bin/python3.14",
+        "flags_policy": "unchanged_single_os_open_no_retry_no_nofollow_weakening",
+        "max_workers": 2,
+        "mode": "production",
+        "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+        "python": "3.14.3 (main, Feb  3 2026, 15:32:20) [Clang 17.0.0 (clang-1700.6.3.2)]",
+        "rounds_per_source": 100,
+        "schema": "reflection_lock_probe_v1",
+        "script_sha256": "c1a532749704584aa45622826e3909499fec86f4a43b2bfb0464b46ce6b50d86",
+        "sources": {
+          "candidate": {
+            "files": {
+              "minime_autonomy/__init__.py": {
+                "bytes": 194,
+                "sha256": "38c665e0637c2ea65941b018a5b7bda1cb5a52caa800f11248a908841d8603f7"
+              },
+              "minime_autonomy/mailbox_fs.py": {
+                "bytes": 8621,
+                "sha256": "45aa94ae77469c342ee1f3eda2674d21050c35dca9bd9e05c53a052220829505"
+              },
+              "minime_autonomy/reflection_publication.py": {
+                "bytes": 31521,
+                "sha256": "0da15290334cd8a444705fba8f0487798ca504b43800f70f87c41b30734cb0cb"
+              }
+            },
+            "path": "/Users/v/other/worktrees/reflection-finalization-20261026/minime"
+          },
+          "parent": {
+            "files": {
+              "minime_autonomy/__init__.py": {
+                "bytes": 194,
+                "sha256": "38c665e0637c2ea65941b018a5b7bda1cb5a52caa800f11248a908841d8603f7"
+              },
+              "minime_autonomy/mailbox_fs.py": {
+                "bytes": 8621,
+                "sha256": "45aa94ae77469c342ee1f3eda2674d21050c35dca9bd9e05c53a052220829505"
+              },
+              "minime_autonomy/reflection_publication.py": {
+                "bytes": 12893,
+                "sha256": "babfc8e406416531cc7b63aff6fe28ee09310850245daa2071946c8bea36debe"
+              }
+            },
+            "path": "/Users/v/other/minime"
+          }
+        },
+        "state_policy": "fresh_owned_retained_each_round_no_cleanup_no_live_state",
+        "timeout_seconds": 20
+      },
+      "summary": {
+        "counters": {
+          "candidate": {
+            "failed": 77,
+            "ok": 23,
+            "rounds": 100,
+            "worker_error": 77,
+            "worker_refused": 23,
+            "worker_reserved": 100
+          },
+          "parent": {
+            "failed": 79,
+            "ok": 21,
+            "rounds": 100,
+            "worker_error": 79,
+            "worker_refused": 21,
+            "worker_reserved": 100
+          }
+        },
+        "failure_count": 156,
+        "max_workers": 2,
+        "all_state_retained": true,
+        "production_changes": false
+      },
+      "validation": {
+        "rounds": 200,
+        "error_groups": [
+          {
+            "count": 79,
+            "error": {
+              "type": "FileNotFoundError",
+              "errno": 2,
+              "filename": ".transaction.lock",
+              "message": "[Errno 2] No such file or directory: '.transaction.lock'",
+              "boundary": "  File \"/Users/v/other/minime/minime_autonomy/mailbox_fs.py\", line 182, in lock"
+            }
+          },
+          {
+            "count": 77,
+            "error": {
+              "type": "FileNotFoundError",
+              "errno": 2,
+              "filename": ".transaction.lock",
+              "message": "[Errno 2] No such file or directory: '.transaction.lock'",
+              "boundary": "  File \"/Users/v/other/worktrees/reflection-finalization-20261026/minime/minime_autonomy/mailbox_fs.py\", line 182, in lock"
+            }
+          }
+        ],
+        "one_owner_rounds": 200,
+        "preserved_after_inspection_rounds": 200,
+        "stable_source_rounds": 200,
+        "harness_failures": 0
+      },
+      "retained_details": "manifest.json, summary.json, and every round workspace, worker JSON and round.json are retained in evidence_directory."
+    },
+    {
+      "name": "reflection-lock-probe-trace-01",
+      "evidence_directory": "/Users/v/other/worktrees/reflection-finalization-20261026/reflection-lock-probe-trace-01",
+      "manifest": {
+        "created_ns": 1793030835218447000,
+        "executable": "/opt/homebrew/opt/python@3.14/bin/python3.14",
+        "flags_policy": "unchanged_single_os_open_no_retry_no_nofollow_weakening",
+        "max_workers": 2,
+        "mode": "trace",
+        "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+        "python": "3.14.3 (main, Feb  3 2026, 15:32:20) [Clang 17.0.0 (clang-1700.6.3.2)]",
+        "rounds_per_source": 100,
+        "schema": "reflection_lock_probe_v1",
+        "script_sha256": "c1a532749704584aa45622826e3909499fec86f4a43b2bfb0464b46ce6b50d86",
+        "sources": {
+          "candidate": {
+            "files": {
+              "minime_autonomy/__init__.py": {
+                "bytes": 194,
+                "sha256": "38c665e0637c2ea65941b018a5b7bda1cb5a52caa800f11248a908841d8603f7"
+              },
+              "minime_autonomy/mailbox_fs.py": {
+                "bytes": 8621,
+                "sha256": "45aa94ae77469c342ee1f3eda2674d21050c35dca9bd9e05c53a052220829505"
+              },
+              "minime_autonomy/reflection_publication.py": {
+                "bytes": 31521,
+                "sha256": "0da15290334cd8a444705fba8f0487798ca504b43800f70f87c41b30734cb0cb"
+              }
+            },
+            "path": "/Users/v/other/worktrees/reflection-finalization-20261026/minime"
+          },
+          "parent": {
+            "files": {
+              "minime_autonomy/__init__.py": {
+                "bytes": 194,
+                "sha256": "38c665e0637c2ea65941b018a5b7bda1cb5a52caa800f11248a908841d8603f7"
+              },
+              "minime_autonomy/mailbox_fs.py": {
+                "bytes": 8621,
+                "sha256": "45aa94ae77469c342ee1f3eda2674d21050c35dca9bd9e05c53a052220829505"
+              },
+              "minime_autonomy/reflection_publication.py": {
+                "bytes": 12893,
+                "sha256": "babfc8e406416531cc7b63aff6fe28ee09310850245daa2071946c8bea36debe"
+              }
+            },
+            "path": "/Users/v/other/minime"
+          }
+        },
+        "state_policy": "fresh_owned_retained_each_round_no_cleanup_no_live_state",
+        "timeout_seconds": 20
+      },
+      "summary": {
+        "counters": {
+          "candidate": {
+            "failed": 82,
+            "ok": 18,
+            "rounds": 100,
+            "worker_error": 82,
+            "worker_refused": 18,
+            "worker_reserved": 100
+          },
+          "parent": {
+            "failed": 80,
+            "ok": 20,
+            "rounds": 100,
+            "worker_error": 80,
+            "worker_refused": 20,
+            "worker_reserved": 100
+          }
+        },
+        "failure_count": 162,
+        "max_workers": 2,
+        "all_state_retained": true,
+        "production_changes": false
+      },
+      "validation": {
+        "rounds": 200,
+        "error_groups": [
+          {
+            "count": 80,
+            "error": {
+              "type": "FileNotFoundError",
+              "errno": 2,
+              "filename": ".transaction.lock",
+              "message": "[Errno 2] No such file or directory: '.transaction.lock'",
+              "boundary": "  File \"/Users/v/other/minime/minime_autonomy/mailbox_fs.py\", line 182, in lock"
+            }
+          },
+          {
+            "count": 82,
+            "error": {
+              "type": "FileNotFoundError",
+              "errno": 2,
+              "filename": ".transaction.lock",
+              "message": "[Errno 2] No such file or directory: '.transaction.lock'",
+              "boundary": "  File \"/Users/v/other/worktrees/reflection-finalization-20261026/minime/minime_autonomy/mailbox_fs.py\", line 182, in lock"
+            }
+          }
+        ],
+        "one_owner_rounds": 200,
+        "preserved_after_inspection_rounds": 200,
+        "stable_source_rounds": 200,
+        "harness_failures": 0
+      },
+      "retained_details": "manifest.json, summary.json, and every round workspace, worker JSON and round.json are retained in evidence_directory."
+    },
+    {
+      "name": "reflection-lock-probe-production-02",
+      "evidence_directory": "/Users/v/other/worktrees/reflection-finalization-20261026/reflection-lock-probe-production-02",
+      "manifest": {
+        "created_ns": 1793030972640120000,
+        "executable": "/opt/homebrew/opt/python@3.14/bin/python3.14",
+        "flags_policy": "unchanged_single_os_open_no_retry_no_nofollow_weakening",
+        "max_workers": 2,
+        "mode": "production",
+        "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+        "python": "3.14.3 (main, Feb  3 2026, 15:32:20) [Clang 17.0.0 (clang-1700.6.3.2)]",
+        "rounds_per_source": 100,
+        "schema": "reflection_lock_probe_v1",
+        "script_sha256": "c1a532749704584aa45622826e3909499fec86f4a43b2bfb0464b46ce6b50d86",
+        "sources": {
+          "candidate": {
+            "files": {
+              "minime_autonomy/__init__.py": {
+                "bytes": 194,
+                "sha256": "38c665e0637c2ea65941b018a5b7bda1cb5a52caa800f11248a908841d8603f7"
+              },
+              "minime_autonomy/mailbox_fs.py": {
+                "bytes": 8621,
+                "sha256": "45aa94ae77469c342ee1f3eda2674d21050c35dca9bd9e05c53a052220829505"
+              },
+              "minime_autonomy/reflection_publication.py": {
+                "bytes": 31814,
+                "sha256": "af3f5c464eff8bf854808385e285c89ea23227abb388b8ad41ee693655531f3c"
+              }
+            },
+            "path": "/Users/v/other/worktrees/reflection-finalization-20261026/minime"
+          },
+          "parent": {
+            "files": {
+              "minime_autonomy/__init__.py": {
+                "bytes": 194,
+                "sha256": "38c665e0637c2ea65941b018a5b7bda1cb5a52caa800f11248a908841d8603f7"
+              },
+              "minime_autonomy/mailbox_fs.py": {
+                "bytes": 8621,
+                "sha256": "45aa94ae77469c342ee1f3eda2674d21050c35dca9bd9e05c53a052220829505"
+              },
+              "minime_autonomy/reflection_publication.py": {
+                "bytes": 12893,
+                "sha256": "babfc8e406416531cc7b63aff6fe28ee09310850245daa2071946c8bea36debe"
+              }
+            },
+            "path": "/Users/v/other/minime"
+          }
+        },
+        "state_policy": "fresh_owned_retained_each_round_no_cleanup_no_live_state",
+        "timeout_seconds": 20
+      },
+      "summary": {
+        "counters": {
+          "candidate": {
+            "failed": 56,
+            "ok": 44,
+            "rounds": 100,
+            "worker_error": 56,
+            "worker_refused": 44,
+            "worker_reserved": 100
+          },
+          "parent": {
+            "failed": 92,
+            "ok": 8,
+            "rounds": 100,
+            "worker_error": 92,
+            "worker_refused": 8,
+            "worker_reserved": 100
+          }
+        },
+        "failure_count": 148,
+        "max_workers": 2,
+        "all_state_retained": true,
+        "production_changes": false
+      },
+      "validation": {
+        "rounds": 200,
+        "error_groups": [
+          {
+            "count": 92,
+            "error": {
+              "type": "FileNotFoundError",
+              "errno": 2,
+              "filename": ".transaction.lock",
+              "message": "[Errno 2] No such file or directory: '.transaction.lock'",
+              "boundary": "  File \"/Users/v/other/minime/minime_autonomy/mailbox_fs.py\", line 182, in lock"
+            }
+          },
+          {
+            "count": 56,
+            "error": {
+              "type": "ValueError",
+              "errno": null,
+              "filename": null,
+              "message": "correspondence artifact changed during read",
+              "boundary": "  File \"/Users/v/other/worktrees/reflection-finalization-20261026/minime/minime_autonomy/mailbox_fs.py\", line 132, in read"
+            }
+          }
+        ],
+        "one_owner_rounds": 200,
+        "preserved_after_inspection_rounds": 200,
+        "stable_source_rounds": 200,
+        "harness_failures": 0
+      },
+      "retained_details": "manifest.json, summary.json, and every round workspace, worker JSON and round.json are retained in evidence_directory."
+    },
+    {
+      "name": "reflection-lock-probe-production-03",
+      "evidence_directory": "/Users/v/other/worktrees/reflection-finalization-20261026/reflection-lock-probe-production-03",
+      "manifest": {
+        "created_ns": 1793031121887186000,
+        "executable": "/opt/homebrew/opt/python@3.14/bin/python3.14",
+        "flags_policy": "unchanged_single_os_open_no_retry_no_nofollow_weakening",
+        "max_workers": 2,
+        "mode": "production",
+        "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+        "python": "3.14.3 (main, Feb  3 2026, 15:32:20) [Clang 17.0.0 (clang-1700.6.3.2)]",
+        "rounds_per_source": 100,
+        "schema": "reflection_lock_probe_v1",
+        "script_sha256": "c1a532749704584aa45622826e3909499fec86f4a43b2bfb0464b46ce6b50d86",
+        "sources": {
+          "candidate": {
+            "files": {
+              "minime_autonomy/__init__.py": {
+                "bytes": 194,
+                "sha256": "38c665e0637c2ea65941b018a5b7bda1cb5a52caa800f11248a908841d8603f7"
+              },
+              "minime_autonomy/mailbox_fs.py": {
+                "bytes": 8621,
+                "sha256": "45aa94ae77469c342ee1f3eda2674d21050c35dca9bd9e05c53a052220829505"
+              },
+              "minime_autonomy/reflection_publication.py": {
+                "bytes": 32207,
+                "sha256": "57afb9a1583776bdcea0fc654179f707794e7eab1f781a6f714799fbc9452db5"
+              }
+            },
+            "path": "/Users/v/other/worktrees/reflection-finalization-20261026/minime"
+          },
+          "parent": {
+            "files": {
+              "minime_autonomy/__init__.py": {
+                "bytes": 194,
+                "sha256": "38c665e0637c2ea65941b018a5b7bda1cb5a52caa800f11248a908841d8603f7"
+              },
+              "minime_autonomy/mailbox_fs.py": {
+                "bytes": 8621,
+                "sha256": "45aa94ae77469c342ee1f3eda2674d21050c35dca9bd9e05c53a052220829505"
+              },
+              "minime_autonomy/reflection_publication.py": {
+                "bytes": 12893,
+                "sha256": "babfc8e406416531cc7b63aff6fe28ee09310850245daa2071946c8bea36debe"
+              }
+            },
+            "path": "/Users/v/other/minime"
+          }
+        },
+        "state_policy": "fresh_owned_retained_each_round_no_cleanup_no_live_state",
+        "timeout_seconds": 20
+      },
+      "summary": {
+        "counters": {
+          "candidate": {
+            "ok": 100,
+            "rounds": 100,
+            "worker_refused": 100,
+            "worker_reserved": 100
+          },
+          "parent": {
+            "failed": 74,
+            "ok": 26,
+            "rounds": 100,
+            "worker_error": 74,
+            "worker_refused": 26,
+            "worker_reserved": 100
+          }
+        },
+        "failure_count": 74,
+        "max_workers": 2,
+        "all_state_retained": true,
+        "production_changes": false
+      },
+      "validation": {
+        "rounds": 200,
+        "error_groups": [
+          {
+            "count": 74,
+            "error": {
+              "type": "FileNotFoundError",
+              "errno": 2,
+              "filename": ".transaction.lock",
+              "message": "[Errno 2] No such file or directory: '.transaction.lock'",
+              "boundary": "  File \"/Users/v/other/minime/minime_autonomy/mailbox_fs.py\", line 182, in lock"
+            }
+          }
+        ],
+        "one_owner_rounds": 200,
+        "preserved_after_inspection_rounds": 200,
+        "stable_source_rounds": 200,
+        "harness_failures": 0
+      },
+      "retained_details": "manifest.json, summary.json, and every round workspace, worker JSON and round.json are retained in evidence_directory."
+    }
+  ]
+}

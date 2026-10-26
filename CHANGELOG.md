@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Candidate: recoverable reflection finalization (2026-10-26, Codex with Banach review and Sartre fault tests).** Give the existing reflection-publication component ownership of sealed public bytes, no-clobber publication and idempotent local journal indexing. Startup and action re-entry can finish verified local writes without inference, response-handler/control replay or NEXT mutation. Preserve v1 history, uncertain choices, original metadata and archive identity; add read-only reconciliation and explicit incomplete outcomes. Agent-only qualification and fresh rollout approval remain separate from push/tag. See `docs/steward-notes/2026-10-26-reflection-finalization-candidate.md`.
+
 - **Architecture review: reflection finalization (2026-10-26, Codex with Banach audit).** Map both runtimes' accepted delivery, response effects, publication, NEXT and derived-state boundaries. Separate repairable publication/indexing from control-bearing hooks and identify policy follow-ups without changing them. Review only; see `docs/steward-notes/2026-10-26-reflection-finalization-architecture.md`.
 
 - **Live: dependable reflection publication and lighter render bookkeeping (2026-10-25, Codex).** Following fresh approval, gracefully drain accepted work and replace only the Minime agent. Verify all 107 loaded inputs, exact pending-NEXT restoration, readiness and unchanged bridge/helper/provider/engine/sensory identities. No force, accepted-work cancellation, prose filtering, framing/capacity change or automation resume. Local integration is coordinated separately from push/tag, which remain unrequested. See `docs/steward-notes/2026-10-25-reflection-development-live.md`.

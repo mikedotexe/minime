@@ -6,6 +6,7 @@ service, Git command or existing private writing is part of these tests.
 """
 
 from contextlib import contextmanager
+import fcntl
 import importlib.util
 import json
 import os
@@ -18,7 +19,7 @@ import sys
 import threading
 import time
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 import pytest
@@ -43,6 +44,19 @@ def _no_live_io():
     # Audit hooks cannot be removed, so disable this scope before pytest teardown.
     active = True
     violations = []
+    opened = threading.local()
+    original_open = os.open
+
+    def descriptor_open(path, flags, mode=0o777, *, dir_fd=None):
+        previous = getattr(opened, "path", None)
+        if dir_fd is not None and not Path(path).is_absolute():
+            parent = (fcntl.fcntl(dir_fd, fcntl.F_GETPATH, b"\0" * 1024).split(b"\0", 1)[0]
+                      if sys.platform == "darwin" else os.readlink(f"/proc/self/fd/{dir_fd}"))
+            opened.path = Path(os.fsdecode(parent)) / path
+        try:
+            return original_open(path, flags, mode, dir_fd=dir_fd)
+        finally:
+            opened.path = previous
 
     def audit(event, args):
         if not active:
@@ -50,6 +64,10 @@ def _no_live_io():
         reason = None
         if event in {"open", "os.listdir", "os.scandir", "sqlite3.connect"}:
             value = args[0]
+            if event == "open" and getattr(opened, "path", None) is not None:
+                # Python's open audit event omits dir_fd; inspect the actual
+                # pinned parent, not the process cwd, for descriptor-relative I/O.
+                value = opened.path
             if isinstance(value, (str, bytes, os.PathLike)):
                 path = Path(os.fsdecode(value)).resolve()
                 if (any(path.is_relative_to(root) for root in LIVE_ROOTS)
@@ -73,7 +91,8 @@ def _no_live_io():
 
     sys.addaudithook(audit)
     try:
-        yield
+        with patch("os.open", descriptor_open):
+            yield
     finally:
         active = False
         assert not violations, violations
