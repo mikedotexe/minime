@@ -26,6 +26,7 @@ def fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(aa.ActionContinuityStore, "_unique_action_id", lambda self, base: "act_synthetic")
     root = tmp_path.resolve() / "populated"
     root.mkdir()
+    monkeypatch.setattr(aa, "SHARED_INVESTIGATION_DIR", root / "shared")
     large = os.environ.get("MINIME_RENDER_REUSE_PROFILE_OUT")
     store, event = populated_store(root, rows=2000 if large else 128, padding=4096 if large else 64)
     for index in range(2000 if large else 12):
@@ -103,7 +104,7 @@ def test_actual_runtime_file_db_parity_and_reduced_calls(fixture, tmp_path, monk
     if operation in {"write", "read"}:
         assert counts == [3, 2]
     else:
-        assert counts == [21, 15]
+        assert counts == [21, 14 if original_thread.get("active_experiment_id") else 15]
     destination = os.environ.get("MINIME_RENDER_REUSE_PROFILE_OUT")
     if destination:
         Path(destination).write_text(json.dumps({
@@ -261,15 +262,11 @@ def test_running_age_predicate_and_clock_reversal(fixture, monkeypatch, shift, r
             assert store._thread_projection(thread)["stale_running_count"] == 1
 
 
-@pytest.mark.parametrize("kind", ["experiment", "authority", "draft"])
+@pytest.mark.parametrize("kind", ["experiment", "draft"])
 def test_unqualified_branches_remain_fresh(fixture, kind):
     store, thread, _ = fixture
     if kind == "experiment":
         thread["experiment_summary"] = {"experiment_id": "exp_minime_synthetic", "status": "paused"}
-    elif kind == "authority":
-        store._append_jsonl(store._authority_gate_path(thread["thread_id"]), {
-            "record_schema": "research_budget_v1", "record_type": "research_budget_request",
-        })
     else:
         store._append_jsonl(store._being_memory_path(thread["thread_id"]), {
             "record_schema": "being_memory_v1", "record_type": "draft", "created_at": store._now(),
@@ -387,20 +384,20 @@ def test_projection_io_closure_requires_explicit_observation_or_fallback():
         "_recent_interpretation_risk_sources", "_repeated_action_cadence_rows", "_return_support_v1",
         "_terminal_jobs_by_action_id", "_stale_running_action_diagnostics",
         "_research_budget_rows",
+        "_recent_experiment_runs", "_list_shared_investigations",
+        "_latest_decompose_snapshot_for_experiment",
     }
     rejected = {
-        "_being_memory_draft_triage_v1", "_latest_decompose_snapshot_for_experiment",
-        "_list_shared_investigations", "_now", "_peer_active_experiment",
-        "_recent_experiment_runs", "_record_journal_hygiene_skip",
+        "_being_memory_draft_triage_v1", "_now", "_peer_active_experiment",
+        "_record_journal_hygiene_skip",
     }
-    # These clocks are downstream of nonempty _authority_gate_rows, which
-    # rejects observation before any authority/budget/loop result is reused.
+    # Observe actual decision timestamps, not merely the preceding ledger read.
     authority_clocks = {
         "_active_authority_budget", "_active_research_budget", "_authority_budget_status_v1",
         "_authority_token_status", "_latest_sovereign_loop", "_research_budget_status_v1",
     }
     assert io_methods == observed | rejected | authority_clocks
-    for name in observed | rejected:
+    for name in observed | rejected | authority_clocks:
         node = methods[name]
         start = min([node.lineno] + [decorator.lineno for decorator in node.decorator_list])
         assert "projection_reads." in "\n".join(source.splitlines()[start - 1:node.end_lineno]), name

@@ -14,8 +14,9 @@ is revalidated after the intentional thread.json write, never assumed unchanged.
 Qualified sources include populated clean journals and job metadata, events,
 proposals, and the instrumented local ledgers. A successful optional-file absence
 is tracked with its parent identity; a failed attempted read is never reusable.
-Experiments, populated authority records, draft-age decisions, peer/shared reads,
-and hygiene writers fall back. Running-action age uses the exact existing
+Local experiments, runs and ledgers are observed, including expiry predicates.
+Draft-age decisions, populated peer/shared reads and hygiene writers fall back.
+Running-action age uses the exact existing
 predicate at capture and consumption, including backward-clock rejection.
 
 This is optimistic verification, not a filesystem transaction: as with a fresh
@@ -38,6 +39,7 @@ import stat
 import threading
 
 from .continuity_snapshot import StableSnapshot, validate_thread
+from . import job_timing
 
 
 _CURRENT = ContextVar("continuity_projection_reads", default=None)
@@ -87,9 +89,15 @@ def _tree(root, depth):
             identity = _signature(entry.stat(follow_symlinks=False))
             rows.append((entry.path, identity))
             if depth and stat.S_ISDIR(identity[2]):
-                # Job discovery reads exactly this child, not other job artifacts.
-                child = os.path.join(entry.path, "job.json")
-                rows.append((child, _identity(child)))
+                # Discovery reads one named child, not its unrelated artifacts.
+                child = os.path.join(entry.path, depth if isinstance(depth, str) else "job.json")
+                try:
+                    child_identity = _identity(child)
+                except FileNotFoundError:
+                    if not isinstance(depth, str):
+                        raise
+                    child_identity = ("absent", _identity(entry.path))
+                rows.append((child, child_identity))
             if len(rows) >= MAX_IDENTITIES:
                 raise ValueError("observation bound exceeded")
     if before != _identity(root):
@@ -126,6 +134,7 @@ class _Observation:
         self.receipt_files = {}
         self.returns = []
         self.predicates = []
+        self.bindings = []
         self.failures = set()
 
     def fail(self, reason):
@@ -190,6 +199,9 @@ class _Observation:
             for path, identity in self.parents.items():
                 if _identity(path)[:3] != identity:
                     self.fail("ancestor_changed")
+            for resolve, expected in self.bindings:
+                if resolve() != expected:
+                    self.fail("source_changed")
             for path, identity in self.files.items():
                 if identity[0] == "absent":
                     if path.exists() or path.is_symlink() or _identity(path.parent) != identity[1]:
@@ -201,9 +213,10 @@ class _Observation:
                     self.fail("discovery_changed")
             for predicate, observed, clock, result in self.predicates:
                 current = clock()
-                if current < observed or predicate(current) != result:
+                if ((isinstance(current, (int, float)) and not math.isfinite(current))
+                        or current < observed or predicate(current) != result):
                     self.fail("temporal_validity_changed")
-        except (OSError, ValueError, TypeError, OverflowError, RecursionError):
+        except (OSError, ValueError, TypeError, AttributeError, OverflowError, RecursionError):
             self.fail("verification_unavailable")
         return not self.failures
 
@@ -216,9 +229,17 @@ def uncertain(reason="read_failed"):
 
 
 @contextmanager
-def _reading(path, *, depth=None, receipt=False, optional=False):
+def _reading(path, *, depth=None, receipt=False, optional=False, resolve=None):
     observation = _CURRENT.get()
-    if observation is None or path is None:
+    if observation is None:
+        yield
+        return
+    if resolve is not None:
+        if len(observation.bindings) >= MAX_IDENTITIES:
+            observation.fail("source_unavailable")
+        else:
+            observation.bindings.append((resolve, path))
+    if path is None:
         yield
         return
     observation.record(path, depth=depth, receipt=receipt, optional=optional)
@@ -238,7 +259,8 @@ def file_reader(path_for, *, optional=False, unsupported_nonempty=False):
         def reader(*args, **kwargs):
             if _CURRENT.get() is None:
                 return function(*args, **kwargs)
-            with _reading(path_for(*args, **kwargs), optional=optional):
+            resolve = lambda: path_for(*args, **kwargs)
+            with _reading(resolve(), optional=optional, resolve=resolve):
                 result = function(*args, **kwargs)
                 if unsupported_nonempty and result:
                     uncertain("unsupported_populated_dependency")
@@ -247,15 +269,19 @@ def file_reader(path_for, *, optional=False, unsupported_nonempty=False):
     return decorate
 
 
-def directory_reader(path_for, *, depth=0):
+def directory_reader(path_for, *, depth=0, optional=False, unsupported_nonempty=False):
     """Observe membership, order and entry identities around directory readers."""
     def decorate(function):
         @wraps(function)
         def reader(*args, **kwargs):
             if _CURRENT.get() is None:
                 return function(*args, **kwargs)
-            with _reading(path_for(*args, **kwargs), depth=depth):
-                return function(*args, **kwargs)
+            resolve = lambda: path_for(*args, **kwargs)
+            with _reading(resolve(), depth=depth, optional=optional, resolve=resolve):
+                result = function(*args, **kwargs)
+                if unsupported_nonempty and result:
+                    uncertain("unsupported_populated_dependency")
+                return result
         return reader
     return decorate
 
@@ -300,6 +326,28 @@ def temporal(predicate, observed, clock):
         else:
             observation.predicates.append((predicate, observed, clock, result))
     return result
+
+
+def observe_expiries(rows, clock, *, observed):
+    """Observe both existing expiry comparisons without caching their decisions.
+
+    Call with the actual consumer's evaluation timestamp, not a prior read time.
+    Admission still calls its original readers and computes independently.
+    """
+    if _CURRENT.get() is None:
+        return
+    now = observed
+    for row in rows:
+        if not isinstance(row, dict):
+            uncertain("unqualified_ledger_shape")
+            return
+        expiry = row.get("expires_at_unix_s")
+        if expiry is None:
+            continue
+        if isinstance(expiry, bool) or not isinstance(expiry, (int, float)) or not math.isfinite(expiry):
+            uncertain("uncertain_clock")
+            return
+        temporal(lambda current, deadline=expiry: (deadline <= current, deadline < current), now, clock)
 
 
 def return_support_reader(function):
@@ -352,10 +400,6 @@ class ProjectionReadScope:
             self.used = True
             return self.store._thread_projection(self.thread)
         observation = self.observation = _Observation(self.store, self.thread)
-        if self.thread.get("active_experiment_id") or self.thread.get("experiment_summary") is not None:
-            observation.fail("experiment_profile_not_qualified")
-            self.projection = self.store._thread_projection(self.thread)
-            return self.projection
         try:
             self.input = _inputs(self.thread)
             self.config = _configuration(self.store)
@@ -381,11 +425,14 @@ class ProjectionReadScope:
                     or _inputs(self.thread) != self.input or _configuration(self.store) != self.config
                     or any(key not in self.thread or self.thread[key] != projection.get(key) for key in OUTPUT_FIELDS)
                     or not observation.returns or not observation.verify(receipts=True)):
+                if not observation.failures:
+                    observation.fail("seal_validation_failed")
                 self.used = True
                 return
             self.payload = _json(projection)
             self.final_thread = _json(self.thread)
         except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+            observation.fail("seal_validation_failed")
             self.used = True
 
     def take(self, store, thread):
@@ -396,6 +443,7 @@ class ProjectionReadScope:
         try:
             if (_json(thread) != self.final_thread or _json(self.projection) != self.payload
                     or _configuration(store) != self.config):
+                self.observation.fail("sealed_inputs_changed")
                 return None
             receipt = StableSnapshot()
             path = store._thread_dir(thread["thread_id"]) / "thread.json"
@@ -403,9 +451,11 @@ class ProjectionReadScope:
             saved = receipt.json(path)
             validate_thread(saved, thread["thread_id"], store.system)
             if _json(saved) != self.final_thread:
+                self.observation.fail("saved_thread_changed")
                 return None
             for reference, expected in self.observation.returns:
                 if _json(store._return_support_v1(thread, reference)) != expected:
+                    self.observation.fail("return_support_changed")
                     return None
             receipt.verify()
             if (_json(thread) != self.final_thread or _json(self.projection) != self.payload
@@ -413,9 +463,12 @@ class ProjectionReadScope:
                 return None
             return json.loads(self.payload)
         except (OSError, ValueError, TypeError, AttributeError, OverflowError, RecursionError):
+            self.observation.fail("receipt_verification_failed")
             return None
 
 
 def projection_for_next_md(store, thread, snapshot=None):
     projection = snapshot.take(store, thread) if isinstance(snapshot, ProjectionReadScope) else None
+    reasons = snapshot.observation.failures if isinstance(snapshot, ProjectionReadScope) and snapshot.observation else ()
+    job_timing.render_reuse(projection is not None, reasons)
     return projection if projection is not None else store._thread_projection(thread)

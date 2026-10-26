@@ -23,6 +23,19 @@ from uuid import uuid4
 MAX_SPANS = 128
 MAX_ATTEMPTS = 24
 MAX_GENERATIONS = 24
+RENDER_REUSE_REASONS = frozenset({
+    "source_changed", "source_unavailable", "different_execution_context",
+    "receipt_changed_before_write", "ancestor_changed", "absence_changed",
+    "discovery_changed", "temporal_validity_changed", "verification_unavailable",
+    "read_failed", "unsupported_populated_dependency", "job_discovery_unobserved",
+    "incomplete_job_read", "job_identity_changed", "uncertain_clock",
+    "unqualified_ledger_shape", "foreign_return_receipt", "unavailable_return_support",
+    "unknown_inputs", "nested_projection", "draft_age_profile_not_qualified",
+    "unqualified_output_clock", "peer_sources_not_qualified",
+    "decompose_source_not_qualified", "attempted_hygiene_write", "unparseable_event_time",
+    "seal_validation_failed", "sealed_inputs_changed", "saved_thread_changed",
+    "return_support_changed", "receipt_verification_failed",
+})
 _active = ContextVar("minime_job_timing", default=None)
 _preparation = ContextVar("minime_job_timing_preparation", default=None)
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}\Z")
@@ -68,6 +81,7 @@ class Recorder:
         self.spans, self.stack, self.attempts, self.generation_ids = [], [], [], []
         self.current_generation = None
         self.attempt_counts = {"ok": 0, "empty": 0, "error": 0}
+        self.render_reuse_counts = {}
         self.dropped_spans = self.dropped_attempts = self.dropped_generations = 0
         self.persistence_errors = self.checkpoint_sequence = 0
         self.state = "running"
@@ -137,6 +151,7 @@ class Recorder:
             "unattributed_s": round(max(0.0, elapsed - sum(
                 s["inclusive_s"] for s in spans if s["parent_id"] is None)), 6),
             "attempt_counts": dict(self.attempt_counts),
+            "render_reuse_counts": dict(self.render_reuse_counts),
             "attempts": [dict(a) for a in self.attempts],
             "generation_ids": list(self.generation_ids),
             "dropped_spans": self.dropped_spans, "dropped_attempts": self.dropped_attempts,
@@ -218,6 +233,23 @@ def phase(name, **metadata):
         return recorder.begin(name, **metadata) if recorder else _Span()
     except Exception:
         return _Span()
+
+
+def render_reuse(reused, reasons=()):
+    """Bounded reason counts only; no paths, prose or command payloads."""
+    try:
+        recorder = _current()
+        if recorder is None:
+            return
+        keys = {"reused"} if reused else {"fallback"}
+        if not reused:
+            keys.update(reason if reason in RENDER_REUSE_REASONS else "other" for reason in reasons)
+            if not reasons:
+                keys.add("unavailable_snapshot")
+        for key in keys:
+            recorder.render_reuse_counts[key] = min(2_147_483_647, recorder.render_reuse_counts.get(key, 0) + 1)
+    except Exception:
+        pass
 
 
 def finish_preparation():

@@ -8656,7 +8656,7 @@ class ActionContinuityStore:
         return projection
 
     @projection_reads.file_reader(
-        lambda self, thread_id, *args, **kwargs: self._authority_gate_path(thread_id), optional=True, unsupported_nonempty=True,
+        lambda self, thread_id, *args, **kwargs: self._authority_gate_path(thread_id), optional=True,
     )
     def _authority_gate_rows(self, thread_id: str) -> List[Dict[str, Any]]:
         path = self._authority_gate_path(thread_id)
@@ -8688,7 +8688,7 @@ class ActionContinuityStore:
         return rows
 
     @projection_reads.file_reader(
-        lambda self, thread_id, *args, **kwargs: self._authority_gate_path(thread_id), optional=True, unsupported_nonempty=True,
+        lambda self, thread_id, *args, **kwargs: self._authority_gate_path(thread_id), optional=True,
     )
     def _research_budget_rows(self, thread_id: str) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
@@ -10257,6 +10257,7 @@ class ActionContinuityStore:
             if row.get("record_type") == "budget_closed"
         }
         now = time.time()
+        projection_reads.observe_expiries(rows, lambda: time.time(), observed=now)
         for row in reversed(rows):
             if row.get("record_type") != "budget_approval":
                 continue
@@ -10300,7 +10301,9 @@ class ActionContinuityStore:
         experiment_id: str,
     ) -> Optional[Dict[str, Any]]:
         rows = self._research_budget_rows(thread_id)
-        return research_transactions.active_budget(rows, experiment_id)
+        now = time.time()
+        projection_reads.observe_expiries(rows, lambda: time.time(), observed=now)
+        return research_transactions.active_budget(rows, experiment_id, now=now)
 
     @classmethod
     def _experiments_share_research_focus(
@@ -10503,7 +10506,8 @@ class ActionContinuityStore:
                 and row.get("budget_id") == latest_approval.get("budget_id")
             )
             expires = latest_approval.get("expires_at_unix_s")
-            if isinstance(expires, (int, float)) and float(expires) <= time.time():
+            if isinstance(expires, (int, float)) and projection_reads.temporal(
+                    lambda now, expiry=expires: float(expiry) <= now, time.time(), lambda: time.time()):
                 stage = "budget_expired"
             elif debit_count >= max_actions:
                 stage = "budget_exhausted"
@@ -10641,6 +10645,7 @@ class ActionContinuityStore:
             if row.get("record_type") == "loop_closed"
         }
         now = time.time()
+        projection_reads.observe_expiries(rows, lambda: time.time(), observed=now)
         for row in reversed(rows):
             if loop_id and row.get("loop_id") != loop_id:
                 continue
@@ -11201,7 +11206,8 @@ class ActionContinuityStore:
                 and row.get("budget_id") == latest_approval.get("budget_id")
             )
             expires = latest_approval.get("expires_at_unix_s")
-            if isinstance(expires, (int, float)) and float(expires) <= time.time():
+            if isinstance(expires, (int, float)) and projection_reads.temporal(
+                    lambda now, expiry=expires: float(expiry) <= now, time.time(), lambda: time.time()):
                 stage = "budget_expired"
             elif debit_count >= max_sends:
                 stage = "budget_exhausted"
@@ -13277,8 +13283,11 @@ class ActionContinuityStore:
                 rows.append(value)
         return rows
 
+    @projection_reads.directory_reader(
+        lambda self: self._shared_investigation_root(), depth="investigation.json",
+        optional=True, unsupported_nonempty=True,
+    )
     def _list_shared_investigations(self) -> List[Dict[str, Any]]:
-        projection_reads.uncertain("shared_discovery_not_qualified")
         root = self._shared_investigation_root()
         if not root.exists():
             return []
@@ -13287,9 +13296,12 @@ class ActionContinuityStore:
             try:
                 value = json.loads(path.read_text())
             except Exception:
+                projection_reads.uncertain()
                 continue
             if isinstance(value, dict):
                 rows.append(value)
+            else:
+                projection_reads.uncertain("unqualified_ledger_shape")
         rows.sort(key=lambda item: item.get("updated_t_ms") or item.get("created_t_ms") or 0, reverse=True)
         return rows
 
@@ -15754,26 +15766,32 @@ class ActionContinuityStore:
             "use the continuity priority scaffold first.\n"
         )
 
+    @projection_reads.file_reader(
+        lambda self, experiment_id: self.workspace_dir / "runtime" / "decompose_snapshots.jsonl"
+        if experiment_id else None, optional=True,
+    )
     def _latest_decompose_snapshot_for_experiment(
         self,
         experiment_id: Optional[str],
     ) -> Optional[Dict[str, Any]]:
         if not experiment_id:
             return None
-        projection_reads.uncertain("decompose_source_not_qualified")
         path = self.workspace_dir / "runtime" / "decompose_snapshots.jsonl"
         if not path.exists():
             return None
         try:
             lines = path.read_text(errors="replace").splitlines()
         except OSError:
+            projection_reads.uncertain()
             return None
         for line in reversed(lines[-200:]):
             try:
                 snapshot = json.loads(line)
             except Exception:
+                projection_reads.uncertain()
                 continue
             if not isinstance(snapshot, dict) or snapshot.get("schema_version") != 1:
+                projection_reads.uncertain("unqualified_ledger_shape")
                 continue
             if snapshot.get("active_experiment_id") != experiment_id:
                 continue
@@ -16425,7 +16443,7 @@ class ActionContinuityStore:
         return self._normalize_experiment_selector(text), ""
 
     @projection_reads.file_reader(
-        lambda self, thread_id, *args, **kwargs: self._experiments_path(thread_id), optional=True, unsupported_nonempty=True,
+        lambda self, thread_id, *args, **kwargs: self._experiments_path(thread_id), optional=True,
     )
     def _read_experiments(self, thread_id: str) -> List[Dict[str, Any]]:
         path = self._experiments_path(thread_id)
@@ -16518,8 +16536,10 @@ class ActionContinuityStore:
             return text.split(None, 1)[0].strip()
         return text
 
+    @projection_reads.file_reader(
+        lambda self, thread_id, *args, **kwargs: self._experiment_runs_path(thread_id), optional=True,
+    )
     def _recent_experiment_runs(self, thread_id: str, experiment_id: str, limit: int) -> List[Dict[str, Any]]:
-        projection_reads.uncertain("experiment_runs_not_qualified")
         path = self._experiment_runs_path(thread_id)
         if not path.exists():
             return []
@@ -16528,6 +16548,7 @@ class ActionContinuityStore:
             try:
                 row = json.loads(line)
             except Exception:
+                projection_reads.uncertain()
                 continue
             if row.get("experiment_id") != experiment_id:
                 continue
@@ -18351,7 +18372,8 @@ class ActionContinuityStore:
             if consumed:
                 return "consumed"
             expires = approval.get("expires_at_unix_s")
-            if isinstance(expires, (int, float)) and expires < time.time():
+            if isinstance(expires, (int, float)) and projection_reads.temporal(
+                    lambda now, expiry=expires: expiry < now, time.time(), lambda: time.time()):
                 return "expired"
             return "active"
         latest = request_rows[-1] if request_rows else {}
