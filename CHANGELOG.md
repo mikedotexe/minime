@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Live: verified local reflection recovery (2026-10-26, Codex).** Complete the freshly approved agent-only activation and local fast-forward integration. The old agent finishes its accepted reflection; the new agent restores the exact pending-NEXT seal and loads all 107 qualified inputs. Protected services and the shared helper remain unchanged. Architecture review and runtime repair are separate commits; no push, tag or automation resume. See `docs/steward-notes/2026-10-26-reflection-finalization-live.md`.
+
 - **Candidate: recoverable reflection finalization (2026-10-26, Codex with Banach review and Sartre fault tests).** Give the existing reflection-publication component ownership of sealed public bytes, no-clobber publication and idempotent local journal indexing. Startup and action re-entry can finish verified local writes without inference, response-handler/control replay or NEXT mutation. Preserve v1 history, uncertain choices, original metadata and archive identity; add read-only reconciliation and explicit incomplete outcomes. Agent-only qualification and fresh rollout approval remain separate from push/tag. See `docs/steward-notes/2026-10-26-reflection-finalization-candidate.md`.
 
 - **Architecture review: reflection finalization (2026-10-26, Codex with Banach audit).** Map both runtimes' accepted delivery, response effects, publication, NEXT and derived-state boundaries. Separate repairable publication/indexing from control-bearing hooks and identify policy follow-ups without changing them. Review only; see `docs/steward-notes/2026-10-26-reflection-finalization-architecture.md`.
