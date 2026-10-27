@@ -64,6 +64,11 @@ def test_fresh_frame_keeps_scope_as_metadata_and_help_explicit(writing_agent):
     assert "telemetry snapshot" not in reflection
     assert "telemetry snapshot" in reflection.output["evidence_scope"]
     assert "800-1,500 words" in reflection.output["system_prompt"]
+    assert reflection.output["evidence_scope"].endswith("Presentation: fresh-reflection-v3.")
+    assert "`NEXT: INTROSPECT` starts another fresh reflection without this passage supplied." in reflection
+    assert (f"`NEXT: WRITE FROM_REFLECTION {reflection.output['navigation_id']}` preserves this response "
+            "in a new private draft and requests a new appended passage after verified delivery.") in reflection
+    assert "`NEXT: REST` stops without continuing." in reflection
     assert client.prepare("INTROSPECT", request_id="fresh-frame").output == reflection.output
     help_prompt = client.prepare("SELF_STUDY HELP attention")
     assert "retains public entries" in help_prompt
@@ -76,7 +81,7 @@ def test_old_pending_frame_keeps_legacy_mail_presentation(writing_agent, monkeyp
     new = client.executable
     client.executable = Path(os.environ["QUALIFICATION_OLD_READER"])
     pending = client.prepare("INTROSPECT", request_id="prepare-retained-old")
-    assert "fresh-reflection-v2" not in pending.output["evidence_scope"]
+    quiet_mail = pending.output["evidence_scope"].endswith("Presentation: fresh-reflection-v2.")
     client.executable = new
     _, letter = seed(client.workspace)
     offered = []
@@ -85,8 +90,9 @@ def test_old_pending_frame_keeps_legacy_mail_presentation(writing_agent, monkeyp
         offered.append(prompt)
         assert prompt.output == pending.output
         assert str(prompt).startswith(str(pending))
-        assert "Mailbox availability:" in prompt and letter not in prompt
-        assert prompt.mailbox_notice is not None
+        assert ("Mailbox availability:" in prompt) is not quiet_mail
+        assert letter not in prompt
+        assert (prompt.mailbox_notice is None) is quiet_mail
         return None
 
     monkeypatch.setattr(agent, "_query_llm", provider)

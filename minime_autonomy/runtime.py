@@ -32692,8 +32692,8 @@ Reason: {reason}
                     and not self._stable_core_astrid_contact_only()):
                 try:
                     # Retained old preparations keep their presentation contract.
-                    quiet_mail = prompt.output.get("evidence_scope", "").endswith(
-                        "Presentation: fresh-reflection-v2.")
+                    quiet_mail = prompt.output.get("evidence_scope", "").endswith((
+                        "Presentation: fresh-reflection-v2.", "Presentation: fresh-reflection-v3."))
                     notice = None if quiet_mail else Mailbox(WORKSPACE_DIR).notice()
                     requested_mailbox_feedback = getattr(self, "_pending_mailbox_feedback", None)
                     feedback = ("\n\nEarlier explicitly requested mailbox result (runtime metadata, not a letter or current measurement):\n"

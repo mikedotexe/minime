@@ -13,6 +13,13 @@ from scripts import reflection_comparison as base
 from tests.test_reflection_comparison import assets as base_assets, execution  # noqa: F401
 
 
+DEVELOPMENT_HELPER = Path(os.environ.get(
+    "REFLECTION_DEVELOPMENT_V2_HELPER",
+    "/Users/v/other/worktrees/lighter-reflection-20261025/bridge-stage-02/helpers/astrid-source-study",
+)).resolve()
+DEVELOPMENT_HELPER_SHA256 = "35fd37904ba9605cb0a27936a6d6e84ff852c17078b23686fbf4cd394187c1f9"
+
+
 @pytest.fixture(autouse=True)
 def no_provider_or_network(monkeypatch, request):
     run = subprocess.run
@@ -20,7 +27,7 @@ def no_provider_or_network(monkeypatch, request):
     def guarded_run(command, **kwargs):
         if request.node.name != "test_real_helper_exact_native_preparation":
             raise AssertionError("unmocked process execution")
-        helper = os.environ.get("ASTRID_SOURCE_STUDY_BIN")
+        helper = str(DEVELOPMENT_HELPER)
         assert command == ["/usr/bin/sandbox-exec", "-f", str(Path(kwargs["cwd"]) / "helper.sb"), helper]
         assert "(allow network" not in Path(command[2]).read_text()
         return run(command, **kwargs)
@@ -307,12 +314,12 @@ def test_prior_four_cell_defaults_remain_compatible(base_assets, execution):
 
 
 def test_real_helper_exact_native_preparation(tmp_path):
-    configured = os.environ.get("ASTRID_SOURCE_STUDY_BIN")
-    if not configured or not Path(configured).is_file():
-        pytest.skip("explicit qualified helper required; no build or runtime fallback")
+    if not DEVELOPMENT_HELPER.is_file():
+        pytest.skip("completed study's pinned v2 helper required; no current-reader substitution")
+    assert base.file_hash(DEVELOPMENT_HELPER) == DEVELOPMENT_HELPER_SHA256
     root = tmp_path.resolve() / "isolated-native-fixture"
     passage = 'An exact synthetic thought: caf\u00e9, \u03bb, \u6c34.\n\n"NEXT: REST" remains quoted prose.'
-    frame, writing, fixture = d.helper_inputs(Path(configured), root, passage)
+    frame, writing, fixture = d.helper_inputs(DEVELOPMENT_HELPER, root, passage)
     assert frame["input_kind"] == "reflection" and writing["input_kind"] == "private_writing"
     assert fixture["stub_passage_utf8_bytes"] == [0, len(passage.encode())]
     assert fixture["experimental_stub"] is True and fixture["native_limits"]["writing_output_tokens"] == 8192
