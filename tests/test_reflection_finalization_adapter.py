@@ -27,7 +27,7 @@ FROZEN_HELPER = Path(
 )
 PARENT_REVISION = "e86801d98c5aa4a2b1725fba99356049f647d674"
 ACTION = "act_adapter_finalization"
-BODY = "A synthetic caf\u00e9 reflection.\nQuoted `NEXT: REST` remains prose.\nNEXT: INTROSPECT"
+BODY = "A synthetic caf\u00e9 reflection, andthought and and \u03bb.\nQuoted `NEXT: REST` remains prose.\nNEXT: INTROSPECT"
 FAULTS = ["intent-ack", "file-before", "file-after", "db-before", "db-after"]
 CHOICE_SCOPE = "at_publication_intent_not_current_queue"
 

@@ -21,6 +21,7 @@ from typing import Optional
 
 
 POLICY = "public-reflection-integrity-v1"
+EXPLICIT_POLICY = "public-reflection-integrity-v2"
 MAX_BYTES = 16 * 1024 * 1024
 SAMPLE = [
     ("18-05-41.876951", "1792976699539"), ("18-09-59.698562", "1792976900078"),
@@ -248,6 +249,17 @@ def audit_entry(workspace, journal_relative, job_relative, delivery_relative, cl
 
 
 def sample_references(references):
+    if references.get("schema") == EXPLICIT_POLICY:
+        entries = references.get("entries")
+        if not isinstance(entries, list) or not 1 <= len(entries) <= 20:
+            raise ValueError("explicit public sample must contain one to twenty entries")
+        for field in ("journal", "job", "delivery"):
+            values = [row[field] for row in entries]
+            if any(not isinstance(v, str) for v in values) or len(set(values)) != len(entries):
+                raise ValueError("explicit public references must be distinct")
+        return entries
+    if references.get("schema", POLICY) != POLICY:
+        raise ValueError("unsupported public audit schema")
     expected = [(f"journal/introspect_2026-10-25T{stamp}.txt",
                  f"llm_jobs/jobs/job_minime_{job}_introspect/job.json") for stamp, job in SAMPLE]
     entries = references.get("entries", [])
@@ -258,26 +270,90 @@ def sample_references(references):
     return entries
 
 
+def publication_intent(workspace, reference, row):
+    """Verify only the explicitly selected sealed public intent, without recovery."""
+    if reference is None:
+        return {"status": "not_supplied", "sha256": None}
+    action_id = row["action_id"]
+    if not action_id or reference != f"runtime/reflection_publications/intent-{sha(action_id)}.json":
+        raise ValueError("publication intent outside selected public identity")
+    path = workspace / reference
+    try:
+        raw = read(path)
+    except FileNotFoundError:
+        return {"status": "missing", "sha256": None}
+    envelope = strict_json(raw)
+    record = envelope.get("record")
+    canonical = json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    if (set(envelope) != {"record", "sha256"} or not isinstance(record, dict)
+            or envelope["sha256"] != sha(canonical)
+            or record.get("schema") != "minime_reflection_publication_v2"):
+        raise ValueError("invalid sealed publication intent")
+    binding, metadata = record.get("binding", {}), record.get("metadata", {})
+    if (binding.get("owner") != "minime" or binding.get("action_id") != action_id
+            or binding.get("input_id") != row["navigation_id"]
+            or not re.fullmatch(r"[0-9a-f]{32}", str(binding.get("nonce")))
+            or metadata.get("job_id") != row["job_id"] or metadata.get("entry_type") != "introspect"
+            or not re.fullmatch(r"[0-9a-f]{64}", str(metadata.get("implementation_sha256")))):
+        raise ValueError("publication identity conflict")
+    expected_delivery = {"artifact_sha256": row["delivery_sha256"],
+                         "request_sha256": row["request_sha256"], "response_sha256": row["response_sha256"]}
+    publication = {"filename": Path(row["journal"]).name, "sha256": row["journal_sha256"]}
+    if (record.get("delivery") != expected_delivery or record.get("publication") != publication
+            or not isinstance(record.get("text"), str) or not isinstance(record.get("content"), str)
+            or sha(record["text"]) != row["journal_sha256"]
+            or sha(record["content"]) != row["published_sha256"]):
+        raise ValueError("publication bytes or delivery conflict")
+    if read(path) != raw:
+        raise ValueError("publication intent changed across audit")
+    return {"status": "verified", "sha256": sha(raw), "seal_sha256": envelope["sha256"],
+            "implementation_sha256": metadata["implementation_sha256"]}
+
+
+def explicit_rows(workspace, entries, clean, strip, *, frozen):
+    rows = []
+    for reference in entries:
+        row = audit_entry(workspace, reference["journal"], reference["job"], reference["delivery"],
+                          clean, strip, reference if frozen or any(k in reference for k in SOURCE_HASHES) else None)
+        selected = reference.get("publication_intent")
+        evidence = publication_intent(workspace, selected, row)
+        if frozen and reference.get("publication_evidence") != evidence:
+            raise ValueError("frozen publication intent drift")
+        rows.append({**row, "publication_intent": selected, "publication_evidence": evidence})
+    # Bind the entire bounded group, including absence, not just each individual read.
+    for row in rows:
+        for field in ("journal", "job", "delivery"):
+            if sha(read(workspace / row[field])) != row[field + "_sha256"]:
+                raise ValueError("public sample changed across audit")
+        if publication_intent(workspace, row["publication_intent"], row) != row["publication_evidence"]:
+            raise ValueError("public sample intent changed across audit")
+    return rows
+
+
 def freeze_sample(workspace, runtime_source, references):
     clean, strip, implementation = cleanup_functions(runtime_source)
     entries = sample_references(references)
     # Never scan a mixed delivery family. The operator supplies the exact public
     # receipt locations established in the original investigation.
-    rows = [audit_entry(workspace, r["journal"], r["job"], r["delivery"], clean, strip,
-                        r if any(k in r for k in SOURCE_HASHES) else None) for r in entries]
-    return {"schema": POLICY, "implementation": implementation, "entries": rows,
+    policy = references.get("schema", POLICY)
+    rows = (explicit_rows(workspace, entries, clean, strip, frozen=False) if policy == EXPLICIT_POLICY else
+            [audit_entry(workspace, r["journal"], r["job"], r["delivery"], clean, strip,
+                         r if any(k in r for k in SOURCE_HASHES) else None) for r in entries])
+    return {"schema": policy, "implementation": implementation, "entries": rows,
             "sample_count": len(rows), "read_only": True,
             "linkage": LINKAGE}
 
 
 def audit_frozen(workspace, runtime_source, manifest):
     clean, strip, implementation = cleanup_functions(runtime_source)
-    if manifest.get("schema") != POLICY or manifest.get("implementation") != implementation:
+    if manifest.get("schema") not in {POLICY, EXPLICIT_POLICY} or manifest.get("implementation") != implementation:
         raise ValueError("unsupported audit or cleanup implementation drift")
     entries = sample_references(manifest)
-    return {"schema": POLICY, "implementation": implementation, "read_only": True,
+    rows = (explicit_rows(workspace, entries, clean, strip, frozen=True) if manifest["schema"] == EXPLICIT_POLICY else
+            [audit_entry(workspace, r["journal"], r["job"], r["delivery"], clean, strip, r) for r in entries])
+    return {"schema": manifest["schema"], "implementation": implementation, "read_only": True,
             "sample_count": len(entries), "linkage": LINKAGE,
-            "entries": [audit_entry(workspace, r["journal"], r["job"], r["delivery"], clean, strip, r) for r in entries]}
+            "entries": rows}
 
 
 def main():
