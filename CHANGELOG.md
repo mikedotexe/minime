@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Live: clear reflection choices and faithful evidence (2026-10-27, Codex).** Activate the qualified v2/v3-compatible adapter with Astrid's shared v3 helper, preserving the accepted reflection and exact pending NEXT. Verify all 107 loaded inputs against locally merged source and restore the existing web grant's deployment binding without new permissions or expiry/spending changes. Retain failed rollout attempts and operational limitations. No push/tag, provider/engine/leak/capacity change or automation resume. See `docs/steward-notes/2026-10-27-reflection-choices-live.md`.
+
 - **Candidate: clear reflection choices (2026-10-27, Codex).** Consume the shared `fresh-reflection-v3` frame: fresh reflection, exact private development and stopping are described together, including the immediate appended-passage request made by exact transfer. Keep unsolicited mailbox notices suppressed for both v2 and v3; preserve retained inputs and explicit mailbox results. No new command, automatic recall/transfer, altered limits or live activation. Qualification: Astrid's `docs/steward-notes/2026-10-27-reflection-evidence-choices.md`.
 
 - **Offline public reflection evidence (2026-10-27, Codex).** Add an explicit, bounded v2 integrity manifest while retaining the original v1 audit. Verify public delivery, cleanup, publication bytes and sealed intent identities without runtime writes or private-store traversal. Freeze the 20-entry October 27 sample: four entries contain five unusual phrases already present in provider-visible content. Preserve them unchanged; upstream attribution remains unresolved. See `docs/steward-notes/2026-10-27-reflection-evidence.md`.
